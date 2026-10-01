@@ -91,6 +91,9 @@ file picker, all four export formats, server exchange and traffic blocking for a
 separate app UID after force-stop. VPN connectivity was then restored. Android
 Jenkins **#16 — SUCCESS**; validated source commit: `2809bea`. Reboot before first
 unlock, additional OEMs and overnight soak remain unverified.
+Huawei DEL-LX9 / Android 12 also passed production connectivity, Wi-Fi/mobile
+handoff, camera/file import, four export formats, app selection, same-version
+reinstall and system lockdown/recovery checks on October 1, 2026.
 [Android instructions](docs/android.md) · [Profile exchange](docs/portal.md).
 
 ## Development and validation

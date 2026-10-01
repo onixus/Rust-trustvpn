@@ -4,7 +4,7 @@ The Android client uses native Android widgets (Java), a foreground `VpnService`
 and the same Rust profile codec, HTTP/2 transport and IPv4/IPv6 packet engine as
 the desktop client. There is no WebView, CLI subprocess or privileged host service.
 Baseline: Android 10/API 29+, arm64-v8a; x86_64 is also built for emulator testing.
-Acceptance uses Android 16/API 36 x86_64 and a physical POCO X3 NFC running Android 12/API 31.
+Acceptance uses Android 16/API 36 x86_64 and physical POCO X3 NFC and Huawei DEL-LX9 phones running Android 12/API 31.
 
 Current signed preview: **0.3.2-preview.5** (versionCode **30206**), validated
 from source commit `2809bea` by Android Jenkins #16 on October 1, 2026. The signed
@@ -88,7 +88,7 @@ VPN consent is shell-granted in automated network tests; those tests do not
 establish human acceptance of the system permission dialog. Device-specific
 battery/OEM behavior is not established by emulator success.
 
-On the physical Android 12 phone, acceptance covered Russian resources, system
+On the POCO X3 NFC, acceptance covered Russian resources, system
 file-picker TOML import and all four export formats (JSON, endpoint TOML, CLI
 TOML and tt), including credential-preserving JSON export across process
 recreation. JSON and TOML filename extensions were verified after correcting
@@ -99,6 +99,38 @@ System Always-on and lockdown were enabled through Android settings. An independ
 app UID first verified VPN egress; after force-stop, the VPN process was absent,
 lockdown remained enabled, and a direct-IP HTTPS request was blocked. Reboot before
 first unlock and other OEMs are not established by this test.
+
+### Huawei DEL-LX9 acceptance — October 1, 2026
+
+The same signed preview APK (versionCode 30206) was tested on a second physical
+arm64 phone, Huawei DEL-LX9 / Android 12 / API 31, with Russian system locale.
+The following checks passed:
+
+- Fresh installation, real system VPN consent, production portal enrollment and
+  manual profile synchronization.
+- Independent app UID verification of VPN egress, system DNS, Google HTTPS 200
+  and UDP DNS; backgrounding and Wi-Fi → mobile → Wi-Fi handoff.
+- Real camera QR scan, QR image and TOML import through the system file picker.
+- All four SAF export formats with synthetic credentials verified; JSON export
+  completed after the client process was killed while the save picker was open.
+- Empty allowlist rejection; an excluded app used direct egress, while an included
+  app passed VPN egress, DNS, HTTPS and UDP checks. All-app routing was restored.
+- A brief 80-second screen-off check retained the VPN process and passed
+  the independent DNS/HTTPS/UDP probe. This was not a forced-Doze or overnight test.
+- Same-version signed APK reinstall preserved local/server profiles, the default
+  profile, app routing and portal registration; authenticated synchronization
+  succeeded afterward. This is not an increasing-version upgrade test on Huawei.
+- Always-on and lockdown enabled through Huawei Settings. After force-stop the VPN
+  process was absent and an independent app UID could not reach direct-IP HTTPS;
+  the same URL had a successful baseline before stopping. Reopening the client
+  restored VPN egress, DNS, HTTPS and UDP.
+
+Huawei exposes these switches under **VPN settings → long-press R-TrustTunnel →
+Edit**: enable **Always-on VPN** and **Allow connections only through VPN**.
+The production VPN and both system protections were left enabled. Temporary
+profiles, exported fixtures and the probe app were removed after testing.
+These checks do not establish reboot-before-unlock, overnight battery behavior,
+IPv6 acceptance on the phone or support for every Huawei firmware.
 
 ## Configuration and remaining release work
 
