@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["crates/profile", "crates/update", "crates/portal", "crates/engine", "crates/store", "crates/control", "apps/native", "apps/inspect", "apps/tun", "apps/codec"]
+exclude = ["vendor/h2"]
+
+[patch.crates-io]
+h2 = { path = "vendor/h2" }
+
+[workspace.package]
+version = "0.3.2"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+rtrust-update = { path = "crates/update" }
+rtrust-portal = { path = "crates/portal" }
+rtrust-profile = { path = "crates/profile" }
+rtrust-engine = { path = "crates/engine" }
+rtrust-store = { path = "crates/store" }
+rtrust-control = { path = "crates/control" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+base64 = "0.22"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+zeroize = { version = "1", features = ["derive"] }
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true

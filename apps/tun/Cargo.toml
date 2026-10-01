@@ -1,0 +1,38 @@
+[package]
+name = "rtrust-tun"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rtrust-profile.workspace = true
+rtrust-engine.workspace = true
+rtrust-store.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp"] }
+futures-util = "0.3"
+rand = "0.9"
+rtrust-control.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+chacha20poly1305 = "0.10"
+tempfile.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
+tun-rs = { version = "2.8", features = ["async_tokio"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = "0.2"
+fs2 = "0.4"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-service = "0.8.1"
+windows-sys = { version = "0.61", features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_NetworkManagement_WindowsFilteringPlatform", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_Rpc", "Win32_System_Registry", "Win32_Devices_DeviceAndDriverInstallation"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+system-configuration-sys = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.19", default-features = false, features = ["tokio"] }

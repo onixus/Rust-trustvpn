@@ -1,0 +1,26 @@
+{% extends 'base_admin.html' %}
+{% from '_icons.html' import icon %}
+{% block title %}Вход{% endblock %}
+{% block auth %}
+<div class="auth-logo">
+  <span class="logo acc">{{ icon('shield', 26) }}</span>
+  <div style="text-align:center;">
+    <b style="font-size:18px;">{{ brand }}</b>
+    <div class="mut" style="font-size:13px;">вход для администраторов</div>
+  </div>
+</div>
+<div class="card">
+  {% if error %}<div class="alert warn">{{ icon('zap') }} {{ error }}</div>{% endif %}
+  <form method="post" action="/admin/login">
+    <div class="field" style="margin-bottom:12px;">
+      <label>Логин</label>
+      <input name="email" type="text" required autofocus placeholder="Логин или e-mail администратора">
+    </div>
+    <div class="field" style="margin-bottom:18px;">
+      <label>Пароль</label>
+      <input name="password" type="password" required placeholder="••••••••">
+    </div>
+    <button type="submit" style="width:100%;">{{ icon('key') }} Войти</button>
+  </form>
+</div>
+{% endblock %}

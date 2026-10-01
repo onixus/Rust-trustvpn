@@ -1,0 +1,10 @@
+# Non-working documentation-only profile. No production credentials.
+name = "Демонстрационный профиль"
+hostname = "vpn.example"
+addresses = ["192.0.2.10:8443"]
+username = "example-user"
+password = "EXAMPLE-NOT-A-REAL-PASSWORD"
+upstream_protocol = "http2"
+has_ipv6 = false
+skip_verification = false
+dns_upstreams = ["tls://1.1.1.1"]

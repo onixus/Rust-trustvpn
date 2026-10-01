@@ -1,0 +1,41 @@
+{% extends 'base_admin.html' %}
+{% from '_icons.html' import icon %}
+{% block title %}Дашборд{% endblock %}
+{% block body %}
+{% if msg %}<div class="alert ok">{{ icon('check') }} {{ msg }}</div>{% endif %}
+{% if err %}<div class="alert warn">{{ icon('zap') }} {{ err }}</div>{% endif %}
+
+<div class="stats">
+  <div class="stat"><div class="l">{{ icon('users', 14) }} Пользователей</div><div class="n">{{ counts.users }}</div></div>
+  <div class="stat"><div class="l">{{ icon('key', 14) }} Активных конфигов</div><div class="n">{{ counts.configs }}</div></div>
+  <div class="stat"><div class="l">{{ icon('shield', 14) }} Заблокировано</div><div class="n">{{ counts.blocked }}</div></div>
+</div>
+
+<div class="card">
+  <h2>{{ icon('server') }} VPN-endpoint</h2>
+  <div class="kv-list">
+    <div class="kv"><span class="kv-name">Состояние</span>
+      <span style="flex:1;">{% if status.running %}<span class="pill ok"><span class="dot"></span> работает</span>{% else %}<span class="pill warn">остановлен</span>{% endif %}</span></div>
+    <div class="kv"><span class="kv-name">Домен подключения</span><code>{{ status.domain or '— не задан —' }}</code></div>
+    <div class="kv"><span class="kv-name">Сертификат</span>
+      <span style="flex:1;">{% if status.cert_present %}<span class="pill ok">найден</span>{% else %}<span class="pill amber">нет</span>{% endif %}</span></div>
+    <div class="kv"><span class="kv-name">Порт</span><code>{{ status.port }}</code></div>
+  </div>
+  <p class="mut" style="margin:14px 0 0;font-size:13px;">Параметры меняются на странице <a href="/admin/settings">Настройки</a>.</p>
+</div>
+
+<div class="card">
+  <h2>{{ icon('user') }} Мой аккаунт</h2>
+  <form method="post" action="/admin/account/profile" class="row" style="margin-bottom: 20px;">
+    <div class="field grow"><label>Логин (для входа)</label><input type="text" name="email" value="{{ admin['email'] }}" required></div>
+    <div class="field grow"><label>Почта восстановления</label><input type="email" name="recovery_email" value="{{ admin['recovery_email'] or '' }}" placeholder="для сброса пароля"></div>
+    <button type="submit" class="ghost" style="height:42px;">{{ icon('check') }} Сохранить</button>
+  </form>
+
+  <h3 style="font-size:15px; margin-top:20px; border-top:1px dashed var(--line); padding-top:16px; display:flex; align-items:center; gap:8px;">{{ icon('lock', 14) }} Смена пароля</h3>
+  <form method="post" action="/admin/account/password" class="row">
+    <div class="field grow"><label>Новый пароль (мин. 8)</label><input type="password" name="password" minlength="8" required placeholder="••••••••"></div>
+    <button type="submit">{{ icon('check') }} Обновить пароль</button>
+  </form>
+</div>
+{% endblock %}

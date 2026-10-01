@@ -1,0 +1,18 @@
+[package]
+name = "rtrust-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rtrust-profile.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+rtrust-control.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+tempfile.workspace = true
+keyring = "4"
+chacha20poly1305 = "0.10"
+directories = "6"
+fs2 = "0.4"

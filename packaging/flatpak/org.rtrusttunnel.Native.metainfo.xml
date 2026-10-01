@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.rtrusttunnel.Native</id>
+  <name>R-TrustTunnel</name>
+  <summary>Manage TrustTunnel profiles and connect your VPN</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <description>
+    <p>A native Wayland client for TrustTunnel with encrypted profile storage, file and tt link import, server synchronization and a desktop tray.</p>
+    <p>System VPN requires the separate R-TrustTunnel host service. The sandbox accesses only its authenticated VPN API. SOCKS mode works without the host service.</p>
+  </description>
+  <launchable type="desktop-id">org.rtrusttunnel.Native.desktop</launchable>
+  <content_rating type="oars-1.1"/>
+</component>

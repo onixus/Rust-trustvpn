@@ -1,0 +1,34 @@
+{% extends 'base_client.html' %}
+{% from '_icons.html' import icon %}
+{% block title %}Подключение устройства{% endblock %}
+{% block body %}
+<div class="auth-wrap"><div class="auth-card">
+  <div class="auth-logo">
+    <span class="logo green">{{ icon('shield', 26) }}</span>
+    <div style="text-align:center;">
+      <b style="font-size:18px;">{{ brand }}</b>
+      <div class="mut" style="font-size:13px;">авторизация приложения</div>
+    </div>
+  </div>
+  <div class="card">
+    {% if error %}<div class="alert warn">{{ icon('zap') }} {{ error }}</div>{% endif %}
+    {% if ok %}
+    <p style="margin-top:0;">Разрешить приложению на этом компьютере
+      <b>«{{ name }}»</b> подключаться к вашему VPN?</p>
+    <p class="mut" style="font-size:12.5px; line-height:1.5;">
+      Приложение получит токен только этого устройства. Пароль ему не передаётся.
+      Устройство можно отозвать в кабинете.
+    </p>
+    <form method="post" action="/connect/approve" style="margin-top:16px;">
+      <input type="hidden" name="redirect_uri" value="{{ redirect_uri }}">
+      <input type="hidden" name="state" value="{{ state }}">
+      <input type="hidden" name="name" value="{{ name }}">
+      <button type="submit" style="width:100%;">{{ icon('check') }} Разрешить и подключить</button>
+    </form>
+    <p class="mut" style="margin:14px 0 0; text-align:center; font-size:12px;">
+      Не вы запускали приложение? Просто закройте эту страницу.
+    </p>
+    {% endif %}
+  </div>
+</div></div>
+{% endblock %}

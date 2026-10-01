@@ -1,0 +1,68 @@
+{% extends 'base_admin.html' %}
+{% from '_icons.html' import icon %}
+{% block title %}Пользователи{% endblock %}
+{% block body %}
+{% if msg %}<div class="alert ok">{{ icon('check') }} {{ msg }}</div>{% endif %}
+{% if err %}<div class="alert warn">{{ icon('zap') }} {{ err }}</div>{% endif %}
+
+<div style="display:flex; justify-content:flex-end; margin-bottom:16px;">
+  <button type="button" onclick="openModal('userModal')">{{ icon('user-plus', 16) }} Создать пользователя</button>
+</div>
+
+<div class="card">
+  <h2>{{ icon('users') }} Все пользователи</h2>
+  {% if not users %}
+    <p class="mut" style="margin:0;">Пользователей пока нет.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Пользователь</th><th>Конфиги</th><th>Статус</th><th>Создан</th><th></th></tr></thead>
+      <tbody>
+      {% for u in users %}
+        <tr>
+          <td><div class="who"><span class="avatar">{{ u['email'][0]|upper }}</span>
+            <a href="/admin/users/{{ u['id'] }}">{{ u['email'] }}</a></div></td>
+          <td>{{ u['config_count'] }}</td>
+          <td>
+            {% if u['status'] == 'active' %}
+              <span class="pill ok"><span class="dot"></span> активен</span>
+            {% elif u['status'] == 'pending' %}
+              <span class="pill warn" style="background: var(--amber-soft); color: var(--amber);"><span class="dot" style="background: var(--amber);"></span> ожидает одобрения</span>
+            {% else %}
+              <span class="pill warn">заблокирован</span>
+            {% endif %}
+          </td>
+          <td class="mut">{{ u['created_at'][:10] }}</td>
+          <td style="text-align:right;"><a class="btn ghost sm" href="/admin/users/{{ u['id'] }}">Открыть</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block modal %}
+<!-- Модальное окно создания пользователя -->
+<div class="modal-backdrop" id="userModal" onclick="if(event.target===this)closeModal('userModal')">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="userModalTitle">
+    <div class="modal-head">
+      <span class="m-ic">{{ icon('user-plus', 20) }}</span>
+      <h2 id="userModalTitle" style="flex:1;">Создать пользователя</h2>
+      <button type="button" class="modal-x" onclick="closeModal('userModal')" aria-label="Закрыть" style="font-size:20px;">&times;</button>
+    </div>
+    <p class="modal-sub">Новый пользователь сразу сможет войти в свой кабинет.</p>
+    <form method="post" action="/admin/users/create" style="display:flex; flex-direction:column; gap:16px;">
+      <div class="field"><label>Email (логин)</label>
+        <input name="email" type="email" required placeholder="user@example.com"></div>
+      <div class="field"><label>Пароль (мин. 6 символов)</label>
+        <input name="password" type="password" required minlength="6" placeholder="пароль для входа"></div>
+      <div class="modal-actions">
+        <button type="button" class="ghost" onclick="closeModal('userModal')">Отмена</button>
+        <button type="submit">{{ icon('plus') }} Создать</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

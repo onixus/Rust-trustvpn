@@ -1,0 +1,71 @@
+# Always-on и dual-stack lifecycle
+
+Системная служба Linux/Windows хранит отдельную зашифрованную копию профиля по умолчанию. Пользователь включает её явно в Settings; закрытие GUI не отключает VPN. Изменение обычного профиля не меняет копию службы: для замены надо выключить и снова включить always-on. Политика предварительно проверяет HTTP/2, адреса endpoint и аутентификацию.
+
+Linux хранит XChaCha20-Poly1305 policy и отдельный ключ в root-only `/var/lib/rtrust`. Windows защищает ключ DPAPI от имени LocalSystem в каталоге службы с административным ACL. Служба не копирует ключ пользовательского vault. Повреждённая политика сохраняет намерение защиты и требует явного отключения; автоматического перехода на прямую сеть нет.
+
+Отдельная загрузочная защита охватывает промежутки между сессиями. Linux использует таблицу `rtrust_boot` и ранний systemd unit перед NetworkManager/systemd-networkd. Основная служба не ждёт `network-online.target`: проверка доступности Интернета сетевым менеджером сама может требовать уже работающий VPN. Windows использует собственный WFP provider с отдельными boot-time и persistent filters. Boot-time и persistent flags не объединяются в одном фильтре; переход при старте BFE относится к одному provider. Основание: [Microsoft WFP basic operation](https://learn.microsoft.com/en-us/windows/win32/fwp/basic-operation) и [FWPM_FILTER0](https://learn.microsoft.com/en-us/windows/win32/api/fwpmtypes/ns-fwpmtypes-fwpm_filter0).
+
+Служба владеет внутренней VPN-сессией без GUI IPC. При сбое она сохраняет guard и повторяет подключение. Выключение ожидает завершения сетевых задач, восстанавливает маршруты, удаляет encrypted policy, затем снимает загрузочную защиту. Обычные Start, Recover и обновление службы запрещены, пока always-on включён.
+
+Полный туннель переносит IPv4/IPv6 TCP, UDP и ICMP echo; DNS пока задаётся IPv4-адресом сервера внутри VPN. Fragment reassembly ограничен 64 датаграммами, 128 фрагментами на датаграмму и десятью секундами; перекрывающиеся фрагменты отклоняются. Не поддерживаются IPv6 extension chains и jumbograms. ICMP MTU errors, для которых TrustTunnel wire format не передаёт MTU, не превращаются в выдуманные значения. Selected-networks остаётся режимом IPv4 CIDR.
+
+## Проверки
+
+- Jenkins #43: завершённый SUCCESS; Windows/macOS unit, Clippy, сборки и smoke, Gitleaks/Trivy, interop с official endpoint, Linux Wayland без X11, Linux full tunnel/always-on E2E.
+- Изолированный Linux namespace: реальные TCP IPv4/IPv6, UDP до 60000 байт, fragmented echo, endpoint outage, отсутствие прямого DNS/IPv4/IPv6 во время сбоя, точное восстановление маршрутов и чужой firewall table.
+- Linux always-on: короткий GUI IPC, аварийное завершение и перезапуск службы, encrypted policy, отказ Recover/PrepareUpdate, отсутствие побочных эффектов Disable при уже выключенном always-on, early guard и повреждённая policy. Остановка ожидает сетевые задачи — регрессионный тест выявил и помог исправить гонку cleanup.
+- systemd-analyze verify проходит с бинарником по установочному пути.
+
+Реальный Windows dual-stack/always-on E2E, смена физического Linux-интерфейса, cold reboot и sleep/wake проверяются отдельно. Наличие кода boot guard и unit validation не считается доказательством cold-boot поведения. Текущий установленный Windows клиент пока остаётся #37; #43 используется для изолированной проверки службы с восстановлением прежних файлов.
+
+Windows runtime на бинарнике #43 прошёл dual-stack TCP/UDP (до 60000 байт), ICMP echo 5000 байт обоих семейств, отказ direct endpoint traffic, обычный reconnect, GUI crash и SCM crash. Always-on после SCM crash не восстановился в заданный timeout; запуск не принят. Исходная служба #37 восстановлена и проверена по SHA256 и SCM identity; временные policy/journal/tasks удалены. Сохранены логи и backup в `C:\ProgramData\RTrustTunnel-E2E-366532c9dd744380a47d320dfc2add94`.
+
+На #45 Windows always-on восстановился после SCM crash и после реального отключения/включения Ethernet. После link restart старый снимок физических маршрутов перестал быть подходящим baseline: сетевые настройки Windows могли измениться независимо от VPN. Сценарий исправлен: после DAD он фиксирует физические маршруты, исключая только VPN-интерфейс и точные journal-owned endpoint exceptions, и снова требует полного равенства после отключения. Проверки без перезапуска физического интерфейса по-прежнему сравниваются с исходной таблицей. Исходная служба #37 повторно восстановлена и проверена; логи #45 сохранены в `C:\ProgramData\RTrustTunnel-E2E-2f47410f6a5c4e40abc1ce4f401cc451`.
+
+Supervisor больше не опрашивает завершённый JoinHandle повторно при гонке setup error/IPC EOF; оба порядка завершения покрыты unit tests. Ответ always-on содержит явный флаг включённой политики, в том числе при ошибке setup. UI игнорирует устаревшие результаты опроса и управляет служебным VPN через верхнюю кнопку. Linux записывает policy/key с fsync каталога.
+
+### Повторная проверка #46
+
+Полный Jenkins #46 завершился SUCCESS, но авторизованный Windows runtime
+повторно выявил зависшее удаление Wintun при SCM crash/restart always-on
+(120-секундный предел не увеличен). Установка #37 восстановлена, кандидату
+sequence 4 запрещено продвижение в latest. В recovery исправлен поиск:
+сетевой NetCfgInstanceId сопоставляется с реальным PnP device через SetupAPI,
+вместо предположения, что GUID сетевого интерфейса равен SWD instance ID.
+Удаление ограничено Wintun-устройством с GUID из защищённого журнала.
+Исправление ожидает повторного runtime на кандидате 0.3.1 / sequence 5.
+
+### Уточнение #49 / #49b
+
+#49: полный CI SUCCESS, runtime прошёл SCM restart always-on и Ethernet bounce,
+но fixture ошибочно ждала Tentative APIPA-адреса отключённых Bluetooth/TAP
+адаптеров. Ожидание теперь ограничено явно перезапускаемым физическим alias.
+Повтор #49b выявил нестабильность обычного recovery: удаление Wintun иногда
+остаётся pending. Версия 0.3.1 / sequence 5 не опубликована.
+
+Короткая диагностика с тем же бинарником прошла; в ней GUID интерфейса и PnP
+instance совпали. Поэтому предположение о несовпадении GUID не считается
+доказанной единственной причиной. В 0.3.2 проверка существования адаптера
+переведена с ConvertInterfaceAliasToLuid на актуальную GetIfTable2: преобразование
+имени в LUID само по себе не подтверждает наличие устройства. Требуется
+повторный полный lifecycle E2E; #49/#49b и журналы сохранены.
+
+### Проверенный Windows-кандидат #53 / sequence 6
+
+Полный Jenkins #53: SUCCESS. Авторизованный runtime: SUCCESS. Проверены
+IPv4/IPv6 TCP/UDP, UDP 60000 байт, ICMP/fragmented echo, блокировка прямого
+трафика и старых соединений, потеря endpoint, Stop во время обрыва транспорта,
+аварии GUI/SCM, always-on и восстановление после Disable/Enable Ethernet.
+Точное сравнение таблицы физических маршрутов после отключения VPN прошло.
+Windows иногда сохраняет удаляемый интерфейс в состоянии Down дольше 30 секунд;
+always-on сохранил защиту и автоматически завершил повторное восстановление
+в пределах 120-секундного тестового лимита. Мгновенный reconnect не обещается.
+
+Затем реально проверены 0.2.1 → 0.3.2 → failed health → 0.2.1 → 0.3.2 (16.98s),
+сохранение/расшифровка vault, autostart, SCM account/SID и hashes всех binaries.
+Холодная загрузка и sleep/wake остаются непроверенными; на перезагрузку ПК
+запрошено отдельное согласие, отсутствие ответа не считается разрешением.
+
+Локальные результаты: `reports/point5-runtime/53/`; Windows сохранённый журнал:
+`C:\ProgramData\RTrustTunnel-E2E-101165e0774a42bab743b94bb7a48262`.

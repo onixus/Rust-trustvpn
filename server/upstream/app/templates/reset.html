@@ -1,0 +1,31 @@
+{% extends 'base_client.html' %}
+{% from '_icons.html' import icon %}
+{% block title %}Новый пароль{% endblock %}
+{% block body %}
+<div class="auth-wrap"><div class="auth-card">
+  <div class="auth-logo">
+    <span class="logo acc">{{ icon('key', 26) }}</span>
+    <div style="text-align:center;"><b style="font-size:18px;">Новый пароль</b></div>
+  </div>
+  <div class="card">
+    {% if done %}
+    <div class="alert ok">{{ icon('check') }} Пароль изменён — можно входить.</div>
+    <a href="/login" class="btn" style="width:100%;">{{ icon('key') }} Войти</a>
+    {% else %}
+    {% if error %}<div class="alert warn">{{ icon('zap') }} {{ error }}</div>{% endif %}
+    {% if token %}
+    <form method="post" action="/reset">
+      <input type="hidden" name="token" value="{{ token }}">
+      <div class="field" style="margin-bottom:18px;">
+        <label>Новый пароль (мин. 6 символов)</label>
+        <input name="password" type="password" required minlength="6" autofocus placeholder="••••••••">
+      </div>
+      <button type="submit" style="width:100%;">{{ icon('check') }} Сохранить пароль</button>
+    </form>
+    {% else %}
+    <p class="mut" style="margin:0;">Ссылка неполная — запросите сброс ещё раз: <a href="/forgot">восстановление пароля</a>.</p>
+    {% endif %}
+    {% endif %}
+  </div>
+</div></div>
+{% endblock %}

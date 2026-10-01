@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=R-TrustTunnel Service Setup
+Name[ru]=Настройка службы R-TrustTunnel
+Comment=Authorize the current desktop user for the VPN host service
+Exec=/usr/libexec/rtrust/setup
+Icon=network-vpn
+Terminal=false
+Categories=Network;Settings;

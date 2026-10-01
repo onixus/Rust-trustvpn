@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="csrf-token" content="{{ csrf }}"><title>Профили — {{ brand }}</title>
+<link rel="stylesheet" href="/static/rtrust-profiles.css"><script defer src="/static/rtrust-profiles.js"></script></head>
+<body><header><a href="/">← Кабинет</a><h1>Профили</h1><span>{{ user.email }}</span></header>
+<main><p id="status" role="status" aria-live="polite"></p>
+<section><h2>Добавить профиль</h2><p>Импорт сохраняет конфиг в вашем зашифрованном хранилище. Учётные данные VPN-сервера не изменяются.</p>
+<label for="file">Файл TOML или JSON</label><input id="file" type="file" accept=".toml,.json,.txt">
+<label for="content">Или вставьте конфиг / tt-ссылку</label><textarea id="content" rows="3" autocomplete="off" spellcheck="false"></textarea>
+<button id="preview">Проверить</button><div id="preview-result" hidden><pre id="summary"></pre><button id="commit">Сохранить конфиг с паролем</button><button id="cancel">Отмена</button></div></section>
+<section><h2>Ваши профили</h2><label for="format">Формат экспорта</label><select id="format"><option value="profile_json">JSON</option><option value="endpoint_toml">Endpoint TOML</option><option value="cli_toml">CLI TOML</option><option value="tt">tt-ссылка</option></select><div id="profiles"></div></section>
+<section><h2>Устройства</h2><p>Код привязки действует 3 минуты и используется один раз. После привязки предоставьте устройству доступ к нужным профилям.</p><button id="enroll">Создать код</button><output id="code"></output><div id="devices"></div><p>Отзыв доступа запрещает дальнейшее получение конфигов. Уже скачанные VPN-пароли нужно отозвать отдельно в кабинете сервера.</p></section></main></body></html>

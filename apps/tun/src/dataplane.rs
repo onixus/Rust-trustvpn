@@ -1,0 +1,190 @@
+use crate::{
+    packet::{self, Packet},
+    stack::Stack,
+};
+use rtrust_engine::{
+    Session,
+    udp::{self, Datagram},
+};
+use std::{
+    collections::HashMap,
+    net::Ipv4Addr,
+    time::{Duration, Instant},
+};
+use tokio::{io::AsyncWriteExt, sync::mpsc, task::JoinSet};
+
+pub async fn run(
+    session: Session,
+    tunnel: rtrust_engine::Tunnel,
+    device: std::sync::Arc<tun_rs::AsyncDevice>,
+    address: Ipv4Addr,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (udp_tx, udp_rx) = mpsc::channel(64);
+    let (reply_tx, mut reply_rx) = mpsc::channel(64);
+    let mut workers = JoinSet::new();
+    workers.spawn(relay_udp(session.clone(), tunnel, udp_rx, reply_tx));
+    let (icmp_tx, icmp_rx) = mpsc::channel(64);
+    let (icmp_reply_tx, mut icmp_reply_rx) = mpsc::channel(64);
+    workers.spawn(relay_icmp(session.clone(), icmp_rx, icmp_reply_tx));
+    let mut assembler = crate::fragments::Reassembler::default();
+    let mut stack = Stack::new();
+    let mut incoming = [0; 65536];
+    let mut tick = tokio::time::interval(Duration::from_millis(5));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let monitor = session.clone();
+    workers.spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            monitor.health().await?;
+        }
+    });
+    loop {
+        tokio::select! {
+            received = device.recv(&mut incoming) => {
+                let len = received?;
+                if !((len>=20 && incoming[0]>>4==4 && incoming[12..16]==address.octets()) || (len>=40 && incoming[0]>>4==6 && incoming[8..24]==crate::ipv6::ADDRESS.octets())) {continue;}
+                let Some(incoming) = assembler.push(&incoming[..len]) else { continue; };
+                match packet::parse(&incoming) {
+                    Some(Packet::Tcp { key, .. }) if (key.0.ip() == address || key.0.ip() == crate::ipv6::ADDRESS) => stack.ingest(incoming, |key, mut remote| {
+                        let session = session.clone();
+                        tokio::spawn(async move {
+                            let mut tunnel = session.open_tcp(&key.1.to_string()).await?;
+                            tokio::io::copy_bidirectional(&mut remote, &mut tunnel).await?;
+                            Ok(())
+                        })
+                    }),
+                    Some(Packet::Udp(d)) if (d.source.ip() == address || d.source.ip() == crate::ipv6::ADDRESS) => { let _ = udp_tx.try_send(d); },
+                    Some(Packet::Icmp(echo)) => { let _ = icmp_tx.try_send(echo); },
+                    _ => {},
+                }
+            }
+            reply = reply_rx.recv() => {
+                let reply = reply.ok_or("UDP relay stopped")?;
+                if let Some(bytes) = packet::udp_packet(&reply) {
+                    for fragment in crate::fragments::split(bytes) {
+                        tokio::time::timeout(Duration::from_secs(2), device.send(&fragment)).await??;
+                    }
+                }
+            }
+            reply = icmp_reply_rx.recv() => {
+                let reply = reply.ok_or("ICMP relay stopped")?;
+                for fragment in crate::fragments::split(reply) {
+                    tokio::time::timeout(Duration::from_secs(2), device.send(&fragment)).await??;
+                }
+            }
+            _ = tick.tick() => stack.poll(),
+
+            result = workers.join_next() => {
+                if let Some(Ok(Err(error))) = result { return Err(error.into()); }
+                return Err("Transport worker stopped".into());
+            },
+        }
+        while let Some(bytes) = stack.output() {
+            tokio::time::timeout(Duration::from_secs(2), device.send(&bytes)).await??;
+        }
+    }
+}
+
+async fn relay_udp(
+    session: Session,
+    mut tunnel: rtrust_engine::Tunnel,
+    mut input: mpsc::Receiver<Datagram>,
+    output: mpsc::Sender<Datagram>,
+) -> Result<(), rtrust_engine::Error> {
+    let mut delay = Duration::from_millis(250);
+    loop {
+        let started = Instant::now();
+        if udp_stream(tunnel, &mut input, &output).await.is_ok() {
+            return Ok(());
+        }
+        // Endpoint 1.1.0 can close _udp2 on an ICMP port-unreachable from
+        // any destination. Replace only this stream: TCP/ICMP flows and the
+        // device must survive. The independent health worker detects loss of
+        // the whole transport. Stop cancels this bounded retry task as usual.
+        if started.elapsed() >= Duration::from_secs(10) {
+            delay = Duration::from_millis(250);
+        }
+        loop {
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(5));
+            if let Ok(Ok(reopened)) =
+                tokio::time::timeout(Duration::from_secs(10), session.open_udp()).await
+            {
+                tunnel = reopened;
+                break;
+            }
+        }
+    }
+}
+
+async fn udp_stream(
+    tunnel: rtrust_engine::Tunnel,
+    input: &mut mpsc::Receiver<Datagram>,
+    output: &mpsc::Sender<Datagram>,
+) -> Result<(), rtrust_engine::Error> {
+    let (mut reader, mut writer) = tokio::io::split(tunnel);
+    let mut mappings = HashMap::new();
+    // Preserve the partially read frame when an outgoing datagram wins select.
+    let mut read = Box::pin(udp::read(&mut reader));
+    loop {
+        tokio::select! {
+            outgoing = input.recv() => {
+                let Some(d) = outgoing else { return Ok(()); };
+                mappings.retain(|_, seen: &mut Instant| seen.elapsed() < Duration::from_secs(60));
+                let key = (d.source, d.destination);
+                if !mappings.contains_key(&key) && mappings.len() >= 256 { continue; }
+                mappings.insert(key, Instant::now());
+                let frame = udp::encode(&d, "rtrust-tun")?;
+                tokio::time::timeout(Duration::from_secs(10), writer.write_all(&frame)).await.map_err(|_| rtrust_engine::Error::Protocol)??;
+            }
+            result = &mut read => {
+                let d = result?;
+                if mappings.get(&(d.destination, d.source)).is_some_and(|seen| seen.elapsed() < Duration::from_secs(60)) {
+                    let _ = output.try_send(d);
+                }
+                drop(read);
+                read = Box::pin(udp::read(&mut reader));
+            }
+        }
+    }
+}
+
+// ICMP is optional at the endpoint. Rejection never fabricates a reply or tears down TCP/UDP.
+async fn relay_icmp(
+    session: Session,
+    mut input: mpsc::Receiver<crate::echo::Echo>,
+    output: mpsc::Sender<Vec<u8>>,
+) -> Result<(), rtrust_engine::Error> {
+    while let Some(first) = input.recv().await {
+        if let Ok(tunnel) = session.open_icmp().await {
+            let _ = icmp_stream(tunnel, first, &mut input, &output).await;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    Ok(())
+}
+async fn icmp_stream(
+    tunnel: rtrust_engine::Tunnel,
+    first: crate::echo::Echo,
+    input: &mut mpsc::Receiver<crate::echo::Echo>,
+    output: &mpsc::Sender<Vec<u8>>,
+) -> Result<(), rtrust_engine::Error> {
+    let (mut reader, mut writer) = tokio::io::split(tunnel);
+    let mut pending = crate::echo::Pending::default();
+    writer.write_all(&pending.insert(first).unwrap()).await?;
+    let mut read = Box::pin(rtrust_engine::icmp::read(&mut reader));
+    loop {
+        tokio::select! {
+            incoming=input.recv()=>{
+                let Some(echo)=incoming else{return Ok(());};
+                if let Some(frame)=pending.insert(echo) {
+                    tokio::time::timeout(Duration::from_secs(10),writer.write_all(&frame)).await.map_err(|_|rtrust_engine::Error::Timeout)??;
+                }
+            }
+            reply=&mut read=>{
+                if let Some(packet)=pending.reply(reply?) {let _=output.try_send(packet);}
+                drop(read);read=Box::pin(rtrust_engine::icmp::read(&mut reader));
+            }
+        }
+    }
+}

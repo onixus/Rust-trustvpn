@@ -1,0 +1,7 @@
+[Unit]
+Description=Reload R-TrustTunnel portal TLS certificate
+After=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker exec rtrust-portal-https nginx -t
+ExecStart=/usr/bin/docker exec rtrust-portal-https nginx -s reload

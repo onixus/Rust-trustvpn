@@ -1,0 +1,113 @@
+{% extends "base_client.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Подключение устройства{% endblock %}
+{% block body %}
+
+<div class="card" style="text-align:center;">
+  <h2 style="margin-bottom:8px;">{{ icon('smartphone') }} Наведите камеру приложения</h2>
+  <p class="mut" style="margin-top:-6px;margin-bottom:18px;font-size:13.5px;line-height:1.45;">
+    В приложении TrustTunnel на телефоне выберите «Подключить по QR».
+    Код одноразовый и действует <span id="left">{{ ttl }}</span> сек.
+  </p>
+
+  <!-- Библиотека отдаёт SVG с размером в мм — он выходит мелким. Растягиваем
+       через CSS: код должен уверенно ловиться камерой телефона с руки. -->
+  <style>
+    #qr svg { width: 100%; height: auto; display: block; }
+  </style>
+  <div id="qr" style="display:inline-block;background:#fff;padding:16px;border-radius:14px;
+              line-height:0;width:min(78vw,340px);">
+    {{ qr_svg|safe }}
+  </div>
+
+  <p id="expired" class="alert warn" style="display:none;margin:18px auto 0;max-width:420px;">
+    Код истёк — сгенерируйте новый.
+  </p>
+
+  <!-- Кабинет открыт на самом телефоне — камеры не хватит, там нечего снимать.
+       Копируем ссылку: в ней и адрес сервера, и одноразовый код, а в приложении
+       есть кнопка «Вставить». Так телефон подключается без компьютера. -->
+  <div id="copybox" style="margin-top:20px;padding-top:16px;border-top:1px solid rgba(255,255,255,0.08);">
+    <p class="mut" style="margin:0 0 10px;font-size:12.5px;">
+      Открыли эту страницу на телефоне? Компьютер не нужен — нажмите кнопку ниже.
+    </p>
+    <p style="margin:0 0 10px;">
+      <a href="{{ app_link }}" class="btn">Подключить это устройство</a>
+    </p>
+    <p class="mut" style="margin:0 0 8px;font-size:12px;">
+      Если кнопка не сработала (приложение ещё не установлено) — скопируйте ссылку
+      и нажмите в приложении «Вставить ссылку из кабинета».
+    </p>
+    <button type="button" class="btn ghost" id="copybtn" onclick="copyEnrollLink()">
+      Скопировать ссылку
+    </button>
+  </div>
+
+  <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:18px;">
+    <form method="post" action="/devices/enroll-qr">
+      <button type="submit" class="btn ghost">Новый код</button>
+    </form>
+    <a href="/" class="btn ghost">Готово</a>
+  </div>
+
+  <p class="mut" style="margin:16px 0 0;font-size:12px;">
+    Камера не нужна, если кабинет открыт на самом телефоне — скопируйте ссылку кнопкой выше.
+  </p>
+</div>
+
+<script>
+  // Ссылку держим в JS, а не в разметке: код одноразовый и короткоживущий, но
+  // светить его текстом на странице ни к чему.
+  var ENROLL_LINK = {{ link|tojson }};
+
+  function copyEnrollLink() {
+    var btn = document.getElementById('copybtn');
+    function done(ok) {
+      btn.textContent = ok ? 'Ссылка скопирована' : 'Не удалось скопировать';
+      setTimeout(function () { btn.textContent = 'Скопировать ссылку'; }, 2500);
+    }
+    // navigator.clipboard есть не везде (нужен https и свежий браузер) — на этот
+    // случай запасной путь через временное поле.
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(ENROLL_LINK).then(function () { done(true); },
+                                                      function () { fallback(); });
+    } else {
+      fallback();
+    }
+    function fallback() {
+      var ta = document.createElement('textarea');
+      ta.value = ENROLL_LINK;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      done(ok);
+    }
+  }
+
+  // Обратный отсчёт: по истечении прячем код, чтобы им уже не воспользовались.
+  (function () {
+    var left = {{ ttl }};
+    var el = document.getElementById('left');
+    var qr = document.getElementById('qr');
+    var expired = document.getElementById('expired');
+    var t = setInterval(function () {
+      left -= 1;
+      if (left <= 0) {
+        clearInterval(t);
+        qr.style.display = 'none';
+        // Прячем и кнопку копирования: код уже недействителен.
+        var box = document.getElementById('copybox');
+        if (box) box.style.display = 'none';
+        expired.style.display = '';
+        el.textContent = '0';
+        return;
+      }
+      el.textContent = left;
+    }, 1000);
+  })();
+</script>
+{% endblock %}

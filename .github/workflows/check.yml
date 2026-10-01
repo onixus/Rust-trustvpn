@@ -1,0 +1,30 @@
+name: Native preview
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-xcb-dev libdbus-1-dev
+      - run: cargo fmt --all --check
+      - run: cargo test --workspace --locked
+      - run: cargo test --manifest-path vendor/h2/Cargo.toml --lib --locked -- --skip hpack::test::fixture
+        env:
+          CARGO_TARGET_DIR: target/h2-tests
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo build --release -p rtrust-native --locked
+      - run: python scripts/package-preview.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-preview-${{ runner.os }}
+          path: dist/

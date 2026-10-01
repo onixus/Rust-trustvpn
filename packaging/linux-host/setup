@@ -1,0 +1,9 @@
+#!/bin/sh
+# A host desktop launcher, never executed from the Flatpak sandbox.
+set -eu
+if pkexec /usr/libexec/rtrust/enable-service; then
+    kdialog --title R-TrustTunnel --msgbox 'Служба VPN настроена. Теперь откройте R-TrustTunnel из Flatpak.'
+else
+    kdialog --title R-TrustTunnel --error 'Служба не настроена. Отключите VPN/always-on и повторите настройку от владельца рабочего стола.'
+    exit 1
+fi

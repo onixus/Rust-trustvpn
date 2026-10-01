@@ -1,0 +1,145 @@
+{% extends 'base_client.html' %}
+{% from '_icons.html' import icon %}
+{% block title %}Кабинет{% endblock %}
+{% block body %}
+{% if error %}<div class="alert warn">{{ icon('zap') }} {{ error }}</div>{% endif %}
+
+<div class="card" style="background: linear-gradient(135deg, rgba(79,110,247,0.07), rgba(124,92,255,0.07)); border-color: rgba(79,110,247,0.15);">
+  <h2 style="margin-bottom:8px;">{{ icon('download') }} Скачать приложение</h2>
+  {% if win_app or android_app %}
+  <p class="mut" style="margin-top:-6px;margin-bottom:14px;font-size:13.5px;line-height:1.45;">
+    Наше приложение подключается само: на компьютере — вход через браузер,
+    на телефоне — сканирование QR из раздела «Мои устройства». Настройки вписывать не нужно.
+  </p>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
+    {% if win_app %}
+    <a href="/download/windows" class="btn" style="font-weight:600;">{{ icon('monitor', 16) }} <span>Скачать для Windows</span></a>
+    {% endif %}
+    {% if android_app %}
+    <a href="/download/android" class="btn" style="font-weight:600;">{{ icon('smartphone', 16) }} <span>Скачать для Android</span></a>
+    {% endif %}
+  </div>
+  {% if android_v7 %}
+  <!-- Ядро туннеля — статический бинарь под конкретную архитектуру, поэтому для
+       старых телефонов нужна своя сборка. -->
+  <p class="mut" style="margin:8px 0 0;font-size:12px;">
+    Не устанавливается или телефон старый?
+    <a href="/download/android-armv7">Сборка для armv7 (32-бит)</a>
+  </p>
+  {% endif %}
+  {% if android_sha256 %}
+  <!-- APK ставится мимо магазина: сверка суммы — единственный способ убедиться,
+       что скачался именно наш файл. -->
+  <p class="mut" style="margin:10px 0 0;font-size:11.5px;word-break:break-all;">
+    SHA-256 для Android: <code style="font-size:11px;">{{ android_sha256 }}</code>
+  </p>
+  {% endif %}
+
+  <p class="mut" style="margin:14px 0 6px;font-size:12px;">
+    Альтернатива — другие приложения TrustTunnel. В них настройки вводятся
+    вручную из раздела «Мои конфиги» ниже.
+  </p>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;">
+    <a href="https://agrd.io/android_trusttunnel" target="_blank" rel="noopener" class="store android">{{ icon('smartphone', 16) }} <span>Android (оригинал)</span></a>
+    <a href="https://agrd.io/ios_trusttunnel" target="_blank" rel="noopener" class="store ios">{{ icon('smartphone', 16) }} <span>iOS</span></a>
+    <!-- Trusty — сторонний GUI поверх официального CLI. Linux он не поддерживает:
+         только Windows 10/11 и macOS 11+. Обещать Linux нечестно — ставить нечего. -->
+    <a href="https://github.com/Meddelin/trusty" target="_blank" rel="noopener" class="btn ghost">{{ icon('monitor', 16) }} <span>macOS / Windows (Trusty)</span></a>
+  </div>
+  {% else %}
+  <p class="mut" style="margin-top:-6px;margin-bottom:18px;font-size:13.5px;line-height:1.4;">
+    Установите приложение TrustTunnel на устройство, затем впишите настройки из раздела «Мои конфиги» ниже.
+  </p>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;">
+    <a href="https://agrd.io/ios_trusttunnel" target="_blank" rel="noopener" class="store ios">{{ icon('smartphone', 16) }} <span>App Store (iOS)</span></a>
+    <a href="https://agrd.io/android_trusttunnel" target="_blank" rel="noopener" class="store android">{{ icon('smartphone', 16) }} <span>Google Play (Android)</span></a>
+    <a href="https://github.com/Meddelin/trusty" target="_blank" rel="noopener" class="btn ghost">{{ icon('monitor', 16) }} <span>Windows / macOS (Trusty)</span></a>
+  </div>
+  {% endif %}
+</div>
+
+{% if not endpoint_ready %}
+<div class="alert warn">{{ icon('zap') }} Сервер подключения ещё настраивается администратором. Конфиги можно создать, подключение заработает после настройки домена/сертификата.</div>
+{% endif %}
+
+<div class="card">
+  <h2>{{ icon('smartphone') }} Мои устройства</h2>
+  <p class="mut" style="margin-top:-6px;margin-bottom:14px;font-size:13.5px;line-height:1.45;">
+    Приложение подключается само — ничего вписывать вручную не нужно.
+    Откройте в приложении «Подключить по QR» и наведите камеру на код.
+  </p>
+  <form method="post" action="/devices/enroll-qr" style="margin-bottom:14px;">
+    <button type="submit" class="btn">{{ icon('plus', 16) }} <span>Подключить устройство по QR</span></button>
+  </form>
+
+  {% for d in devices %}
+  <div class="kv" style="align-items:center;">
+    <span class="kv-name" style="min-width:0;">
+      {{ d.name }}
+      <span class="mut" style="font-size:12px;">· {{ d.platform }}</span>
+    </span>
+    <code>{% if d.last_seen_at %}активно {{ d.last_seen_at }}{% else %}ещё не выходило на связь{% endif %}</code>
+    <form method="post" action="/devices/{{ d.id }}/revoke"
+          onsubmit="return confirm('Отозвать устройство «{{ d.name }}»? Его VPN перестанет работать.');">
+      <button type="submit" class="ghost">Отозвать</button>
+    </form>
+  </div>
+  {% else %}
+  <p class="mut" style="margin:0;">Устройств пока нет.</p>
+  {% endfor %}
+</div>
+
+<div class="card">
+  <h2>{{ icon('plus') }} Новый конфиг</h2>
+  <form method="post" action="/configs" class="row">
+    <div class="field grow"><label>Метка устройства</label><input name="label" placeholder="Телефон, ноутбук…"></div>
+    <button type="submit">{{ icon('plus') }} Создать конфиг</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>{{ icon('smartphone') }} Мои конфиги</h2>
+  <p class="mut" style="margin-top:-6px;font-size:13px;">Впишите значения в приложение TrustTunnel — каждое поле копируется кнопкой, либо скачайте файл.</p>
+  {% for c in configs %}
+  <div class="cfg">
+    <div class="cfg-head">
+      <b style="font-size:15px;">{{ c.label }}</b>
+      <div style="display:flex;gap:8px;">
+        <a class="btn ghost sm" href="/config/{{ c.id }}/download?fmt=toml">{{ icon('download', 14) }} Скачать TOML</a>
+        <form method="post" action="/configs/{{ c.id }}/delete" onsubmit="return confirm('Отозвать конфиг? Подключение перестанет работать.');">
+          <button class="danger sm" type="submit">{{ icon('trash', 14) }} Отозвать</button>
+        </form>
+      </div>
+    </div>
+    <div class="kv-list" style="margin-top:10px;">
+      {% if c.show_address %}
+      <div class="kv"><span class="kv-name">Address</span><code>{{ c.address }}{% if c.show_port %}:{{ c.port }}{% endif %}</code>
+        <button type="button" class="ghost kv-copy" onclick="copyText('{{ c.address }}{% if c.show_port %}:{{ c.port }}{% endif %}', this)">{{ icon('copy', 13) }}</button></div>
+      {% endif %}
+      {% if c.show_domain and c.domain %}
+      <div class="kv"><span class="kv-name">Domain name from server certificate</span><code>{{ c.domain }}</code>
+        <button type="button" class="ghost kv-copy" onclick="copyText('{{ c.domain }}', this)">{{ icon('copy', 13) }}</button></div>
+      {% endif %}
+      {% if c.show_sni %}
+      <div class="kv"><span class="kv-name">Custom SNI</span><code>{{ c.sni }}</code>
+        <button type="button" class="ghost kv-copy" onclick="copyText('{{ c.sni }}', this)">{{ icon('copy', 13) }}</button></div>
+      {% endif %}
+      {% if c.show_username %}
+      <div class="kv"><span class="kv-name">Username</span><code>{{ c.username }}</code>
+        <button type="button" class="ghost kv-copy" onclick="copyText('{{ c.username }}', this)">{{ icon('copy', 13) }}</button></div>
+      {% endif %}
+      {% if c.show_password %}
+      <div class="kv"><span class="kv-name">Password</span><code>{{ c.password }}</code>
+        <button type="button" class="ghost kv-copy" onclick="copyText('{{ c.password }}', this)">{{ icon('copy', 13) }}</button></div>
+      {% endif %}
+      {% if c.show_protocol %}
+      <div class="kv"><span class="kv-name">Protocol</span><code>{{ c.protocol }}</code>
+        <button type="button" class="ghost kv-copy" onclick="copyText('{{ c.protocol }}', this)">{{ icon('copy', 13) }}</button></div>
+      {% endif %}
+    </div>
+  </div>
+  {% else %}
+  <p class="mut" style="margin:0;">Конфигов пока нет — создайте первый выше.</p>
+  {% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+state='/Library/Application Support/RTrustTunnel'
+plist='/Library/LaunchDaemons/org.rtrusttunnel.service.plist'
+uid=$(stat -f %u /dev/console)
+case "$uid" in ''|*[!0-9]*) exit 1;; esac
+if [ "$uid" -lt 501 ]; then
+    echo 'Install while signed in to a desktop user account.' >&2
+    exit 1
+fi
+# Ownership is fixed by the package. Do not follow an existing state symlink.
+if [ -L "$state" ]; then exit 1; fi
+if [ ! -d "$state" ]; then install -d -o root -g wheel -m 700 "$state"; fi
+if [ "$(stat -f %u "$state")" -ne 0 ]; then exit 1; fi
+/usr/libexec/PlistBuddy -c "Set :ProgramArguments:1 $uid" "$plist"
+chown root:wheel "$plist"
+chmod 644 "$plist"
+launchctl bootstrap system "$plist"
+attempt=0
+while [ "$attempt" -lt 15 ]; do
+    if [ -S /private/var/run/rtrust/control.sock ] && launchctl print system/org.rtrusttunnel.service | grep -q 'state = running'; then
+        # A root-visible socket is insufficient: launchd's restrictive umask
+        # previously left the desktop owner unable to traverse its directory.
+        if /usr/bin/sudo -u "#$uid" -- /Applications/R-TrustTunnel.app/Contents/MacOS/rtrust-native --ci-service-smoke; then
+            exit 0
+        fi
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+done
+launchctl bootout system/org.rtrusttunnel.service || true
+echo 'The VPN service did not start. Check Privacy & Security for a per-app approval; never disable Gatekeeper globally.' >&2
+exit 1

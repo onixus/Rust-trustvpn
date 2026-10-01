@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+# Downloaded scanner distributions are not project source; their READMEs contain
+# deliberate scanner examples. The generated manifest contains only file hashes.
+[[allowlists]]
+description = "CI tool cache and generated SHA-256 source manifest only"
+paths = ['''^\.ci-tools/''', '''^source-manifest\.json$''']

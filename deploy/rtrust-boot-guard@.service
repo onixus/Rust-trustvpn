@@ -1,0 +1,26 @@
+[Unit]
+Description=R-TrustTunnel early network guard for UID %i
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target NetworkManager.service systemd-networkd.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/rtrust/rtrust-service --boot-guard %i
+StateDirectory=rtrust
+StateDirectoryMode=0700
+RuntimeDirectory=rtrust
+RuntimeDirectoryMode=0711
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/run/rtrust /var/lib/rtrust
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+TimeoutStartSec=15

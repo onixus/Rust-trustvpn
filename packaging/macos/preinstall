@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+state='/Library/Application Support/RTrustTunnel'
+plist='/Library/LaunchDaemons/org.rtrusttunnel.service.plist'
+uid=$(stat -f %u /dev/console)
+case "$uid" in ''|*[!0-9]*) exit 1;; esac
+if [ "$uid" -lt 501 ]; then
+    echo 'Install while signed in to a desktop user account.' >&2
+    exit 1
+fi
+if [ -L "$state" ]; then exit 1; fi
+if [ -e "$plist" ]; then
+    previous=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:1' "$plist")
+    if [ "$previous" != "$uid" ]; then
+        echo 'Only the existing VPN desktop owner may update this installation.' >&2
+        exit 1
+    fi
+fi
+if pgrep -x rtrust-native >/dev/null; then
+    echo 'Quit R-TrustTunnel before installing or updating.' >&2
+    exit 1
+fi
+# Never replace a service protecting a session, including after a crash.
+if [ -e "$state/route-state.json" ]; then
+    echo 'Disconnect or recover R-TrustTunnel in the app before installing.' >&2
+    exit 1
+fi
+if launchctl print system/org.rtrusttunnel.service >/dev/null 2>&1; then
+    launchctl bootout system/org.rtrusttunnel.service
+    # A Start may have raced the initial check. Restore the original daemon;
+    # keep its protected journal and reject the package transaction.
+    if [ -e "$state/route-state.json" ]; then
+        launchctl bootstrap system "$plist"
+        echo 'VPN became active during installer preflight; installation refused.' >&2
+        exit 1
+    fi
+fi

@@ -1,0 +1,50 @@
+{% from '_icons.html' import icon %}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Кабинет{% endblock %} — {{ brand }}</title>
+  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="%234f6ef7"/><path d="M12 19s6-2.6 6-7V7.2L12 4.8 6 7.2V12c0 4.4 6 7 6 7z" fill="white"/></svg>'>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <script>
+    (function(){
+      var t = localStorage.getItem('theme');
+      if (!t) t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
+</head>
+<body class="client">
+<header class="topbar-client">
+  <span class="brand">
+    <span class="logo">{{ icon('shield', 19) }}</span>
+    <span>{{ brand }} <small>личный кабинет</small></span>
+  </span>
+  <span class="sp"></span>
+  <button type="button" class="icon-btn" onclick="tglTheme()" aria-label="Тема">{{ icon('moon', 17) }}{{ icon('sun', 17) }}</button>
+  {% if request.cookies.get('user_token') %}
+  <a href="/logout" class="icon-btn" aria-label="Выйти" style="color:var(--fg);">{{ icon('logout', 17) }}</a>
+  {% endif %}
+</header>
+<main>{% block body %}{% endblock %}</main>
+<script>
+  function tglTheme() {
+    var h = document.documentElement;
+    var n = h.dataset.theme === 'dark' ? 'light' : 'dark';
+    h.dataset.theme = n; localStorage.setItem('theme', n);
+  }
+  function copyText(t, btn) {
+    navigator.clipboard.writeText(t).then(function(){
+      btn.classList.add('ok');
+      var old = btn.innerHTML;
+      btn.innerHTML = 'Скопировано ✓';
+      setTimeout(function(){ btn.innerHTML = old; btn.classList.remove('ok'); }, 1500);
+    });
+  }
+</script>
+</body>
+</html>

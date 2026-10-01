@@ -1,0 +1,38 @@
+[Unit]
+Description=R-TrustTunnel VPN service for UID %i
+After=network.target systemd-resolved.service rtrust-boot-guard@%i.service
+Requires=rtrust-boot-guard@%i.service
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/rtrust/rtrust-service %i
+Restart=on-failure
+RestartSec=3
+StateDirectory=rtrust
+StateDirectoryMode=0700
+RuntimeDirectory=rtrust
+RuntimeDirectoryMode=0711
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+ReadWritePaths=/run/rtrust /var/lib/rtrust
+MemoryMax=256M
+TasksMax=64
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

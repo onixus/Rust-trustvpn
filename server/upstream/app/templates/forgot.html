@@ -1,0 +1,31 @@
+{% extends 'base_client.html' %}
+{% from '_icons.html' import icon %}
+{% block title %}Сброс пароля{% endblock %}
+{% block body %}
+<div class="auth-wrap"><div class="auth-card">
+  <div class="auth-logo">
+    <span class="logo acc">{{ icon('key', 26) }}</span>
+    <div style="text-align:center;">
+      <b style="font-size:18px;">Сброс пароля</b>
+      <div class="mut" style="font-size:13px;">пришлём ссылку на почту</div>
+    </div>
+  </div>
+  <div class="card">
+    {% if sent %}
+    <div class="alert ok">{{ icon('check') }}
+      <span>Если аккаунт с почтой <b>{{ email }}</b> существует — письмо со ссылкой отправлено. Ссылка действует 24 часа.</span>
+    </div>
+    <p style="text-align:center;margin:0;"><a href="/login">← Вернуться ко входу</a></p>
+    {% else %}
+    <form method="post" action="/forgot">
+      <div class="field" style="margin-bottom:18px;">
+        <label>Email вашего аккаунта</label>
+        <input name="email" type="email" required autofocus placeholder="you@example.com">
+      </div>
+      <button type="submit" style="width:100%;">{{ icon('send') }} Отправить ссылку</button>
+    </form>
+    <p class="mut" style="margin:16px 0 0;text-align:center;"><a href="/login">← Вернуться ко входу</a></p>
+    {% endif %}
+  </div>
+</div></div>
+{% endblock %}

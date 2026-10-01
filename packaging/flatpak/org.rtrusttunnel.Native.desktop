@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=R-TrustTunnel
+Comment=TrustTunnel VPN profile manager
+Exec=rtrust-native %U
+Icon=org.rtrusttunnel.Native
+Terminal=false
+Categories=Network;Security;
+MimeType=x-scheme-handler/tt;application/toml;
+StartupNotify=true

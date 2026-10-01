@@ -1,0 +1,21 @@
+{% extends "base_client.html" %}
+{% from "_icons.html" import icon %}
+{% block title %}Подключение устройства{% endblock %}
+{% block body %}
+
+<div class="card" style="text-align:center;">
+  <h2 style="margin-bottom:8px;">{{ icon('smartphone') }} Откройте это в приложении</h2>
+  <p class="mut" style="margin-top:-6px;font-size:13.5px;line-height:1.5;">
+    Похоже, QR-код отсканирован обычной камерой или браузером.
+    Такой код понимает только приложение TrustTunnel: откройте в нём
+    «Подключить по QR» и наведите камеру на код в кабинете.
+  </p>
+  <p class="mut" style="font-size:12px;margin-top:14px;">
+    Сам код передаётся в части ссылки после «#» и на сервер не отправляется —
+    поэтому подключить устройство отсюда нельзя.
+  </p>
+  <div style="margin-top:18px;">
+    <a href="/" class="btn">В кабинет</a>
+  </div>
+</div>
+{% endblock %}

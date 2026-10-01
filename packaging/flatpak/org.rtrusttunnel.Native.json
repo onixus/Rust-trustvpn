@@ -1,0 +1,31 @@
+{
+  "app-id": "org.rtrusttunnel.Native",
+  "runtime": "org.freedesktop.Platform",
+  "runtime-version": "25.08",
+  "sdk": "org.freedesktop.Sdk",
+  "command": "rtrust-native",
+  "finish-args": [
+    "--share=network",
+    "--socket=wayland",
+    "--env=WINIT_UNIX_BACKEND=wayland",
+    "--talk-name=org.freedesktop.secrets",
+    "--talk-name=org.kde.StatusNotifierWatcher",
+    "--system-talk-name=org.rtrusttunnel.Service"
+  ],
+  "modules": [{
+    "name": "rtrust-native",
+    "buildsystem": "simple",
+    "build-commands": [
+      "install -Dm755 rtrust-native /app/bin/rtrust-native",
+      "install -Dm644 org.rtrusttunnel.Native.desktop /app/share/applications/org.rtrusttunnel.Native.desktop",
+      "install -Dm644 org.rtrusttunnel.Native.metainfo.xml /app/share/metainfo/org.rtrusttunnel.Native.metainfo.xml",
+      "install -Dm644 org.rtrusttunnel.Native.svg /app/share/icons/hicolor/scalable/apps/org.rtrusttunnel.Native.svg"
+    ],
+    "sources": [
+      {"type": "file", "path": "../../target/release/rtrust-native"},
+      {"type": "file", "path": "org.rtrusttunnel.Native.desktop"},
+      {"type": "file", "path": "org.rtrusttunnel.Native.metainfo.xml"},
+      {"type": "file", "path": "org.rtrusttunnel.Native.svg"}
+    ]
+  }]
+}

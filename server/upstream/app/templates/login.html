@@ -1,0 +1,33 @@
+{% extends 'base_client.html' %}
+{% from '_icons.html' import icon %}
+{% block title %}Вход{% endblock %}
+{% block body %}
+<div class="auth-wrap"><div class="auth-card">
+  <div class="auth-logo">
+    <span class="logo green">{{ icon('shield', 26) }}</span>
+    <div style="text-align:center;">
+      <b style="font-size:18px;">{{ brand }}</b>
+      <div class="mut" style="font-size:13px;">вход в личный кабинет</div>
+    </div>
+  </div>
+  <div class="card">
+    {% if msg %}<div class="alert ok">{{ icon('check') }} {{ msg }}</div>{% endif %}
+    {% if error %}<div class="alert warn">{{ icon('zap') }} {{ error }}</div>{% endif %}
+    <form method="post" action="/login">
+      {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+      <div class="field" style="margin-bottom:12px;">
+        <label>Email</label>
+        <input name="email" type="email" required autofocus placeholder="you@example.com">
+      </div>
+      <div class="field" style="margin-bottom:18px;">
+        <label>Пароль</label>
+        <input name="password" type="password" required placeholder="••••••••">
+      </div>
+      <button type="submit" style="width:100%;">{{ icon('key') }} Войти</button>
+    </form>
+    <p class="mut" style="margin:16px 0 0;text-align:center;">
+      {% if registration_enabled %}Нет аккаунта? <a href="/register">Регистрация</a> · {% endif %}<a href="/forgot">Забыли пароль?</a>
+    </p>
+  </div>
+</div></div>
+{% endblock %}

@@ -1,0 +1,104 @@
+{% extends 'base_admin.html' %}
+{% from '_icons.html' import icon %}
+{% block title %}Пользователь{% endblock %}
+{% block body %}
+{% if msg %}<div class="alert ok">{{ icon('check') }} {{ msg }}</div>{% endif %}
+{% if err %}<div class="alert warn">{{ icon('zap') }} {{ err }}</div>{% endif %}
+
+<div class="card">
+  <div class="cfg-head" style="margin-bottom:4px;">
+    <div class="who"><span class="avatar">{{ user['email'][0]|upper }}</span>
+      <div><b style="font-size:16px;">{{ user['email'] }}</b>
+        <div>
+        {% if user['status'] == 'active' %}
+          <span class="pill ok"><span class="dot"></span> активен</span>
+        {% elif user['status'] == 'pending' %}
+          <span class="pill warn" style="background: var(--amber-soft); color: var(--amber);"><span class="dot" style="background: var(--amber);"></span> ожидает одобрения</span>
+        {% else %}
+          <span class="pill warn">заблокирован</span>
+        {% endif %}
+      </div>
+    </div>
+    <a class="btn ghost sm" href="/admin/users">← К списку</a>
+  </div>
+</div>
+
+<div class="row" style="align-items:stretch;">
+  <div class="card grow" style="min-width:280px;">
+    <h2>{{ icon('user') }} Данные</h2>
+    <form method="post" action="/admin/users/{{ user['id'] }}/email" class="row">
+      <div class="field grow"><label>Email</label><input type="email" name="email" value="{{ user['email'] }}" required></div>
+      <button type="submit" class="ghost">Сохранить</button>
+    </form>
+    <form method="post" action="/admin/users/{{ user['id'] }}/password" class="row" style="margin-top:12px;">
+      <div class="field grow"><label>Новый пароль</label><input type="password" name="password" minlength="6" required placeholder="мин. 6"></div>
+      <button type="submit" class="ghost">Сбросить</button>
+    </form>
+  </div>
+
+  <div class="card grow" style="min-width:280px;">
+    <h2>{{ icon('sliders') }} Действия</h2>
+    {% if user['status'] == 'pending' %}
+    <form method="post" action="/admin/users/{{ user['id'] }}/status">
+      <input type="hidden" name="status" value="active">
+      <button type="submit" style="width:100%;">{{ icon('check') }} Одобрить и активировать</button>
+    </form>
+    {% elif user['status'] == 'active' %}
+    <form method="post" action="/admin/users/{{ user['id'] }}/status">
+      <input type="hidden" name="status" value="blocked">
+      <button type="submit" class="ghost" style="width:100%;">Заблокировать (снять креды с VPN)</button>
+    </form>
+    {% else %}
+    <form method="post" action="/admin/users/{{ user['id'] }}/status">
+      <input type="hidden" name="status" value="active">
+      <button type="submit" style="width:100%;">Разблокировать</button>
+    </form>
+    {% endif %}
+    <form method="post" action="/admin/users/{{ user['id'] }}/delete" style="margin-top:12px;"
+          onsubmit="return confirm('Удалить пользователя и все его конфиги?')">
+      <button type="submit" class="danger" style="width:100%;">{{ icon('trash', 15) }} Удалить пользователя</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="cfg-head" style="margin-bottom:14px;">
+    <h2 style="margin:0;">{{ icon('key') }} Конфиги ({{ configs|length }})</h2>
+    <form method="post" action="/admin/users/{{ user['id'] }}/configs" class="row" style="align-items:end;">
+      <div class="field"><label>Метка</label><input name="label" placeholder="необязательно"></div>
+      <button type="submit" class="sm">{{ icon('plus', 15) }} Добавить</button>
+    </form>
+  </div>
+  <p class="mut">Отправка на <b>{{ user['email'] }}</b>: TOML-файлы и ссылки импорта TrustTunnel.</p>
+  {% if configs and mail_ready and user['status'] == 'active' %}
+  <form method="post" action="/admin/users/{{ user['id'] }}/send-configs" style="margin-bottom:14px;" onsubmit="this.querySelector('button').disabled=true">
+    <input type="hidden" name="mail_token" value="{{ mail_token }}">
+    <button type="submit">{{ icon('mail', 15) }} Отправить все конфиги на email</button>
+  </form>
+  {% elif not mail_ready %}<p class="mut">Для отправки настройте SMTP в настройках панели.</p>{% endif %}
+  {% if not configs %}<p class="mut" style="margin:0;">Конфигов нет.</p>{% endif %}
+  {% for c in configs %}
+  <div class="cfg">
+    <div class="cfg-head" style="margin-bottom:10px;">
+      <b>{{ c.label }}</b>
+      <form method="post" action="/admin/configs/{{ c.id }}/delete" onsubmit="return confirm('Удалить конфиг?')">
+        <button class="danger sm" type="submit">{{ icon('trash', 14) }}</button>
+      </form>
+    </div>
+    {% if mail_ready and user['status'] == 'active' %}
+    <form method="post" action="/admin/users/{{ user['id'] }}/send-configs" style="margin-bottom:10px;" onsubmit="this.querySelector('button').disabled=true">
+      <input type="hidden" name="mail_token" value="{{ mail_token }}">
+      <input type="hidden" name="config_id" value="{{ c.id }}">
+      <button class="sm" type="submit">{{ icon('mail', 14) }} Отправить на email</button>
+    </form>
+    {% endif %}
+    <div class="kv-list">
+      <div class="kv"><span class="kv-name">Username</span><code>{{ c.username }}</code>
+        <button type="button" class="ghost kv-copy" onclick="copyText('{{ c.username }}', this)">{{ icon('copy', 13) }}</button></div>
+      <div class="kv"><span class="kv-name">Password</span><code>{{ c.password }}</code>
+        <button type="button" class="ghost kv-copy" onclick="copyText('{{ c.password }}', this)">{{ icon('copy', 13) }}</button></div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

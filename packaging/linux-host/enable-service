@@ -1,0 +1,41 @@
+#!/bin/sh
+# Installed root-owned; pkexec supplies the authenticated original user's UID.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+[ "$(id -u)" = 0 ] || exit 1
+uid=${PKEXEC_UID:-}
+case "$uid" in ''|*[!0-9]*|0) echo 'Launch VPN Service Setup from your desktop.' >&2; exit 1;; esac
+[ "$uid" -ge 1000 ] && [ "$uid" -lt 65534 ] || exit 1
+getent passwd "$uid" >/dev/null
+state=/var/lib/rtrust
+[ ! -L "$state" ] || exit 1
+if [ -e "$state" ]; then
+    [ -d "$state" ] && [ "$(stat -c %u "$state")" = 0 ] && [ "$(stat -c %a "$state")" = 700 ] || exit 1
+else
+    install -d -o root -g root -m 700 "$state"
+fi
+[ ! -L "$state/desktop-uid" ] || exit 1
+if [ -f "$state/desktop-uid" ] && [ "$(cat "$state/desktop-uid")" != "$uid" ]; then
+    echo 'The service is configured for another desktop owner.' >&2; exit 1
+fi
+if [ -e /run/rtrust/full.json ] || [ -e /run/rtrust/lease.json ] || [ -e "$state/always-on.rtrust" ]; then
+    echo 'Disable always-on, disconnect and recover VPN before configuration.' >&2; exit 1
+fi
+for unit in $(systemctl list-units --state=active --no-legend 'rtrust-service@*.service' | awk '{print $1}'); do
+    [ "$unit" = "rtrust-service@$uid.service" ] || { echo 'Another desktop owner already runs the VPN service.' >&2; exit 1; }
+done
+systemctl stop "rtrust-service@$uid.service" || true
+if [ -e /run/rtrust/full.json ] || [ -e /run/rtrust/lease.json ] || [ -e "$state/always-on.rtrust" ]; then
+    systemctl start "rtrust-service@$uid.service"
+    echo 'VPN became active during setup; configuration refused.' >&2; exit 1
+fi
+printf '%s\n' "$uid" > "$state/desktop-uid"
+chmod 600 "$state/desktop-uid"
+for manager in NetworkManager systemd-networkd; do
+    install -d -m 755 "/etc/systemd/system/$manager.service.d"
+    printf '[Unit]\nRequires=rtrust-boot-guard@%s.service\nAfter=rtrust-boot-guard@%s.service\n' "$uid" "$uid" > "/etc/systemd/system/$manager.service.d/rtrust-boot-guard.conf"
+done
+systemctl daemon-reload
+systemctl enable --now "rtrust-service@$uid.service"
+systemctl is-active --quiet "rtrust-service@$uid.service"
