@@ -1,5 +1,6 @@
 """Linux native/TUN checks in a disposable Docker VM namespace, from this source snapshot."""
 import hashlib
+import os
 import pathlib
 import platform
 import secrets
@@ -76,5 +77,11 @@ cp target/release/rtrust-service scripts/install-linux-service.sh deploy/rtrust-
             "-v", f"{ROOT}:/work:ro", "-v", f"{ROOT / 'dist'}:/work/dist", "-v", f"rtrust-ci-linux-{ARCH}-target:/work/target", "-v", "rtrust-linux-cargo:/usr/local/cargo/registry", "-v", f"{CACHE}:/fixture:ro", "-w", "/work", "rust:1.98.1-bookworm", "sh", "-c", script], check=True, timeout=1800)
     finally:
         subprocess.run(["docker", "rm", "-f", NAME], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        # Root is needed only inside the disposable network test container.
+        # Return its published files to the agent so the next deleteDir works.
+        subprocess.run(["docker", "run", "--rm", "--network", "none",
+            "-v", f"{ROOT / 'dist'}:/artifacts", "rust:1.98.1-bookworm",
+            "chown", "-hR", f"{os.getuid()}:{os.getgid()}", "/artifacts"],
+            check=True, timeout=60)
 
 if __name__ == "__main__": main()
