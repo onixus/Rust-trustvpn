@@ -1,6 +1,40 @@
 # Профили: серверный контракт и интеграция
 
-Статус: **предлагаемый API v2**, ещё не реализован. Действующий `/portal/v1/device/*` сохраняется. Ни один пример не содержит production credentials.
+Статус на 1 октября 2026 года: **реализовано подмножество API v2** в
+[`rtrust_profiles.py`](../server/overlay/app/rtrust_profiles.py), используемое
+серверным UI, настольными клиентами и Android. Действующий `/portal/v1/device/*`
+сохраняется. Ни один пример не содержит production credentials.
+
+## Реализованный контракт
+
+| Маршрут | Назначение |
+|---|---|
+| GET `/portal/v2/capabilities` | Версия, форматы, метод `one_time_code`, лимит профиля |
+| POST `/portal/v2/enrollment-codes` | Код из браузерной сессии + CSRF, TTL 180 секунд |
+| POST `/portal/v2/enroll` | `code`, `name`, `platform` → `token`, `device_id`, `expires_in` (30 дней) |
+| GET `/portal/v2/devices` | Устройства владельца, браузерная сессия |
+| DELETE `/portal/v2/devices/{id}` | Отзыв токена и grants через браузер + CSRF; не ротация VPN-пароля |
+| GET `/portal/v2/profiles` | Список разрешённых metadata и revisions |
+| POST `/portal/v2/profiles/{id}/export` | `format`, `revision`, `include_secrets`, `accept_losses` |
+| POST `/portal/v2/profile-imports/preview` | `content`, `intent=external_stored`; preview TTL 600 секунд |
+| POST `/portal/v2/profile-imports/{id}/commit` | Явное `consent`, `create` либо `replace` с проверкой ревизии |
+| POST `/portal/v2/profiles/{id}/grants` | `device_id`, `allow` через браузерную сессию + CSRF |
+| DELETE `/portal/v2/profiles/{id}` | Отзыв внешнего профиля владельцем с `If-Match` |
+
+Форматы: `profile_json`, `endpoint_toml`, `cli_toml`, `tt`. Native-клиенты
+используют Bearer-токен; браузерные изменения защищены CSRF. Права устройства
+проверяются на сервере. Android не следует HTTPS redirects и хранит токен в
+зашифрованном vault. Реальные пользовательские сценарии и различия платформ
+описаны в [инструкции обмена профилями](portal.md).
+
+## Проект дальнейшего API (не полный перечень реализованных возможностей)
+
+Нумерованные разделы ниже сохраняют исходный архитектурный проект. Device-code
+polling через `device-authorizations`/`device-tokens`, отдельные preference,
+transfer и job endpoints, расширенные scopes/capabilities не следует считать
+реализованными только на основании этого проекта. Для текущих интеграций
+используйте таблицу выше и серверный код; протокол регистрации сейчас —
+одноразовый код из панели, а не предлагаемый ниже OAuth-подобный polling.
 
 API общий для первой волны Windows/Linux и второй Android/macOS. Device registration учитывает `platform=windows|linux|android|macos`, app/core version и capabilities; эти значения не являются доказательством доверия и не дают дополнительных scopes. Сервер предоставляет только опубликованные артефакты соответствующей платформы; несовместимые local policies обрабатывает клиентский preview, а не молчаливое удаление полей сервером.
 

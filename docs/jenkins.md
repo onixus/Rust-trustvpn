@@ -241,3 +241,28 @@ upgrade. The fixture binds only host loopback, runs as the source-file owner
 without capabilities and cleans up its own Docker network. No host VPN switch
 is required. Release APKs leave CI unsigned; the persistent release key stays
 outside Jenkins. See [Android details](android.md).
+
+### Android preview acceptance — build 16
+
+[Android build #16](http://localhost:8081/job/rtrust-android/16/) finished SUCCESS
+on 2026-10-01. Its complete source manifest matched commit `2809bea`; later
+user-guide updates are documentation-only and are not a new binary CI result.
+The installed signed APK is `0.3.2-preview.5` / versionCode `30206`.
+
+Coverage includes Gitleaks/Trivy, Rust/JNI tests, arm64 and x86_64 APK builds,
+Android lint, encrypted vault and tamper checks, portal-origin validation and
+atomic sync behavior, Russian resources, camera Activity startup, image QR
+round-trip, pending export recreation, startup DNS failure retaining the TUN,
+IPv4/IPv6 TCP/UDP/DNS, reconnect, selected-app routing and reinstall/upgrade.
+
+Separate physical POCO X3 NFC / Android 12 acceptance verified camera scanning,
+SAF import and all four export formats, HTTPS portal enrollment/download/upload,
+withdrawn/restored grants, and system Always-on/lockdown configured through
+Android settings. An independent app UID verified VPN egress, failed direct-IP
+HTTPS after VPN force-stop while its process was absent, and verified VPN egress
+again after recovery. This final sequence was repeated on the installed build-16
+APK. Temporary profiles, files and the probe app were removed.
+
+The local evidence file is `reports/android/mobile-features-physical.json`;
+reports and signed APKs are intentionally excluded from Git. Other OEMs, reboot
+before first unlock and overnight soak remain outside this acceptance result.

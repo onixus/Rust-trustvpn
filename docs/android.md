@@ -6,6 +6,12 @@ the desktop client. There is no WebView, CLI subprocess or privileged host servi
 Baseline: Android 10/API 29+, arm64-v8a; x86_64 is also built for emulator testing.
 Acceptance uses Android 16/API 36 x86_64 and a physical POCO X3 NFC running Android 12/API 31.
 
+Current signed preview: **0.3.2-preview.5** (versionCode **30206**), validated
+from source commit `2809bea` by Android Jenkins #16 on October 1, 2026. The signed
+APK was installed and its force-stop/recovery behavior retested on the physical
+phone. Build outputs are local artifacts, not published GitHub release assets:
+`dist/android/R-TrustTunnel-Android-preview.apk` and its `.sha256` sidecar.
+
 ## Implemented
 
 - A bottom-anchored Connect/Disconnect button: gray when off, green when connected,
@@ -83,8 +89,10 @@ establish human acceptance of the system permission dialog. Device-specific
 battery/OEM behavior is not established by emulator success.
 
 On the physical Android 12 phone, acceptance covered Russian resources, system
-file-picker TOML import and credential-preserving JSON export across process
-recreation, image QR import and a real camera scan. HTTPS portal enrollment,
+file-picker TOML import and all four export formats (JSON, endpoint TOML, CLI
+TOML and tt), including credential-preserving JSON export across process
+recreation. JSON and TOML filename extensions were verified after correcting
+the export MIME types. Image QR import and a real camera scan also passed. HTTPS portal enrollment,
 download, synthetic upload, grant withdrawal/removal and regrant/re-download
 passed without changing the local default. Temporary server profiles were revoked.
 System Always-on and lockdown were enabled through Android settings. An independent
@@ -109,7 +117,8 @@ in the server UI to invalidate its token. HTTPS redirects are never followed.
 **Always-on / block bypass** opens Android VPN settings. Enable both Always-on VPN
 and Block connections without VPN for system protection after process death or
 force-stop. The service supports sticky restart and offline startup. Android
-controls restart scheduling; reopening the app may be necessary after force-stop.
+controls restart scheduling; reopening the app and pressing Connect may be
+necessary after force-stop. Blocking while stopped does not mean the tunnel is connected.
 App Disconnect is disabled while Always-on is active; change that system setting
 first. Excluded apps have no Internet under lockdown. Credentials remain in
 credential-encrypted storage; no plaintext direct-boot copy is created. Before

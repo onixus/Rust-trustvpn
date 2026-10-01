@@ -59,6 +59,8 @@ Generated installers, Flatpak bundles and local test reports are excluded from G
 
 ## Using the client
 
+### Windows, Linux and macOS
+
 1. Import a configuration file or `tt://` link, review it and add the profile.
 2. Choose the default profile and connection mode. For system VPN, install the matching service first.
 3. Use the top connect/disconnect button. Closing the window hides it in the tray; use **Exit** to quit.
@@ -73,6 +75,23 @@ curl --socks5-hostname 127.0.0.1:1080 https://example.com
 SOCKS5 mode does not change system routes, DNS or proxy settings. Other local processes can access the loopback proxy. SOCKS UDP domain addressing, SOCKS UDP fragmentation and BIND are not supported.
 
 Login startup, GUI autoconnect and boot-level always-on are different features. Their platform limits and recovery behavior are described in [desktop lifecycle](docs/desktop-lifecycle.md) and [always-on](docs/always-on.md).
+
+### Android
+
+Current signed preview: **0.3.2-preview.5**, versionCode **30206**.
+
+1. Install the APK and import a file, `tt://` link, or QR code using the camera or an image.
+2. Choose the default profile and use the bottom connect button. Accept Android VPN consent; no separate host service is needed.
+3. Use **VPN apps** to select all apps or an allowlist. Disconnect before changing it. English and Russian follow the system locale.
+4. For protection after force-stop, open **Always-on / block bypass** and enable **both** Android settings: Always-on VPN and Block connections without VPN. Excluded apps have no Internet under lockdown. Change the system setting before manually disconnecting.
+5. Use **Server profiles** to enroll with a one-time code, grant access in the server UI and synchronize manually with VPN disconnected. Upload requires explicit consent to transfer credentials.
+
+Physical POCO X3 NFC / Android 12 acceptance covered camera/image QR, the system
+file picker, all four export formats, server exchange and traffic blocking for a
+separate app UID after force-stop. VPN connectivity was then restored. Android
+Jenkins **#16 — SUCCESS**; validated source commit: `2809bea`. Reboot before first
+unlock, additional OEMs and overnight soak remain unverified.
+[Android instructions](docs/android.md) · [Profile exchange](docs/portal.md).
 
 ## Development and validation
 
