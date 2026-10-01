@@ -27,10 +27,14 @@ public final class MainActivity extends Activity {
         public void run() {
             try {
                 JSONObject state = new JSONObject(NativeCore.INSTANCE.status());
-                status.setText(!TunnelService.problem.isEmpty() ? TunnelService.problem : state.optString("message", ""));
-                if (status.length() == 0) status.setText(TunnelService.active ? "Starting VPN…" : "Disconnected");
-                connect.setText(TunnelService.active ? "Disconnect" : "Connect default profile");
-            } catch (Exception ignored) { status.setText("VPN status unavailable"); }
+                String message = !TunnelService.problem.isEmpty() ? TunnelService.problem : state.optString("message", "");
+                if (message.isEmpty()) message = TunnelService.active ? "Starting VPN…" : "Disconnected";
+                if (!status.getText().toString().equals(message)) status.setText(message);
+                String action = TunnelService.active ? "Disconnect" : "Connect default profile";
+                if (!connect.getText().toString().equals(action)) connect.setText(action);
+            } catch (Exception ignored) {
+                if (!status.getText().toString().equals("VPN status unavailable")) status.setText("VPN status unavailable");
+            }
             handler.postDelayed(this, 500);
         }
     };
