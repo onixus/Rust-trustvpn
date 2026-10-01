@@ -44,15 +44,19 @@ def main():
         shutil.copy2(binary / frontend, app / ('MacOS/'+frontend))
         (app / 'Info.plist').write_bytes(plistlib.dumps(dict(
             CFBundleExecutable=frontend, CFBundleIdentifier='org.rtrusttunnel.Native',
-            CFBundleName='R-TrustTunnel', CFBundlePackageType='APPL',
+            CFBundleName='R-TrustTunnel', CFBundlePackageType='APPL', CFBundleIconFile='rtrust.icns',
             CFBundleShortVersionString=version, CFBundleVersion=version,
             NSHighResolutionCapable=True)))
+        (app / 'Resources').mkdir()
+        shutil.copy2(ROOT / 'packaging/branding/icon.icns', app / 'Resources/rtrust.icns')
         secondary=None
         if args.ui=='both':
             secondary=payload/'Applications/R-TrustTunnel WebView.app/Contents'
             (secondary/'MacOS').mkdir(parents=True)
             shutil.copy2(binary/'rtrust-webview',secondary/'MacOS/rtrust-webview')
-            (secondary/'Info.plist').write_bytes(plistlib.dumps(dict(CFBundleExecutable='rtrust-webview',CFBundleIdentifier='org.rtrusttunnel.Webview',CFBundleName='R-TrustTunnel WebView',CFBundlePackageType='APPL',CFBundleShortVersionString=version,CFBundleVersion=version,NSHighResolutionCapable=True)))
+            (secondary/'Info.plist').write_bytes(plistlib.dumps(dict(CFBundleExecutable='rtrust-webview',CFBundleIdentifier='org.rtrusttunnel.Webview',CFBundleName='R-TrustTunnel WebView',CFBundlePackageType='APPL',CFBundleIconFile='rtrust.icns',CFBundleShortVersionString=version,CFBundleVersion=version,NSHighResolutionCapable=True)))
+            (secondary/'Resources').mkdir()
+            shutil.copy2(ROOT/'packaging/branding/icon.icns',secondary/'Resources/rtrust.icns')
             run('/usr/bin/codesign','--force','--sign','-',str(secondary.parent))
         helper = app / 'Library/LaunchServices/org.rtrusttunnel.service'
         helper.parent.mkdir(parents=True)

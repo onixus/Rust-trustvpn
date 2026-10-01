@@ -363,9 +363,14 @@ fn main() {
                 None::<&str>,
             )?;
             let menu = tauri::menu::Menu::with_items(app, &[&open, &quit])?;
-            let icon = tauri::image::Image::new_owned([52, 140, 160, 255].repeat(32 * 32), 32, 32);
+            let icon = tauri::image::Image::new_owned(
+                include_bytes!("../../../packaging/branding/tray-32.rgba").to_vec(),
+                32,
+                32,
+            );
             tauri::tray::TrayIconBuilder::new()
                 .icon(icon)
+                .icon_as_template(cfg!(target_os = "macos"))
                 .menu(&menu)
                 .tooltip("R-TrustTunnel")
                 .on_menu_event(|app, event| {

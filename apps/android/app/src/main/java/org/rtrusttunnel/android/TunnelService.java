@@ -37,7 +37,7 @@ public final class TunnelService extends VpnService {
     private Notification notification() {
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, TunnelService.class).setAction(STOP), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        Notification.Builder notification = new Notification.Builder(this, "vpn").setSmallIcon(android.R.drawable.ic_lock_lock)
+        Notification.Builder notification = new Notification.Builder(this, "vpn").setSmallIcon(R.drawable.ic_flow_notification)
             .setContentTitle("R-TrustTunnel").setContentText(getString(R.string.vpn_active_open_app_for_connection))
             .setContentIntent(open).setOngoing(true);
         if (!isAlwaysOn()) notification.addAction(new Notification.Action.Builder(null, getString(R.string.disconnect), stop).build());

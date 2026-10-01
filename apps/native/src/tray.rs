@@ -14,16 +14,7 @@ type Handle = tray_icon::TrayIcon;
 type Handle = ksni::blocking::Handle<LinuxTray>;
 thread_local! { static HANDLE: RefCell<Option<Handle>> = const { RefCell::new(None) }; }
 fn pixels() -> Vec<u8> {
-    (0..32 * 32)
-        .flat_map(|i| {
-            let (x, y) = (i % 32, i / 32);
-            if (8..24).contains(&x) && (6..26).contains(&y) {
-                [124, 170, 230, 255]
-            } else {
-                [44, 48, 62, 255]
-            }
-        })
-        .collect()
+    include_bytes!("../../../packaging/branding/tray-32.rgba").to_vec()
 }
 #[cfg(not(target_os = "linux"))]
 pub fn initialize() -> bool {
@@ -47,6 +38,7 @@ pub fn initialize() -> bool {
             Ok(TrayIconBuilder::new()
                 .with_tooltip("R-TrustTunnel")
                 .with_icon(Icon::from_rgba(pixels(), 32, 32).expect("fixed icon dimensions"))
+                .with_icon_as_template(cfg!(target_os = "macos"))
                 .with_menu(Box::new(menu))
                 .build()?)
         };

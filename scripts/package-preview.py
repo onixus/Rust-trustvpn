@@ -20,12 +20,16 @@ if system == "Darwin":
     (app / "MacOS").mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, app / "MacOS" / "rtrust-native")
     with (app / "Info.plist").open("wb") as f:
-        plistlib.dump(dict(CFBundleExecutable="rtrust-native", CFBundleIdentifier="org.rtrusttunnel.preview", CFBundleName="R-TrustTunnel Preview", CFBundlePackageType="APPL", CFBundleShortVersionString="0.3.2", CFBundleVersion="6", NSHighResolutionCapable=True), f)
+        plistlib.dump(dict(CFBundleExecutable="rtrust-native", CFBundleIdentifier="org.rtrusttunnel.preview", CFBundleName="R-TrustTunnel Preview", CFBundlePackageType="APPL", CFBundleIconFile="rtrust.icns", CFBundleShortVersionString="0.3.2", CFBundleVersion="6", NSHighResolutionCapable=True), f)
+    (app / "Resources").mkdir(exist_ok=True)
+    shutil.copy2(root / "packaging/branding/icon.icns", app / "Resources/rtrust.icns")
 elif system == "Linux":
     shutil.copy2(source, destination / "rtrust-native")
+    shutil.copy2(root / "packaging/branding/icon.svg", destination / "org.rtrusttunnel.Native.svg")
     (destination / "rtrust-preview.desktop").unlink(missing_ok=True)
-    (destination / "org.rtrusttunnel.Native.desktop").write_text('[Desktop Entry]\nType=Application\nName=R-TrustTunnel Preview\nComment=Native profile manager and tunnel diagnostics\nExec=rtrust-native %f\nTerminal=false\nCategories=Network;\n')
+    (destination / "org.rtrusttunnel.Native.desktop").write_text('[Desktop Entry]\nType=Application\nName=R-TrustTunnel Preview\nComment=Native profile manager and tunnel diagnostics\nExec=rtrust-native %f\nTerminal=false\nCategories=Network;\nIcon=org.rtrusttunnel.Native\n')
 elif system == "Windows":
+    shutil.copy2(root / "packaging/branding/icon.ico", destination / "rtrust.ico")
     shutil.copy2(source, destination / "R-TrustTunnel.exe")
     shutil.copy2(source.with_name("rtrust-update.exe"), destination / "rtrust-update.exe")
     if args.ui in ("webview", "both"):

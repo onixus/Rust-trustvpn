@@ -26,6 +26,12 @@ fn window_settings() -> iced::window::Settings {
     let window = iced::window::Settings {
         size: iced::Size::new(860.0, 620.0),
         exit_on_close_request: false,
+        icon: iced::window::icon::from_rgba(
+            include_bytes!("../../../packaging/branding/icon-128.rgba").to_vec(),
+            128,
+            128,
+        )
+        .ok(),
         ..Default::default()
     };
     #[cfg(target_os = "linux")]

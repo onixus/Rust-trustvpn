@@ -15,8 +15,9 @@ PrivilegesRequired=admin
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\..\packaging\branding\icon.ico
 DisableProgramGroupPage=yes
-UninstallDisplayIcon={code:GetUiExe}
+UninstallDisplayIcon={app}\rtrust.ico
 CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
@@ -40,6 +41,7 @@ Root: HKLM; Subkey: "Software\Classes\tt"; ValueType: string; ValueName: ""; Val
 Root: HKLM; Subkey: "Software\Classes\tt"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Tasks: ttprotocol; Check: CanRegisterTT
 Root: HKLM; Subkey: "Software\Classes\tt\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{code:GetUiExe}"" ""%1"""; Tasks: ttprotocol; Check: CanRegisterTT
 [Files]
+Source: "..\..\packaging\branding\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\dist\native-preview-windows\rtrust-update.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\dist\native-preview-windows\R-TrustTunnel.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: native
 Source: "..\..\dist\native-preview-windows\R-TrustTunnel-WebView.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: webview
@@ -48,9 +50,9 @@ Source: "..\..\dist\native-preview-windows\wintun.dll"; DestDir: "{app}"; Flags:
 Source: "..\..\dist\native-preview-windows\WINTUN-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\scripts\install-windows-service.ps1"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
-Name: "{group}\R-TrustTunnel Native"; Filename: "{app}\R-TrustTunnel.exe"; Components: native
-Name: "{group}\R-TrustTunnel WebView"; Filename: "{app}\R-TrustTunnel-WebView.exe"; Components: webview
-Name: "{autodesktop}\R-TrustTunnel"; Filename: "{code:GetUiExe}"; Tasks: desktopicon
+Name: "{group}\R-TrustTunnel Native"; Filename: "{app}\R-TrustTunnel.exe"; Components: native; IconFilename: "{app}\rtrust.ico"
+Name: "{group}\R-TrustTunnel WebView"; Filename: "{app}\R-TrustTunnel-WebView.exe"; Components: webview; IconFilename: "{app}\rtrust.ico"
+Name: "{autodesktop}\R-TrustTunnel"; Filename: "{code:GetUiExe}"; Tasks: desktopicon; IconFilename: "{app}\rtrust.ico"
 [Run]
 Filename: "{code:GetUiExe}"; Description: "Launch R-TrustTunnel"; Flags: nowait postinstall skipifsilent runasoriginaluser; Check: CanLaunch
 [Code]
