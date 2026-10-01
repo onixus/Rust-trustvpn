@@ -1,4 +1,22 @@
-# macOS system VPN — candidate, not accepted release
+# macOS system VPN — development preview
+
+## Published UI refresh: v0.3.2-ui.1
+
+[Download the UI Choices DMG](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.1/R-TrustTunnel-macOS-arm64-UI-Choices.dmg)
+and choose exactly one Native, WebView or Both PKG. macOS Jenkins **#69 completed
+SUCCESS**. The Native package was installed over the existing app; its executable
+and helper matched the PKG payload, GUI/service smoke passed, and the encrypted
+vault remained byte-for-byte unchanged. This is an Apple Silicon preview, without
+Developer ID/notarization. It does not close boot always-on, sleep/handoff,
+clean-install-on-another-Mac or automatic rollback acceptance.
+
+Disconnect/recover an active session and quit both frontends before installing.
+Use the standard macOS administrator prompt. Preserve application data and the
+Keychain entry. If macOS requests approval, use the per-app Privacy & Security
+flow; do not disable Gatekeeper globally. See [release evidence](releases/v0.3.2-ui.1.md)
+and [actual UI screenshots](screenshots/README.md).
+
+## Implementation
 
 The working tree now includes a root LaunchDaemon, reserved `utun5254`, authenticated
 Unix IPC restricted to the configured desktop UID, selected IPv4 networks and
@@ -19,6 +37,8 @@ is ad-hoc sealed. Installation requires normal macOS administrator authorization
 The preinstall refuses an active GUI, active/recovery journal or desktop-owner
 change. A race with Start is detected after stopping the old daemon, which is
 then restored before refusing the package.
+
+## Earlier live network acceptance (#61)
 
 Jenkins #61 finished SUCCESS and its system candidate was installed on October 1.
 The package's desktop-UID IPC probe passed again after the service crash test.

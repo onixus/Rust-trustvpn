@@ -1,6 +1,39 @@
 # Linux-служба и TUN из native UI
 
-## Flatpak candidate: 1 октября 2026
+## Опубликованный UI refresh: v0.3.2-ui.1
+
+[Релиз и загрузки](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.1)
+содержат подписанные x86_64 Flatpak **Native / WebView / Both** и отдельный Arch
+host-пакет **rtrust-host-0.3.2-20**. Native использует Freedesktop 25.08,
+WebView/Both — GNOME 50. Linux поддерживает только Wayland.
+
+Linux Jenkins **№20 — SUCCESS**: Gitleaks/Trivy, unit, сборка, Wayland и сетевые
+E2E обоих протоколов. Установленные Native и host-служба обновлены; на физическом
+KDE проверены главный экран, настройки, портал, трей и IPC. WebView и Both также
+прошли smoke в отдельных временных ветках; затем оставлен обновлённый Native master.
+Новый ARM64-пакет в этот релиз не входит; прежние ARM64-результаты приведены ниже.
+
+Скачайте выбранный Flatpak, host-пакет, его `.sig`, `rtrusttunnel.gpg` и
+`SHA256SUMS` со страницы релиза. Полный отпечаток ключа проекта:
+`CB9C4FB4B9CFAF255BE008C9F0E6162B056843CC`. Для Arch после сверки отпечатка:
+
+```sh
+gpg --show-keys --with-fingerprint rtrusttunnel.gpg
+sha256sum --ignore-missing -c SHA256SUMS
+sudo pacman-key --add rtrusttunnel.gpg
+sudo pacman-key --lsign-key CB9C4FB4B9CFAF255BE008C9F0E6162B056843CC
+sudo pacman -U rtrust-host-0.3.2-20-x86_64.pkg.tar.zst
+flatpak install --user ./R-TrustTunnel-Linux-x86_64.flatpak
+```
+
+Для WebView или Both замените имя Flatpak. При первой установке настройте владельца
+службы через **R-TrustTunnel Service Setup**; GUI запускается без sudo. Перед
+обновлением отключите VPN и always-on, восстановите аварийную сессию и закройте GUI.
+Не удаляйте данные приложения. Остальные дистрибутивы используют ручную установку
+службы из исходников; Arch-пакет не универсален. Исторический HTTPS candidate-канал
+ниже — отдельный канал, не доказательство наличия в нём этого GitHub-релиза.
+
+## История первоначального Flatpak-кандидата: 1 октября 2026
 
 Собраны `dist/R-TrustTunnel-Linux-aarch64.flatpak` и
 `dist/R-TrustTunnel-Linux-x86_64.flatpak` на Freedesktop 25.08.

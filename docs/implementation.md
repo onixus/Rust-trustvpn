@@ -1,12 +1,19 @@
 # Состояние реализации — 1 октября 2026
 
+Текущий опубликованный клиентский выпуск: [v0.3.2-ui.1](releases/v0.3.2-ui.1.md).
+macOS CI №69 и Linux CI №20 завершены успешно; Native/службы обновлены на Mac и
+физическом Linux, WebView/Both проверены в KDE Wayland. APK 30208 установлен на
+Huawei с сохранением профиля и Always-on/lockdown. Обновлены навигация и оформление;
+[скриншоты](screenshots/README.md) показывают реальные macOS Native/WebView окна.
+Windows-пакет нового выпуска отсутствует; долгие boot/sleep/soak проверки открыты.
+
 Текущее дополнение: задача 5 и Hysteria 2. Реализованы фоновая Android-синхронизация,
 переносимые правила маршрутизации, DoT/DoH через VPN и desktop WebView с вариантами
 Native/WebView/Both. Hysteria 2 определяется автоматически при импорте и подключается
 общим Rust-ядром. Подробности: [Android](android.md), [выбор UI](ui-choices.md),
-[Hysteria 2 и ограничения](hysteria2.md). Android CI №25 проверил оба протокола,
+[Hysteria 2 и ограничения](hysteria2.md). Android CI №26 проверил оба протокола,
 обрыв/восстановление и обновление APK; Windows-проверка дополнения отложена до включения ноды.
-Физическая приёмка нового кандидата продолжается. Исторические результаты ниже
+Huawei также прошёл Hysteria 2, DoH/DoT и фоновую синхронизацию. Исторические результаты ниже
 не означают автоматической приёмки новых функций.
 
 Текущая последовательность: 6 → 5 → 4 → 1 (Flatpak), см. [delivery.md](delivery.md).
@@ -24,7 +31,7 @@ Windows runtime #53 подтвердил SCM recovery, Stop при обрыве 
 macOS system candidate №61 прошёл live IPv4/IPv6 TCP/UDP/ICMP, DNS,
 reconnect, аварии GUI/root-службы и восстановление сети. DMG без Developer ID
 и notarization; boot always-on, sleep/handoff и автообновление ещё не завершены.
-[Отчёт](../reports/macos-runtime/acceptance-61.json).
+Отчёт (локальный отчёт `reports/macos-runtime/acceptance-61.json`, не входит в Git).
 Linux Flatpak ARM64/x86_64 прошли установленный Wayland/tray/IPC smoke на Weston
 (x86_64 под QEMU). Физический KDE, host GUI-пакет и совместный lifecycle
 установки/обновления/отката ещё не приняты. [Подробности](linux-service.md).

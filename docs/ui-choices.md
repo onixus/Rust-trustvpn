@@ -56,3 +56,15 @@ session with DISPLAY unset; the Native executable in Both also passed its GUI sm
 Temporary CI branches were uninstalled and the original signed Native commit retained.
 Physical tray-menu/restart acceptance for WebView and Windows validation remain
 separate checks; package generation alone does not establish that they passed.
+
+## Published UI refresh
+
+[v0.3.2-ui.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.1)
+ships the macOS UI Choices DMG and signed x86_64 Native/WebView/Both Flatpaks.
+macOS #69 and Linux #20 completed successfully. The installed Native clients and
+host services were upgraded; macOS retained the exact encrypted vault bytes.
+All three Linux packages passed smoke on physical KDE Wayland; temporary variant
+branches were removed and the updated Native master retained. This does not
+establish physical WebView tray/restart parity or Windows acceptance.
+
+See the [actual release screenshots](screenshots/README.md).

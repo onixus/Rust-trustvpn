@@ -6,11 +6,23 @@ the desktop client. There is no WebView, CLI subprocess or privileged host servi
 Baseline: Android 10/API 29+, arm64-v8a; x86_64 is also built for emulator testing.
 Acceptance uses Android 16/API 36 x86_64 and physical POCO X3 NFC and Huawei DEL-LX9 phones running Android 12/API 31.
 
-Previously validated signed preview: **0.3.2-preview.5** (versionCode **30206**), validated
-from source commit `2809bea` by Android Jenkins #16 on October 1, 2026. The signed
-APK was installed and its force-stop/recovery behavior retested on the physical
-phone. Build outputs are local artifacts, not published GitHub release assets:
-`dist/android/R-TrustTunnel-Android-preview.apk` and its `.sha256` sidecar.
+Current published package: [v0.3.2-ui.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.1),
+versionCode **30208**, versionName **0.3.2-preview.6**. The displayed version name
+is unchanged; Android uses the increased versionCode for this in-place update.
+The APK is signed with the existing release key. It was installed on Huawei with
+the saved default profile, active VPN and system Always-on/lockdown retained.
+The UI build and Android lint passed. The native libraries are unchanged from
+successful Android Jenkins #26; their source hashes were checked before packaging.
+This UI release did not repeat the full Android network acceptance pipeline.
+
+## Navigation
+
+The default profile appears at the top, with Connect/Disconnect at the bottom.
+**+ Add profile** groups file, pasted configuration/link and QR import.
+**Settings** contains Server profiles and the entry to system Always-on controls.
+**VPN apps** remains on the home screen. English/Russian labels follow the system
+locale. Screenshots are blocked by `FLAG_SECURE` in the released Android app;
+do not disable that protection or publish real profiles to create documentation.
 
 ## Implemented
 
