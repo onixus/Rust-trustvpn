@@ -77,10 +77,15 @@ public final class TunnelService extends VpnService {
             }
         }
         endpoint.put("addresses", resolved);
+        boolean ipv6 = endpoint.optBoolean("has_ipv6", true);
         Builder builder = new Builder().setSession("R-TrustTunnel").setMtu(1500)
-            .addAddress("169.254.254.2", 32).addAddress("fd00:5254::2", 128)
-            .addRoute("0.0.0.0", 0).addRoute("::", 0).setBlocking(false)
+            .addAddress("169.254.254.2", 32)
+            .addRoute("0.0.0.0", 0).setBlocking(false)
             .setUnderlyingNetworks(new Network[]{underlying});
+        // Leaving IPv6 unconfigured blocks that family in Android; never allowBypass/allowFamily.
+        // Advertising a local IPv6 route for an IPv4-only endpoint makes browser
+        // connection attempts reach an unusable tunnel instead of falling back to IPv4.
+        if (ipv6) builder.addAddress("fd00:5254::2", 128).addRoute("::", 0);
         AppRouting.read(new ProfileVault(this).read()).apply(builder, getPackageManager());
         // The engine rejects unsupported policy/DNS options; do not silently bypass them.
         JSONArray dns = endpoint.optJSONArray("dns_upstreams");
@@ -88,6 +93,7 @@ public final class TunnelService extends VpnService {
         else for (int i = 0; i < dns.length(); i++) {
             String server = dns.getString(i);
             if (!server.matches("[0-9a-fA-F:.]+")) throw new IllegalArgumentException("Numeric DNS required");
+            if (!ipv6 && server.contains(":")) throw new IllegalArgumentException("IPv6 DNS requires an IPv6 endpoint");
             builder.addDnsServer(server);
         }
         if (stopping) return;

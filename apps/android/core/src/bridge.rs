@@ -209,7 +209,14 @@ async fn run(
         };
         match connected {
             Ok((session, tunnel)) => {
-                state(2, "Connected · IPv4, IPv6 and DNS");
+                state(
+                    2,
+                    if profile.endpoint.has_ipv6 {
+                        "Connected · IPv4, IPv6 and DNS"
+                    } else {
+                        "Connected · IPv4 and DNS"
+                    },
+                );
                 let started = std::time::Instant::now();
                 tokio::select! {
                     _=cancel.changed()=>break,

@@ -82,6 +82,25 @@ final class NetworkAcceptance {
             check(!TunnelService.active, "Service and TUN stopped");
             Thread.sleep(300);
             AppRoutingAcceptance.uidRouting(test, fixture);
+            // A server without IPv6 must not be advertised as an IPv6 VPN. Otherwise
+            // browsers can complete a local handshake into an unusable address family.
+            JSONObject ipv4Only = vault.read();
+            ipv4Only.getJSONArray("profiles").getJSONObject(0).getJSONObject("profile").getJSONObject("endpoint").put("has_ipv6", false);
+            vault.write(ipv4Only);
+            context.startForegroundService(new Intent(context, TunnelService.class));
+            await(2, 45000);
+            android.net.ConnectivityManager cm = context.getSystemService(android.net.ConnectivityManager.class);
+            android.net.LinkProperties links = cm.getLinkProperties(cm.getActiveNetwork());
+            check(links != null && links.getLinkAddresses().stream().noneMatch(a -> a.getAddress() instanceof Inet6Address), "IPv4-only endpoint must not advertise IPv6 on Android");
+            check(links.getRoutes().stream().noneMatch(r -> r.getType() == android.net.RouteInfo.RTN_UNICAST && r.getDestination().getAddress() instanceof Inet6Address), "No IPv6 route for IPv4-only endpoint");
+            tcp(v4); udp(v4);
+            boolean v6Blocked = false;
+            try (Socket socket = new Socket()) { socket.connect(new InetSocketAddress(v6, 8080), 2000); }
+            catch (IOException expected) { v6Blocked = true; }
+            check(v6Blocked, "IPv6 cannot bypass an IPv4-only VPN");
+            context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP));
+            await(0, 10000);
+
         } finally {
             if (TunnelService.active) { context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP)); await(0, 10000); }
             if (activity != null) { Activity finished = activity; test.runOnMainSync(finished::finish); }

@@ -28,7 +28,9 @@ The current runtime acceptance environment is Android 16/API 36 x86_64.
   backup and device transfer are also excluded. Screenshots of the app are blocked.
 - System consent precedes VPN setup. A persistent notification has Disconnect.
   Closing the Activity leaves the foreground service running.
-- Both default routes and DNS use the TUN. Every endpoint socket is protected
+- IPv4 and DNS use the TUN. IPv6 is advertised only when the profile sets
+  `has_ipv6=true`; otherwise Android blocks that family without direct bypass.
+  An IPv6 DNS server is rejected for an IPv4-only endpoint. Every endpoint socket is protected
   and bound to the underlying non-VPN network before connect; protection failure
   rejects the attempt. Endpoint DNS resolution happens before TUN establishment.
 - Rust duplicates the TUN FD, cancels/joins its worker before closing the duplicate,
