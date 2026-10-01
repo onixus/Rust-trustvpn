@@ -69,6 +69,11 @@ cp target/aarch64-linux-android/release/librtrust_android.so /out/arm64-v8a/
     run(['python3', 'ci/android_smoke.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
     for protocol in ('trusttunnel','hysteria2'):
         print('Android network protocol:',protocol,flush=True)
+        if protocol == 'hysteria2':
+            # Download and verify the pinned tool before timing server readiness.
+            # A cold release download is not an endpoint startup failure.
+            from hysteria_interop import binary
+            binary()
         fixture = subprocess.Popen(['python3', 'ci/android_fixture.py','--protocol',protocol], cwd=ROOT)
         try:
             for _ in range(120):
