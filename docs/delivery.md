@@ -21,12 +21,13 @@
    должны быть проверены вместе.
 
 На 1 октября x86_64 теперь проверяется нативно на физическом Arch Linux,
-а не только под QEMU. `rtrust-linux` #5 завершился SUCCESS: security, unit,
+а не только под QEMU. `rtrust-linux` #7 завершился SUCCESS: security, unit,
 Wayland и полный сетевой E2E, включая строгий rp_filter и смену интерфейса.
 Пройдены реальная Plasma/Wayland-сессия, трей, KWallet, Document/Background
 portals, Arch host package install/update/rollback/uninstall и отдельный
 подписанный Flatpak update/rollback с отказом неподписанному commit.
-Публичный подписанный репозиторий и проверки reboot/sleep ещё открыты.
+Подписанный HTTPS candidate-репозиторий опубликован и проверен анонимной
+установкой. Проверки reboot/sleep ещё открыты.
 [Подробности](linux-service.md).
 
 По следующему запросу пользователя после Linux начинается Android.

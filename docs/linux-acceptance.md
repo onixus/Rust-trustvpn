@@ -5,7 +5,7 @@ NetworkManager and systemd-resolved. X11 support remains excluded.
 
 ## Completed
 
-- Jenkins `rtrust-linux` #5: completed SUCCESS, including Gitleaks, Trivy,
+- Jenkins `rtrust-linux` #7: completed SUCCESS, including Gitleaks, Trivy,
   workspace unit/Clippy, Wayland/tray and all network namespace E2E.
 - Full-tunnel reconnect with strict reverse-path filtering, endpoint outage,
   physical-interface/gateway handoff and return, GUI/service crash, early guard,
@@ -18,6 +18,9 @@ NetworkManager and systemd-resolved. X11 support remains excluded.
   uninstall/reinstall and authenticated Flatpak service channel.
 - Private signed Flatpak installation: install/update/rollback, rejection of an
   unsigned application commit despite a signed summary, uninstall.
+- Public HTTPS candidate repository: anonymous GPG-verified Flatpak installation
+  of the exact tested commit; host package SHA-256 and detached GPG signature
+  verified. Release key remains on the signing workstation, outside Git and CI.
 - Installed service live test `rtrust-linux-live-5b`: IPv4/IPv6 TCP 512 KiB,
   UDP through 60 KB, ICMP 56/5000, system DNS, physical-bound bypass rejection,
   endpoint outage/reconnect, Stop, GUI disconnect and service SIGKILL/restart.
@@ -34,8 +37,6 @@ No production credentials or endpoint configuration were changed.
   to interrupt desktop applications.
 - Human interaction with KDE file chooser and polkit setup dialog. Portal APIs
   and the underlying package/setup operations were tested separately.
-- Production GPG key and public HTTPS repository publication. Signing and
-  rejection behavior were tested with an isolated temporary CI key.
 - ARM64 physical desktop acceptance; its earlier container evidence remains.
 
 Detailed local logs are under `reports/linux-runtime/` and are intentionally
