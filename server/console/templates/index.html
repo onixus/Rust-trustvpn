@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content="{{ csrf }}" />
+    <title>R-TrustTunnel · VPN Console</title>
+    <link rel="stylesheet" href="/console/static/console.css" />
+    <script src="/console/static/console.js" defer></script>
+  </head>
+  <body>
+    <aside>
+      <a class="brand" href="/console"
+        ><img class="mark" src="/console/static/icon.svg" alt="" /><span>R-TrustTunnel<small>NETWORK CONSOLE</small></span></a
+      >
+      <div class="nav-label">УПРАВЛЕНИЕ</div>
+      <nav aria-label="Разделы">
+        <button data-page="overview" class="selected">
+          ◈ <span>Обзор сети</span></button
+        ><button data-page="users">♙ <span>Пользователи</span></button
+        ><button data-page="keys">⚿ <span>Ключи и устройства</span></button
+        ><button data-page="routing">⇄ <span>Маршрутизация</span></button
+        ><button data-page="updates">↓ <span>Обновления</span></button
+        ><button data-page="campaigns">✉ <span>Рассылки</span></button
+        ><button data-page="telegram">↗ <span>Telegram</span></button
+        ><button data-page="audit">≡ <span>Журнал операций</span></button>
+      </nav>
+      <div class="sidebar-bottom">
+        <span class="host-dot"></span> VPN-сервер<small
+          >Единый центр управления</small
+        ><a href="/admin/settings">Настройки TrustTunnel ↗</a
+        ><a href="/admin/logout">Выйти</a>
+      </div>
+    </aside>
+    <div class="workspace">
+      <header>
+        <span
+          >Инфраструктура <span class="muted">/</span>
+          <b id="breadcrumb">Обзор сети</b></span
+        >
+        <div class="header-right">
+          <span class="live" id="freshness">Подключение…</span
+          ><button id="refresh" class="subtle">↻ Обновить</button>
+        </div>
+      </header>
+      <main>
+        <div id="notice" role="status" aria-live="polite"></div>
+        <div id="content">
+          <div class="empty">Загружаем состояние узлов…</div>
+        </div>
+      </main>
+      <footer>
+        Hysteria 2 · TrustTunnel · R-TrustTunnel
+        <span>Управление через существующие сервисы</span>
+      </footer>
+    </div>
+    <dialog id="modal">
+      <form method="dialog" class="dialog-top">
+        <b id="modal-title"></b><button aria-label="Закрыть">×</button>
+      </form>
+      <div id="modal-body"></div>
+    </dialog>
+  </body>
+</html>

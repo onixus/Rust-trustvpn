@@ -137,6 +137,24 @@ Windows was excluded; earlier system acceptance belongs to #53 and sequence 6. T
 
 Network and installer harnesses may change routes or firewall rules. Follow their documented disposable-environment requirements. Local Jenkins node names and paths need adaptation for another installation.
 
+## Unified VPN administration
+
+The [unified console](https://vpn.example.com/console/) runs alongside the VPN endpoints
+and uses the existing TrustTunnel administrator login. It brings together Hysteria
+and TrustTunnel users, credential/device lifecycle, Hysteria egress rules,
+R-TrustTunnel signed release channels, email/Telegram campaign drafts and an
+operation queue with audit history. Existing VPN services and accounts are retained.
+
+Routing changes currently affect **Hysteria only**; TrustTunnel and host traffic
+still exit directly. Server upgrades require operator-staged packages, and
+TrustTunnel upgrades require a protocol probe. Campaigns require recipient consent
+and an explicit send confirmation. There is no automatic cross-protocol account
+merge or global routing/failover.
+
+See [deployment and acceptance](docs/unified-console.md),
+[architecture and operations](server/console/README.md), and the
+[deployment entry point](deploy/README.md#unified-console).
+
 ## Repository layout
 
 | Path | Purpose |
@@ -145,7 +163,7 @@ Network and installer harnesses may change routes or firewall rules. Follow thei
 | `apps/tun` | TUN/Wintun/utun dataplane and platform services |
 | `apps/inspect`, `apps/codec` | Diagnostic and configuration tools |
 | `crates/` | Shared profiles, transport, storage, IPC, portal and update logic |
-| `server/`, `deploy/` | Server-panel extension, test environment and deployment tools |
+| `server/`, `deploy/` | Profile exchange, unified VPN console, isolated tests and deployment tools |
 | `packaging/`, `scripts/` | Platform packaging and interoperability harnesses |
 | `ci/`, `Jenkinsfile` | Build, security and runtime checks |
 | `vendor/h2` | Patched HTTP/2 dependency, with its own license |
@@ -161,6 +179,7 @@ The server extension targets an existing TrustTunnel panel; it is not a replacem
 - [Windows service](docs/windows-service.md), [Linux service](docs/linux-service.md), [macOS system VPN](docs/macos-system.md)
 - [Secure updates](docs/secure-updates.md)
 - [Profile exchange API](docs/profile-api.md)
+- [Unified VPN console](docs/unified-console.md)
 - [Technical debt](docs/technical-debt.md)
 
 Historical documents may refer to local reports or artifacts that are not shipped in this repository. Current platform status takes precedence over older milestone notes.

@@ -1,0 +1,17 @@
+[Unit]
+Description=VPN Console local privileged adapter
+After=network-online.target docker.service h-ui.service
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/vpn-console/agent.py
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run /opt/vpn-console /opt/rtrust-updates /opt/trusttunnel-web /var/lib/h-ui /root/hysteria-route-backups
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+[Install]
+WantedBy=multi-user.target
