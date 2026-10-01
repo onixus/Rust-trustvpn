@@ -37,11 +37,10 @@ pub fn initialize() -> bool {
             }
             let icon = Icon::from_rgba(pixels(), 32, 32).expect("fixed icon dimensions");
             let builder = TrayIconBuilder::new();
-            let builder = if cfg!(target_os = "macos") {
-                builder.with_icon_templated(icon)
-            } else {
-                builder.with_icon(icon)
-            };
+            #[cfg(target_os = "macos")]
+            let builder = builder.with_icon_templated(icon);
+            #[cfg(target_os = "windows")]
+            let builder = builder.with_icon(icon);
             Ok(builder
                 .with_tooltip("R-TrustTunnel")
                 .with_menu(Box::new(menu))
