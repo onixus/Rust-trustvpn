@@ -49,7 +49,9 @@ impl App {
                 let Some(mut profile) = self.profiles.first().cloned() else {
                     return Task::none();
                 };
-                profile.endpoint.upstream_protocol = "http2".into();
+                if profile.protocol == rtrust_profile::Protocol::TrustTunnel {
+                    profile.endpoint.upstream_protocol = "http2".into();
+                }
                 let Ok(dns) = self.dns.parse() else {
                     self.always_on.status = "Укажите IPv4 DNS в настройках полного туннеля".into();
                     return Task::none();

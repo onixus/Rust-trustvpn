@@ -11,6 +11,7 @@ import java.util.Arrays;
 import org.json.*;
 
 final class NetworkAcceptance {
+    private static boolean largeUdpDigest;
     private static void check(boolean ok, String message) { if (!ok) throw new AssertionError(message); }
     private static int state() throws Exception { return new JSONObject(NativeCore.INSTANCE.status()).getInt("state"); }
     private static void await(int expected, long timeout) throws Exception {
@@ -39,7 +40,12 @@ final class NetworkAcceptance {
                 socket.setSoTimeout(5000); socket.connect(InetAddress.getByName(address), 8081);
                 socket.send(new DatagramPacket(payload, payload.length));
                 byte[] bytes = new byte[65535]; DatagramPacket packet = new DatagramPacket(bytes, bytes.length); socket.receive(packet);
-                check(packet.getLength() == size && Arrays.equals(payload, Arrays.copyOf(bytes, size)), "UDP payload integrity");
+                byte[] expected=payload;
+                if(largeUdpDigest && size>4000){
+                    StringBuilder hex=new StringBuilder();for(byte value:java.security.MessageDigest.getInstance("SHA-256").digest(payload))hex.append(String.format(java.util.Locale.ROOT,"%02x",value&255));
+                    expected=("SHA256:"+size+":"+hex).getBytes(StandardCharsets.US_ASCII);
+                }
+                check(packet.getLength()==expected.length && Arrays.equals(expected,Arrays.copyOf(bytes,packet.getLength())), "UDP payload integrity (large Hysteria requests use length+hash reply)");
             }
         }
     }
@@ -47,10 +53,49 @@ final class NetworkAcceptance {
         tcp(fixture.getString("target")); tcp(fixture.getString("target6"));
         udp(fixture.getString("target")); udp(fixture.getString("target6"));
     }
+    private static String sourceTcp(String address) throws Exception {
+        String response = new String(request(address, 8083, "GET / HTTP/1.0\r\nHost: fixture\r\n\r\n"), StandardCharsets.US_ASCII);
+        return response.substring(response.indexOf("\r\n\r\n") + 4).trim();
+    }
+    private static String sourceUdp(String address) throws Exception {
+        try (DatagramSocket socket = new DatagramSocket()) {
+            socket.setSoTimeout(5000); socket.connect(InetAddress.getByName(address),8084);
+            socket.send(new DatagramPacket(new byte[]{1},1)); byte[] bytes = new byte[128];
+            DatagramPacket reply = new DatagramPacket(bytes,bytes.length);socket.receive(reply);
+            return new String(bytes,0,reply.getLength(),StandardCharsets.US_ASCII).trim();
+        }
+    }
+    private static void flowRouting(Context context, ProfileVault vault, JSONObject fixture, JSONObject base) throws Exception {
+        String target=fixture.getString("target");
+        String directTcp=sourceTcp(target), directUdp=sourceUdp(target);
+        for (String kind : new String[]{"baseline","ip","port","domain","selective"}) {
+            JSONObject candidate=new JSONObject(base.toString());
+            JSONArray exclusions=new JSONArray();
+            if (kind.equals("ip")) exclusions.put(target+"/32");
+            if (kind.equals("port")) { exclusions.put("*:8083"); exclusions.put("*:8084"); }
+            if (kind.equals("domain")) exclusions.put("*.split.example");
+            if (kind.equals("selective")) exclusions.put(target+"/32");
+            candidate.put("policy",new JSONObject().put("mode",kind.equals("selective")?"selective":"general").put("exclusions",exclusions));
+            vault.edit(data -> { data.put("app_routing",new AppRouting(false,java.util.Collections.emptyList()).json());
+                data.put("default","flow").put("profiles",new JSONArray().put(new JSONObject().put("id","flow").put("profile",candidate))); });
+            context.startForegroundService(new Intent(context,TunnelService.class));await(2,45000);
+            try {
+                if(kind.equals("domain")) check(InetAddress.getByName("rtrust-"+System.nanoTime()+".split.example").getHostAddress().equals(target),"Domain rule learned through VPN DNS");
+                boolean bypass=kind.equals("ip")||kind.equals("port")||kind.equals("domain");
+                check(sourceTcp(target).equals(directTcp)==bypass,"TCP source confirms "+kind+" route");
+                check(sourceUdp(target).equals(directUdp)==bypass,"UDP source confirms "+kind+" route");
+            } finally {
+                context.startService(new Intent(context,TunnelService.class).setAction(TunnelService.STOP));
+                await(0,10000);for(int i=0;i<100&&TunnelService.active;i++)Thread.sleep(50);Thread.sleep(300);
+            }
+        }
+        vault.write(new JSONObject().put("default","acceptance").put("profiles",new JSONArray().put(new JSONObject().put("id","acceptance").put("profile",base))));
+    }
     static void run(Instrumentation test) throws Exception {
         Context context = test.getTargetContext();
         File source = new File(context.getCacheDir(), "vpn-fixture.json");
         JSONObject fixture = new JSONObject(new String(Files.readAllBytes(source.toPath()), StandardCharsets.UTF_8)); source.delete();
+        largeUdpDigest=fixture.optBoolean("large_udp_digest");
         ProfileVault vault = new ProfileVault(context); JSONObject previous = vault.read();
         JSONObject profile = new JSONObject(NativeCore.INSTANCE.parse(fixture.getJSONObject("base").toString())).getJSONObject("profile");
         Activity activity = null;
@@ -66,7 +111,7 @@ final class NetworkAcceptance {
             check(Arrays.stream(InetAddress.getAllByName("rtrust-" + System.nanoTime() + ".example")).anyMatch(ip -> ip.getHostAddress().equals(v4)), "System DNS through tunnel");
             byte[] control = request(v4, 8082, "POST /cycle HTTP/1.0\r\nHost: fixture\r\nAuthorization: Bearer " + fixture.getString("control_token") + "\r\nContent-Length: 0\r\n\r\n");
             check(new String(control, StandardCharsets.US_ASCII).contains("204"), "Endpoint outage scheduled");
-            await(3, 10000);
+            await(3, largeUdpDigest ? 40000 : 10000);
             check(TunnelService.active, "TUN retained during reconnect");
             boolean blocked = false;
             try (Socket socket = new Socket()) { socket.connect(new InetSocketAddress(v4, 8080), 2000); }
@@ -82,6 +127,7 @@ final class NetworkAcceptance {
             check(!TunnelService.active, "Service and TUN stopped");
             Thread.sleep(300);
             AppRoutingAcceptance.uidRouting(test, fixture);
+            flowRouting(context, vault, fixture, profile);
             // A server without IPv6 must not be advertised as an IPv6 VPN. Otherwise
             // browsers can complete a local handshake into an unusable address family.
             JSONObject ipv4Only = vault.read();
@@ -122,7 +168,7 @@ final class NetworkAcceptance {
         } finally {
             if (TunnelService.active) { context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP)); await(0, 10000); }
             if (activity != null) { Activity finished = activity; test.runOnMainSync(finished::finish); }
-            vault.write(previous);
+            vault.write(previous);largeUdpDigest=false;
         }
     }
 }

@@ -71,22 +71,29 @@ public final class TunnelService extends VpnService {
     }
     private void connect() throws Exception {
         JSONObject profile = new ProfileVault(this).selected();
-        if (profile.has("original_cli") && !profile.isNull("original_cli")) throw new IllegalArgumentException("Desktop CLI policy unsupported");
-        if (!profile.isNull("policy") && !profile.opt("policy").toString().equals("{}")) throw new IllegalArgumentException("Desktop policy unsupported");
+        JSONObject prepared = new JSONObject(NativeCore.INSTANCE.plan(profile.toString()));
+        if (!prepared.getBoolean("ok")) throw new IllegalArgumentException("Unsupported mobile policy");
+        profile = prepared.getJSONObject("profile");
+        JSONObject plan = prepared.getJSONObject("plan");
+        if (plan.getBoolean("require_lockdown") && (!isAlwaysOn() || !isLockdownEnabled())) throw new IllegalArgumentException("System lockdown required");
         underlying = availableNetwork();
         JSONObject endpoint = profile.getJSONObject("endpoint");
         boolean ipv6 = endpoint.optBoolean("has_ipv6", true);
-        Builder builder = new Builder().setSession("R-TrustTunnel").setMtu(1500)
+        Builder builder = new Builder().setSession("R-TrustTunnel").setMtu(plan.getInt("mtu"))
             .addAddress("169.254.254.2", 32)
-            .addRoute("0.0.0.0", 0).setBlocking(false)
+            .setBlocking(false)
             .setUnderlyingNetworks(underlying == null ? new Network[]{} : new Network[]{underlying});
         // Leaving IPv6 unconfigured blocks that family in Android; never allowBypass/allowFamily.
         // Advertising a local IPv6 route for an IPv4-only endpoint makes browser
         // connection attempts reach an unusable tunnel instead of falling back to IPv4.
-        if (ipv6) builder.addAddress("fd00:5254::2", 128).addRoute("::", 0);
+        if (ipv6) builder.addAddress("fd00:5254::2", 128);
+        JSONArray routes = plan.getJSONArray("routes");
+        for (int i = 0; i < routes.length(); i++) {
+            String[] route = routes.getString(i).split("/"); builder.addRoute(route[0], Integer.parseInt(route[1]));
+        }
         AppRouting.read(new ProfileVault(this).read()).apply(builder, getPackageManager());
         // The engine rejects unsupported policy/DNS options; do not silently bypass them.
-        JSONArray dns = endpoint.optJSONArray("dns_upstreams");
+        JSONArray dns = plan.getJSONArray("dns");
         if (dns == null || dns.length() == 0) builder.addDnsServer("1.1.1.1");
         else for (int i = 0; i < dns.length(); i++) {
             String server = dns.getString(i);

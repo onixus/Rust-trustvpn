@@ -51,6 +51,10 @@ final class ProfileVault {
         finally { Arrays.fill(plain, (byte) 0); Arrays.fill(bytes, (byte) 0); }
     }
     void write(JSONObject data) throws Exception { synchronized (LOCK) { writeUnlocked(data); } }
+    interface Edit { void apply(JSONObject data) throws Exception; }
+    void edit(Edit edit) throws Exception { synchronized (LOCK) {
+        JSONObject data = readUnlocked(); edit.apply(data); writeUnlocked(data);
+    } }
     private void writeUnlocked(JSONObject data) throws Exception {
         byte[] plain = data.toString().getBytes(StandardCharsets.UTF_8);
         if (plain.length > 8 * 1024 * 1024 - 64) throw new IOException("Profile storage limit reached");
@@ -71,6 +75,25 @@ final class ProfileVault {
         if (data.has("portal")) throw new IOException("Already enrolled");
         data.put("portal", session); writeUnlocked(data);
     } }
+    void setPortalSync(boolean enabled) throws Exception { synchronized (LOCK) {
+        JSONObject data = readUnlocked(), session = data.getJSONObject("portal");
+        session.put("background_sync", enabled).remove("sync_auth_expired"); writeUnlocked(data);
+    } }
+    void expirePortalSync(JSONObject session) throws Exception { synchronized (LOCK) {
+        JSONObject data = readUnlocked(), current = data.optJSONObject("portal");
+        if (!samePortal(current, session)) return;
+        current.put("background_sync", false).put("sync_auth_expired", true); writeUnlocked(data);
+    } }
+    private static boolean samePortal(JSONObject a, JSONObject b) {
+        return a != null && a.optString("origin").equals(b.optString("origin"))
+            && !a.optString("token").isEmpty() && a.optString("token").equals(b.optString("token"));
+    }
+    void syncPortalBackground(JSONObject session, JSONArray remote) throws Exception { synchronized (LOCK) {
+        JSONObject current = readUnlocked().optJSONObject("portal");
+        // A canceled, expired or replaced registration cannot commit an in-flight response.
+        if (!samePortal(current, session) || !current.optBoolean("background_sync")) return;
+        syncPortal(session, remote);
+    } }
     void forgetPortal() throws Exception { synchronized (LOCK) {
         JSONObject data = readUnlocked(); removeRemote(data); data.remove("portal"); writeUnlocked(data);
     } }
@@ -86,7 +109,7 @@ final class ProfileVault {
     }
     void syncPortal(JSONObject session, JSONArray remote) throws Exception { synchronized (LOCK) {
         JSONObject data = readUnlocked();
-        if (!data.has("portal") || !data.getJSONObject("portal").getString("token").equals(session.getString("token"))) throw new IOException("Registration changed");
+        if (!samePortal(data.optJSONObject("portal"), session)) throw new IOException("Registration changed");
         String selected = data.getString("default"); removeRemote(data);
         JSONArray profiles = data.getJSONArray("profiles");
         if (profiles.length() + remote.length() > 64) throw new IOException("Profile limit");
@@ -96,7 +119,9 @@ final class ProfileVault {
             if (!ids.add(item.getString("id"))) throw new IOException("Duplicate remote profile");
             profiles.put(item);
         }
-        data.put("default", selected); repairDefault(data); writeUnlocked(data);
+        data.put("default", selected); repairDefault(data);
+        data.getJSONObject("portal").put("last_sync", System.currentTimeMillis()).remove("sync_auth_expired");
+        writeUnlocked(data);
     } }
     void pendingExport(String content) throws Exception { synchronized (LOCK) {
         JSONObject data = readUnlocked();

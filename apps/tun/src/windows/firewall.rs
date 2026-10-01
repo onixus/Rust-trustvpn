@@ -127,17 +127,26 @@ fn add_in(
     };
     check(unsafe { FwpmFilterAdd0(engine.0, &filter, ptr::null_mut(), ptr::null_mut()) })
 }
-pub fn install(luid: u64, endpoints: &[SocketAddrV4]) -> Result<(), String> {
-    install_in(luid, endpoints, FULL, false)
+pub fn install(
+    luid: u64,
+    endpoints: &[SocketAddrV4],
+    protocol: rtrust_profile::Protocol,
+) -> Result<(), String> {
+    install_in(luid, endpoints, FULL, false, protocol)
 }
-pub fn install_boot(luid: u64, endpoints: &[SocketAddrV4]) -> Result<(), String> {
-    install_in(luid, endpoints, BOOT, true)
+pub fn install_boot(
+    luid: u64,
+    endpoints: &[SocketAddrV4],
+    protocol: rtrust_profile::Protocol,
+) -> Result<(), String> {
+    install_in(luid, endpoints, BOOT, true, protocol)
 }
 fn install_in(
     mut luid: u64,
     endpoints: &[SocketAddrV4],
     space: Space,
     boot: bool,
+    protocol: rtrust_profile::Protocol,
 ) -> Result<(), String> {
     let existed = active_in(space)?;
     if !boot && existed {
@@ -235,7 +244,13 @@ fn install_in(
                         conditions.push(condition(
                             FWPM_CONDITION_IP_PROTOCOL,
                             FWP_UINT8,
-                            FWP_CONDITION_VALUE0_0 { uint8: 6 },
+                            FWP_CONDITION_VALUE0_0 {
+                                uint8: if protocol == rtrust_profile::Protocol::Hysteria2 {
+                                    17
+                                } else {
+                                    6
+                                },
+                            },
                         ));
                         conditions.push(condition(
                             FWPM_CONDITION_IP_REMOTE_PORT,

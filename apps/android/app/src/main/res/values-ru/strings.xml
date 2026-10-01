@@ -20,7 +20,7 @@
     <string name="qr_import">"Импорт QR-кода"</string>
     <string name="qr_camera">"Сканировать камерой"</string>
     <string name="qr_image">"Выбрать изображение QR"</string>
-    <string name="qr_prompt">"Наведите камеру на QR-код профиля или ссылки tt://"</string>
+    <string name="qr_prompt">"Наведите камеру на QR-код профиля или ссылки tt:// / hy2://"</string>
     <string name="qr_failed">"Не удалось прочитать QR-код. Выберите чёткое изображение размером до 12 МиБ."</string>
     <string name="export_failed">"Не удалось экспортировать профиль."</string>
     <string name="export_expired">"Время экспорта истекло. Выберите профиль и повторите экспорт."</string>
@@ -42,10 +42,10 @@
     <string name="connect_default_profile">"Подключить профиль по умолчанию"</string>
     <string name="vpn_status_unavailable">"Статус VPN недоступен"</string>
     <string name="import_file">"Импорт файла"</string>
-    <string name="paste_config_or_tt_link">"Вставить конфиг или ссылку tt://"</string>
+    <string name="paste_config_or_tt_link">"Вставить конфиг или ссылку tt:// / hy2://"</string>
     <string name="vpn_apps">"Приложения VPN"</string>
     <string name="app_selection_could_not_be_opened">"Не удалось открыть список приложений. Настройки сохранены."</string>
-    <string name="vpn_uses_http_for_protection_after">"VPN использует HTTP/2. HTTP/3 сохраняется в профиле. Для защиты после остановки приложения включите системную блокировку без VPN."</string>
+    <string name="vpn_uses_http_for_protection_after">"Протокол определяется профилем: TrustTunnel HTTP/2 или Hysteria 2. Для защиты после остановки приложения включите системную блокировку без VPN."</string>
     <string name="import_a_profile_to_get_started">"Импортируйте профиль для начала работы."</string>
     <string name="encrypted_profiles_could_not_be_opened">"Не удалось открыть зашифрованные профили. Данные сохранены."</string>
     <string name="use_as_default">"Использовать по умолчанию"</string>
@@ -68,7 +68,7 @@
     <string name="export_contains_credentials">"Экспорт содержит учётные данные"</string>
     <string name="endpoint_toml">"TOML сервера"</string>
     <string name="cli_toml">"TOML CLI"</string>
-    <string name="tt_link">"Ссылка tt://"</string>
+    <string name="tt_link">"Ссылка tt:// / hy2://"</string>
     <string name="save_unencrypted_credentials">"Сохранить незашифрованные учётные данные?"</string>
     <string name="anyone_with_this_file_can_use">"Любой обладатель этого файла сможет использовать профиль. "</string>
     <string name="choose_file">"Выбрать файл"</string>
@@ -93,4 +93,9 @@
     <string name="vpn_active_open_app_for_connection">"VPN активен · статус подключения в приложении"</string>
     <string name="vpn_permission_is_required">"Необходимо разрешение на VPN"</string>
     <string name="cannot_start_vpn_check_the_profile">"Не удалось запустить VPN. Проверьте профиль и сеть и повторите попытку."</string>
+    <string name="portal_background">"Фоновая синхронизация"</string>
+    <string name="portal_background_help">"Проверять профили сервера примерно раз в час при наличии сети. Android может отложить проверку для экономии батареи. Локальные профили сохраняются, серверные с отозванным доступом удаляются. Изменения применятся при следующем подключении VPN без разрыва текущего туннеля."</string>
+    <string name="portal_background_enable">"Включить"</string>
+    <string name="portal_background_disable">"Выключить"</string>
+    <string name="portal_last_sync">"Последняя успешная синхронизация: %1$s"</string>
 </resources>

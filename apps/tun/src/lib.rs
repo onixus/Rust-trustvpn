@@ -22,7 +22,7 @@ pub mod service;
 ))]
 mod dataplane;
 #[cfg(target_os = "android")]
-pub use dataplane::run as run_android;
+pub use dataplane::run_with_dns as run_android;
 #[cfg(target_os = "windows")]
 pub mod windows;
 

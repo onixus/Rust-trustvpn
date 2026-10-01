@@ -1,6 +1,8 @@
 //! Android codec and narrow JNI boundary. No privileged desktop service is used.
 #[cfg(target_os = "android")]
 mod bridge;
+mod policy;
+pub use policy::prepare;
 use rtrust_profile::{Format, Profile};
 use zeroize::Zeroizing;
 

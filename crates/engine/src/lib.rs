@@ -1,7 +1,10 @@
 //! TrustTunnel HTTP/2 and HTTP/3 transport. This is not a system VPN: it never modifies routes or DNS.
+pub mod dns;
 mod h3transport;
+mod hysteria;
 pub mod icmp;
 pub mod proxy;
+pub mod routing;
 pub mod udp;
 use base64::Engine;
 use bytes::Bytes;
@@ -65,6 +68,12 @@ pub fn check_capabilities(p: &Profile) -> Result<()> {
     if e.skip_verification {
         return Err(Error::Unsupported("disabled certificate verification"));
     }
+    if p.hysteria2
+        .as_ref()
+        .is_some_and(|h| !h.pin_sha256.is_empty())
+    {
+        return Err(Error::Unsupported("Hysteria certificate pin override"));
+    }
     if !e.custom_sni.is_empty() && e.custom_sni != e.hostname {
         return Err(Error::Unsupported("separate SNI and verification identity"));
     }
@@ -90,11 +99,17 @@ pub struct Session(Transport);
 enum Transport {
     H2(H2Session),
     H3(h3transport::H3Session),
+    Hysteria(hysteria::HysteriaSession),
 }
 impl Session {
     pub async fn connect(p: &Profile) -> Result<Self> {
         check_capabilities(p)?;
         tokio::time::timeout(Duration::from_secs(20), async {
+            if p.protocol == rtrust_profile::Protocol::Hysteria2 {
+                return Ok(Self(Transport::Hysteria(
+                    hysteria::HysteriaSession::connect(p, None, None).await?,
+                )));
+            }
             if p.endpoint.upstream_protocol == "http3" {
                 Ok(Self(Transport::H3(
                     h3transport::H3Session::connect(p).await?,
@@ -110,6 +125,15 @@ impl Session {
     #[cfg(target_os = "linux")]
     pub async fn connect_marked(p: &Profile, mark: u32) -> Result<Self> {
         check_capabilities(p)?;
+        if p.protocol == rtrust_profile::Protocol::Hysteria2 && mark != 0 {
+            return tokio::time::timeout(
+                Duration::from_secs(20),
+                hysteria::HysteriaSession::connect(p, Some(mark), None),
+            )
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map(|s| Self(Transport::Hysteria(s)));
+        }
         if p.endpoint.upstream_protocol != "http2" || mark == 0 {
             return Err(Error::Unsupported("marked transport requires HTTP/2"));
         }
@@ -124,6 +148,15 @@ impl Session {
     #[cfg(unix)]
     pub async fn connect_protected(p: &Profile, protector: &SocketProtector) -> Result<Self> {
         check_capabilities(p)?;
+        if p.protocol == rtrust_profile::Protocol::Hysteria2 {
+            return tokio::time::timeout(
+                Duration::from_secs(20),
+                hysteria::HysteriaSession::connect(p, None, Some(protector)),
+            )
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map(|s| Self(Transport::Hysteria(s)));
+        }
         if p.endpoint.upstream_protocol != "http2" {
             return Err(Error::Unsupported("protected transport requires HTTP/2"));
         }
@@ -148,6 +181,7 @@ impl Session {
         match &self.0 {
             Transport::H2(s) => s.health().await,
             Transport::H3(s) => s.health().await,
+            Transport::Hysteria(s) => s.health().await,
         }
     }
     pub async fn open_tcp(&self, target: &str) -> Result<Tunnel> {
@@ -155,18 +189,21 @@ impl Session {
         match &self.0 {
             Transport::H2(s) => s.open_tcp(target).await,
             Transport::H3(s) => s.open(target).await,
+            Transport::Hysteria(s) => s.open_tcp(target).await,
         }
     }
     pub async fn open_icmp(&self) -> Result<Tunnel> {
         match &self.0 {
             Transport::H2(s) => s.open("_icmp").await,
             Transport::H3(s) => s.open("_icmp").await,
+            Transport::Hysteria(_) => Err(Error::Unsupported("Hysteria does not relay ICMP")),
         }
     }
     pub async fn open_udp(&self) -> Result<Tunnel> {
         match &self.0 {
             Transport::H2(s) => s.open_udp().await,
             Transport::H3(s) => s.open("_udp2").await,
+            Transport::Hysteria(s) => s.open_udp().await,
         }
     }
 }
@@ -424,8 +461,11 @@ pub async fn probe_http(p: &Profile, destination: &str) -> Result<String> {
 }
 
 fn tls_config(p: &Profile) -> Result<rustls::ClientConfig> {
+    tls_config_with_ca(&p.endpoint.certificate)
+}
+fn tls_config_with_ca(certificate: &str) -> Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
-    if p.endpoint.certificate.is_empty() {
+    if certificate.is_empty() {
         #[cfg(target_os = "android")]
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         #[cfg(not(target_os = "android"))]
@@ -435,7 +475,7 @@ fn tls_config(p: &Profile) -> Result<rustls::ClientConfig> {
             let _ = roots.add(cert);
         }
     } else {
-        for cert in rustls_pemfile::certs(&mut p.endpoint.certificate.as_bytes()) {
+        for cert in rustls_pemfile::certs(&mut certificate.as_bytes()) {
             roots
                 .add(cert.map_err(|_| Error::Trust)?)
                 .map_err(|_| Error::Trust)?;
@@ -494,4 +534,50 @@ async fn connect_tcp(
     #[cfg(not(target_os = "linux"))]
     let _ = (mark, protector);
     TcpStream::connect(address).await
+}
+
+/// Explicit mobile split-routing path. The caller must protect and bind every socket.
+#[cfg(unix)]
+pub async fn direct_tcp(
+    destination: std::net::SocketAddr,
+    protect: &SocketProtector,
+) -> Result<TcpStream> {
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        connect_tcp(&destination.to_string(), None, Some(protect)),
+    )
+    .await
+    .map_err(|_| Error::Timeout)?
+    .map_err(Into::into)
+}
+#[cfg(not(unix))]
+pub async fn direct_tcp(
+    _destination: std::net::SocketAddr,
+    _protect: &SocketProtector,
+) -> Result<TcpStream> {
+    Err(Error::Unsupported("direct mobile route on this platform"))
+}
+pub async fn direct_udp(
+    destination: std::net::SocketAddr,
+    protect: &SocketProtector,
+) -> Result<tokio::net::UdpSocket> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let bind = if destination.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let socket = std::net::UdpSocket::bind(bind)?;
+        socket.set_nonblocking(true)?;
+        protect(socket.as_raw_fd())?;
+        socket.connect(destination)?;
+        Ok(tokio::net::UdpSocket::from_std(socket)?)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (destination, protect);
+        Err(Error::Unsupported("direct mobile route on this platform"))
+    }
 }

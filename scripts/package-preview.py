@@ -8,6 +8,7 @@ import shutil
 
 p = argparse.ArgumentParser()
 p.add_argument("--debug", action="store_true")
+p.add_argument("--ui", choices=["native", "webview", "both"], default="native")
 args = p.parse_args()
 root = pathlib.Path(__file__).resolve().parents[1]
 system = platform.system()
@@ -27,6 +28,8 @@ elif system == "Linux":
 elif system == "Windows":
     shutil.copy2(source, destination / "R-TrustTunnel.exe")
     shutil.copy2(source.with_name("rtrust-update.exe"), destination / "rtrust-update.exe")
+    if args.ui in ("webview", "both"):
+        shutil.copy2(source.with_name("rtrust-webview.exe"), destination / "R-TrustTunnel-WebView.exe")
 else:
     raise SystemExit("Unsupported packaging host")
 shutil.copy2(root / "Readme.md", destination / "Readme.md")

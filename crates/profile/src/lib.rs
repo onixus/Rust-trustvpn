@@ -1,5 +1,7 @@
 //! Bounded, secret-redacting TrustTunnel profile codec. No network or filesystem I/O.
+pub mod hysteria;
 mod link;
+pub use hysteria::{Hysteria2, Protocol};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, fmt};
@@ -89,6 +91,10 @@ fn http2() -> String {
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Protocol::is_trust_tunnel")]
+    pub protocol: Protocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hysteria2: Option<Hysteria2>,
     pub name: String,
     pub endpoint: Endpoint,
     #[serde(default)]
@@ -130,7 +136,7 @@ impl fmt::Display for Format {
         f.write_str(match self {
             Self::EndpointToml => "Endpoint TOML",
             Self::CliToml => "CLI TOML",
-            Self::Link => "tt://",
+            Self::Link => "VPN link",
             Self::Json => "R-TrustTunnel JSON",
         })
     }
@@ -146,9 +152,25 @@ impl Drop for Export {
 }
 
 impl Profile {
+    pub fn transport_name(&self) -> &str {
+        if self.protocol == Protocol::Hysteria2 {
+            "Hysteria 2"
+        } else {
+            &self.endpoint.upstream_protocol
+        }
+    }
+    pub fn formats(&self) -> &'static [Format] {
+        if self.protocol == Protocol::Hysteria2 {
+            &[Format::Json, Format::Link]
+        } else {
+            &Format::ALL
+        }
+    }
     pub fn from_endpoint(endpoint: Endpoint, name: String) -> Self {
         Self {
             schema_version: 1,
+            protocol: Protocol::TrustTunnel,
+            hysteria2: None,
             name,
             endpoint,
             policy: Value::Null,
@@ -162,6 +184,9 @@ impl Profile {
             return Err(Error::TooLarge);
         }
         let input = input.trim().trim_start_matches('\u{feff}');
+        if input.starts_with("hy2://") || input.starts_with("hysteria2://") {
+            return hysteria::link(input);
+        }
         if input.starts_with("tt://") {
             return link::decode(input);
         }
@@ -169,6 +194,8 @@ impl Profile {
             let mut value: Value = serde_json::from_str(input).map_err(|_| Error::Syntax)?;
             if value.get("schema_version").is_some() {
                 serde_json::from_value(value).map_err(|_| Error::Syntax)?
+            } else if value.get("server").is_some() {
+                hysteria::config(value)?
             } else if value.get("address").is_some() {
                 Self::legacy_json(&value)?
             } else {
@@ -183,7 +210,10 @@ impl Profile {
                 )
             }
         } else {
-            let value: toml::Value = toml::from_str(input).map_err(|_| Error::Syntax)?;
+            let value: toml::Value = match toml::from_str(input) {
+                Ok(v) => v,
+                Err(_) => return hysteria::yaml(input),
+            };
             if value.get("endpoint").is_some()
                 && (value.get("hostname").is_some() || value.get("addresses").is_some())
             {
@@ -298,6 +328,16 @@ impl Profile {
         if self.schema_version != 1 {
             return Err(Error::Version);
         }
+        match (&self.protocol, &self.hysteria2) {
+            (Protocol::TrustTunnel, None) => {}
+            (Protocol::Hysteria2, Some(options)) => {
+                options.validate()?;
+                if self.endpoint.upstream_protocol != "http3" || self.original_cli.is_some() {
+                    return Err(Error::Field("protocol"));
+                }
+            }
+            _ => return Err(Error::Field("protocol")),
+        }
         let e = &self.endpoint;
         if self.name.len() > 1024 {
             return Err(Error::Field("name"));
@@ -365,6 +405,42 @@ impl Profile {
     }
     pub fn export(&self, format: Format) -> Result<Export> {
         self.validate()?;
+        if self.protocol == Protocol::Hysteria2 {
+            return match format {
+                Format::Json => Ok(Export {
+                    content: serde_json::to_string_pretty(self).map_err(|_| Error::Syntax)?,
+                    losses: vec![],
+                }),
+                Format::Link => {
+                    let mut losses = vec![];
+                    if !self.policy.is_null() {
+                        losses.push("Routing policy is only preserved in JSON");
+                    }
+                    if !self.endpoint.certificate.is_empty() {
+                        losses.push("Custom CA certificate is only preserved in JSON");
+                    }
+                    if !self.endpoint.dns_upstreams.is_empty() {
+                        losses.push("DNS upstreams are only preserved in JSON");
+                    }
+                    if !self.endpoint.has_ipv6 {
+                        losses.push("IPv6 restriction is only preserved in JSON");
+                    }
+                    if !self.extensions.is_empty()
+                        || !self.endpoint.extra.is_empty()
+                        || !self.unknown_tlv.is_empty()
+                    {
+                        losses.push("Additional profile fields are only preserved in JSON");
+                    }
+                    Ok(Export {
+                        content: hysteria::encode(self)?,
+                        losses,
+                    })
+                }
+                _ => Err(Error::Field(
+                    "Hysteria 2 exports require JSON or a hy2 link",
+                )),
+            };
+        }
         let mut losses = vec![];
         if format != Format::Json {
             if !self.policy.is_null() {

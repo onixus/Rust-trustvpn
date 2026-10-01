@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/profile", "crates/update", "crates/portal", "crates/engine", "crates/store", "crates/control", "apps/native", "apps/inspect", "apps/tun", "apps/codec", "apps/android/core"]
+members = ["crates/profile", "crates/desktop", "apps/webview", "crates/update", "crates/portal", "crates/engine", "crates/store", "crates/control", "apps/native", "apps/inspect", "apps/tun", "apps/codec", "apps/android/core"]
 exclude = ["vendor/h2"]
 
 [patch.crates-io]
@@ -9,10 +9,11 @@ h2 = { path = "vendor/h2" }
 [workspace.package]
 version = "0.3.2"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+rtrust-desktop = { path = "crates/desktop" }
 rtrust-update = { path = "crates/update" }
 rtrust-portal = { path = "crates/portal" }
 rtrust-profile = { path = "crates/profile" }

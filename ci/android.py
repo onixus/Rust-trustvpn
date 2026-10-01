@@ -67,18 +67,20 @@ cp target/aarch64-linux-android/release/librtrust_android.so /out/arm64-v8a/
         run(['docker', 'run', '--rm', '--network', 'none', '-v', f'{libs}:/out', IMAGE, 'chown', '-hR', f'{os.getuid()}:{os.getgid()}', '/out'], timeout=60)
     run([args.gradle, '-p', str(ROOT / 'apps/android'), '--no-daemon', 'assembleDebug', 'assembleRelease', 'assembleDebugAndroidTest', 'lintDebug'], env=env, timeout=1200)
     run(['python3', 'ci/android_smoke.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
-    fixture = subprocess.Popen(['python3', 'ci/android_fixture.py'], cwd=ROOT)
-    try:
-        for _ in range(120):
-            if fixture.poll() is not None: raise RuntimeError('Android fixture failed to start')
-            if (ROOT / '.ci-android/ready').exists(): break
-            time.sleep(.5)
-        else: raise RuntimeError('Android fixture readiness timeout')
-        run(['python3', 'ci/android_network_e2e.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
-    finally:
-        fixture.terminate()
-        try: fixture.wait(timeout=40)
-        except subprocess.TimeoutExpired: fixture.kill(); fixture.wait()
+    for protocol in ('trusttunnel','hysteria2'):
+        print('Android network protocol:',protocol,flush=True)
+        fixture = subprocess.Popen(['python3', 'ci/android_fixture.py','--protocol',protocol], cwd=ROOT)
+        try:
+            for _ in range(120):
+                if fixture.poll() is not None: raise RuntimeError('Android fixture failed to start')
+                if (ROOT / '.ci-android/ready').exists(): break
+                time.sleep(.5)
+            else: raise RuntimeError('Android fixture readiness timeout')
+            run(['python3', 'ci/android_network_e2e.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
+        finally:
+            fixture.terminate()
+            try: fixture.wait(timeout=40)
+            except subprocess.TimeoutExpired: fixture.kill(); fixture.wait()
     run(['python3', 'ci/android_upgrade_e2e.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial, '--gradle', args.gradle], cwd=ROOT, env=env)
     dist = ROOT / 'dist/android'
     dist.mkdir(parents=True, exist_ok=True)

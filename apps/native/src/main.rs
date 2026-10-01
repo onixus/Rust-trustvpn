@@ -3,7 +3,7 @@
 mod always_on;
 mod autostart;
 mod conflicts;
-mod connection;
+use rtrust_desktop::connection;
 #[cfg(target_os = "linux")]
 mod flatpak_startup;
 mod portal;
@@ -325,7 +325,10 @@ impl App {
         app.boot_connect_pending = args.iter().all(|arg| arg == "--autostart");
         app.login_start = args.iter().any(|arg| arg == "--autostart");
         if let Some(arg) = args.iter().find(|arg| *arg != "--autostart") {
-            let input = if arg.to_string_lossy().starts_with("tt://") {
+            let input = if ["tt://", "hy2://", "hysteria2://"]
+                .iter()
+                .any(|scheme| arg.to_string_lossy().starts_with(scheme))
+            {
                 Ok(arg.to_string_lossy().into_owned())
             } else {
                 startup_file(arg)
@@ -1476,11 +1479,11 @@ impl App {
             Page::Import => {
                 let mut content = column![
                     text("Добавить профиль").size(22),
-                    text("Endpoint/CLI TOML, tt://, JSON. Импорт не подключает VPN."),
+                    text("TrustTunnel TOML/tt://, Hysteria 2 YAML/hy2://, JSON. Импорт не подключает VPN."),
                     button("Выбрать файл…")
                         .on_press_maybe((!self.busy).then_some(Message::PickFile)),
                     text_editor(&self.input)
-                        .placeholder("Вставьте tt:// или конфигурацию")
+                        .placeholder("Вставьте tt://, hy2:// или конфигурацию")
                         .height(120)
                         .on_action(Message::Edit),
                     button("Проверить").on_press_maybe((!self.busy).then_some(Message::Parse))
@@ -1631,7 +1634,11 @@ impl App {
                         )
                         .push(summary(p))
                         .push(text("Экспорт").size(18))
-                        .push(pick_list(Format::ALL, Some(self.format), Message::Format));
+                        .push(pick_list(
+                            p.formats(),
+                            p.formats().contains(&self.format).then_some(self.format),
+                            Message::Format,
+                        ));
                     if let Ok(export) = p.export(self.format) {
                         for loss in &export.losses {
                             list = list.push(text(format!("⚠ {loss}")).size(14));
@@ -1690,7 +1697,7 @@ impl App {
 }
 fn summary(p: &Profile) -> Element<'_, Message> {
     let capability = match rtrust_engine::check_capabilities(p) {
-        Ok(()) => format!("Транспорт {} поддерживается", p.endpoint.upstream_protocol),
+        Ok(()) => format!("Транспорт {} поддерживается", p.transport_name()),
         Err(e) => e.to_string(),
     };
     container(
@@ -1699,7 +1706,8 @@ fn summary(p: &Profile) -> Element<'_, Message> {
             text(format!("Сервер: {}", p.endpoint.addresses.join(", "))),
             text(format!(
                 "TLS hostname: {} · {}",
-                p.endpoint.hostname, p.endpoint.upstream_protocol
+                p.endpoint.hostname,
+                p.transport_name()
             )),
             text(if p.endpoint.certificate.is_empty() {
                 "Системные CA · логин и пароль скрыты"

@@ -1,5 +1,5 @@
 """Runs only in the disposable Docker endpoint fixture."""
-import http.server,pathlib,socket,subprocess,threading,time,struct
+import http.server,pathlib,socket,subprocess,threading,time,struct,hashlib
 BODY=bytes(range(256))*2048
 paused=threading.Event()
 token=pathlib.Path('/fixture/control-token').read_text()
@@ -10,7 +10,10 @@ class Control(http.server.BaseHTTPRequestHandler):
         if self.path=='/pause':paused.set()
         elif self.path=='/resume':paused.clear()
         elif self.path=='/cycle':
-            threading.Timer(1,paused.set).start();threading.Timer(12,paused.clear).start()
+            # QUIC has no TCP EOF when the endpoint process disappears. Keep
+            # it down past the client's 30-second idle deadline and health poll.
+            duration=45 if pathlib.Path('/fixture/hysteria.json').exists() else 12
+            threading.Timer(1,paused.set).start();threading.Timer(duration,paused.clear).start()
         else:self.send_error(404);return
         self.send_response(204);self.end_headers()
     def log_message(self,*_):pass
@@ -29,7 +32,9 @@ threading.Thread(target=server6.serve_forever,daemon=True).start()
 udp=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);udp.bind(('0.0.0.0',8081))
 def echo(sock):
     while True:
-        data,addr=sock.recvfrom(65535);sock.sendto(data,addr)
+        data,addr=sock.recvfrom(65535)
+        response=("SHA256:"+str(len(data))+":"+hashlib.sha256(data).hexdigest()).encode() if len(data)>4000 and pathlib.Path('/fixture/hysteria.json').exists() else data
+        sock.sendto(response,addr)
 threading.Thread(target=echo,args=(udp,),daemon=True).start()
 udp6=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM);udp6.bind(('fd00:5254:243::2',8081))
 threading.Thread(target=echo,args=(udp6,),daemon=True).start()
@@ -39,15 +44,33 @@ def answer_dns():
     while True:
         data,addr=dns.recvfrom(4096)
         if len(data)<17:continue
-        i=12
-        while i<len(data) and data[i]:i+=data[i]+1
+        i=12; labels=[]
+        while i<len(data) and data[i]:
+            labels.append(data[i+1:i+1+data[i]].lower());i+=data[i]+1
         end=i+5
         if end>len(data):continue
         qtype=struct.unpack('!H',data[i+1:i+3])[0]
-        answer=b'\xc0\x0c'+struct.pack('!HHIH',1,1,0,4)+socket.inet_aton('10.231.243.2') if qtype==1 else b''
-        result=data[:2]+struct.pack('!HHHHH',0x8180,1,int(bool(answer)),0,0)+data[12:end]+answer
+        # Do not map OS connectivity checks and unrelated names to the same
+        # test IP: domain routing deliberately keeps shared-IP conflicts in VPN.
+        known=bool(labels) and labels[-1]==b'example'
+        answer=b'\xc0\x0c'+struct.pack('!HHIH',1,1,60,4)+socket.inet_aton('10.231.243.2') if qtype==1 and known else b''
+        result=data[:2]+struct.pack('!HHHHH',0x8180 if known else 0x8183,1,int(bool(answer)),0,0)+data[12:end]+answer
         dns.sendto(result,addr)
 threading.Thread(target=answer_dns,daemon=True).start()
+
+# Path attribution for mobile split-routing tests (isolated fixture only).
+class SourceHTTP(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body=self.client_address[0].encode('ascii')
+        self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+    def log_message(self,*args):pass
+source_http=http.server.ThreadingHTTPServer(('0.0.0.0',8083),SourceHTTP)
+threading.Thread(target=source_http.serve_forever,daemon=True).start()
+source_udp=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);source_udp.bind(('0.0.0.0',8084))
+def report_source():
+    while True:
+        _,addr=source_udp.recvfrom(4096);source_udp.sendto(addr[0].encode('ascii'),addr)
+threading.Thread(target=report_source,daemon=True).start()
 # Start/restart only the endpoint, keeping the TCP/UDP test targets alive.
 process=None
 try:
@@ -56,7 +79,8 @@ try:
         if paused.is_set() and process:
             process.terminate();process.wait(timeout=5);process=None
         if not paused.is_set() and process is None:
-            process=subprocess.Popen(['/fixture/trusttunnel_endpoint','/fixture/vpn.toml','/fixture/hosts.toml','--jobs','2'],cwd='/fixture')
+            command=['/fixture/hysteria','server','-c','/fixture/hysteria.json'] if pathlib.Path('/fixture/hysteria.json').exists() else ['/fixture/trusttunnel_endpoint','/fixture/vpn.toml','/fixture/hosts.toml','--jobs','2']
+            process=subprocess.Popen(command,cwd='/fixture')
         time.sleep(.2)
 finally:
     if process:process.terminate();process.wait(timeout=5)

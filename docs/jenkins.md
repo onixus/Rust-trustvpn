@@ -266,3 +266,37 @@ APK. Temporary profiles, files and the probe app were removed.
 The local evidence file is `reports/android/mobile-features-physical.json`;
 reports and signed APKs are intentionally excluded from Git. Other OEMs, reboot
 before first unlock and overnight soak remain outside this acceptance result.
+
+
+## Task 5 / Hysteria 2 acceptance (October 1, 2026)
+
+- Android #26: Gitleaks/Trivy, shared Rust unit tests, both ABIs, lint,
+  JNI/Keystore/portal tests, TrustTunnel and Hysteria VpnService network checks,
+  process restart, reinstall and increasing-version upgrade: SUCCESS.
+- Linux #18: unit/Clippy, official Hysteria UDP interoperability through 65507
+  bytes, native Wayland/tray, TrustTunnel TUN and full-tunnel, Hysteria full-tunnel
+  (IPv4/IPv6, DNS, outage guard, recovery, Always-on and network handoff), installer
+  contracts and Native/WebView/Both Flatpak builds: SUCCESS.
+- macOS #66: unit/Clippy, TrustTunnel/Hysteria interoperability, Native/WebView
+  build and GUI smoke, unsigned Native/WebView/Both packages and DMG: SUCCESS.
+  `RUN_WINDOWS=false` and `RUN_LINUX=false` explicitly skipped unavailable Windows
+  and the duplicate container branch; Linux #18 is the independent native job.
+
+The source-manifest hashes, not just the Git base revision, identify these local
+snapshots. Android compiled sources/lockfile match #26; desktop compiled sources
+match Linux #18 / macOS #66. Later changes are documentation or another platform's
+harness/resources. Windows remains a deferred check, not a green result.
+
+Failed runs are retained: #24 Android exposed the mismatch between the 10-second
+TCP outage assertion and QUIC's 30-second idle timeout. The Hysteria fixture now
+keeps the server down for 45 seconds and requires blocked/reconnect/traffic checks.
+Linux #17 exposed IPv6 link-local DAD completing after rapid Hysteria recovery;
+the fixture waits for DAD before exact route comparison. Linux #15 also timed out
+on an Always-on disable; subsequent #16/#17/#18 passed that step, so it is retained
+as an intermittent result, not claimed as a fixed product defect.
+
+Separate physical checks: Huawei production Hysteria 2, DoH/DoT and a real portal
+Worker run; Plasma Wayland WebView-only/Both smoke and Native in Both. WorkManager
+was explicitly triggered via JobScheduler, and Flatpak CI branches were temporary.
+These checks do not establish overnight/OEM scheduling, macOS installed Hysteria
+full-tunnel, WebView tray-menu parity or Windows installer lifecycle.

@@ -1,0 +1,15 @@
+[package]
+name = "rtrust-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+rtrust-profile.workspace = true
+rtrust-engine.workspace = true
+rtrust-control.workspace = true
+rtrust-store.workspace = true
+rtrust-portal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+tokio.workspace = true

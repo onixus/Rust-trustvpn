@@ -32,6 +32,8 @@ pipeline {
         sh '''python3 ci/run.py linux-flatpak python3 scripts/package-flatpak.py --binary-dir dist/native-preview-linux
           python3 ci/run.py linux-host-package python3 scripts/package-linux-host.py --binary dist/service-preview-linux/rtrust-service --pkgrel "$BUILD_NUMBER"
           python3 ci/run.py linux-flatpak-update python3 ci/flatpak_update_e2e.py --repo dist/flatpak-repo
+          python3 ci/run.py linux-flatpak-webview python3 scripts/package-flatpak.py --binary-dir dist/native-preview-linux --ui webview --webview-libs dist/webview-libs --repo-dir dist/flatpak-webview-repo
+          python3 ci/run.py linux-flatpak-both python3 scripts/package-flatpak.py --binary-dir dist/native-preview-linux --ui both --webview-libs dist/webview-libs --repo-dir dist/flatpak-both-repo
         '''
       }
       post { always { junit allowEmptyResults: true, testResults: 'reports/linux-*.xml'; archiveArtifacts artifacts: 'reports/linux-*,dist/R-TrustTunnel-Linux-*.flatpak*,dist/rtrust-host-*.pkg.tar.*', allowEmptyArchive: true, fingerprint: true } }

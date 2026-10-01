@@ -19,7 +19,9 @@ pub fn unused() -> Result<(), String> {
 impl Prepared {
     pub async fn connect(profile: &rtrust_profile::Profile) -> Result<Self, String> {
         unused()?;
-        if profile.endpoint.upstream_protocol != "http2" {
+        if profile.protocol == rtrust_profile::Protocol::TrustTunnel
+            && profile.endpoint.upstream_protocol != "http2"
+        {
             return Err("System VPN requires HTTP/2".into());
         }
         let session = Session::connect(profile)

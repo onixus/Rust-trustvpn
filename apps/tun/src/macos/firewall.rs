@@ -59,15 +59,22 @@ pub(super) fn policy(
     full: bool,
     networks: &[rtrust_control::Ipv4Net],
     endpoints: &[SocketAddrV4],
+    protocol: rtrust_profile::Protocol,
 ) -> String {
     let mut rules = vec![
         "pass out quick on lo0 all no state".into(),
         format!("pass out quick on {DEVICE} all no state"),
     ];
     if full {
+        let transport = if protocol == rtrust_profile::Protocol::Hysteria2 {
+            "udp"
+        } else {
+            "tcp"
+        };
+        let flags = if transport == "tcp" { " flags any" } else { "" };
         for endpoint in endpoints {
             rules.push(format!(
-                "pass out quick inet proto tcp to {} port {} user root flags any no state",
+                "pass out quick inet proto {transport} to {} port {} user root{flags} no state",
                 endpoint.ip(),
                 endpoint.port()
             ));

@@ -148,7 +148,9 @@ async fn pinned(
     profile: &rtrust_profile::Profile,
     networks: &[rtrust_control::Ipv4Net],
 ) -> Result<rtrust_profile::Profile, String> {
-    if profile.endpoint.upstream_protocol != "http2" {
+    if profile.protocol == rtrust_profile::Protocol::TrustTunnel
+        && profile.endpoint.upstream_protocol != "http2"
+    {
         return Err("Wintun currently requires HTTP/2".into());
     }
     let mut result = profile.clone();
@@ -327,7 +329,7 @@ async fn serve(
         let index = device
             .if_index()
             .map_err(|_| "Wintun interface index unavailable")?;
-        full::install(index, &full::endpoints(&profile)?, dns)?;
+        full::install(index, &full::endpoints(&profile)?, dns, profile.protocol)?;
         vec!["0.0.0.0/1".parse().unwrap(), "128.0.0.0/1".parse().unwrap()]
     } else {
         networks
@@ -472,7 +474,11 @@ pub(crate) fn boot_guard(policy: Option<&crate::boot_policy::Policy>) -> Result<
         Some(p) => full::endpoints(&p.profile)?,
         None => vec![],
     };
-    firewall::install_boot(0, &endpoints)
+    firewall::install_boot(
+        0,
+        &endpoints,
+        policy.map(|p| p.profile.protocol).unwrap_or_default(),
+    )
 }
 pub(crate) fn boot_unguard() -> Result<(), String> {
     firewall::remove_boot()

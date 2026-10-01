@@ -2,9 +2,9 @@
 
 [English](Readme.md) · [Русский](readme_ru.md)
 
-A native desktop VPN client written in Rust, compatible with TrustTunnel, with a server-panel extension for importing, exporting and synchronizing connection profiles. The client implements its own transport; it does not wrap the official CLI.
+A native desktop VPN client written in Rust, compatible with TrustTunnel and Hysteria 2, with a server-panel extension for importing, exporting and synchronizing connection profiles. The client implements its own transport; it does not wrap the official CLI.
 
-**Status: development preview, October 1, 2026.** Windows, Linux and macOS have working system-tunnel implementations. Packaging and platform acceptance are still in progress. Android now has a native VpnService preview with a shared Rust core; the optional WebView interface remains planned.
+**Status: development preview, October 1, 2026.** Windows, Linux and macOS have working system-tunnel implementations. Packaging and platform acceptance are still in progress. Android now has a native VpnService preview with a shared Rust core; a desktop Tauri WebView frontend is now implemented as an additional preview.
 
 ## Features
 
@@ -16,7 +16,9 @@ A native desktop VPN client written in Rust, compatible with TrustTunnel, with a
 - Profile exchange through the native UI and server panel: device enrollment, scoped access, import preview/commit, synchronization and conflict detection.
 - Signed update manifests and a tested Windows upgrade/rollback path. Installer platform signatures are a separate concern; current installers are unsigned.
 
-HTTP/3 for **system VPN** is deferred to [wave 3](docs/technical-debt.md). An imported HTTP/3 profile is retained, while the system-tunnel connection uses HTTP/2.
+TrustTunnel HTTP/3 for **system VPN** is deferred to [wave 3](docs/technical-debt.md). An imported TrustTunnel HTTP/3 profile is retained, while the system-tunnel connection uses HTTP/2.
+
+Hysteria 2 configurations and links select the new QUIC transport automatically. TCP, UDP and Salamander are implemented in the shared engine. See [supported fields and verification limits](docs/hysteria2.md); platform acceptance of this addition is in progress.
 
 ## Platform status
 
@@ -25,13 +27,13 @@ HTTP/3 for **system VPN** is deferred to [wave 3](docs/technical-debt.md). An im
 | Windows x64 | Native `.exe`, Setup installer, Wintun/SCM service and WFP guard. Real system-tunnel, service-crash, reconnect, upgrade and rollback checks have passed. | Cold boot and sleep/wake acceptance; delivery of the latest shared UDP recovery fix to the installed release. |
 | Linux ARM64 / x86_64 | Wayland native UI, TUN service, nftables and systemd-resolved. Native x86_64 CI and physical Plasma/Wayland, tray, KWallet and portals passed. Arch host-package lifecycle and signed Flatpak update/rollback tested. ARM64 retains its earlier container coverage. | Physical reboot/sleep and final GUI installer acceptance. A signed HTTPS candidate repository has passed anonymous installation. |
 | macOS Apple Silicon | Native app and root LaunchDaemon using `utun`. Installed system candidate passed live IPv4/IPv6, DNS, reconnect, GUI/service-crash and recovery tests. PKG inside an unsigned DMG. | Boot always-on, sleep/network handoff, clean installation on another Mac and automatic update/rollback. No Developer ID or notarization. |
-| Android arm64 / x86_64 | Native APK, Rust/JNI VpnService, Keystore, file/tt/QR import, app selection, Russian UI, portal enrollment/manual sync, system Always-on/lockdown. | Additional OEMs, reboot before first unlock and long soak. See [Android preview](docs/android.md). |
+| Android arm64 / x86_64 | Native APK, Rust/JNI VpnService, Keystore, file/tt/QR import, app selection, Russian UI, portal enrollment/manual and background sync, system Always-on/lockdown. | Additional OEMs, reboot before first unlock and long soak. See [Android preview](docs/android.md). |
 
-Only the native interface is available. Choosing Native/WebView/Both during installation remains planned. Linux X11 support is out of scope.
+Desktop packaging supports Native/WebView/Both variants. The native frontend remains the default; WebView uses the shared Rust connection controller and encrypted vault. Windows installer validation is deferred while its node is offline. See [desktop UI choices](docs/ui-choices.md). Linux uses Wayland only.
 
 ## Build and run
 
-Use Rust with Cargo; the workspace declares Rust 1.88 or newer, and CI currently pins 1.98.1. Native builds also require the target platform's compiler and libraries. Linux requires Wayland, Fontconfig, D-Bus, a desktop file portal and an available Secret Service backend for the vault. See the [CI setup](docs/jenkins.md) for the tested environments.
+Use Rust with Cargo; the workspace declares Rust 1.89 or newer, and CI currently pins 1.98.1. Native builds also require the target platform's compiler and libraries. Linux requires Wayland, Fontconfig, D-Bus, a desktop file portal and an available Secret Service backend for the vault. See the [CI setup](docs/jenkins.md) for the tested environments.
 
 ```sh
 git clone https://github.com/onixus/Rust-trustvpn.git
@@ -61,7 +63,7 @@ Generated installers, Flatpak bundles and local test reports are excluded from G
 
 ### Windows, Linux and macOS
 
-1. Import a configuration file or `tt://` link, review it and add the profile.
+1. Import a configuration file or `tt://`, `hy2://`, `hysteria2://` link, review it and add the profile.
 2. Choose the default profile and connection mode. For system VPN, install the matching service first.
 3. Use the top connect/disconnect button. Closing the window hides it in the tray; use **Exit** to quit.
 4. Profile changes are saved automatically in the encrypted vault. Server profile exchange is available through the [portal interface](docs/portal.md).
@@ -78,13 +80,13 @@ Login startup, GUI autoconnect and boot-level always-on are different features. 
 
 ### Android
 
-Current signed preview: **0.3.2-preview.5**, versionCode **30206**.
+Current signed preview: **0.3.2-preview.6**, versionCode **30207**.
 
 1. Install the APK and import a file, `tt://` link, or QR code using the camera or an image.
 2. Choose the default profile and use the bottom connect button. Accept Android VPN consent; no separate host service is needed.
 3. Use **VPN apps** to select all apps or an allowlist. Disconnect before changing it. English and Russian follow the system locale.
 4. For protection after force-stop, open **Always-on / block bypass** and enable **both** Android settings: Always-on VPN and Block connections without VPN. Excluded apps have no Internet under lockdown. Change the system setting before manually disconnecting.
-5. Use **Server profiles** to enroll with a one-time code, grant access in the server UI and synchronize manually with VPN disconnected. Upload requires explicit consent to transfer credentials.
+5. Use **Server profiles** to enroll with a one-time code, grant access in the server UI and synchronize manually with VPN disconnected, or enable hourly background sync. Background changes apply on the next connection. Upload requires explicit consent to transfer credentials.
 
 Physical POCO X3 NFC / Android 12 acceptance covered camera/image QR, the system
 file picker, all four export formats, server exchange and traffic blocking for a
@@ -95,6 +97,8 @@ Huawei DEL-LX9 / Android 12 also passed production connectivity, Wi-Fi/mobile
 handoff, camera/file import, four export formats, app selection, same-version
 reinstall and system lockdown/recovery checks on October 1, 2026.
 [Android instructions](docs/android.md) · [Profile exchange](docs/portal.md).
+
+Latest addition: Android Jenkins **#26**, Linux **#18** and macOS **#66** completed successfully. Linux system-service tests cover TrustTunnel and Hysteria 2, including route/firewall recovery and Always-on. Huawei passed production Hysteria 2, DNS/Google HTTPS/UDP, DoH/DoT, and a real background portal-worker sync. Native/WebView/Both Flatpaks built; both frontends passed physical Wayland smoke. Windows testing of this addition remains deferred.
 
 ## Development and validation
 
@@ -112,7 +116,7 @@ Network and installer harnesses may change routes or firewall rules. Follow thei
 
 | Path | Purpose |
 | --- | --- |
-| `apps/native` | Native desktop application |
+| `apps/native`, `apps/webview` | Native desktop application and optional Tauri frontend |
 | `apps/tun` | TUN/Wintun/utun dataplane and platform services |
 | `apps/inspect`, `apps/codec` | Diagnostic and configuration tools |
 | `crates/` | Shared profiles, transport, storage, IPC, portal and update logic |

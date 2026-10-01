@@ -2,7 +2,7 @@
 pipeline {
   agent none
   options { disableConcurrentBuilds(); timestamps(); timeout(time: 120, unit: 'MINUTES'); buildDiscarder(logRotator(numToKeepStr: '15')) }
-  parameters { booleanParam(name: 'WINDOWS_SYSTEM_E2E', defaultValue: false, description: 'Run invasive installer/Wintun tests only on an idle Windows test host without a user installation') }
+  parameters { booleanParam(name: 'RUN_WINDOWS', defaultValue: true, description: 'Explicitly defer Windows when its node is offline'); booleanParam(name: 'RUN_LINUX', defaultValue: true, description: 'Run additional Linux ARM checks; x86 Linux has an independent pipeline'); booleanParam(name: 'WINDOWS_SYSTEM_E2E', defaultValue: false, description: 'Run invasive installer/Wintun tests only on an idle Windows test host without a user installation') }
   stages {
     stage('Source snapshot') {
       agent { label 'built-in' }
@@ -39,18 +39,22 @@ pipeline {
               cargo build -p rtrust-portal --example portal_e2e --locked
               python3 ci/run.py macos-portal-native .ci-server/bin/python server/tests/native_exchange.py
               python3 ci/run.py macos-clippy cargo clippy --workspace --all-targets --locked -- -D warnings
-              python3 ci/run.py macos-build cargo build --release -p rtrust-native -p rtrust-inspect -p rtrust-tun --locked
+              python3 ci/run.py macos-build cargo build --release -p rtrust-webview -p rtrust-native -p rtrust-inspect -p rtrust-tun --locked
               python3 ci/run.py macos-smoke python3 ci/smoke.py
+              python3 ci/run.py macos-webview python3 ci/webview_smoke.py
+              python3 ci/run.py macos-hysteria python3 ci/hysteria_interop.py
               python3 scripts/package-preview.py
               python3 ci/run.py macos-dmg python3 scripts/package-macos-dmg.py
               python3 ci/run.py macos-system-package python3 scripts/package-macos-system.py
               python3 ci/run.py macos-bundled-package python3 scripts/package-macos-system.py --bundled-service
+              python3 ci/run.py macos-ui-choices python3 scripts/package-macos-ui-choices.py --binary-dir target/release
             '''
             stash name: 'macos-bins', includes: 'target/release/rtrust-inspect'
           }
           post { always { junit allowEmptyResults: true, testResults: 'reports/macos-*.xml'; archiveArtifacts artifacts: 'reports/macos-*,dist/native-preview-darwin/**,dist/R-TrustTunnel-macOS-*.dmg*,dist/R-TrustTunnel-macOS-*.pkg*', allowEmptyArchive: true, fingerprint: true } }
         }
         stage('Windows unit / build / smoke') {
+          when { beforeAgent true; expression { params.RUN_WINDOWS } }
           agent { label 'windows-amd64' }
           steps {
             powershell "Get-ChildItem -Force | Where-Object { \$_.Name -notin @('target','.ci-tools') } | Remove-Item -Recurse -Force"
@@ -72,11 +76,11 @@ pipeline {
               if ($LASTEXITCODE) { throw 'H2 failed' }
               python ci/run.py windows-clippy cargo clippy --workspace --all-targets --locked -- -D warnings
               if ($LASTEXITCODE) { throw 'Clippy failed' }
-              python ci/run.py windows-build cargo build --release -p rtrust-native -p rtrust-inspect -p rtrust-tun -p rtrust-update --locked
+              python ci/run.py windows-build cargo build --release -p rtrust-webview -p rtrust-native -p rtrust-inspect -p rtrust-tun -p rtrust-update --locked
               if ($LASTEXITCODE) { throw 'Build failed' }
               python ci/run.py windows-smoke python ci/windows_desktop.py python ci/smoke.py
               if ($LASTEXITCODE) { throw 'Smoke failed' }
-              python scripts/package-preview.py
+              python scripts/package-preview.py --ui both
               if ($LASTEXITCODE) { throw 'Packaging failed' }
               python ci/wintun.py
               if ($LASTEXITCODE) { throw 'Wintun packaging failed' }
@@ -98,6 +102,7 @@ pipeline {
       }
     }
     stage('Linux native + full tunnel E2E') {
+      when { beforeAgent true; expression { params.RUN_LINUX } }
       agent { label 'macos-arm64' }
       steps {
         unstash 'source'
@@ -124,7 +129,7 @@ pipeline {
               '''
               sh 'python3 ci/run.py macos-e2e python3 ci/e2e.py .ci-fixture/client.json'
               stash name: 'fixture', includes: '.ci-fixture/client.json', useDefaultExcludes: false
-              node('windows-amd64') {
+              if (params.RUN_WINDOWS) { node('windows-amd64') {
                 unstash 'source'
                 unstash 'windows-bins'
                 unstash 'fixture'
@@ -134,6 +139,7 @@ pipeline {
                   junit allowEmptyResults: true, testResults: 'reports/windows-e2e.xml'
                   archiveArtifacts artifacts: 'reports/windows-e2e.*', allowEmptyArchive: true
                 }
+              }
               }
             } finally {
               sh 'test ! -d .ci-fixture || touch .ci-fixture/stop'
@@ -145,7 +151,7 @@ pipeline {
       }
     }
     stage('Windows Wintun service E2E') {
-      when { expression { params.WINDOWS_SYSTEM_E2E } }
+      when { expression { params.RUN_WINDOWS && params.WINDOWS_SYSTEM_E2E } }
       steps {
         script {
           node('macos-arm64') {

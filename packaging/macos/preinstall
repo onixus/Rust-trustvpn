@@ -17,7 +17,7 @@ if [ -e "$plist" ]; then
         exit 1
     fi
 fi
-if pgrep -x rtrust-native >/dev/null; then
+if pgrep -x rtrust-native >/dev/null || pgrep -x rtrust-webview >/dev/null; then
     echo 'Quit R-TrustTunnel before installing or updating.' >&2
     exit 1
 fi

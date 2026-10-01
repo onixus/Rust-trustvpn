@@ -73,6 +73,24 @@ fn export<'a>(
     codec_result(env, super::export_profile(&raw, format))
 }
 const _: jni::NativeMethod = native_method! {java_type="org.rtrusttunnel.android.NativeCore",extern fn start(raw:JString,fd:jint,protector:JObject)->jboolean,};
+const _: jni::NativeMethod = native_method! {java_type="org.rtrusttunnel.android.NativeCore",extern fn plan(raw:JString)->JString,};
+fn plan<'a>(
+    env: &mut Env<'a>,
+    _this: JObject<'a>,
+    raw: JString<'a>,
+) -> jni::errors::Result<JString<'a>> {
+    let raw = input(env, &raw)?;
+    codec_result(
+        env,
+        (|| {
+            let profile = Profile::import(&raw).map_err(|e| e.to_string())?;
+            let (profile, plan) = super::prepare(profile)?;
+            Ok(Zeroizing::new(
+                serde_json::json!({"ok":true,"profile":profile,"plan":plan}).to_string(),
+            ))
+        })(),
+    )
+}
 fn start<'a>(
     env: &mut Env<'a>,
     _this: JObject<'a>,
@@ -85,20 +103,17 @@ fn start<'a>(
         return Ok(false);
     }
     let raw = input(env, &raw)?;
-    let Ok(mut profile) = Profile::import(&raw) else {
+    let Ok(profile) = Profile::import(&raw) else {
         return Ok(false);
     };
-    if (!profile.policy.is_null() && profile.policy != serde_json::json!({}))
-        || profile.original_cli.is_some()
-    {
-        state(
-            4,
-            "Desktop routing policy is unsupported; import an endpoint-only profile",
-        );
+    let Ok((mut profile, _plan)) = super::prepare(profile) else {
+        state(4, "Unsupported mobile routing or DNS policy");
         return Ok(false);
-    }
+    };
     // Preserve the stored protocol; only this runtime copy uses system HTTP/2.
-    profile.endpoint.upstream_protocol = "http2".into();
+    if profile.protocol == rtrust_profile::Protocol::TrustTunnel {
+        profile.endpoint.upstream_protocol = "http2".into();
+    }
     if profile
         .endpoint
         .addresses
@@ -196,6 +211,15 @@ async fn run(
 ) -> std::io::Result<()> {
     // VpnService configured addresses, DNS and routes before handing over the FD.
     let device = Arc::new(unsafe { tun_rs::AsyncDevice::from_fd(fd.into_raw_fd()) }?);
+    let dns = rtrust_engine::dns::encrypted(&profile.endpoint.dns_upstreams)
+        .map_err(std::io::Error::other)?
+        .unwrap_or_default();
+    let policy: rtrust_engine::routing::Policy =
+        serde_json::from_value(profile.policy.clone()).map_err(std::io::Error::other)?;
+    let routing = Some((
+        Arc::new(policy.compile().map_err(std::io::Error::other)?),
+        protect.clone(),
+    ));
     let mut delay = 1;
     loop {
         let connected = tokio::select! {
@@ -220,7 +244,7 @@ async fn run(
                 let started = std::time::Instant::now();
                 tokio::select! {
                     _=cancel.changed()=>break,
-                    _=rtrust_tun::run_android(session,tunnel,device.clone(),"169.254.254.2".parse().unwrap())=>{},
+                    _=rtrust_tun::run_android(session,tunnel,device.clone(),"169.254.254.2".parse().unwrap(),dns.clone(),routing.clone())=>{},
                 }
                 if started.elapsed() > Duration::from_secs(30) {
                     delay = 1;

@@ -1,12 +1,12 @@
 # Android native preview
 
 The Android client uses native Android widgets (Java), a foreground `VpnService`
-and the same Rust profile codec, HTTP/2 transport and IPv4/IPv6 packet engine as
+and the same Rust profile codec, TrustTunnel HTTP/2 and Hysteria 2 transports and IPv4/IPv6 packet engine as
 the desktop client. There is no WebView, CLI subprocess or privileged host service.
 Baseline: Android 10/API 29+, arm64-v8a; x86_64 is also built for emulator testing.
 Acceptance uses Android 16/API 36 x86_64 and physical POCO X3 NFC and Huawei DEL-LX9 phones running Android 12/API 31.
 
-Current signed preview: **0.3.2-preview.5** (versionCode **30206**), validated
+Previously validated signed preview: **0.3.2-preview.5** (versionCode **30206**), validated
 from source commit `2809bea` by Android Jenkins #16 on October 1, 2026. The signed
 APK was installed and its force-stop/recovery behavior retested on the physical
 phone. Build outputs are local artifacts, not published GitHub release assets:
@@ -24,10 +24,15 @@ phone. Build outputs are local artifacts, not published GitHub release assets:
   is used locally and is not included in profile exports.
 - Compact profile list, default-profile Connect/Disconnect, import preview for
   files/pasted text/`tt://`, export via the system document picker and deletion.
-- JSON, endpoint TOML, full CLI TOML and `tt://` use the Rust codec. Full CLI
-  configurations can be stored/exported, but their desktop policy is rejected
-  at connection time. Explicitly export/import endpoint TOML to select Android's
-  full-tunnel behavior. Policy is never silently dropped from the saved profile.
+- JSON, endpoint TOML, full CLI TOML and `tt://` use the Rust codec. Portable CLI routing policies now support general/selective routing, IP/CIDR,
+  domain/wildcard/port rules, included/excluded routes, DNS and MTU. Unsupported
+  security fields are rejected; saved policy is never silently discarded.
+- DNS-over-TLS and DNS-over-HTTPS run through the VPN with certificate validation.
+  There is no direct resolver fallback. Mixed numeric/encrypted resolver lists,
+  DoQ and DNS stamps are currently rejected. Domain routing uses correlated DNS
+  answers; conflicting shared-IP identities conservatively stay on VPN.
+- Hysteria 2 links and client YAML/JSON are detected automatically; see
+  [protocol support and limits](hysteria2.md). JSON preserves the complete profile.
 - Profiles and default selection are encrypted with AES-256-GCM and an Android
   Keystore key. Atomic writes, authenticated reads, no plaintext fallback and
   no automatic reset on corruption. Files live in `noBackupFilesDir`; application
@@ -43,7 +48,7 @@ phone. Build outputs are local artifacts, not published GitHub release assets:
   and retains TUN while reconnecting. The Java service owns the original FD.
   Stop/revoke closes both. Temporary handshake EOF/reset remains retryable;
   invalid certificates remain fatal, with traffic blocked until Disconnect.
-- Stored HTTP/3 remains unchanged; the system session uses HTTP/2. HTTP/3 system
+- Stored TrustTunnel HTTP/3 remains unchanged; the system session uses HTTP/2. HTTP/3 system
   VPN belongs to [wave 3](technical-debt.md).
 
 ## Build
@@ -137,8 +142,10 @@ IPv6 acceptance on the phone or support for every Huawei firmware.
 The native UI supports English and Russian system locales, offline camera/image
 QR import, and the existing HTTPS portal v2 enrollment and profile exchange API.
 Use **Server profiles** to enter a one-time code created in the server UI, grant
-profiles to that device on the server, then synchronize. Synchronization is manual
-and requires disconnecting VPN: it atomically replaces downloaded profiles and
+profiles to that device on the server, then synchronize. Manual synchronization
+requires disconnecting VPN. Optional background synchronization uses WorkManager
+with an hourly network-constrained schedule and retry backoff; Android/OEM battery
+policy may delay it. The running tunnel keeps its profile until reconnect. Synchronization atomically replaces downloaded profiles and
 removes withdrawn grants while preserving locally imported profiles. Failed or
 unauthorized requests preserve the local vault; server credential revocation is
 still enforced by the endpoint. Upload creates a new external profile after
@@ -163,8 +170,13 @@ plaintext credential export. Pending export is encrypted across Activity/process
 recreation, expires after one hour, and is consumed on completion or cancellation.
 
 Remaining stable-release work includes additional Samsung/Pixel devices, reboot
-and overnight soak coverage, automatic background portal synchronization, and
-native desktop-policy/encrypted-DNS support. Numeric DNS servers are supported.
+and overnight soak coverage. Background synchronization, portable routing and
+encrypted DNS are implemented. Candidate 0.3.2-preview.6 (30207) passed Jenkins #26
+with both TrustTunnel and Hysteria 2. On Huawei, Hysteria production egress, DNS,
+Google HTTPS, UDP, DoH and DoT passed from a separate app UID. A real portal Worker
+updated its success timestamp without breaking the active tunnel; JobScheduler
+forced that run, so OEM hourly scheduling/battery behavior remains unverified.
+Portable IP/domain/port policy combinations passed emulator tests.
 
 The architecture and later milestones remain in [android-macos.md](android-macos.md).
 Android foreground-service eligibility follows the official

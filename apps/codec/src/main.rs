@@ -30,7 +30,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let export = profile.export(format)?;
     let result = Zeroizing::new(serde_json::to_vec(
-        &serde_json::json!({"content":export.content,"losses":export.losses,"summary":{"name":profile.name,"hostname":profile.endpoint.hostname,"addresses":profile.endpoint.addresses,"protocol":profile.endpoint.upstream_protocol}}),
+        &serde_json::json!({"content":export.content,"losses":export.losses,"summary":{"name":profile.name,"hostname":profile.endpoint.hostname,"addresses":profile.endpoint.addresses,"protocol":profile.transport_name()}}),
     )?);
     std::io::stdout().write_all(&result)?;
     Ok(())

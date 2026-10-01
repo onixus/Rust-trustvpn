@@ -120,7 +120,7 @@ impl Session {
 // TUN's packet transport is HTTP/2 on both Windows and Linux. Keep the stored
 // profile unchanged so SOCKS and exports retain the user's HTTP/3 preference.
 fn runtime_profile(mut profile: rtrust_profile::Profile, mode: Mode) -> rtrust_profile::Profile {
-    if mode != Mode::Socks {
+    if mode != Mode::Socks && profile.protocol == rtrust_profile::Protocol::TrustTunnel {
         profile.endpoint.upstream_protocol = "http2".into();
     }
     profile

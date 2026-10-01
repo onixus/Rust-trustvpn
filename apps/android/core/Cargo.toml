@@ -12,9 +12,10 @@ rtrust-profile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true
+rtrust-engine.workspace = true
+ipnet = "2"
 
 [target.'cfg(target_os = "android")'.dependencies]
-rtrust-engine.workspace = true
 rtrust-tun = { path = "../../tun" }
 tokio.workspace = true
 jni = "0.22.4"

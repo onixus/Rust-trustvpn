@@ -7,6 +7,7 @@ public final class NativeCore {
     private NativeCore() {}
     public native String parse(String raw);
     public native String export(String raw, int format);
+    public native String plan(String raw);
     public native boolean start(String raw, int fd, Object protector);
     public native void stop();
     public native String status();

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+rtrust-desktop.workspace = true
 rtrust-update.workspace = true
 rtrust-portal.workspace = true
 rtrust-profile.workspace = true

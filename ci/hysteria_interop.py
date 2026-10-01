@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Loopback-only official Hysteria 2 fixture with pinned binary digests."""
+import hashlib,json,os,pathlib,platform,secrets,socket,struct,subprocess,tempfile,threading,time,urllib.request
+ROOT=pathlib.Path(__file__).resolve().parents[1]
+RELEASE='app/v2.12.3'
+ASSETS={('Darwin','arm64'):('hysteria-darwin-arm64','9065dc5dc9cd75f7ba881f481e8cb77e7eae17139460ca09d399682ca6fad443'),('Linux','x86_64'):('hysteria-linux-amd64','8c7a68a906998b747a0db87586e364f995fbfddb95693ae6e2fdb68a6e920d3e'),('Linux','aarch64'):('hysteria-linux-arm64','c8dc653c3ba0a28d29a26b8fa52d2086f27c0927afddce95c09965e7174e78b0')}
+def binary():
+    asset,digest=ASSETS[(platform.system(),platform.machine())]
+    target=pathlib.Path(os.environ.get('RTRUST_HYSTERIA_CACHE',str(ROOT/'.ci-tools/hysteria')))/asset;target.parent.mkdir(parents=True,exist_ok=True)
+    if not target.exists() or hashlib.sha256(target.read_bytes()).hexdigest()!=digest:
+        with urllib.request.urlopen('https://github.com/HyNetworks/hysteria/releases/download/'+RELEASE+'/'+asset,timeout=60) as response:data=response.read(64*1024*1024)
+        if hashlib.sha256(data).hexdigest()!=digest:raise RuntimeError('Hysteria release checksum mismatch')
+        target.write_bytes(data);target.chmod(0o755)
+    return target
+
+def main():
+    executable=binary()
+    tcp=socket.socket();tcp.bind(('127.0.0.1',0));tcp.listen();udp=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);udp.bind(('127.0.0.1',0))
+    def serve_tcp():
+        while True:
+            try:c,_=tcp.accept()
+            except OSError:return
+            def exchange(c):
+                with c:
+                    c.settimeout(20);digest=hashlib.sha256();header=b''
+                    while len(header)<4:
+                        chunk=c.recv(4-len(header))
+                        if not chunk:return
+                        header+=chunk
+                    remaining=struct.unpack('!I',header)[0]
+                    while remaining:
+                        chunk=c.recv(min(remaining,65536))
+                        if not chunk:return
+                        digest.update(chunk);remaining-=len(chunk)
+                    c.sendall(digest.hexdigest().encode())
+            threading.Thread(target=exchange,args=(c,),daemon=True).start()
+    seen=[]
+    def serve_udp():
+        while True:
+            try:data,addr=udp.recvfrom(65535);seen.append(len(data));udp.sendto(data if len(data)<=4000 else ("SHA256:"+str(len(data))+":"+hashlib.sha256(data).hexdigest()).encode(),addr)
+            except OSError:return
+    threading.Thread(target=serve_tcp,daemon=True).start();threading.Thread(target=serve_udp,daemon=True).start()
+    with tempfile.TemporaryDirectory(prefix='rtrust-hysteria-') as temporary:
+        work=pathlib.Path(temporary);probe=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);probe.bind(('127.0.0.1',0));port=probe.getsockname()[1];probe.close()
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost','-addext','basicConstraints=critical,CA:FALSE','-keyout',str(work/'key.pem'),'-out',str(work/'cert.pem')],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        auth=secrets.token_urlsafe(32);obfs=secrets.token_urlsafe(32)
+        config={'listen':f'127.0.0.1:{port}','tls':{'cert':str(work/'cert.pem'),'key':str(work/'key.pem')},'auth':{'type':'password','password':auth},'obfs':{'type':'salamander','salamander':{'password':obfs}}}
+        profile={'schema_version':1,'protocol':'hysteria2','hysteria2':{'salamander':obfs},'name':'Isolated Hysteria','endpoint':{'hostname':'localhost','addresses':[f'127.0.0.1:{port}'],'username':'hysteria2','password':auth,'upstream_protocol':'http3','certificate':(work/'cert.pem').read_text()}}
+        server=work/'server.json';server.write_text(json.dumps(config));server.chmod(0o600)
+        client=work/'client.json';client.write_text(json.dumps(profile));client.chmod(0o600)
+        with (work/'server.log').open('wb') as log:
+            process=subprocess.Popen([str(executable),'server','-c',str(server)],stdout=log,stderr=log,env={**os.environ,'HYSTERIA_DISABLE_UPDATE_CHECK':'1'})
+            try:
+                time.sleep(.5)
+                if process.poll() is not None:raise RuntimeError('Hysteria fixture did not start')
+                env={**os.environ,'RTRUST_HYSTERIA_FIXTURE':str(client),'RTRUST_HYSTERIA_MAX_UDP':'8192' if platform.system()=='Darwin' else '65507','RTRUST_HYSTERIA_TCP':str(tcp.getsockname()[1]),'RTRUST_HYSTERIA_UDP':str(udp.getsockname()[1])}
+                subprocess.run(['cargo','test','--locked','-p','rtrust-engine','--test','hysteria_fixture','--','--ignored'],cwd=ROOT,env=env,check=True,timeout=180)
+            finally:process.terminate();process.wait(timeout=10);tcp.close();udp.close();print("UDP fixture payload lengths:",seen)
+    print('PASS official Hysteria 2: TCP payload, UDP fragmentation and independent sessions')
+if __name__=='__main__':main()

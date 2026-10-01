@@ -9,7 +9,7 @@
     <application android:label="R-TrustTunnel" android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules" android:icon="@drawable/ic_shield" android:usesCleartextTraffic="false" android:supportsRtl="true">
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
-            <intent-filter><action android:name="android.intent.action.VIEW" /><category android:name="android.intent.category.DEFAULT" /><category android:name="android.intent.category.BROWSABLE" /><data android:scheme="tt" /></intent-filter>
+            <intent-filter><action android:name="android.intent.action.VIEW" /><category android:name="android.intent.category.DEFAULT" /><category android:name="android.intent.category.BROWSABLE" /><data android:scheme="tt" /><data android:scheme="hy2" /><data android:scheme="hysteria2" /></intent-filter>
         </activity>
         <activity android:name=".QrCaptureActivity" android:exported="false" android:screenOrientation="fullSensor" tools:ignore="LockedOrientationActivity" />
         <!-- VPN consent is the runtime systemExempted prerequisite. AGP 8.13 lint

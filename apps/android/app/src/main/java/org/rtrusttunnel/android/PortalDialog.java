@@ -26,13 +26,27 @@ final class PortalDialog {
             JSONObject session = vault.read().optJSONObject("portal");
             if (session == null) { enroll(); return; }
             new AlertDialog.Builder(activity).setTitle(session.getString("origin"))
-                .setItems(new String[]{activity.getString(R.string.portal_sync), activity.getString(R.string.portal_upload), activity.getString(R.string.portal_forget)}, (d, choice) -> {
+                .setItems(new String[]{activity.getString(R.string.portal_sync), activity.getString(R.string.portal_upload), activity.getString(R.string.portal_forget), activity.getString(R.string.portal_background)}, (d, choice) -> {
                     if (choice == 0) sync(session);
                     if (choice == 1) upload(session);
                     if (choice == 2) new AlertDialog.Builder(activity).setMessage(R.string.portal_forget_warning).setNegativeButton(android.R.string.cancel, null)
-                        .setPositiveButton(R.string.portal_forget, (a,b) -> { try { if (TunnelService.active) throw new IllegalStateException(); vault.forgetPortal(); saved.run(); } catch (Exception e) { error(activity.getString(R.string.portal_disconnect)); } }).show();
+                        .setPositiveButton(R.string.portal_forget, (a,b) -> { try { if (TunnelService.active) throw new IllegalStateException(); vault.forgetPortal(); PortalSyncWorker.schedule(activity); saved.run(); } catch (Exception e) { error(activity.getString(R.string.portal_disconnect)); } }).show();
+                    if (choice == 3) backgroundSettings(session);
                 }).show();
         } catch (Exception e) { error(activity.getString(R.string.portal_failed)); }
+    }
+    void backgroundSettings(JSONObject session) {
+        boolean enabled = session.optBoolean("background_sync");
+        String details = activity.getString(R.string.portal_background_help);
+        if (session.optBoolean("sync_auth_expired")) details += "\n\n" + activity.getString(R.string.portal_expired);
+        if (session.optLong("last_sync") > 0) details += "\n\n" + activity.getString(R.string.portal_last_sync,
+            java.text.DateFormat.getDateTimeInstance().format(new java.util.Date(session.optLong("last_sync"))));
+        new AlertDialog.Builder(activity).setTitle(R.string.portal_background).setMessage(details)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(enabled ? R.string.portal_background_disable : R.string.portal_background_enable, (d,w) -> {
+                try { vault.setPortalSync(!enabled); PortalSyncWorker.schedule(activity); saved.run(); }
+                catch (Exception error) { error(activity.getString(R.string.portal_failed)); }
+            }).show();
     }
     void enroll() {
         LinearLayout panel = new LinearLayout(activity); panel.setOrientation(LinearLayout.VERTICAL);
@@ -56,12 +70,13 @@ final class PortalDialog {
     void sync(JSONObject session) {
         if (TunnelService.active) { error(activity.getString(R.string.portal_disconnect)); return; }
         new AlertDialog.Builder(activity).setMessage(R.string.portal_sync_warning).setNegativeButton(android.R.string.cancel, null).setPositiveButton(R.string.portal_sync, (d,w) -> background(() -> {
-            JSONArray profiles = client(session).download();
+            final int count;
+            synchronized (PortalSyncWorker.SYNC) {
+                JSONArray profiles = client(session).download();
+                vault.syncPortal(session, profiles); count = profiles.length();
+            }
             activity.runOnUiThread(() -> {
-                try {
-                    if (TunnelService.active) throw new IllegalStateException();
-                    vault.syncPortal(session, profiles); saved.run(); error(activity.getString(R.string.portal_synced, profiles.length()));
-                } catch (Exception e) { error(activity.getString(R.string.portal_failed)); }
+                if (!activity.isDestroyed()) { saved.run(); error(activity.getString(R.string.portal_synced, count)); }
             });
         })).show();
     }

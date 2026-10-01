@@ -23,27 +23,37 @@ def main():
                         help='Use binaries from a verified CI build')
     parser.add_argument('--bundled-service', action='store_true',
                         help='Use the separately named bundled-candidate output')
+    parser.add_argument('--ui',choices=['native','webview','both'],default='native')
     args = parser.parse_args()
+    frontend='rtrust-webview' if args.ui=='webview' else 'rtrust-native'
     version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
     binary = args.binary_dir or ROOT / 'target' / ('debug' if args.debug else 'release')
-    for name in ('rtrust-native', 'rtrust-service'):
+    for name in (frontend, 'rtrust-service', *(['rtrust-webview'] if args.ui=='both' else [])):
         if run('/usr/bin/lipo', '-archs', str(binary / name)).strip() != b'arm64':
             raise RuntimeError('Expected macOS arm64 binary: ' + name)
     output = ROOT / 'dist/R-TrustTunnel-macOS-arm64-system-candidate.dmg'
     if args.bundled_service:
         output = output.with_name('R-TrustTunnel-macOS-arm64-bundled-candidate.dmg')
+    if args.ui!='native':output=output.with_name(output.stem+'-'+args.ui+output.suffix)
     output.parent.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='rtrust-system-package-') as temporary:
         work = pathlib.Path(temporary)
         payload = work / 'payload'
         app = payload / 'Applications/R-TrustTunnel.app/Contents'
         (app / 'MacOS').mkdir(parents=True)
-        shutil.copy2(binary / 'rtrust-native', app / 'MacOS/rtrust-native')
+        shutil.copy2(binary / frontend, app / ('MacOS/'+frontend))
         (app / 'Info.plist').write_bytes(plistlib.dumps(dict(
-            CFBundleExecutable='rtrust-native', CFBundleIdentifier='org.rtrusttunnel.Native',
+            CFBundleExecutable=frontend, CFBundleIdentifier='org.rtrusttunnel.Native',
             CFBundleName='R-TrustTunnel', CFBundlePackageType='APPL',
             CFBundleShortVersionString=version, CFBundleVersion=version,
             NSHighResolutionCapable=True)))
+        secondary=None
+        if args.ui=='both':
+            secondary=payload/'Applications/R-TrustTunnel WebView.app/Contents'
+            (secondary/'MacOS').mkdir(parents=True)
+            shutil.copy2(binary/'rtrust-webview',secondary/'MacOS/rtrust-webview')
+            (secondary/'Info.plist').write_bytes(plistlib.dumps(dict(CFBundleExecutable='rtrust-webview',CFBundleIdentifier='org.rtrusttunnel.Webview',CFBundleName='R-TrustTunnel WebView',CFBundlePackageType='APPL',CFBundleShortVersionString=version,CFBundleVersion=version,NSHighResolutionCapable=True)))
+            run('/usr/bin/codesign','--force','--sign','-',str(secondary.parent))
         helper = app / 'Library/LaunchServices/org.rtrusttunnel.service'
         helper.parent.mkdir(parents=True)
         shutil.copy2(binary / 'rtrust-service', helper)
@@ -64,6 +74,8 @@ def main():
             ThrottleInterval=5, ProcessType='Background', Umask=63)))
         scripts = work / 'scripts'
         shutil.copytree(ROOT / 'packaging/macos', scripts)
+        post=scripts/'postinstall'
+        post.write_text(post.read_text().replace('/MacOS/rtrust-native --ci-service-smoke','/MacOS/'+frontend+' --ci-service-smoke'))
         stage = work / 'image'
         stage.mkdir()
         pkg = stage / 'R-TrustTunnel-System.pkg'
@@ -74,7 +86,7 @@ def main():
         # than treating successful pkgbuild as proof of correct packaging.
         expanded = work / 'expanded'
         run('/usr/sbin/pkgutil', '--expand-full', str(pkg), str(expanded))
-        for source in (app / 'MacOS/rtrust-native', helper):
+        for source in (app / ('MacOS/'+frontend), helper, *([secondary/'MacOS/rtrust-webview'] if secondary else [])):
             bundled = expanded / 'Payload' / source.relative_to(payload)
             if hashlib.sha256(source.read_bytes()).digest() != hashlib.sha256(bundled.read_bytes()).digest():
                 raise RuntimeError('Package payload hash mismatch')

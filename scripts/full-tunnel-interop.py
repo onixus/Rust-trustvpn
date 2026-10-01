@@ -56,6 +56,7 @@ def wait_state(lines, state, diagnostic=None):
 def main():
     assert os.geteuid() == 0 and pathlib.Path("/.dockerenv").exists(), "Disposable root Docker required"
     endpoint_binary = str(pathlib.Path(sys.argv[1]).resolve())
+    hysteria = "--hysteria2" in sys.argv[2:]
     processes, servers = [], []
     original_resolv = pathlib.Path("/etc/resolv.conf").read_bytes()
     # Docker masks sysctls read-only; this mount change stays in this disposable
@@ -141,9 +142,18 @@ def main():
             (d/"credentials.toml").write_text('[[client]]\nusername="interop"\npassword="synthetic-full-test"\n')
             profile=d/"profile.json"
             profile.write_text(json.dumps(dict(schema_version=1, name="Full test", endpoint=dict(hostname="localhost", addresses=["10.99.0.1:8443"],username="interop",password="synthetic-full-test",certificate=(d/"cert.pem").read_text(),upstream_protocol="http2"))))
+            if hysteria:
+                value=json.loads(profile.read_text());value.update(protocol="hysteria2",hysteria2={"salamander":"synthetic-obfs"})
+                value['endpoint']['upstream_protocol']='http3';profile.write_text(json.dumps(value))
+                (d/'hysteria.json').write_text(json.dumps({'listen':'10.99.0.1:8443','tls':{'cert':'cert.pem','key':'key.pem'},'auth':{'type':'password','password':'synthetic-full-test'},'obfs':{'type':'salamander','salamander':{'password':'synthetic-obfs'}}}))
             profile.chmod(0o600); os.chown(profile,1000,1000)
             def endpoint():
-                p = spawn([endpoint_binary,"vpn.toml","hosts.toml","--jobs","2"],"endpoint.log",cwd=d)
+                args=[endpoint_binary,"server","-c","hysteria.json"] if hysteria else [endpoint_binary,"vpn.toml","hosts.toml","--jobs","2"]
+                p = spawn(args,"endpoint.log",cwd=d)
+                if hysteria:
+                    time.sleep(.5)
+                    assert p.poll() is None, (d/'endpoint.log').read_text()
+                    return p
                 for _ in range(100):
                     try:
                         with socket.create_connection(("10.99.0.1",8443), timeout=.1): return p
@@ -258,7 +268,8 @@ print(exact(n).decode())
             s.ns("ip","link","set","rtrust-client","down")
             s.ns("ip","addr","del","10.99.0.2/30","dev","rtrust-client")
             assert b'dev rtrust-alt' in s.ns("ip","route","get","10.99.0.1","mark","0x5254")
-            s.ns("python3","-c","import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,36,0x5254); s.settimeout(3); s.connect(('10.99.0.1',8443)); print('PASS marked endpoint TCP after physical handoff')")
+            if not hysteria:
+                s.ns("python3","-c","import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,36,0x5254); s.settimeout(3); s.connect(('10.99.0.1',8443)); print('PASS marked endpoint TCP after physical handoff')")
             def traffic_returns():
                 until=time.monotonic()+70
                 while True:
@@ -276,6 +287,14 @@ print(exact(n).decode())
             s.ns("ip","link","set","rtrust-client","up")
             s.ns("ip","route","replace","default","via","10.99.0.1","dev","rtrust-client")
             s.ns("ip","link","delete","rtrust-alt")
+            # Restoring the physical link restarts link-local IPv6 DAD. Hysteria
+            # can recover before that kernel-owned route has reappeared.
+            for _ in range(100):
+                addresses=json.loads(s.ns("ip","-j","-6","address","show","dev","rtrust-client"))
+                if not any(addr.get("tentative",False) or "tentative" in addr.get("flags",[]) for device in addresses for addr in device.get("addr_info",[])):
+                    break
+                time.sleep(.05)
+            else: raise AssertionError("Restored link IPv6 DAD did not complete")
             traffic_returns()
             print("PASS always-on physical interface/gateway/source-IP handoff and return with firewall retained",flush=True)
             result=ipc("DisableAlwaysOn");assert result["state"]=="Idle", result
@@ -284,7 +303,7 @@ print(exact(n).decode())
             assert s.ns("ip","-j","-4","rule","show")==baseline_rules
             assert s.ns("ip","-j","-4","route","show","table","all")==baseline_routes
             assert s.ns("ip","-j","-6","rule","show")==baseline_rules6
-            assert s.ns("ip","-j","-6","route","show","table","all")==baseline_routes6
+            assert s.ns("ip","-j","-6","route","show","table","all")==baseline_routes6, (baseline_routes6,s.ns("ip","-j","-6","route","show","table","all"))
             fetch(1000,"10.99.0.2");ipv6(True)
             with s.client(profile,"--serve-full","198.18.0.1") as (client,_):
                 assert ipc("DisableAlwaysOn")["state"]=="Idle"
@@ -308,6 +327,12 @@ print(exact(n).decode())
             print("PASS early boot guard and corrupted policy fail closed; explicit disable restores network",flush=True)
 
 
+    except BaseException:
+        # Retain service diagnostics in the CI log before temporary files and
+        # the disposable namespace disappear.
+        if 'd' in locals() and (d / "daemon.log").exists():
+            print((d / "daemon.log").read_text()[-12000:], flush=True)
+        raise
     finally:
         for p in reversed(processes): s.stop(p)
         pathlib.Path("/etc/resolv.conf").write_bytes(original_resolv)

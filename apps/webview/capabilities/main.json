@@ -1,0 +1,24 @@
+{
+  "identifier": "main",
+  "description": "Bundled local UI only; no remote origin or filesystem/shell plugin access.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "allow-view",
+    "allow-preview",
+    "allow-pick-import",
+    "allow-commit-import",
+    "allow-edit-profile",
+    "allow-save-settings",
+    "allow-connect",
+    "allow-disconnect",
+    "allow-export-profile",
+    "allow-portal-enroll",
+    "allow-portal-sync",
+    "allow-portal-forget",
+    "allow-portal-auto",
+    "allow-portal-upload",
+    "allow-ui-ready"
+  ]
+}

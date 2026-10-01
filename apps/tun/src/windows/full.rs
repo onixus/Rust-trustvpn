@@ -69,7 +69,12 @@ fn route(item: &EndpointRoute) -> MIB_IPFORWARD_ROW2 {
     r.Metric = METRIC;
     r
 }
-pub fn install(index: u32, endpoints: &[SocketAddrV4], dns: Ipv4Addr) -> Result<(), String> {
+pub fn install(
+    index: u32,
+    endpoints: &[SocketAddrV4],
+    dns: Ipv4Addr,
+    protocol: rtrust_profile::Protocol,
+) -> Result<(), String> {
     rtrust_control::validate_dns(dns)?;
     if pending()? {
         return Err("После аварии требуется явный сброс защиты перед подключением".into());
@@ -138,9 +143,9 @@ pub fn install(index: u32, endpoints: &[SocketAddrV4], dns: Ipv4Addr) -> Result<
     file.sync_all()
         .map_err(|_| "Cannot sync recovery journal")?;
     // No Drop cleanup: once this commits, crashes must retain the blocking policy.
-    firewall::install(unsafe { luid.Value }, endpoints)?;
+    firewall::install(unsafe { luid.Value }, endpoints, protocol)?;
     if firewall::boot_active()? {
-        firewall::install_boot(unsafe { luid.Value }, endpoints)?;
+        firewall::install_boot(unsafe { luid.Value }, endpoints, protocol)?;
     }
     for item in &journal.routes {
         check(unsafe { CreateIpForwardEntry2(&route(item)) })?;

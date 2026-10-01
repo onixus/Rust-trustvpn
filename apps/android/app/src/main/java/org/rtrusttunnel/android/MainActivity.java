@@ -46,6 +46,7 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state); getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         vault = new ProfileVault(this);
+        try { PortalSyncWorker.schedule(this); } catch (Exception ignored) { /* Reconcile again on next launch. */ }
         LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(dp(16), dp(16), dp(16), dp(12));
         root.setBackgroundColor(Color.rgb(39, 47, 59));
         root.setOnApplyWindowInsetsListener((view, insets) -> {
@@ -87,11 +88,11 @@ public final class MainActivity extends Activity {
         connectionColor = color;
         GradientDrawable background = new GradientDrawable(); background.setColor(color); background.setCornerRadius(dp(7)); connect.setBackground(background);
     }
-    @Override public void onResume() { super.onResume(); handler.post(poll); }
+    @Override public void onResume() { super.onResume(); reload(); handler.post(poll); }
     @Override public void onPause() { handler.removeCallbacks(poll); super.onPause(); }
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); setIntent(intent); incoming(intent); }
     private void incoming(Intent intent) {
-        if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null && "tt".equals(intent.getData().getScheme())) {
+        if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null && java.util.Arrays.asList("tt", "hy2", "hysteria2").contains(intent.getData().getScheme())) {
             String raw = intent.getDataString(); intent.setData(null); preview(raw);
         }
     }
@@ -114,23 +115,27 @@ public final class MainActivity extends Activity {
         new AlertDialog.Builder(this).setItems(new String[]{getString(R.string.use_as_default), getString(R.string.export), getString(R.string.delete)}, (dialog, which) -> {
             try {
                 JSONObject data = vault.read(); JSONArray profiles = data.getJSONArray("profiles");
-                if (which == 0) { data.put("default", id); vault.write(data); reload(); }
+                if (which == 0) { vault.edit(current -> {
+                    JSONArray latest = current.getJSONArray("profiles");
+                    for (int i = 0; i < latest.length(); i++) if (latest.getJSONObject(i).getString("id").equals(id)) { current.put("default", id); return; }
+                    throw new IOException("Profile removed during sync");
+                }); reload(); }
                 else if (which == 1) {
                     for (int i = 0; i < profiles.length(); i++) if (profiles.getJSONObject(i).getString("id").equals(id)) export(profiles.getJSONObject(i).getJSONObject("profile").toString());
                 } else new AlertDialog.Builder(this).setMessage(getString(R.string.delete_this_saved_profile)).setNegativeButton(getString(R.string.cancel), null).setPositiveButton(getString(R.string.delete_text), (d, w) -> {
                     try {
-                        JSONObject current = vault.read(); JSONArray old = current.getJSONArray("profiles"), kept = new JSONArray();
+                        vault.edit(current -> { JSONArray old = current.getJSONArray("profiles"), kept = new JSONArray();
                         for (int i = 0; i < old.length(); i++) if (!old.getJSONObject(i).getString("id").equals(id)) kept.put(old.get(i));
                         current.put("profiles", kept);
                         if (id.equals(current.getString("default"))) current.put("default", kept.length() == 0 ? "" : kept.getJSONObject(0).getString("id"));
-                        vault.write(current); reload();
+                        }); reload();
                     } catch (Exception e) { error(getString(R.string.could_not_save_profile_changes)); }
                 }).show();
             } catch (Exception e) { error(getString(R.string.could_not_open_profile)); }
         }).show();
     }
     private void paste() {
-        EditText input = new EditText(this); input.setHint("TOML, JSON or tt://"); input.setMinLines(4); input.setMaxLines(10);
+        EditText input = new EditText(this); input.setHint("TOML, YAML, JSON, tt:// or hy2://"); input.setMinLines(4); input.setMaxLines(10);
         input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         input.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
         input.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
@@ -143,20 +148,24 @@ public final class MainActivity extends Activity {
             if (!parsed.getBoolean("ok")) { error(getString(R.string.invalid_profile)); return; }
             JSONObject profile = parsed.getJSONObject("profile"), endpoint = profile.getJSONObject("endpoint");
             String warning = endpoint.optBoolean("skip_verification") ? getString(R.string.nwarning_certificate_verification_is_disabled_in) : "";
-            new AlertDialog.Builder(this).setTitle(getString(R.string.import_profile_text)).setMessage(profile.optString("name", "") + "\n" + endpoint.getString("hostname") + warning + getString(R.string.ncredentials_will_be_encrypted_on_this))
+            new AlertDialog.Builder(this).setTitle(getString(R.string.import_profile_text)).setMessage(profile.optString("name", "") + "\n" + endpoint.getString("hostname") + " · " + ("hysteria2".equals(profile.optString("protocol")) ? "Hysteria 2" : "TrustTunnel") + warning + getString(R.string.ncredentials_will_be_encrypted_on_this))
                 .setNegativeButton(getString(R.string.cancel), null).setPositiveButton(getString(R.string.import_confirm), (d, w) -> {
                     try {
-                        JSONObject data = vault.read(); JSONArray list = data.getJSONArray("profiles");
+                        vault.edit(data -> { JSONArray list = data.getJSONArray("profiles");
                         if (list.length() >= 64) throw new IOException("Profile limit");
                         String id = UUID.randomUUID().toString(); list.put(new JSONObject().put("id", id).put("profile", profile));
                         if (data.getString("default").isEmpty()) data.put("default", id);
-                        vault.write(data); reload();
+                        }); reload();
                     } catch (Exception e) { error(getString(R.string.could_not_save_encrypted_profile)); }
                 }).show();
         } catch (Exception e) { error(getString(R.string.invalid_or_oversized_profile)); }
     }
     private void export(String raw) {
-        new AlertDialog.Builder(this).setTitle(getString(R.string.export_contains_credentials)).setItems(new String[]{"JSON", getString(R.string.endpoint_toml), getString(R.string.cli_toml), getString(R.string.tt_link)}, (d, format) -> {
+        final boolean hysteria;
+        try {hysteria="hysteria2".equals(new JSONObject(raw).optString("protocol"));}catch(Exception e){error(getString(R.string.could_not_export_this_profile));return;}
+        String[] formats=hysteria?new String[]{"JSON",getString(R.string.tt_link)}:new String[]{"JSON",getString(R.string.endpoint_toml),getString(R.string.cli_toml),getString(R.string.tt_link)};
+        new AlertDialog.Builder(this).setTitle(getString(R.string.export_contains_credentials)).setItems(formats, (d, choice) -> {
+            int format=hysteria&&choice==1?3:choice;
             try {
                 JSONObject output = new JSONObject(NativeCore.INSTANCE.export(raw, format));
                 if (!output.getBoolean("ok")) { error(output.optString("message")); return; }
@@ -191,7 +200,8 @@ public final class MainActivity extends Activity {
         if (TunnelService.active) { startService(new Intent(this, TunnelService.class).setAction(TunnelService.STOP)); return; }
         try {
             JSONObject profile = vault.selected();
-            if ((profile.has("original_cli") && !profile.isNull("original_cli")) || (!profile.isNull("policy") && !profile.opt("policy").toString().equals("{}"))) {
+            JSONObject prepared = new JSONObject(NativeCore.INSTANCE.plan(profile.toString()));
+            if (!prepared.getBoolean("ok")) {
                 error(getString(R.string.desktop_routing_policy_is_not_supported)); return;
             }
         } catch (Exception e) { error(getString(R.string.import_and_select_a_default_profile)); return; }
