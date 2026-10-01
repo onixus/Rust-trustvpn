@@ -1,5 +1,12 @@
 name: Native preview
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: native-preview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -15,14 +22,23 @@ jobs:
         with:
           components: rustfmt, clippy
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-xcb-dev libdbus-1-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-xcb-dev libdbus-1-dev libglib2.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev python3-venv
       - run: cargo fmt --all --check
       - run: cargo test --workspace --locked
       - run: cargo test --manifest-path vendor/h2/Cargo.toml --lib --locked -- --skip hpack::test::fixture
         env:
           CARGO_TARGET_DIR: target/h2-tests
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo build --release -p rtrust-native --locked
+      - if: runner.os == 'Linux'
+        name: Console and profile exchange regression tests
+        run: |
+          cargo build -p rtrust-codec --locked
+          python3 -m venv .ci-server
+          .ci-server/bin/pip install -r server/test-environment/requirements.txt
+          .ci-server/bin/python server/tests/test_console.py
+          .ci-server/bin/python server/tests/test_console_installer.py
+          .ci-server/bin/python server/tests/test_exchange.py
+      - run: cargo build --release -p rtrust-native -p rtrust-update --locked
       - run: python scripts/package-preview.py
       - uses: actions/upload-artifact@v4
         with:
