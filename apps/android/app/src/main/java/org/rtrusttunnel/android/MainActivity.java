@@ -19,7 +19,7 @@ public final class MainActivity extends Activity {
     private static final int PICK = 10, SAVE = 11, CONSENT = 12, QR_IMAGE = 13;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private LinearLayout rows;
-    private TextView status;
+    private TextView status, defaultProfile;
     private Button connect, routing;
     private int connectionColor;
     private ProfileVault vault;
@@ -48,33 +48,47 @@ public final class MainActivity extends Activity {
         vault = new ProfileVault(this);
         try { PortalSyncWorker.schedule(this); } catch (Exception ignored) { /* Reconcile again on next launch. */ }
         LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(dp(16), dp(16), dp(16), dp(12));
-        root.setBackgroundColor(Color.rgb(39, 47, 59));
+        root.setBackgroundColor(Color.rgb(48, 57, 72));
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             android.graphics.Insets bars = Build.VERSION.SDK_INT >= 30 ? insets.getInsets(WindowInsets.Type.systemBars()) : insets.getSystemWindowInsets();
             view.setPadding(dp(16) + bars.left, dp(12) + bars.top, dp(16) + bars.right, dp(12) + bars.bottom); return insets;
         });
         TextView title = new TextView(this); title.setText("R-TrustTunnel"); title.setTextSize(23); title.setTypeface(null, Typeface.BOLD); root.addView(title);
-        root.addView(button(getString(R.string.import_file), () -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE), PICK)));
-        root.addView(button(getString(R.string.paste_config_or_tt_link), () -> paste()));
-        root.addView(button(getString(R.string.qr_import), this::qr));
-        root.addView(button(getString(R.string.portal_title), () -> new PortalDialog(this, vault, this::reload).show()));
-        root.addView(button(getString(R.string.always_on), this::vpnSettings));
+        TextView subtitle = new TextView(this); subtitle.setText(R.string.home_subtitle); subtitle.setTextSize(13); subtitle.setTextColor(Color.rgb(191, 205, 224)); subtitle.setPadding(0, dp(4), 0, dp(20)); root.addView(subtitle);
+        defaultProfile = new TextView(this); defaultProfile.setTextSize(20); defaultProfile.setTypeface(null, Typeface.BOLD); defaultProfile.setPadding(dp(16), dp(16), dp(16), dp(16));
+        GradientDrawable card = new GradientDrawable(); card.setColor(Color.rgb(60, 73, 92)); card.setCornerRadius(dp(12)); defaultProfile.setBackground(card); root.addView(defaultProfile);
+        LinearLayout actions = new LinearLayout(this);
+        Button add = button(getString(R.string.add_profile), this::importMenu);
+        Button settings = button(getString(R.string.home_settings), this::settingsMenu);
+        LinearLayout.LayoutParams half = new LinearLayout.LayoutParams(0, dp(48), 1); half.setMargins(0, dp(12), dp(8), dp(12)); actions.addView(add, half);
+        LinearLayout.LayoutParams other = new LinearLayout.LayoutParams(0, dp(48), 1); other.setMargins(0, dp(12), 0, dp(12)); actions.addView(settings, other); root.addView(actions);
         routing = button(getString(R.string.vpn_apps), () -> {
             try { AppRoutingDialog.show(this, vault, this::reload); }
             catch (Exception error) { error(getString(R.string.app_selection_could_not_be_opened)); }
         }); root.addView(routing);
         ScrollView scroll = new ScrollView(this); rows = new LinearLayout(this); rows.setOrientation(LinearLayout.VERTICAL); scroll.addView(rows); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        TextView note = new TextView(this); note.setText(getString(R.string.vpn_uses_http_for_protection_after)); note.setTextSize(12); root.addView(note);
+
         status = new TextView(this); status.setTextSize(14); status.setPadding(0, dp(8), 0, dp(8)); root.addView(status);
         connect = button(getString(R.string.connect_default_profile), () -> toggle()); root.addView(connect, new LinearLayout.LayoutParams(-1, dp(60)));
         setContentView(root); reload(); incoming(getIntent());
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 20);
     }
+    private void importMenu() {
+        new AlertDialog.Builder(this).setTitle(R.string.add_profile).setItems(new String[]{getString(R.string.import_file), getString(R.string.paste_config_or_tt_link), getString(R.string.qr_import)}, (dialog, which) -> {
+            if (which == 0) startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE), PICK);
+            else if (which == 1) paste(); else qr();
+        }).show();
+    }
+    private void settingsMenu() {
+        new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on)}, (dialog, which) -> {
+            if (which == 0) new PortalDialog(this, vault, this::reload).show(); else vpnSettings();
+        }).show();
+    }
     private int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
     private Button button(String text, Runnable click) {
         Button button = new Button(this); button.setText(text); button.setAllCaps(false); button.setGravity(Gravity.CENTER); button.setTypeface(null, Typeface.BOLD); button.setTextColor(Color.WHITE); button.setBackgroundTintList(null);
-        GradientDrawable bg = new GradientDrawable(); bg.setColor(Color.rgb(68, 83, 102)); bg.setCornerRadius(dp(7)); button.setBackground(bg);
+        GradientDrawable bg = new GradientDrawable(); bg.setColor(Color.rgb(68, 83, 102)); bg.setCornerRadius(dp(10)); button.setBackground(bg);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(44)); params.setMargins(0, dp(4), 0, dp(4)); button.setLayoutParams(params);
         button.setOnClickListener(v -> click.run()); return button;
     }
@@ -86,7 +100,7 @@ public final class MainActivity extends Activity {
     private void paintConnection(int color) {
         if (connectionColor == color) return;
         connectionColor = color;
-        GradientDrawable background = new GradientDrawable(); background.setColor(color); background.setCornerRadius(dp(7)); connect.setBackground(background);
+        GradientDrawable background = new GradientDrawable(); background.setColor(color); background.setCornerRadius(dp(10)); connect.setBackground(background);
     }
     @Override public void onResume() { super.onResume(); reload(); handler.post(poll); }
     @Override public void onPause() { handler.removeCallbacks(poll); super.onPause(); }
@@ -103,9 +117,11 @@ public final class MainActivity extends Activity {
             JSONObject data = vault.read(); JSONArray profiles = data.getJSONArray("profiles");
             AppRouting selection = AppRouting.read(data);
             routing.setText(selection.selectedOnly ? getString(R.string.apps_summary, selection.packages.size()) : getString(R.string.apps_all_summary));
+            defaultProfile.setText(R.string.import_a_profile_to_get_started);
             for (int i = 0; i < profiles.length(); i++) {
                 JSONObject item = profiles.getJSONObject(i), profile = item.getJSONObject("profile"); String id = item.getString("id");
                 String name = profile.optString("name"); if (name.trim().isEmpty()) name = "Profile " + (i + 1);
+                if (id.equals(data.getString("default"))) defaultProfile.setText(getString(R.string.default_profile_label) + "\n" + name);
                 rows.addView(button((id.equals(data.getString("default")) ? "★ " : "") + name, () -> profileActions(id)));
             }
             if (profiles.length() == 0) { TextView empty = new TextView(this); empty.setText(getString(R.string.import_a_profile_to_get_started)); rows.addView(empty); }

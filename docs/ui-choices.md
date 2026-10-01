@@ -14,6 +14,20 @@ controls and update/recovery screens still use Native. Simultaneous frontend
 editing is protected by revision checks; seamless transfer of an active
 frontend-owned session is not claimed.
 
+## Everyday navigation
+
+The default profile and connect/disconnect action stay at the top of desktop
+windows. Native highlights the active sidebar section; network mode, DNS and
+proxy settings live in Settings. WebView separates Profiles, Settings and Sync,
+shows only mode-relevant network fields, and asks for a second click before
+removing a profile. Its import options are grouped under Add a profile.
+
+Android keeps the status-colored connection button at the bottom. The home
+screen shows the default profile, saved profiles and app selection. Add a profile
+opens file, paste and QR import; Settings opens server synchronization and system
+Always-on VPN controls. New Android navigation labels are localized in English
+and Russian. Profile storage and tunnel behavior are unchanged.
+
 ## Packaging
 
 - Windows Setup defines Native, WebView, Both and custom component choices.

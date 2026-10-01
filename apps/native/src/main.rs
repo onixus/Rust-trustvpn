@@ -95,9 +95,9 @@ fn main() -> iced::Result {
     .theme(Theme::custom(
         "R-TrustTunnel",
         iced::theme::Palette {
-            background: Color::from_rgb8(44, 48, 62),
+            background: Color::from_rgb8(48, 57, 72),
             text: Color::from_rgb8(227, 231, 241),
-            primary: Color::from_rgb8(124, 170, 230),
+            primary: Color::from_rgb8(133, 184, 247),
             success: Color::from_rgb8(114, 194, 166),
             warning: Color::from_rgb8(230, 191, 114),
             danger: Color::from_rgb8(226, 130, 143),
@@ -1436,45 +1436,48 @@ impl App {
         .into()
     }
     fn view(&self) -> Element<'_, Message> {
-        let nav = column![
-            text("R-TrustTunnel").size(20),
-            text("Native preview").size(12),
-            button("В трей")
-                .on_press(Message::CloseRequested)
-                .width(Length::Fill),
-            button("Выход")
-                .on_press(Message::ExitRequested)
-                .width(Length::Fill),
-            button("Профили")
-                .on_press(Message::Navigate(Page::Profiles))
-                .width(Length::Fill),
-            button("Импорт")
-                .on_press(Message::Navigate(Page::Import))
-                .width(Length::Fill),
-            button("Серверная панель")
-                .on_press(Message::Navigate(Page::Portal))
-                .width(Length::Fill),
-            button("Настройки")
-                .on_press(Message::Navigate(Page::Settings))
-                .width(Length::Fill),
-            button("Диагностика")
-                .on_press(Message::Navigate(Page::Diagnostics))
-                .width(Length::Fill),
-            text(
-                if cfg!(any(
-                    target_os = "linux",
-                    target_os = "windows",
-                    target_os = "macos"
-                )) {
-                    "Системный VPN / SOCKS5"
-                } else {
-                    "Режим SOCKS5\nСистемный VPN пока недоступен"
-                }
-            )
-            .size(12)
+        let mut nav = column![
+            text("R-TrustTunnel").size(19),
+            text("Ваше подключение").size(12)
         ]
-        .spacing(10)
-        .width(155);
+        .spacing(8)
+        .width(160);
+        for (label, page) in [
+            ("Профили", Page::Profiles),
+            ("Добавить профиль", Page::Import),
+            ("Синхронизация", Page::Portal),
+            ("Настройки", Page::Settings),
+            ("Диагностика", Page::Diagnostics),
+        ] {
+            let selected = self.page == page;
+            nav = nav.push(
+                button(label)
+                    .width(Length::Fill)
+                    .padding([11, 12])
+                    .style(move |theme, status| {
+                        let mut style = if selected {
+                            buttons::primary(theme, status)
+                        } else {
+                            buttons::text(theme, status)
+                        };
+                        style.border.radius = 8.0.into();
+                        style
+                    })
+                    .on_press(Message::Navigate(page)),
+            );
+        }
+        let nav = nav
+            .push(iced::widget::Space::new().height(Length::Fill))
+            .push(
+                button("Свернуть в трей")
+                    .on_press(Message::CloseRequested)
+                    .width(Length::Fill),
+            )
+            .push(
+                button("Выход")
+                    .on_press(Message::ExitRequested)
+                    .width(Length::Fill),
+            );
         let body: Element<'_, Message> = match self.page {
             Page::Import => {
                 let mut content = column![
@@ -1527,6 +1530,7 @@ impl App {
                 }
                 let mut panel = column![
                     text("Настройки").size(22),
+                    self.proxy_settings(),
                     toggle,
                     text("Приложение откроется в трее. При отсутствии трея окно будет свёрнуто.")
                         .size(13),
@@ -1559,7 +1563,8 @@ impl App {
             Page::Profiles => {
                 let mut list = column![
                     text("Профили").size(22),
-                    self.proxy_settings(),
+                    text("Выберите профиль для подключения или добавьте новый.").size(13),
+                    button("+ Добавить профиль").on_press(Message::Navigate(Page::Import)),
                     row![
                         button("Открыть хранилище").on_press_maybe(
                             (!self.busy && !self.dirty && self.profiles.is_empty())
@@ -1580,7 +1585,7 @@ impl App {
                     list = list.push(text("Есть несохранённые изменения").size(12));
                 }
                 if self.profiles.is_empty() {
-                    list=list.push(text("Добавьте файл или tt-ссылку. Для возврата к сохранённым профилям сначала откройте хранилище."));
+                    list=list.push(text("Пока нет профилей. Нажмите «Добавить профиль», чтобы открыть файл или вставить ссылку."));
                 }
                 for (i, p) in self.profiles.iter().enumerate() {
                     list = list.push(

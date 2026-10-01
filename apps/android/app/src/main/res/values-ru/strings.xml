@@ -98,4 +98,8 @@
     <string name="portal_background_enable">"Включить"</string>
     <string name="portal_background_disable">"Выключить"</string>
     <string name="portal_last_sync">"Последняя успешная синхронизация: %1$s"</string>
+    <string name="home_subtitle">Ваше подключение — всё под рукой</string>
+    <string name="add_profile">+ Добавить профиль</string>
+    <string name="home_settings">Настройки</string>
+    <string name="default_profile_label">ПРОФИЛЬ ПО УМОЛЧАНИЮ</string>
 </resources>

@@ -98,4 +98,8 @@
     <string name="portal_background_enable">"Enable"</string>
     <string name="portal_background_disable">"Disable"</string>
     <string name="portal_last_sync">"Last successful sync: %1$s"</string>
+    <string name="home_subtitle">Your connection, at a glance</string>
+    <string name="add_profile">+ Add profile</string>
+    <string name="home_settings">Settings</string>
+    <string name="default_profile_label">DEFAULT PROFILE</string>
 </resources>
