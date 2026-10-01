@@ -11,12 +11,13 @@
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
             <intent-filter><action android:name="android.intent.action.VIEW" /><category android:name="android.intent.category.DEFAULT" /><category android:name="android.intent.category.BROWSABLE" /><data android:scheme="tt" /></intent-filter>
         </activity>
+        <activity android:name=".QrCaptureActivity" android:exported="false" android:screenOrientation="fullSensor" tools:ignore="LockedOrientationActivity" />
         <!-- VPN consent is the runtime systemExempted prerequisite. AGP 8.13 lint
              only models the alternative alarm permission; no alarm is used here.
              https://developer.android.com/develop/background-work/services/fgs/service-types#system-exempted -->
         <service tools:ignore="ForegroundServicePermission" android:name=".TunnelService" android:permission="android.permission.BIND_VPN_SERVICE" android:exported="true" android:foregroundServiceType="systemExempted">
             <intent-filter><action android:name="android.net.VpnService" /></intent-filter>
-            <meta-data android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON" android:value="false" />
+            <meta-data android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON" android:value="true" />
         </service>
     </application>
 </manifest>

@@ -16,27 +16,29 @@ import org.json.*;
 
 /** Native Android widgets; no WebView and no remote UI code. */
 public final class MainActivity extends Activity {
-    private static final int PICK = 10, SAVE = 11, CONSENT = 12;
+    private static final int PICK = 10, SAVE = 11, CONSENT = 12, QR_IMAGE = 13;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private LinearLayout rows;
     private TextView status;
     private Button connect, routing;
     private int connectionColor;
-    private String pendingExport;
     private ProfileVault vault;
     private final Runnable poll = new Runnable() {
         public void run() {
             try {
                 JSONObject state = new JSONObject(NativeCore.INSTANCE.status());
-                String message = !TunnelService.problem.isEmpty() ? TunnelService.problem : state.optString("message", "");
-                if (message.isEmpty()) message = TunnelService.active ? "Starting VPN…" : "Disconnected";
+                TunnelService.refreshPolicy();
+                int nativeState = state.optInt("state", 0);
+                String message = !TunnelService.problem.isEmpty() ? TunnelService.problem : nativeState == 2 ? getString(R.string.connected) : nativeState == 1 ? getString(R.string.connecting) : nativeState == 3 ? getString(R.string.reconnecting) : nativeState == 4 ? getString(R.string.connection_failed) : "";
+                if (message.isEmpty()) message = TunnelService.active ? getString(R.string.starting_vpn) : getString(R.string.disconnected);
                 if (!status.getText().toString().equals(message)) status.setText(message);
-                String action = TunnelService.active ? "Disconnect" : "Connect default profile";
+                String action = TunnelService.active ? getString(R.string.disconnect) : getString(R.string.connect_default_profile);
+                connect.setEnabled(!TunnelService.active || !TunnelService.alwaysOn);
                 if (!connect.getText().toString().equals(action)) connect.setText(action);
                 paintConnection(connectionColor(TunnelService.active, state.optInt("state", -1), !TunnelService.problem.isEmpty()));
             } catch (Exception ignored) {
                 paintConnection(Color.rgb(166, 53, 58));
-                if (!status.getText().toString().equals("VPN status unavailable")) status.setText("VPN status unavailable");
+                if (!status.getText().toString().equals(getString(R.string.vpn_status_unavailable))) status.setText(getString(R.string.vpn_status_unavailable));
             }
             handler.postDelayed(this, 500);
         }
@@ -51,16 +53,19 @@ public final class MainActivity extends Activity {
             view.setPadding(dp(16) + bars.left, dp(12) + bars.top, dp(16) + bars.right, dp(12) + bars.bottom); return insets;
         });
         TextView title = new TextView(this); title.setText("R-TrustTunnel"); title.setTextSize(23); title.setTypeface(null, Typeface.BOLD); root.addView(title);
-        root.addView(button("Import file", () -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE), PICK)));
-        root.addView(button("Paste config or tt:// link", () -> paste()));
-        routing = button("VPN apps", () -> {
+        root.addView(button(getString(R.string.import_file), () -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE), PICK)));
+        root.addView(button(getString(R.string.paste_config_or_tt_link), () -> paste()));
+        root.addView(button(getString(R.string.qr_import), this::qr));
+        root.addView(button(getString(R.string.portal_title), () -> new PortalDialog(this, vault, this::reload).show()));
+        root.addView(button(getString(R.string.always_on), this::vpnSettings));
+        routing = button(getString(R.string.vpn_apps), () -> {
             try { AppRoutingDialog.show(this, vault, this::reload); }
-            catch (Exception error) { error("App selection could not be opened. Existing settings are preserved."); }
+            catch (Exception error) { error(getString(R.string.app_selection_could_not_be_opened)); }
         }); root.addView(routing);
         ScrollView scroll = new ScrollView(this); rows = new LinearLayout(this); rows.setOrientation(LinearLayout.VERTICAL); scroll.addView(rows); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        TextView note = new TextView(this); note.setText("System VPN uses HTTP/2. HTTP/3 remains saved in your profile. Traffic is blocked during reconnection; protection ends when you disconnect."); note.setTextSize(12); root.addView(note);
+        TextView note = new TextView(this); note.setText(getString(R.string.vpn_uses_http_for_protection_after)); note.setTextSize(12); root.addView(note);
         status = new TextView(this); status.setTextSize(14); status.setPadding(0, dp(8), 0, dp(8)); root.addView(status);
-        connect = button("Connect default profile", () -> toggle()); root.addView(connect, new LinearLayout.LayoutParams(-1, dp(60)));
+        connect = button(getString(R.string.connect_default_profile), () -> toggle()); root.addView(connect, new LinearLayout.LayoutParams(-1, dp(60)));
         setContentView(root); reload(); incoming(getIntent());
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 20);
@@ -95,32 +100,33 @@ public final class MainActivity extends Activity {
         rows.removeAllViews();
         try {
             JSONObject data = vault.read(); JSONArray profiles = data.getJSONArray("profiles");
-            routing.setText(AppRouting.read(data).summary());
+            AppRouting selection = AppRouting.read(data);
+            routing.setText(selection.selectedOnly ? getString(R.string.apps_summary, selection.packages.size()) : getString(R.string.apps_all_summary));
             for (int i = 0; i < profiles.length(); i++) {
                 JSONObject item = profiles.getJSONObject(i), profile = item.getJSONObject("profile"); String id = item.getString("id");
                 String name = profile.optString("name"); if (name.trim().isEmpty()) name = "Profile " + (i + 1);
                 rows.addView(button((id.equals(data.getString("default")) ? "★ " : "") + name, () -> profileActions(id)));
             }
-            if (profiles.length() == 0) { TextView empty = new TextView(this); empty.setText("Import a profile to get started."); rows.addView(empty); }
-        } catch (Exception e) { error("Encrypted profiles could not be opened. Existing data has been preserved."); }
+            if (profiles.length() == 0) { TextView empty = new TextView(this); empty.setText(getString(R.string.import_a_profile_to_get_started)); rows.addView(empty); }
+        } catch (Exception e) { error(getString(R.string.encrypted_profiles_could_not_be_opened)); }
     }
     private void profileActions(String id) {
-        new AlertDialog.Builder(this).setItems(new String[]{"Use as default", "Export…", "Delete…"}, (dialog, which) -> {
+        new AlertDialog.Builder(this).setItems(new String[]{getString(R.string.use_as_default), getString(R.string.export), getString(R.string.delete)}, (dialog, which) -> {
             try {
                 JSONObject data = vault.read(); JSONArray profiles = data.getJSONArray("profiles");
                 if (which == 0) { data.put("default", id); vault.write(data); reload(); }
                 else if (which == 1) {
                     for (int i = 0; i < profiles.length(); i++) if (profiles.getJSONObject(i).getString("id").equals(id)) export(profiles.getJSONObject(i).getJSONObject("profile").toString());
-                } else new AlertDialog.Builder(this).setMessage("Delete this saved profile?").setNegativeButton("Cancel", null).setPositiveButton("Delete", (d, w) -> {
+                } else new AlertDialog.Builder(this).setMessage(getString(R.string.delete_this_saved_profile)).setNegativeButton(getString(R.string.cancel), null).setPositiveButton(getString(R.string.delete_text), (d, w) -> {
                     try {
                         JSONObject current = vault.read(); JSONArray old = current.getJSONArray("profiles"), kept = new JSONArray();
                         for (int i = 0; i < old.length(); i++) if (!old.getJSONObject(i).getString("id").equals(id)) kept.put(old.get(i));
                         current.put("profiles", kept);
                         if (id.equals(current.getString("default"))) current.put("default", kept.length() == 0 ? "" : kept.getJSONObject(0).getString("id"));
                         vault.write(current); reload();
-                    } catch (Exception e) { error("Could not save profile changes."); }
+                    } catch (Exception e) { error(getString(R.string.could_not_save_profile_changes)); }
                 }).show();
-            } catch (Exception e) { error("Could not open profile."); }
+            } catch (Exception e) { error(getString(R.string.could_not_open_profile)); }
         }).show();
     }
     private void paste() {
@@ -129,66 +135,98 @@ public final class MainActivity extends Activity {
         input.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
         input.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
         input.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(1024 * 1024)});
-        new AlertDialog.Builder(this).setTitle("Import profile").setView(input).setNegativeButton("Cancel", null).setPositiveButton("Preview", (d, w) -> { String raw = input.getText().toString(); input.setText(""); preview(raw); }).show();
+        new AlertDialog.Builder(this).setTitle(getString(R.string.import_profile)).setView(input).setNegativeButton(getString(R.string.cancel), null).setPositiveButton(getString(R.string.preview), (d, w) -> { String raw = input.getText().toString(); input.setText(""); preview(raw); }).show();
     }
     private void preview(String raw) {
         try {
             JSONObject parsed = new JSONObject(NativeCore.INSTANCE.parse(raw));
-            if (!parsed.getBoolean("ok")) { error(parsed.optString("message", "Invalid profile")); return; }
+            if (!parsed.getBoolean("ok")) { error(getString(R.string.invalid_profile)); return; }
             JSONObject profile = parsed.getJSONObject("profile"), endpoint = profile.getJSONObject("endpoint");
-            String warning = endpoint.optBoolean("skip_verification") ? "\nWARNING: certificate verification is disabled in this profile." : "";
-            new AlertDialog.Builder(this).setTitle("Import profile?").setMessage(profile.optString("name", "") + "\n" + endpoint.getString("hostname") + warning + "\nCredentials will be encrypted on this device.")
-                .setNegativeButton("Cancel", null).setPositiveButton("Import", (d, w) -> {
+            String warning = endpoint.optBoolean("skip_verification") ? getString(R.string.nwarning_certificate_verification_is_disabled_in) : "";
+            new AlertDialog.Builder(this).setTitle(getString(R.string.import_profile_text)).setMessage(profile.optString("name", "") + "\n" + endpoint.getString("hostname") + warning + getString(R.string.ncredentials_will_be_encrypted_on_this))
+                .setNegativeButton(getString(R.string.cancel), null).setPositiveButton(getString(R.string.import_confirm), (d, w) -> {
                     try {
                         JSONObject data = vault.read(); JSONArray list = data.getJSONArray("profiles");
                         if (list.length() >= 64) throw new IOException("Profile limit");
                         String id = UUID.randomUUID().toString(); list.put(new JSONObject().put("id", id).put("profile", profile));
                         if (data.getString("default").isEmpty()) data.put("default", id);
                         vault.write(data); reload();
-                    } catch (Exception e) { error("Could not save encrypted profile."); }
+                    } catch (Exception e) { error(getString(R.string.could_not_save_encrypted_profile)); }
                 }).show();
-        } catch (Exception e) { error("Invalid or oversized profile."); }
+        } catch (Exception e) { error(getString(R.string.invalid_or_oversized_profile)); }
     }
     private void export(String raw) {
-        new AlertDialog.Builder(this).setTitle("Export contains credentials").setItems(new String[]{"JSON", "Endpoint TOML", "CLI TOML", "tt:// link"}, (d, format) -> {
+        new AlertDialog.Builder(this).setTitle(getString(R.string.export_contains_credentials)).setItems(new String[]{"JSON", getString(R.string.endpoint_toml), getString(R.string.cli_toml), getString(R.string.tt_link)}, (d, format) -> {
             try {
                 JSONObject output = new JSONObject(NativeCore.INSTANCE.export(raw, format));
                 if (!output.getBoolean("ok")) { error(output.optString("message")); return; }
-                new AlertDialog.Builder(this).setTitle("Save unencrypted credentials?").setMessage("Anyone with this file can use the profile. " + output.getJSONArray("losses").toString())
-                    .setNegativeButton("Cancel", null).setPositiveButton("Choose file", (confirm, which) -> {
-                        pendingExport = output.optString("content");
-                        startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("text/plain").addCategory(Intent.CATEGORY_OPENABLE)
+                new AlertDialog.Builder(this).setTitle(getString(R.string.save_unencrypted_credentials)).setMessage(getString(R.string.anyone_with_this_file_can_use) + output.getJSONArray("losses").toString())
+                    .setNegativeButton(getString(R.string.cancel), null).setPositiveButton(getString(R.string.choose_file), (confirm, which) -> {
+                        try { vault.pendingExport(output.getString("content")); }
+                        catch (Exception e) { error(getString(R.string.export_failed)); return; }
+                        startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).setType(format == 0 ? "application/json" : format == 3 ? "text/plain" : "application/toml").addCategory(Intent.CATEGORY_OPENABLE)
                             .putExtra(Intent.EXTRA_TITLE, "rtrust-profile." + (format == 0 ? "json" : format == 3 ? "txt" : "toml")), SAVE);
                     }).show();
-            } catch (Exception e) { error("Could not export this profile."); }
+            } catch (Exception e) { error(getString(R.string.could_not_export_this_profile)); }
         }).show();
     }
+    private void qr() {
+        new AlertDialog.Builder(this).setTitle(R.string.qr_import).setItems(new String[]{getString(R.string.qr_camera), getString(R.string.qr_image)}, (d,w) -> {
+            if (w == 0) new com.google.zxing.integration.android.IntentIntegrator(this).setCaptureActivity(QrCaptureActivity.class)
+                .setDesiredBarcodeFormats(com.google.zxing.integration.android.IntentIntegrator.QR_CODE).setPrompt(getString(R.string.qr_prompt))
+                .setBeepEnabled(false).setBarcodeImageEnabled(false).setOrientationLocked(false).initiateScan();
+            else startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE), QR_IMAGE);
+        }).show();
+    }
+    private void vpnSettings() {
+        String state = TunnelService.active ? getString(R.string.always_status, TunnelService.alwaysOn, TunnelService.lockdown) : getString(R.string.always_status_unknown);
+        new AlertDialog.Builder(this).setTitle(R.string.always_on).setMessage(state + "\n\n" + getString(R.string.always_help))
+            .setNegativeButton(android.R.string.cancel, null).setPositiveButton(R.string.open_settings, (d,w) -> {
+                try { startActivity(new Intent(android.provider.Settings.ACTION_VPN_SETTINGS)); }
+                catch (ActivityNotFoundException e) { startActivity(new Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS)); }
+            }).show();
+    }
     private void toggle() {
+        if (TunnelService.active && TunnelService.alwaysOn) { vpnSettings(); return; }
         if (TunnelService.active) { startService(new Intent(this, TunnelService.class).setAction(TunnelService.STOP)); return; }
         try {
             JSONObject profile = vault.selected();
             if ((profile.has("original_cli") && !profile.isNull("original_cli")) || (!profile.isNull("policy") && !profile.opt("policy").toString().equals("{}"))) {
-                error("Desktop routing policy is not supported on Android yet. Export this profile as Endpoint TOML and import it to explicitly use full-tunnel routing."); return;
+                error(getString(R.string.desktop_routing_policy_is_not_supported)); return;
             }
-        } catch (Exception e) { error("Import and select a default profile first."); return; }
+        } catch (Exception e) { error(getString(R.string.import_and_select_a_default_profile)); return; }
         try { AppRouting.read(vault.read()).validateInstalled(getPackageManager()); }
-        catch (Exception error) { error("Check VPN apps: select at least one installed app, or choose All apps."); return; }
+        catch (Exception error) { error(getString(R.string.check_vpn_apps_select_at_least)); return; }
         Intent consent = VpnService.prepare(this);
         if (consent != null) startActivityForResult(consent, CONSENT); else startForegroundService(new Intent(this, TunnelService.class));
     }
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        com.google.zxing.integration.android.IntentResult qr = com.google.zxing.integration.android.IntentIntegrator.parseActivityResult(request, result, data);
+        if (qr != null) { if (qr.getContents() != null) preview(qr.getContents()); return; }
+        if (request == QR_IMAGE && result == RESULT_OK && data != null) {
+            android.net.Uri uri = data.getData();
+            new Thread(() -> {
+                try (InputStream in = getContentResolver().openInputStream(uri)) {
+                    if (in == null) throw new IOException(); String raw = QrImport.decode(in);
+                    runOnUiThread(() -> { if (!isDestroyed()) preview(raw); });
+                } catch (Exception e) { runOnUiThread(() -> { if (!isDestroyed()) error(getString(R.string.qr_failed)); }); }
+            }, "qr-import").start();
+        }
         if (request == CONSENT && result == RESULT_OK) startForegroundService(new Intent(this, TunnelService.class));
         if (request == SAVE) {
-            String output = pendingExport; pendingExport = null;
+            String output;
+            try { output = vault.takeExport(); }
+            catch (Exception e) { error(getString(R.string.export_failed)); return; }
+            if (result == RESULT_OK && output == null) { error(getString(R.string.export_expired)); return; }
             if (result == RESULT_OK && data != null && output != null) try (OutputStream out = getContentResolver().openOutputStream(data.getData(), "wt")) {
                 if (out == null) throw new IOException(); out.write(output.getBytes(StandardCharsets.UTF_8));
-            } catch (Exception e) { error("Could not write export."); }
+            } catch (Exception e) { error(getString(R.string.could_not_write_export)); }
         }
         if (request == PICK && result == RESULT_OK && data != null) try (InputStream in = getContentResolver().openInputStream(data.getData())) {
             if (in == null) throw new IOException(); byte[] bytes = ProfileVault.readBounded(in, 1024 * 1024);
             if (bytes.length > 1024 * 1024) throw new IOException(); preview(new String(bytes, StandardCharsets.UTF_8));
             java.util.Arrays.fill(bytes, (byte) 0);
-        } catch (Exception e) { error("Could not read file, or profile exceeds 1 MiB."); }
+        } catch (Exception e) { error(getString(R.string.could_not_read_file_or_profile)); }
     }
 }

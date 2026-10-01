@@ -13,6 +13,7 @@ public final class TunnelService extends VpnService {
     static final String STOP = "org.rtrusttunnel.android.STOP";
     static volatile String problem = "";
     static volatile boolean active;
+    static volatile boolean alwaysOn, lockdown;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private volatile Network underlying;
     private ParcelFileDescriptor tun;
@@ -20,22 +21,33 @@ public final class TunnelService extends VpnService {
     private ConnectivityManager.NetworkCallback callback;
     private volatile boolean stopping;
     private boolean cleaned;
+    private static volatile TunnelService running;
+    static void refreshPolicy() {
+        TunnelService service = running;
+        if (service == null) return;
+        boolean previous = alwaysOn;
+        alwaysOn = service.isAlwaysOn(); lockdown = service.isLockdownEnabled();
+        if (previous != alwaysOn && active) service.getSystemService(NotificationManager.class).notify(1, service.notification());
+    }
 
     @Override public void onCreate() {
-        super.onCreate(); connectivity = getSystemService(ConnectivityManager.class);
-        getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel("vpn", "VPN connection", NotificationManager.IMPORTANCE_LOW));
+        super.onCreate(); running = this; connectivity = getSystemService(ConnectivityManager.class);
+        getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel("vpn", getString(R.string.vpn_connection), NotificationManager.IMPORTANCE_LOW));
     }
     private Notification notification() {
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, TunnelService.class).setAction(STOP), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        return new Notification.Builder(this, "vpn").setSmallIcon(android.R.drawable.ic_lock_lock)
-            .setContentTitle("R-TrustTunnel").setContentText("VPN active · open app for connection status")
-            .setContentIntent(open).setOngoing(true).addAction(new Notification.Action.Builder(null, "Disconnect", stop).build()).build();
+        Notification.Builder notification = new Notification.Builder(this, "vpn").setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setContentTitle("R-TrustTunnel").setContentText(getString(R.string.vpn_active_open_app_for_connection))
+            .setContentIntent(open).setOngoing(true);
+        if (!isAlwaysOn()) notification.addAction(new Notification.Action.Builder(null, getString(R.string.disconnect), stop).build());
+        return notification.build();
     }
     @Override public int onStartCommand(Intent intent, int flags, int id) {
-        if (intent != null && STOP.equals(intent.getAction())) { disconnect(); return START_NOT_STICKY; }
-        if (active || stopping) return START_NOT_STICKY;
-        if (VpnService.prepare(this) != null) { problem = "VPN permission is required"; stopSelf(); return START_NOT_STICKY; }
+        alwaysOn = isAlwaysOn(); lockdown = isLockdownEnabled();
+        if (intent != null && STOP.equals(intent.getAction()) && !alwaysOn) { disconnect(); return START_NOT_STICKY; }
+        if (active || stopping) return START_STICKY;
+        if (VpnService.prepare(this) != null) { problem = getString(R.string.vpn_permission_is_required); stopSelf(); return START_NOT_STICKY; }
         if (Build.VERSION.SDK_INT >= 34) startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED);
         else startForeground(1, notification());
         active = true; problem = "";
@@ -43,11 +55,11 @@ public final class TunnelService extends VpnService {
             try { connect(); }
             catch (Exception error) {
                 // Never include config, addresses or exception payloads in UI/logs.
-                problem = "Cannot start VPN. Check the profile and network, then retry.";
+                problem = getString(R.string.cannot_start_vpn_check_the_profile);
                 cleanup(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf();
             }
         });
-        return START_NOT_STICKY;
+        return START_STICKY;
     }
     private Network availableNetwork() {
         for (Network network : connectivity.getAllNetworks()) {
@@ -62,26 +74,12 @@ public final class TunnelService extends VpnService {
         if (profile.has("original_cli") && !profile.isNull("original_cli")) throw new IllegalArgumentException("Desktop CLI policy unsupported");
         if (!profile.isNull("policy") && !profile.opt("policy").toString().equals("{}")) throw new IllegalArgumentException("Desktop policy unsupported");
         underlying = availableNetwork();
-        if (underlying == null) throw new IllegalStateException("No underlying network");
         JSONObject endpoint = profile.getJSONObject("endpoint");
-        JSONArray addresses = endpoint.getJSONArray("addresses"), resolved = new JSONArray();
-        for (int i = 0; i < addresses.length(); i++) {
-            String address = addresses.getString(i);
-            int colon = address.lastIndexOf(':');
-            if (colon < 1) throw new IllegalArgumentException("Invalid endpoint");
-            String host = address.substring(0, colon).replace("[", "").replace("]", "");
-            int port = Integer.parseInt(address.substring(colon + 1));
-            for (InetAddress ip : underlying.getAllByName(host)) {
-                resolved.put((ip instanceof Inet6Address ? "[" + ip.getHostAddress() + "]" : ip.getHostAddress()) + ":" + port);
-                if (resolved.length() > 64) throw new IllegalArgumentException("Too many endpoints");
-            }
-        }
-        endpoint.put("addresses", resolved);
         boolean ipv6 = endpoint.optBoolean("has_ipv6", true);
         Builder builder = new Builder().setSession("R-TrustTunnel").setMtu(1500)
             .addAddress("169.254.254.2", 32)
             .addRoute("0.0.0.0", 0).setBlocking(false)
-            .setUnderlyingNetworks(new Network[]{underlying});
+            .setUnderlyingNetworks(underlying == null ? new Network[]{} : new Network[]{underlying});
         // Leaving IPv6 unconfigured blocks that family in Android; never allowBypass/allowFamily.
         // Advertising a local IPv6 route for an IPv4-only endpoint makes browser
         // connection attempts reach an unusable tunnel instead of falling back to IPv4.
@@ -99,7 +97,6 @@ public final class TunnelService extends VpnService {
         if (stopping) return;
         tun = builder.establish();
         if (tun == null) throw new IllegalStateException("VPN permission revoked");
-        if (!NativeCore.INSTANCE.start(profile.toString(), tun.getFd(), this)) throw new IllegalStateException("Core rejected profile");
         callback = new ConnectivityManager.NetworkCallback() {
             @Override public void onAvailable(Network network) { updateUnderlying(); }
             @Override public void onLost(Network network) { updateUnderlying(); }
@@ -110,6 +107,35 @@ public final class TunnelService extends VpnService {
         };
         connectivity.registerNetworkCallback(new NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(), callback);
+        // Establish the blocking TUN before waiting for connectivity or endpoint DNS.
+        // The system's lockdown policy also protects the interval before service startup.
+        JSONArray addresses = endpoint.getJSONArray("addresses");
+        while (!stopping) {
+            Network network = underlying;
+            if (network != null) try {
+                JSONArray resolved = new JSONArray();
+                for (int i = 0; i < addresses.length(); i++) {
+                    String address = addresses.getString(i);
+                    int colon = address.lastIndexOf(':');
+                    if (colon < 1) throw new IllegalArgumentException("Invalid endpoint");
+                    String host = address.substring(0, colon).replace("[", "").replace("]", "");
+                    int port = Integer.parseInt(address.substring(colon + 1));
+                    for (InetAddress ip : network.getAllByName(host)) {
+                        resolved.put((ip instanceof Inet6Address ? "[" + ip.getHostAddress() + "]" : ip.getHostAddress()) + ":" + port);
+                        if (resolved.length() > 64) throw new IllegalArgumentException("Too many endpoints");
+                    }
+                }
+                if (resolved.length() == 0) throw new UnknownHostException();
+                endpoint.put("addresses", resolved);
+                if (stopping) return;
+                if (!NativeCore.INSTANCE.start(profile.toString(), tun.getFd(), this)) throw new IllegalStateException("Core rejected profile");
+                problem = "";
+                return;
+            } catch (UnknownHostException unavailable) { /* Network/DNS can be unavailable at boot. */ }
+            Thread.sleep(500);
+            underlying = availableNetwork();
+        }
+
     }
     /** Called from Rust before every endpoint socket connects. Failure always blocks that attempt. */
     public boolean protectSocket(int fd) {
@@ -133,5 +159,5 @@ public final class TunnelService extends VpnService {
         worker.execute(() -> { cleanup(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); });
     }
     @Override public void onRevoke() { disconnect(); }
-    @Override public void onDestroy() { stopping = true; worker.execute(this::cleanup); worker.shutdown(); super.onDestroy(); }
+    @Override public void onDestroy() { running = null; stopping = true; worker.execute(this::cleanup); worker.shutdown(); super.onDestroy(); }
 }

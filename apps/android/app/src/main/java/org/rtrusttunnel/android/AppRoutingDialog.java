@@ -24,16 +24,16 @@ final class AppRoutingDialog {
             if (pm.checkPermission("android.permission.INTERNET", info.packageName) != PackageManager.PERMISSION_GRANTED && !selected.contains(info.packageName)) continue;
             apps.add(new App(info.packageName, info.loadLabel(pm).toString())); known.add(info.packageName);
         }
-        for (String name : selected) if (!known.contains(name)) apps.add(new App(name, "Unavailable app"));
+        for (String name : selected) if (!known.contains(name)) apps.add(new App(name, activity.getString(R.string.unavailable_app)));
         apps.sort(Comparator.comparing((App app) -> !selected.contains(app.name)).thenComparing(app -> app.label, String.CASE_INSENSITIVE_ORDER).thenComparing(app -> app.name));
         LinearLayout panel = new LinearLayout(activity); panel.setOrientation(LinearLayout.VERTICAL);
         int pad = (int) (16 * activity.getResources().getDisplayMetrics().density); panel.setPadding(pad, 0, pad, 0);
         RadioGroup modes = new RadioGroup(activity);
-        RadioButton all = new RadioButton(activity); all.setId(View.generateViewId()); all.setText("All apps"); modes.addView(all);
-        RadioButton only = new RadioButton(activity); only.setId(View.generateViewId()); only.setText("Only selected apps"); modes.addView(only);
+        RadioButton all = new RadioButton(activity); all.setId(View.generateViewId()); all.setText(activity.getString(R.string.all_apps)); modes.addView(all);
+        RadioButton only = new RadioButton(activity); only.setId(View.generateViewId()); only.setText(activity.getString(R.string.only_selected_apps)); modes.addView(only);
         modes.check(current.selectedOnly ? only.getId() : all.getId()); panel.addView(modes);
-        TextView hint = new TextView(activity); hint.setText("Unselected apps connect directly. Disconnect VPN before saving changes."); panel.addView(hint);
-        EditText search = new EditText(activity); search.setSingleLine(true); search.setHint("Search apps"); panel.addView(search);
+        TextView hint = new TextView(activity); hint.setText(activity.getString(R.string.unselected_apps_connect_directly_or_have)); panel.addView(hint);
+        EditText search = new EditText(activity); search.setSingleLine(true); search.setHint(activity.getString(R.string.search_apps)); panel.addView(search);
         search.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
         Runnable hideKeyboard = () -> {
             android.view.inputmethod.InputMethodManager keyboard = activity.getSystemService(android.view.inputmethod.InputMethodManager.class);
@@ -57,13 +57,13 @@ final class AppRoutingDialog {
             for (int i = 0; i < visible.size(); i++) list.setItemChecked(i, selected.contains(visible.get(i).name));
             boolean enabled = modes.getCheckedRadioButtonId() == only.getId();
             list.setEnabled(enabled); list.setAlpha(enabled ? 1f : .45f); search.setEnabled(enabled);
-            count.setText(selected.size() + " selected");
+            count.setText(activity.getString(R.string.selected_count, selected.size()));
         };
         list.setOnItemClickListener((parent, view, position, id) -> {
             String name = visible.get(position).name;
             if (list.isItemChecked(position)) selected.add(name); else selected.remove(name);
-            count.setText(selected.size() + " selected");
-            hint.setText("Unselected apps connect directly. Disconnect VPN before saving changes.");
+            count.setText(activity.getString(R.string.selected_count, selected.size()));
+            hint.setText(activity.getString(R.string.unselected_apps_connect_directly_or_have));
             hideKeyboard.run();
         });
         modes.setOnCheckedChangeListener((group, id) -> render.run());
@@ -72,16 +72,16 @@ final class AppRoutingDialog {
             public void onTextChanged(CharSequence s, int start, int before, int count) { render.run(); }
             public void afterTextChanged(Editable value) {}
         });
-        AlertDialog dialog = new AlertDialog.Builder(activity).setTitle("Apps using VPN").setView(panel).setNegativeButton("Cancel", null).setPositiveButton("Save", null).create();
+        AlertDialog dialog = new AlertDialog.Builder(activity).setTitle(activity.getString(R.string.apps_using_vpn)).setView(panel).setNegativeButton(activity.getString(R.string.cancel), null).setPositiveButton(activity.getString(R.string.save), null).create();
         dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-            if (TunnelService.active) { hint.setText("Disconnect VPN before saving changes. Your current selection has not changed."); return; }
+            if (TunnelService.active) { hint.setText(activity.getString(R.string.disconnect_vpn_before_saving_changes_your)); return; }
             try {
                 AppRouting next = new AppRouting(modes.getCheckedRadioButtonId() == only.getId(), selected);
                 next.validateInstalled(pm);
                 vault.saveAppRouting(next); saved.run(); dialog.dismiss();
-            } catch (PackageManager.NameNotFoundException error) { hint.setText("A selected app is no longer installed. Uncheck it before saving."); }
-            catch (IllegalArgumentException error) { hint.setText("Select at least one installed app, or choose All apps."); }
-            catch (Exception error) { hint.setText("Could not save app selection. Existing settings are preserved."); }
+            } catch (PackageManager.NameNotFoundException error) { hint.setText(activity.getString(R.string.a_selected_app_is_no_longer)); }
+            catch (IllegalArgumentException error) { hint.setText(activity.getString(R.string.select_at_least_one_installed_app)); }
+            catch (Exception error) { hint.setText(activity.getString(R.string.could_not_save_app_selection_existing)); }
         }));
         render.run(); dialog.show();
     }

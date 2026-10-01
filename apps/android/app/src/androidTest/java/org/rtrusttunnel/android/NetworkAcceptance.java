@@ -100,6 +100,24 @@ final class NetworkAcceptance {
             check(v6Blocked, "IPv6 cannot bypass an IPv4-only VPN");
             context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP));
             await(0, 10000);
+            Thread.sleep(300);
+            JSONObject unavailable = vault.read();
+            unavailable.getJSONArray("profiles").getJSONObject(0).getJSONObject("profile").getJSONObject("endpoint")
+                .put("addresses", new JSONArray().put("startup-unavailable.invalid:443"));
+            vault.write(unavailable);
+            context.startForegroundService(new Intent(context, TunnelService.class));
+            boolean guarded = false;
+            for (int i = 0; i < 100; i++) {
+                android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(cm.getActiveNetwork());
+                if (TunnelService.active && caps != null && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) { guarded = true; break; }
+                Thread.sleep(100);
+            }
+            check(guarded, "Unavailable startup DNS retains blocking TUN");
+            Thread.sleep(1000);
+            check(TunnelService.active && TunnelService.problem.isEmpty(), "Unavailable DNS waits instead of terminating service");
+            context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP));
+            for (int i = 0; i < 100 && TunnelService.active; i++) Thread.sleep(100);
+            check(!TunnelService.active, "Offline startup can be cancelled");
 
         } finally {
             if (TunnelService.active) { context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP)); await(0, 10000); }

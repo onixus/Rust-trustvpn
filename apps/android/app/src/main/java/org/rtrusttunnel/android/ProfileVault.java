@@ -66,6 +66,50 @@ final class ProfileVault {
     void saveAppRouting(AppRouting routing) throws Exception { synchronized (LOCK) {
         JSONObject data = readUnlocked(); data.put("app_routing", routing.json()); writeUnlocked(data);
     } }
+    void savePortal(JSONObject session) throws Exception { synchronized (LOCK) {
+        JSONObject data = readUnlocked();
+        if (data.has("portal")) throw new IOException("Already enrolled");
+        data.put("portal", session); writeUnlocked(data);
+    } }
+    void forgetPortal() throws Exception { synchronized (LOCK) {
+        JSONObject data = readUnlocked(); removeRemote(data); data.remove("portal"); writeUnlocked(data);
+    } }
+    private static void removeRemote(JSONObject data) throws Exception {
+        JSONArray old = data.getJSONArray("profiles"), kept = new JSONArray();
+        for (int i = 0; i < old.length(); i++) if (!old.getJSONObject(i).has("remote_id")) kept.put(old.get(i));
+        data.put("profiles", kept); repairDefault(data);
+    }
+    private static void repairDefault(JSONObject data) throws Exception {
+        JSONArray profiles = data.getJSONArray("profiles");
+        for (int i = 0; i < profiles.length(); i++) if (profiles.getJSONObject(i).getString("id").equals(data.getString("default"))) return;
+        data.put("default", profiles.length() == 0 ? "" : profiles.getJSONObject(0).getString("id"));
+    }
+    void syncPortal(JSONObject session, JSONArray remote) throws Exception { synchronized (LOCK) {
+        JSONObject data = readUnlocked();
+        if (!data.has("portal") || !data.getJSONObject("portal").getString("token").equals(session.getString("token"))) throw new IOException("Registration changed");
+        String selected = data.getString("default"); removeRemote(data);
+        JSONArray profiles = data.getJSONArray("profiles");
+        if (profiles.length() + remote.length() > 64) throw new IOException("Profile limit");
+        java.util.HashSet<String> ids = new java.util.HashSet<>();
+        for (int i = 0; i < remote.length(); i++) {
+            JSONObject item = remote.getJSONObject(i);
+            if (!ids.add(item.getString("id"))) throw new IOException("Duplicate remote profile");
+            profiles.put(item);
+        }
+        data.put("default", selected); repairDefault(data); writeUnlocked(data);
+    } }
+    void pendingExport(String content) throws Exception { synchronized (LOCK) {
+        JSONObject data = readUnlocked();
+        data.put("pending_export", new JSONObject().put("content", content).put("created", System.currentTimeMillis())); writeUnlocked(data);
+    } }
+    String takeExport() throws Exception { synchronized (LOCK) {
+        JSONObject data = readUnlocked(), pending = data.optJSONObject("pending_export");
+        data.remove("pending_export"); writeUnlocked(data);
+        if (pending == null) return null;
+        long age = System.currentTimeMillis() - pending.getLong("created");
+        if (age < 0 || age > 3600000) return null;
+        return pending.getString("content");
+    } }
     JSONObject selected() throws Exception {
         JSONObject data = read(); JSONArray profiles = data.getJSONArray("profiles");
         for (int i = 0; i < profiles.length(); i++) {

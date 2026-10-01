@@ -40,9 +40,10 @@ public final class SmokeInstrumentation extends Instrumentation {
             }
             if ("true".equals(arguments.getString("network"))) {
                 NetworkAcceptance.run(this);
-                result.putString("stream", "PASS: VPN IPv4/IPv6 TCP512KiB, UDP1/1472/5000/60000, system DNS, outage guard, reconnect, Activity close, Stop\n");
+                result.putString("stream", "PASS: VPN IPv4/IPv6 TCP512KiB, UDP1/1472/5000/60000, system DNS, outage guard, reconnect, Activity close, Stop, unavailable startup DNS guard\n");
                 finish(-1, result); return;
             }
+            MobileFeaturesAcceptance.run(this);
             AppRoutingAcceptance.smoke(this);
             String secret = "android-test-synthetic-password";
             String raw = "hostname='test.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='" + secret + "'\n";
@@ -71,7 +72,7 @@ public final class SmokeInstrumentation extends Instrumentation {
             check(new JSONObject(NativeCore.INSTANCE.status()).getInt("state") == 0, "Initial disconnected state");
             check(!NativeCore.INSTANCE.start(profile.toString(), -1, this), "Invalid TUN rejected");
             NativeCore.INSTANCE.stop();
-            result.putString("stream", "PASS: JNI codec, four formats, redaction, Keystore persistence, encrypted file, tamper rejection, invalid FD\n");
+            result.putString("stream", "PASS: JNI codec, four formats, redaction, Keystore persistence, encrypted file, tamper rejection, invalid FD, portal sync, QR camera/image, Russian resources, export recreation, Always-on declaration\n");
             finish(-1, result);
         } catch (Throwable error) {
             result.putString("stream", "FAIL: " + error.getClass().getSimpleName() + (error instanceof AssertionError ? ": " + error.getMessage() : "") + "\n"); finish(1, result);
