@@ -59,7 +59,7 @@ separate checks; package generation alone does not establish that they passed.
 
 ## Published UI refresh
 
-[v0.3.2-ui.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.1)
+[v0.3.2-ui.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.2)
 ships the macOS UI Choices DMG and signed x86_64 Native/WebView/Both Flatpaks.
 macOS #69 and Linux #20 completed successfully. The installed Native clients and
 host services were upgraded; macOS retained the exact encrypted vault bytes.

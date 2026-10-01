@@ -8,16 +8,18 @@
 
 ## Скачать и установить
 
-Текущий выпуск: **[v0.3.2-ui.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.1)** — preview от 1 октября 2026 года.
+Текущий выпуск: **[v0.3.2-ui.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.2)** — preview от 1 октября 2026 года.
 
 | Платформа | Пакет | Установка |
 | --- | --- | --- |
-| macOS Apple Silicon | [DMG: выбор Native / WebView / Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.1/R-TrustTunnel-macOS-arm64-UI-Choices.dmg) | Откройте DMG и выберите один PKG. Нужны права администратора; Developer ID и notarization отсутствуют. |
-| Linux x86_64, Wayland | [Native](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.1/R-TrustTunnel-Linux-x86_64.flatpak) · [WebView](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.1/R-TrustTunnel-Linux-x86_64-webview.flatpak) · [Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.1/R-TrustTunnel-Linux-x86_64-both.flatpak) | Выберите один Flatpak. Для системного VPN отдельно установите host-службу; [инструкция Linux](docs/linux-service.md). |
-| Android 10+, arm64 / x86_64 | [Подписанный APK](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.1/R-TrustTunnel-Android.apk) | Устанавливается поверх предыдущего подписанного preview. Версия сборки **30208**; отображаемая версия осталась `0.3.2-preview.6`. |
+| macOS Apple Silicon | [DMG: выбор Native / WebView / Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-macOS-arm64-UI-Choices.dmg) | Откройте DMG и выберите один PKG. Нужны права администратора; Developer ID и notarization отсутствуют. |
+| Linux x86_64, Wayland | [Native](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64.flatpak) · [WebView](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64-webview.flatpak) · [Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64-both.flatpak) | Выберите один Flatpak. Для системного VPN отдельно установите host-службу; [инструкция Linux](docs/linux-service.md). |
+| Android 10+, arm64 / x86_64 | [Подписанный APK](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Android.apk) | Устанавливается поверх предыдущего подписанного preview. Версия сборки **30209**; отображаемая версия `0.3.2-preview.7`. |
 | Windows x64 | Новый пакет в этот выпуск не входит | Сборка и приёмка обновлённого UI отложены до доступности Windows-ноды. |
 
-На [странице релиза](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.1) также доступны подписанный Arch host-пакет `rtrust-host-0.3.2-20`, `SHA256SUMS`, подписи и сведения о проверках. Native Flatpak использует Freedesktop 25.08; WebView/Both — GNOME 50. При обновлении сохраняйте прежний ключ подписи и не удаляйте данные приложения.
+На [странице релиза](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.2) также доступны подписанный Arch host-пакет `rtrust-host-0.3.2-23`, `SHA256SUMS`, подписи и сведения о проверках. Native Flatpak использует Freedesktop 25.08; WebView/Both — GNOME 50. При обновлении сохраняйте прежний ключ подписи и не удаляйте данные приложения.
+
+Выбран значок **№6 «Поток»**: приложения, трей, установщики и Android adaptive launcher. Пакеты прошли macOS Jenkins №73, Linux №23 и Android №30. Windows-значки подготовлены в исходниках; новая Windows-сборка отложена. [Состав выпуска](docs/releases/v0.3.2-ui.2.md).
 
 ## Скриншоты
 
@@ -101,7 +103,7 @@ SOCKS5 не меняет системные маршруты, DNS или нас�
 
 ### Android
 
-Подписанный APK в **v0.3.2-ui.1**: versionCode **30208**, versionName **0.3.2-preview.6**. Номер версии в интерфейсе Android не изменился, номер сборки увеличен.
+Подписанный APK в **v0.3.2-ui.2**: versionCode **30209**, versionName **0.3.2-preview.7**.
 
 1. Установите APK. Через «+ Добавить профиль» откройте файл, вставьте конфигурацию/ссылку `tt://` или `hy2://`, либо импортируйте QR камерой/из изображения.
 2. Выберите профиль по умолчанию и нажмите нижнюю кнопку подключения. Подтвердите системное разрешение VPN; отдельная host-служба не нужна.
@@ -130,7 +132,7 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-Релиз UI refresh прошёл **macOS Jenkins №69** и **Linux Jenkins №20**: Gitleaks/Trivy, unit, сборку, smoke и сетевые E2E. После обновления установленного macOS проверены GUI и доступ к службе, хеш зашифрованного хранилища не изменился. На физическом KDE Wayland проверены Native, WebView, Both, трей и IPC новой host-службы. На Huawei проверено обновление APK до 30208 с сохранением профиля, подключения и Always-on/lockdown; для UI выполнены сборка и Android lint. Это не новый полный Android CI-прогон: последний полный прогон ядра — №26.
+Предыдущий релиз v0.3.2-ui.1 прошёл **macOS Jenkins №69** и **Linux Jenkins №20**: Gitleaks/Trivy, unit, сборку, smoke и сетевые E2E. После обновления установленного macOS проверены GUI и доступ к службе, хеш зашифрованного хранилища не изменился. На физическом KDE Wayland проверены Native, WebView, Both, трей и IPC новой host-службы. На Huawei проверено обновление APK до 30208 с сохранением профиля, подключения и Always-on/lockdown; для UI выполнены сборка и Android lint. Это не новый полный Android CI-прогон: последний полный прогон ядра — №26.
 
 Windows в этот прогон не входила; предыдущая системная приёмка относится к №53 и выпуску sequence 6. Boot/sleep/длительные проверки из таблицы выше не считаются закрытыми. [Состав релиза и проверки](docs/releases/v0.3.2-ui.1.md).
 

@@ -1,13 +1,18 @@
 # Linux-служба и TUN из native UI
 
-## Опубликованный UI refresh: v0.3.2-ui.1
+## Опубликованный UI refresh: v0.3.2-ui.2
 
-[Релиз и загрузки](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.1)
+[Релиз и загрузки](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.2)
 содержат подписанные x86_64 Flatpak **Native / WebView / Both** и отдельный Arch
-host-пакет **rtrust-host-0.3.2-20**. Native использует Freedesktop 25.08,
+host-пакет **rtrust-host-0.3.2-23**. Native использует Freedesktop 25.08,
 WebView/Both — GNOME 50. Linux поддерживает только Wayland.
 
-Linux Jenkins **№20 — SUCCESS**: Gitleaks/Trivy, unit, сборка, Wayland и сетевые
+Текущий выпуск с новым значком «Поток» прошёл Linux Jenkins **№23 — SUCCESS**:
+Gitleaks/Trivy, unit/clippy, Wayland/tray, сетевые E2E обоих протоколов и упаковку.
+SVG проверен внутри всех трёх подписанных Flatpak. Установка этой branding-сборки
+на физический desktop пока не повторялась.
+
+Предыдущий выпуск v0.3.2-ui.1 прошёл Linux Jenkins **№20 — SUCCESS**: Gitleaks/Trivy, unit, сборка, Wayland и сетевые
 E2E обоих протоколов. Установленные Native и host-служба обновлены; на физическом
 KDE проверены главный экран, настройки, портал, трей и IPC. WebView и Both также
 прошли smoke в отдельных временных ветках; затем оставлен обновлённый Native master.
@@ -22,7 +27,7 @@ gpg --show-keys --with-fingerprint rtrusttunnel.gpg
 sha256sum --ignore-missing -c SHA256SUMS
 sudo pacman-key --add rtrusttunnel.gpg
 sudo pacman-key --lsign-key CB9C4FB4B9CFAF255BE008C9F0E6162B056843CC
-sudo pacman -U rtrust-host-0.3.2-20-x86_64.pkg.tar.zst
+sudo pacman -U rtrust-host-0.3.2-23-x86_64.pkg.tar.zst
 flatpak install --user ./R-TrustTunnel-Linux-x86_64.flatpak
 ```
 

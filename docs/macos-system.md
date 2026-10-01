@@ -1,10 +1,15 @@
 # macOS system VPN — development preview
 
-## Published UI refresh: v0.3.2-ui.1
+## Published Flow branding: v0.3.2-ui.2
 
-[Download the UI Choices DMG](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.1/R-TrustTunnel-macOS-arm64-UI-Choices.dmg)
-and choose exactly one Native, WebView or Both PKG. macOS Jenkins **#69 completed
-SUCCESS**. The Native package was installed over the existing app; its executable
+macOS Jenkins **#73 completed SUCCESS**. The selected Flow icon is declared in
+Info.plist and sealed in every Native/WebView/Both app payload; package icon hashes
+and codesign verification passed. This branding package has not been installed on
+the host Mac. The preceding UI upgrade acceptance below belongs to v0.3.2-ui.1.
+
+[Download the UI Choices DMG](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-macOS-arm64-UI-Choices.dmg)
+and choose exactly one Native, WebView or Both PKG. The preceding v0.3.2-ui.1
+passed macOS Jenkins **#69 completed SUCCESS**. Its Native package was installed over the existing app; its executable
 and helper matched the PKG payload, GUI/service smoke passed, and the encrypted
 vault remained byte-for-byte unchanged. This is an Apple Silicon preview, without
 Developer ID/notarization. It does not close boot always-on, sleep/handoff,
@@ -13,7 +18,7 @@ clean-install-on-another-Mac or automatic rollback acceptance.
 Disconnect/recover an active session and quit both frontends before installing.
 Use the standard macOS administrator prompt. Preserve application data and the
 Keychain entry. If macOS requests approval, use the per-app Privacy & Security
-flow; do not disable Gatekeeper globally. See [release evidence](releases/v0.3.2-ui.1.md)
+flow; do not disable Gatekeeper globally. See [release evidence](releases/v0.3.2-ui.2.md)
 and [actual UI screenshots](screenshots/README.md).
 
 ## Implementation

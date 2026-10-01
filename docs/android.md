@@ -6,14 +6,14 @@ the desktop client. There is no WebView, CLI subprocess or privileged host servi
 Baseline: Android 10/API 29+, arm64-v8a; x86_64 is also built for emulator testing.
 Acceptance uses Android 16/API 36 x86_64 and physical POCO X3 NFC and Huawei DEL-LX9 phones running Android 12/API 31.
 
-Current published package: [v0.3.2-ui.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.1),
-versionCode **30208**, versionName **0.3.2-preview.6**. The displayed version name
-is unchanged; Android uses the increased versionCode for this in-place update.
-The APK is signed with the existing release key. It was installed on Huawei with
-the saved default profile, active VPN and system Always-on/lockdown retained.
-The UI build and Android lint passed. The native libraries are unchanged from
-successful Android Jenkins #26; their source hashes were checked before packaging.
-This UI release did not repeat the full Android network acceptance pipeline.
+Current published package: [v0.3.2-ui.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.2),
+versionCode **30209**, versionName **0.3.2-preview.7**, signed with the existing release identity.
+The selected Flow icon uses adaptive launcher artwork, Android 13 themed monochrome
+artwork and a separate notification icon. Android Jenkins **#30 completed SUCCESS**:
+Gitleaks/Trivy, shared Rust unit tests, both ABIs, build/lint, emulator smoke,
+TrustTunnel and Hysteria 2 network E2E, restart, reinstall and version upgrade.
+This branding build has not been installed on a physical phone; the preceding
+30208 UI release was installed on Huawei with its profile and Always-on/lockdown retained.
 
 ## Navigation
 

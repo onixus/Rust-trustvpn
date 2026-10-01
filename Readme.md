@@ -8,16 +8,18 @@ A native desktop VPN client written in Rust, compatible with TrustTunnel and Hys
 
 ## Download and install
 
-Current release: **[v0.3.2-ui.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.1)**, a preview published October 1, 2026.
+Current release: **[v0.3.2-ui.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.2)**, a preview published October 1, 2026.
 
 | Platform | Package | Installation |
 | --- | --- | --- |
-| macOS Apple Silicon | [DMG: Native / WebView / Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.1/R-TrustTunnel-macOS-arm64-UI-Choices.dmg) | Open the DMG and choose one PKG. Administrator authorization is required; no Developer ID or notarization. |
-| Linux x86_64, Wayland | [Native](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.1/R-TrustTunnel-Linux-x86_64.flatpak) · [WebView](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.1/R-TrustTunnel-Linux-x86_64-webview.flatpak) · [Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.1/R-TrustTunnel-Linux-x86_64-both.flatpak) | Choose one Flatpak. System VPN also requires the separate host service; see [Linux instructions](docs/linux-service.md). |
-| Android 10+, arm64 / x86_64 | [Signed APK](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.1/R-TrustTunnel-Android.apk) | Updates the previous signed preview in place. Build **30208**; the displayed version remains `0.3.2-preview.6`. |
+| macOS Apple Silicon | [DMG: Native / WebView / Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-macOS-arm64-UI-Choices.dmg) | Open the DMG and choose one PKG. Administrator authorization is required; no Developer ID or notarization. |
+| Linux x86_64, Wayland | [Native](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64.flatpak) · [WebView](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64-webview.flatpak) · [Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64-both.flatpak) | Choose one Flatpak. System VPN also requires the separate host service; see [Linux instructions](docs/linux-service.md). |
+| Android 10+, arm64 / x86_64 | [Signed APK](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Android.apk) | Updates the previous signed preview in place. Build **30209**; version `0.3.2-preview.7`. |
 | Windows x64 | No new package in this release | Updated UI build and acceptance are deferred until the Windows node is available. |
 
-The [release page](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.1) also provides the signed Arch host package `rtrust-host-0.3.2-20`, `SHA256SUMS`, signatures and validation evidence. Native Flatpak uses Freedesktop 25.08; WebView/Both use GNOME 50. Preserve the signing identity and application data when upgrading.
+The [release page](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.2) also provides the signed Arch host package `rtrust-host-0.3.2-23`, `SHA256SUMS`, signatures and validation evidence. Native Flatpak uses Freedesktop 25.08; WebView/Both use GNOME 50. Preserve the signing identity and application data when upgrading.
+
+Selected icon **#6, Flow** is included in apps, tray, installers and the Android adaptive launcher. Packages passed macOS Jenkins #73, Linux #23 and Android #30. Windows branding is prepared in source; its new build remains deferred. [Release scope](docs/releases/v0.3.2-ui.2.md).
 
 ## Screenshots
 
@@ -101,7 +103,7 @@ Login startup, GUI autoconnect and boot-level always-on are different features. 
 
 ### Android
 
-The signed APK in **v0.3.2-ui.1** has versionCode **30208** and versionName **0.3.2-preview.6**. Android shows the previous version name, but the build number has increased.
+The signed APK in **v0.3.2-ui.2** has versionCode **30209** and versionName **0.3.2-preview.7**.
 
 1. Install the APK. Open **+ Add profile** to import a file, paste a configuration/`tt://`/`hy2://` link, or import a QR code using the camera or an image.
 2. Choose the default profile and use the bottom connect button. Accept Android VPN consent; no separate host service is needed.
@@ -129,7 +131,7 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-The UI refresh passed **macOS Jenkins #69** and **Linux Jenkins #20**, including Gitleaks/Trivy, unit, build, smoke and network E2E. After the installed macOS upgrade, GUI/service access passed and the encrypted vault hash was unchanged. Native, WebView, Both, tray and updated host-service IPC passed on physical KDE Wayland. Huawei was upgraded to APK build 30208 with its profile, VPN connection and Always-on/lockdown retained; the UI change also passed Android build and lint. This is not a new full Android CI run: the latest full core pipeline is #26.
+The preceding v0.3.2-ui.1 UI refresh passed **macOS Jenkins #69** and **Linux Jenkins #20**, including Gitleaks/Trivy, unit, build, smoke and network E2E. After the installed macOS upgrade, GUI/service access passed and the encrypted vault hash was unchanged. Native, WebView, Both, tray and updated host-service IPC passed on physical KDE Wayland. Huawei was upgraded to APK build 30208 with its profile, VPN connection and Always-on/lockdown retained; the UI change also passed Android build and lint. This is not a new full Android CI run: the latest full core pipeline is #26.
 
 Windows was excluded; earlier system acceptance belongs to #53 and sequence 6. The boot/sleep/soak items above remain open. See [release contents and validation](docs/releases/v0.3.2-ui.1.md).
 
