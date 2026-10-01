@@ -76,7 +76,7 @@ public final class MainActivity extends Activity {
             JSONObject data = vault.read(); JSONArray profiles = data.getJSONArray("profiles");
             for (int i = 0; i < profiles.length(); i++) {
                 JSONObject item = profiles.getJSONObject(i), profile = item.getJSONObject("profile"); String id = item.getString("id");
-                String name = profile.optString("name"); if (name.isBlank()) name = "Profile " + (i + 1);
+                String name = profile.optString("name"); if (name.trim().isEmpty()) name = "Profile " + (i + 1);
                 rows.addView(button((id.equals(data.getString("default")) ? "★ " : "") + name, () -> profileActions(id)));
             }
             if (profiles.length() == 0) { TextView empty = new TextView(this); empty.setText("Import a profile to get started."); rows.addView(empty); }
