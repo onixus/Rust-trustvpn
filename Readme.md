@@ -4,7 +4,7 @@
 
 A native desktop VPN client written in Rust, compatible with TrustTunnel, with a server-panel extension for importing, exporting and synchronizing connection profiles. The client implements its own transport; it does not wrap the official CLI.
 
-**Status: development preview, October 1, 2026.** Windows, Linux and macOS have working system-tunnel implementations. Packaging and platform acceptance are still in progress. Android and the optional WebView interface are planned, not implemented.
+**Status: development preview, October 1, 2026.** Windows, Linux and macOS have working system-tunnel implementations. Packaging and platform acceptance are still in progress. Android now has a native VpnService preview with a shared Rust core; the optional WebView interface remains planned.
 
 ## Features
 
@@ -25,7 +25,7 @@ HTTP/3 for **system VPN** is deferred to [wave 3](docs/technical-debt.md). An im
 | Windows x64 | Native `.exe`, Setup installer, Wintun/SCM service and WFP guard. Real system-tunnel, service-crash, reconnect, upgrade and rollback checks have passed. | Cold boot and sleep/wake acceptance; delivery of the latest shared UDP recovery fix to the installed release. |
 | Linux ARM64 / x86_64 | Wayland native UI, TUN service, nftables and systemd-resolved. Native x86_64 CI and physical Plasma/Wayland, tray, KWallet and portals passed. Arch host-package lifecycle and signed Flatpak update/rollback tested. ARM64 retains its earlier container coverage. | Physical reboot/sleep and final GUI installer acceptance. A signed HTTPS candidate repository has passed anonymous installation. |
 | macOS Apple Silicon | Native app and root LaunchDaemon using `utun`. Installed system candidate passed live IPv4/IPv6, DNS, reconnect, GUI/service-crash and recovery tests. PKG inside an unsigned DMG. | Boot always-on, sleep/network handoff, clean installation on another Mac and automatic update/rollback. No Developer ID or notarization. |
-| Android | Architecture planned around the shared Rust core and Android VpnService. | Client implementation and device acceptance. |
+| Android arm64 / x86_64 | Native APK, Rust/JNI VpnService, encrypted Keystore profiles, file/tt import/export. API 36 emulator passed IPv4/IPv6, DNS, reconnect and Activity lifecycle. | Physical devices, network handoff/Doze, portal sync, QR, localization and always-on. See [Android preview](docs/android.md). |
 
 Only the native interface is available. Choosing Native/WebView/Both during installation remains planned. Linux X11 support is out of scope.
 
@@ -52,6 +52,7 @@ Packaging entry points:
 
 - **Windows:** `python ci/package_windows.py`; produces `dist/R-TrustTunnel-Windows-x64-Setup.exe`. Follow [Windows service prerequisites](docs/windows-service.md), including the pinned Wintun dependency. Windows 10 2004+ x64 is required.
 - **macOS:** `python3 scripts/package-macos-system.py`; produces a system-service PKG and `dist/R-TrustTunnel-macOS-arm64-system-candidate.dmg`. Installation needs administrator authorization. See [macOS system VPN](docs/macos-system.md).
+- **Android:** `python3 scripts/build-android.py`; builds native APKs with SDK 36 / NDK 28.2. Release signing is separate. See [Android build and limitations](docs/android.md).
 - **Linux:** `python3 scripts/package-flatpak.py` on Linux with Flatpak builder 1.4.4+ and the Freedesktop 25.08 SDK/runtime. Cross-built binaries can be supplied with `--arch x86_64 --binary-dir PATH`. See [Linux service and Flatpak status](docs/linux-service.md).
 
 Generated installers, Flatpak bundles and local test reports are excluded from Git. These paths describe build outputs, not published download links. Flatpak contains the unprivileged GUI; it does not install the host VPN service or receive arbitrary host-command access.

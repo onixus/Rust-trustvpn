@@ -26,3 +26,6 @@ rcgen = "0.14"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+webpki-roots = "1"

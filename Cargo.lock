@@ -3394,6 +3394,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
+name = "rtrust-android"
+version = "0.3.2"
+dependencies = [
+ "jni",
+ "libc",
+ "rtrust-engine",
+ "rtrust-profile",
+ "rtrust-tun",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tun-rs",
+ "zeroize",
+]
+
+[[package]]
 name = "rtrust-codec"
 version = "0.3.2"
 dependencies = [
@@ -3438,6 +3454,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+ "webpki-roots",
  "zeroize",
 ]
 

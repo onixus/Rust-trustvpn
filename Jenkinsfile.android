@@ -1,0 +1,35 @@
+// Android preview on the Linux/KVM node; no host VPN or route changes.
+pipeline {
+  agent none
+  options { disableConcurrentBuilds(); timestamps(); timeout(time: 90, unit: 'MINUTES'); buildDiscarder(logRotator(numToKeepStr: '15')) }
+  parameters { string(name: 'ANDROID_EMULATOR', defaultValue: 'emulator-5580', description: 'Already provisioned isolated Android emulator') }
+  stages {
+    stage('Source snapshot') {
+      agent { label 'built-in' }
+      steps {
+        deleteDir()
+        sh 'python3 /Users/onixus/Git/R-Trusttunnel/ci/snapshot.py .'
+        stash name: 'source', includes: '**', useDefaultExcludes: false
+        archiveArtifacts artifacts: 'source-manifest.json', fingerprint: true
+      }
+    }
+    stage('Gitleaks + Trivy') {
+      agent { label 'built-in' }
+      steps { sh 'RTRUST_TOOL_CACHE="$JENKINS_HOME/caches/rtrust-native-tools" python3 ci/run.py security python3 ci/security.py' }
+      post { always { junit 'reports/security.xml'; archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true } }
+    }
+    stage('Android JNI, APK, lint and emulator smoke') {
+      agent { label 'gaming-amd64' }
+      steps {
+        deleteDir()
+        unstash 'source'
+        sh '''export JAVA_HOME="$HOME/.jenkins-agent/jdk"
+          export ANDROID_HOME="$HOME/Android/Sdk"
+          export GRADLE="$HOME/rtrust-validation/gradle-8.13/bin/gradle"
+          python3 ci/run.py android python3 ci/android.py --serial "${ANDROID_EMULATOR:-emulator-5580}"
+        '''
+      }
+      post { always { junit allowEmptyResults: true, testResults: 'reports/android.xml'; archiveArtifacts artifacts: 'reports/android*,dist/android/*,apps/android/app/build/reports/lint-results-*', allowEmptyArchive: true, fingerprint: true } }
+    }
+  }
+}

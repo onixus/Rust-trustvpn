@@ -248,3 +248,86 @@ async fn socks_port_conflict_and_auth_failure_do_not_leave_listener() {
         .unwrap();
     server.abort();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn protected_transport_invokes_hook_before_connect_and_fails_closed() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (mut profile, server) = endpoint().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let protect: rtrust_engine::SocketProtector = Arc::new(move |fd| {
+        use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd};
+        // Inspect a duplicate, never close the descriptor owned by the engine.
+        let copy = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?;
+        let socket = unsafe { std::net::TcpStream::from_raw_fd(copy.into_raw_fd()) };
+        assert!(socket.peer_addr().is_err(), "protect ran after connect");
+        count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    });
+    let session = Session::connect_protected(&profile, &protect)
+        .await
+        .unwrap();
+    session.health().await.unwrap();
+    drop(session);
+    let session = Session::connect_protected(&profile, &protect)
+        .await
+        .unwrap();
+    session.health().await.unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "reconnect must protect a fresh socket"
+    );
+    drop(session);
+    let refused_calls = Arc::new(AtomicUsize::new(0));
+    let count = refused_calls.clone();
+    let denied: rtrust_engine::SocketProtector = Arc::new(move |_| {
+        count.fetch_add(1, Ordering::SeqCst);
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    });
+    profile
+        .endpoint
+        .addresses
+        .push(profile.endpoint.addresses[0].clone());
+    assert!(matches!(
+        Session::connect_protected(&profile, &denied).await,
+        Err(Error::ConnectIo(std::io::ErrorKind::PermissionDenied))
+    ));
+    assert_eq!(refused_calls.load(Ordering::SeqCst), 2);
+    profile.endpoint.addresses = vec!["localhost:443".into()];
+    assert!(matches!(
+        Session::connect_protected(&profile, &protect).await,
+        Err(Error::Unsupported(_))
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "must reject unprotected DNS resolution"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn interrupted_tls_handshake_is_retryable_but_certificate_failures_are_not() {
+    let (mut profile, original) = endpoint().await;
+    original.abort();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    profile.endpoint.addresses = vec![listener.local_addr().unwrap().to_string()];
+    let interrupted = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut hello = [0; 4096];
+        let _ = stream.read(&mut hello).await;
+        // A restarting endpoint closes an otherwise valid socket before TLS completes.
+    });
+    let result = Session::connect(&profile).await;
+    assert!(
+        matches!(result, Err(Error::ConnectIo(_))),
+        "Interrupted TLS must remain retryable"
+    );
+    interrupted.await.unwrap();
+    let (mut profile, endpoint) = endpoint().await;
+    profile.endpoint.hostname = "wrong.example".into();
+    assert!(matches!(Session::connect(&profile).await, Err(Error::Tls)));
+    endpoint.abort();
+}

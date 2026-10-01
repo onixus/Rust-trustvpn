@@ -134,3 +134,15 @@ Windows CI должен включать VM с реальным Wintun/WFP и re
 ## Третья волна
 
 [Технический долг волны 3](technical-debt.md): HTTP/3 для системного VPN (Windows Wintun и Linux TUN).
+
+## Android native preview implementation (2026-10-01)
+
+The first Android APK now uses native Android widgets with the shared Rust core,
+JNI protected sockets, Android VpnService and an encrypted Keystore-backed vault.
+An API 36 x86_64 emulator has passed real IPv4/IPv6 TCP/UDP/DNS, endpoint outage,
+reconnect, Activity closure and Stop. The outage test also exposed and fixed a
+shared TLS classification bug: handshake EOF/reset must remain retryable, while
+invalid certificates must not. A regression test failed before the fix and passes
+after it. The separate Android Jenkins job adds security, packaging, storage and
+APK upgrade checks. This is a preview, not physical-device or stable-release
+acceptance. See [android.md](android.md) for exact limits and remaining work.

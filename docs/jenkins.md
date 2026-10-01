@@ -226,3 +226,18 @@ and `ci/linux_system_e2e.py` are separate, explicitly invasive acceptance tools;
 they must not run as ordinary CI. The host-network driver requires a separate
 systemd restore timer and restores the original VPNs in its cleanup path.
 See [Linux acceptance](linux-acceptance.md) for evidence and remaining checks.
+
+## Android on the Linux agent
+
+`Jenkinsfile.android` defines the separate `rtrust-android` job. It runs security
+checks on the controller and `ci/android.py` on the Linux/KVM node. Provision
+SDK 36, build-tools 36.0.0, NDK 28.2.13676358, JDK 17+, Gradle 8.13 and the
+API 36 Google APIs x86_64 emulator. The configured emulator serial must belong
+to an isolated test device: the tests replace the app installation.
+
+The job checks Rust/JNI, both ABIs, Android lint, Keystore/tamper smoke, real
+TrustTunnel IPv4/IPv6/DNS/reconnect/Activity lifecycle, and reinstall/version
+upgrade. The fixture binds only host loopback, runs as the source-file owner
+without capabilities and cleans up its own Docker network. No host VPN switch
+is required. Release APKs leave CI unsigned; the persistent release key stays
+outside Jenkins. See [Android details](android.md).

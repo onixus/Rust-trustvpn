@@ -4,7 +4,7 @@
 
 Нативный VPN-клиент на Rust, совместимый с TrustTunnel, и расширение серверной панели для импорта, экспорта и синхронизации профилей подключения. Клиент реализует собственный транспорт и не является оболочкой над официальным CLI.
 
-**Статус: development preview, 1 октября 2026 года.** Системный туннель реализован для Windows, Linux и macOS. Подготовка пакетов и приёмка платформ продолжаются. Android и дополнительный WebView-интерфейс запланированы, но не реализованы.
+**Статус: development preview, 1 октября 2026 года.** Системный туннель реализован для Windows, Linux и macOS. Подготовка пакетов и приёмка платформ продолжаются. Для Android реализован нативный VpnService preview с общим Rust-ядром; дополнительный WebView-интерфейс остаётся в планах.
 
 ## Возможности
 
@@ -25,7 +25,7 @@ HTTP/3 для **системного VPN** отложен до [третьей �
 | Windows x64 | Нативный `.exe`, Setup, служба Wintun/SCM и защита WFP. Пройдены реальные проверки системного туннеля, аварии службы, переподключения, обновления и отката. | Приёмка холодной загрузки и сна; доставка последнего общего исправления восстановления UDP в установленную версию. |
 | Linux ARM64 / x86_64 | Нативный Wayland UI, TUN-служба, nftables и systemd-resolved. Пройдены нативный x86_64 CI и физическая Plasma/Wayland, трей, KWallet и порталы. Проверены lifecycle Arch host-пакета и подписанное обновление/откат Flatpak. Для ARM64 сохраняется прежнее контейнерное покрытие. | Физические reboot/sleep и окончательная приёмка GUI-установщика. Подписанный HTTPS candidate-репозиторий прошёл анонимную установку. |
 | macOS Apple Silicon | Нативное приложение и root LaunchDaemon с `utun`. Установленный системный кандидат прошёл реальные IPv4/IPv6, DNS, reconnect, аварии GUI/службы и восстановление сети. PKG внутри неподписанного DMG. | Boot always-on, сон/смена сети, чистая установка на другом Mac и автообновление/откат. Developer ID и notarization отсутствуют. |
-| Android | Спроектировано использование общего Rust-ядра и Android VpnService. | Реализация клиента и приёмка на устройстве. |
+| Android arm64 / x86_64 | Нативный APK, Rust/JNI VpnService, шифрованные профили в Keystore, импорт/экспорт файлов и tt. Эмулятор API 36 прошёл IPv4/IPv6, DNS, reconnect и lifecycle Activity. | Физические устройства, смена сетей/Doze, portal sync, QR, локализация и always-on. [Подробности](docs/android.md). |
 
 Доступен только нативный интерфейс. Выбор Native/WebView/Both при установке остаётся в планах. Поддержка X11 в Linux не предусматривается.
 
@@ -52,6 +52,7 @@ cargo build --release -p rtrust-native -p rtrust-tun -p rtrust-inspect --locked
 
 - **Windows:** `python ci/package_windows.py`; результат — `dist/R-TrustTunnel-Windows-x64-Setup.exe`. Подготовка окружения, включая Wintun с фиксированным хешем, описана в [документации Windows-службы](docs/windows-service.md). Нужна Windows 10 2004+ x64.
 - **macOS:** `python3 scripts/package-macos-system.py`; создаёт PKG системной службы и `dist/R-TrustTunnel-macOS-arm64-system-candidate.dmg`. Установка требует прав администратора. Подробнее: [macOS system VPN](docs/macos-system.md).
+- **Android:** `python3 scripts/build-android.py`; сборка нативных APK с SDK 36 / NDK 28.2. Release-подпись выполняется отдельно. [Сборка и ограничения](docs/android.md).
 - **Linux:** `python3 scripts/package-flatpak.py` на Linux с Flatpak builder 1.4.4+ и Freedesktop SDK/runtime 25.08. Для cross-сборки можно указать `--arch x86_64 --binary-dir PATH`. Подробнее: [Linux-служба и Flatpak](docs/linux-service.md).
 
 Установщики, Flatpak-пакеты и локальные отчёты исключены из Git. Указанные пути — результаты сборки, а не ссылки на опубликованные загрузки. Flatpak содержит непривилегированный GUI: он не устанавливает VPN-службу на хост и не получает произвольного выполнения команд хоста.

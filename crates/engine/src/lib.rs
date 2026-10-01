@@ -20,6 +20,9 @@ use tokio::{
 use zeroize::Zeroizing;
 
 pub type Result<T> = std::result::Result<T, Error>;
+/// Protect/bind a transport socket before its first packet (Android VpnService).
+/// Failure is terminal for that attempt: no unprotected fallback is allowed.
+pub type SocketProtector = Arc<dyn Fn(i32) -> std::io::Result<()> + Send + Sync>;
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum Error {
     #[error("Local SOCKS port is unavailable; choose another port")]
@@ -112,7 +115,30 @@ impl Session {
         }
         let session = tokio::time::timeout(
             Duration::from_secs(20),
-            H2Session::connect_inner(p, Some(mark)),
+            H2Session::connect_inner(p, Some(mark), None),
+        )
+        .await
+        .map_err(|_| Error::Timeout)??;
+        Ok(Self(Transport::H2(session)))
+    }
+    #[cfg(unix)]
+    pub async fn connect_protected(p: &Profile, protector: &SocketProtector) -> Result<Self> {
+        check_capabilities(p)?;
+        if p.endpoint.upstream_protocol != "http2" {
+            return Err(Error::Unsupported("protected transport requires HTTP/2"));
+        }
+        if p.endpoint
+            .addresses
+            .iter()
+            .any(|address| address.parse::<std::net::SocketAddr>().is_err())
+        {
+            return Err(Error::Unsupported(
+                "resolve endpoint on the underlying network before VPN setup",
+            ));
+        }
+        let session = tokio::time::timeout(
+            Duration::from_secs(20),
+            H2Session::connect_inner(p, None, Some(protector)),
         )
         .await
         .map_err(|_| Error::Timeout)??;
@@ -159,11 +185,15 @@ pub struct H2Session(Arc<Inner>);
 impl H2Session {
     pub async fn connect(p: &Profile) -> Result<Self> {
         check_capabilities(p)?;
-        tokio::time::timeout(Duration::from_secs(20), Self::connect_inner(p, None))
+        tokio::time::timeout(Duration::from_secs(20), Self::connect_inner(p, None, None))
             .await
             .map_err(|_| Error::Timeout)?
     }
-    async fn connect_inner(p: &Profile, mark: Option<u32>) -> Result<Self> {
+    async fn connect_inner(
+        p: &Profile,
+        mark: Option<u32>,
+        protector: Option<&SocketProtector>,
+    ) -> Result<Self> {
         let mut config = tls_config(p)?;
         config.alpn_protocols = vec![b"h2".to_vec()];
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
@@ -173,7 +203,12 @@ impl H2Session {
         let mut failure = Error::Connect;
         for address in &p.endpoint.addresses {
             // A failed address must not consume the entire global timeout.
-            match tokio::time::timeout(Duration::from_secs(4), connect_tcp(address, mark)).await {
+            match tokio::time::timeout(
+                Duration::from_secs(4),
+                connect_tcp(address, mark, protector),
+            )
+            .await
+            {
                 Ok(Ok(tcp)) => {
                     connected = Some(tcp);
                     break;
@@ -184,7 +219,18 @@ impl H2Session {
         }
         let tcp = connected.ok_or(failure)?;
         tcp.set_nodelay(true)?;
-        let tls = connector.connect(name, tcp).await.map_err(|_| Error::Tls)?;
+        let tls = connector.connect(name, tcp).await.map_err(|error| {
+            // EOF/reset while an endpoint restarts is a transport failure, not
+            // evidence of an invalid certificate. Never log the error payload.
+            if error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<rustls::Error>())
+            {
+                Error::Tls
+            } else {
+                Error::ConnectIo(error.kind())
+            }
+        })?;
         if tls.get_ref().1.alpn_protocol() != Some(b"h2".as_slice()) {
             return Err(Error::Protocol);
         }
@@ -380,7 +426,11 @@ pub async fn probe_http(p: &Profile, destination: &str) -> Result<String> {
 fn tls_config(p: &Profile) -> Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     if p.endpoint.certificate.is_empty() {
+        #[cfg(target_os = "android")]
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        #[cfg(not(target_os = "android"))]
         let native = rustls_native_certs::load_native_certs();
+        #[cfg(not(target_os = "android"))]
         for cert in native.certs {
             let _ = roots.add(cert);
         }
@@ -404,9 +454,13 @@ fn tls_config(p: &Profile) -> Result<rustls::ClientConfig> {
     Ok(config)
 }
 
-async fn connect_tcp(address: &str, mark: Option<u32>) -> std::io::Result<TcpStream> {
-    #[cfg(target_os = "linux")]
-    if let Some(mark) = mark {
+async fn connect_tcp(
+    address: &str,
+    mark: Option<u32>,
+    protector: Option<&SocketProtector>,
+) -> std::io::Result<TcpStream> {
+    #[cfg(unix)]
+    if mark.is_some() || protector.is_some() {
         use std::os::fd::AsRawFd;
         let address: std::net::SocketAddr = address
             .parse()
@@ -416,22 +470,28 @@ async fn connect_tcp(address: &str, mark: Option<u32>) -> std::io::Result<TcpStr
         } else {
             tokio::net::TcpSocket::new_v6()?
         };
-        // Set before connect: even SYN packets must bypass the full-tunnel policy.
-        let result = unsafe {
-            libc::setsockopt(
-                socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_MARK,
-                (&mark as *const u32).cast(),
-                std::mem::size_of_val(&mark) as libc::socklen_t,
-            )
-        };
-        if result != 0 {
-            return Err(std::io::Error::last_os_error());
+        #[cfg(target_os = "linux")]
+        if let Some(mark) = mark {
+            // Set before connect: even SYN packets must bypass the full-tunnel policy.
+            let result = unsafe {
+                libc::setsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_MARK,
+                    (&mark as *const u32).cast(),
+                    std::mem::size_of_val(&mark) as libc::socklen_t,
+                )
+            };
+            if result != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        if let Some(protect) = protector {
+            protect(socket.as_raw_fd())?;
         }
         return socket.connect(address).await;
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = mark;
+    let _ = (mark, protector);
     TcpStream::connect(address).await
 }

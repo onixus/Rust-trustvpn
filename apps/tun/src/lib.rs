@@ -14,8 +14,15 @@ pub mod linux;
 #[cfg(target_os = "linux")]
 pub mod service;
 
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "android"
+))]
 mod dataplane;
+#[cfg(target_os = "android")]
+pub use dataplane::run as run_android;
 #[cfg(target_os = "windows")]
 pub mod windows;
 

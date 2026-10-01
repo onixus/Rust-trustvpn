@@ -24,3 +24,10 @@ __pycache__/
 *.key
 *.p12
 *.pfx
+
+/apps/android/.gradle/
+/apps/android/local.properties
+/apps/android/**/build/
+/apps/android/app/src/main/jniLibs/
+
+/.ci-android/

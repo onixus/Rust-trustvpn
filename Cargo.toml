@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/profile", "crates/update", "crates/portal", "crates/engine", "crates/store", "crates/control", "apps/native", "apps/inspect", "apps/tun", "apps/codec"]
+members = ["crates/profile", "crates/update", "crates/portal", "crates/engine", "crates/store", "crates/control", "apps/native", "apps/inspect", "apps/tun", "apps/codec", "apps/android/core"]
 exclude = ["vendor/h2"]
 
 [patch.crates-io]
