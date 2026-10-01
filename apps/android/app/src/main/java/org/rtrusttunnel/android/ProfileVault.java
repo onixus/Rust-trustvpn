@@ -63,6 +63,9 @@ final class ProfileVault {
             file.finishWrite(out); out = null;
         } finally { if (out != null) file.failWrite(out); Arrays.fill(plain, (byte) 0); }
     }
+    void saveAppRouting(AppRouting routing) throws Exception { synchronized (LOCK) {
+        JSONObject data = readUnlocked(); data.put("app_routing", routing.json()); writeUnlocked(data);
+    } }
     JSONObject selected() throws Exception {
         JSONObject data = read(); JSONArray profiles = data.getJSONArray("profiles");
         for (int i = 0; i < profiles.length(); i++) {

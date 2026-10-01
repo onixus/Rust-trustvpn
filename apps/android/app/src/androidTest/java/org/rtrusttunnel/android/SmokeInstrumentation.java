@@ -20,15 +20,20 @@ public final class SmokeInstrumentation extends Instrumentation {
                 if (upgrade.equals("seed")) {
                     JSONObject profile = new JSONObject(NativeCore.INSTANCE.parse("hostname='upgrade.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='upgrade-synthetic-canary'\n")).getJSONObject("profile");
                     data.put("test_previous_default", data.getString("default"));
+                    data.put("test_previous_routing", data.opt("app_routing"));
+                    data.put("app_routing", new AppRouting(true, java.util.Collections.singletonList(getTargetContext().getPackageName())).json());
                     data.getJSONArray("profiles").put(new JSONObject().put("id", "upgrade-test").put("profile", profile));
                     data.put("default", "upgrade-test"); vault.write(data);
                 } else {
                     check(data.getString("default").equals("upgrade-test"), "Default survives upgrade");
+                    check(AppRouting.read(data).selectedOnly && AppRouting.read(data).packages.contains(getTargetContext().getPackageName()), "App routing survives upgrade");
                     check(vault.selected().getJSONObject("endpoint").getString("password").equals("upgrade-synthetic-canary"), "Keystore survives upgrade");
                     if (upgrade.equals("finish")) {
                         JSONArray old = data.getJSONArray("profiles"), kept = new JSONArray();
                         for (int i = 0; i < old.length(); i++) if (!old.getJSONObject(i).getString("id").equals("upgrade-test")) kept.put(old.get(i));
-                        data.put("profiles", kept).put("default", data.getString("test_previous_default")); data.remove("test_previous_default"); vault.write(data);
+                        data.put("profiles", kept).put("default", data.getString("test_previous_default")); data.remove("test_previous_default");
+                        if (data.has("test_previous_routing")) data.put("app_routing", data.get("test_previous_routing")); else data.remove("app_routing");
+                        data.remove("test_previous_routing"); vault.write(data);
                     }
                 }
                 result.putString("stream", "PASS: upgrade " + upgrade + "\n"); finish(-1, result); return;
@@ -38,6 +43,7 @@ public final class SmokeInstrumentation extends Instrumentation {
                 result.putString("stream", "PASS: VPN IPv4/IPv6 TCP512KiB, UDP1/1472/5000/60000, system DNS, outage guard, reconnect, Activity close, Stop\n");
                 finish(-1, result); return;
             }
+            AppRoutingAcceptance.smoke(this);
             String secret = "android-test-synthetic-password";
             String raw = "hostname='test.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='" + secret + "'\n";
             JSONObject parsed = new JSONObject(NativeCore.INSTANCE.parse(raw));

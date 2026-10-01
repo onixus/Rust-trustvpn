@@ -43,6 +43,10 @@ final class NetworkAcceptance {
             }
         }
     }
+    static void verifyTraffic(JSONObject fixture) throws Exception {
+        tcp(fixture.getString("target")); tcp(fixture.getString("target6"));
+        udp(fixture.getString("target")); udp(fixture.getString("target6"));
+    }
     static void run(Instrumentation test) throws Exception {
         Context context = test.getTargetContext();
         File source = new File(context.getCacheDir(), "vpn-fixture.json");
@@ -76,6 +80,8 @@ final class NetworkAcceptance {
             long end = SystemClock.elapsedRealtime() + 5000;
             while (TunnelService.active && SystemClock.elapsedRealtime() < end) Thread.sleep(50);
             check(!TunnelService.active, "Service and TUN stopped");
+            Thread.sleep(300);
+            AppRoutingAcceptance.uidRouting(test, fixture);
         } finally {
             if (TunnelService.active) { context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP)); await(0, 10000); }
             if (activity != null) { Activity finished = activity; test.runOnMainSync(finished::finish); }

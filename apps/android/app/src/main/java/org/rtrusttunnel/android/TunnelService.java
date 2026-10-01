@@ -81,6 +81,7 @@ public final class TunnelService extends VpnService {
             .addAddress("169.254.254.2", 32).addAddress("fd00:5254::2", 128)
             .addRoute("0.0.0.0", 0).addRoute("::", 0).setBlocking(false)
             .setUnderlyingNetworks(new Network[]{underlying});
+        AppRouting.read(new ProfileVault(this).read()).apply(builder, getPackageManager());
         // The engine rejects unsupported policy/DNS options; do not silently bypass them.
         JSONArray dns = endpoint.optJSONArray("dns_upstreams");
         if (dns == null || dns.length() == 0) builder.addDnsServer("1.1.1.1");

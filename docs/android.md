@@ -8,6 +8,14 @@ The current runtime acceptance environment is Android 16/API 36 x86_64.
 
 ## Implemented
 
+- A bottom-anchored Connect/Disconnect button: gray when off, green when connected,
+  amber while connecting/reconnecting and red on error. Status text remains visible.
+- Device-local app routing: all apps (default), or only selected installed apps,
+  with searchable selection stored in the encrypted vault. Unselected apps use
+  their normal network. Disconnect before editing the selection; reconnect to apply.
+  Empty or missing-app allowlists are rejected instead of silently routing all apps.
+  Android routes by UID, so apps sharing a UID follow the same rule. The app inventory
+  is used locally and is not included in profile exports.
 - Compact profile list, default-profile Connect/Disconnect, import preview for
   files/pasted text/`tt://`, export via the system document picker and deletion.
 - JSON, endpoint TOML, full CLI TOML and `tt://` use the Rust codec. Full CLI

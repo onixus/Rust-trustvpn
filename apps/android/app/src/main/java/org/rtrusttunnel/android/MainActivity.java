@@ -20,7 +20,8 @@ public final class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private LinearLayout rows;
     private TextView status;
-    private Button connect;
+    private Button connect, routing;
+    private int connectionColor;
     private String pendingExport;
     private ProfileVault vault;
     private final Runnable poll = new Runnable() {
@@ -32,7 +33,9 @@ public final class MainActivity extends Activity {
                 if (!status.getText().toString().equals(message)) status.setText(message);
                 String action = TunnelService.active ? "Disconnect" : "Connect default profile";
                 if (!connect.getText().toString().equals(action)) connect.setText(action);
+                paintConnection(connectionColor(TunnelService.active, state.optInt("state", -1), !TunnelService.problem.isEmpty()));
             } catch (Exception ignored) {
+                paintConnection(Color.rgb(166, 53, 58));
                 if (!status.getText().toString().equals("VPN status unavailable")) status.setText("VPN status unavailable");
             }
             handler.postDelayed(this, 500);
@@ -48,22 +51,36 @@ public final class MainActivity extends Activity {
             view.setPadding(dp(16) + bars.left, dp(12) + bars.top, dp(16) + bars.right, dp(12) + bars.bottom); return insets;
         });
         TextView title = new TextView(this); title.setText("R-TrustTunnel"); title.setTextSize(23); title.setTypeface(null, Typeface.BOLD); root.addView(title);
-        connect = button("Connect default profile", () -> toggle()); root.addView(connect, new LinearLayout.LayoutParams(-1, dp(60)));
-        status = new TextView(this); status.setTextSize(14); status.setPadding(0, dp(8), 0, dp(8)); root.addView(status);
         root.addView(button("Import file", () -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE), PICK)));
         root.addView(button("Paste config or tt:// link", () -> paste()));
+        routing = button("VPN apps", () -> {
+            try { AppRoutingDialog.show(this, vault, this::reload); }
+            catch (Exception error) { error("App selection could not be opened. Existing settings are preserved."); }
+        }); root.addView(routing);
         ScrollView scroll = new ScrollView(this); rows = new LinearLayout(this); rows.setOrientation(LinearLayout.VERTICAL); scroll.addView(rows); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         TextView note = new TextView(this); note.setText("System VPN uses HTTP/2. HTTP/3 remains saved in your profile. Traffic is blocked during reconnection; protection ends when you disconnect."); note.setTextSize(12); root.addView(note);
+        status = new TextView(this); status.setTextSize(14); status.setPadding(0, dp(8), 0, dp(8)); root.addView(status);
+        connect = button("Connect default profile", () -> toggle()); root.addView(connect, new LinearLayout.LayoutParams(-1, dp(60)));
         setContentView(root); reload(); incoming(getIntent());
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 20);
     }
     private int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
     private Button button(String text, Runnable click) {
-        Button button = new Button(this); button.setText(text); button.setAllCaps(false); button.setGravity(Gravity.CENTER); button.setTypeface(null, Typeface.BOLD);
+        Button button = new Button(this); button.setText(text); button.setAllCaps(false); button.setGravity(Gravity.CENTER); button.setTypeface(null, Typeface.BOLD); button.setTextColor(Color.WHITE); button.setBackgroundTintList(null);
         GradientDrawable bg = new GradientDrawable(); bg.setColor(Color.rgb(68, 83, 102)); bg.setCornerRadius(dp(7)); button.setBackground(bg);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(44)); params.setMargins(0, dp(4), 0, dp(4)); button.setLayoutParams(params);
         button.setOnClickListener(v -> click.run()); return button;
+    }
+    static int connectionColor(boolean active, int state, boolean problem) {
+        if (problem || state == 4 || state < 0 || state > 4) return Color.rgb(166, 53, 58);
+        if (!active) return Color.rgb(68, 83, 102);
+        return state == 2 ? Color.rgb(36, 112, 68) : Color.rgb(138, 89, 0);
+    }
+    private void paintConnection(int color) {
+        if (connectionColor == color) return;
+        connectionColor = color;
+        GradientDrawable background = new GradientDrawable(); background.setColor(color); background.setCornerRadius(dp(7)); connect.setBackground(background);
     }
     @Override public void onResume() { super.onResume(); handler.post(poll); }
     @Override public void onPause() { handler.removeCallbacks(poll); super.onPause(); }
@@ -78,6 +95,7 @@ public final class MainActivity extends Activity {
         rows.removeAllViews();
         try {
             JSONObject data = vault.read(); JSONArray profiles = data.getJSONArray("profiles");
+            routing.setText(AppRouting.read(data).summary());
             for (int i = 0; i < profiles.length(); i++) {
                 JSONObject item = profiles.getJSONObject(i), profile = item.getJSONObject("profile"); String id = item.getString("id");
                 String name = profile.optString("name"); if (name.trim().isEmpty()) name = "Profile " + (i + 1);
@@ -153,6 +171,8 @@ public final class MainActivity extends Activity {
                 error("Desktop routing policy is not supported on Android yet. Export this profile as Endpoint TOML and import it to explicitly use full-tunnel routing."); return;
             }
         } catch (Exception e) { error("Import and select a default profile first."); return; }
+        try { AppRouting.read(vault.read()).validateInstalled(getPackageManager()); }
+        catch (Exception error) { error("Check VPN apps: select at least one installed app, or choose All apps."); return; }
         Intent consent = VpnService.prepare(this);
         if (consent != null) startActivityForResult(consent, CONSENT); else startForegroundService(new Intent(this, TunnelService.class));
     }
