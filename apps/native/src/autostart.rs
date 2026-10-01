@@ -252,7 +252,10 @@ mod tests {
         let output = dir.path().join("argv.txt");
         std::fs::write(
             &executable,
-            format!("#!/bin/sh\nprintf '%s' \"$1\" > '{}'\n", output.display()),
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$1\" > '{0}.tmp'\nmv '{0}.tmp' '{0}'\n",
+                output.display()
+            ),
         )
         .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
