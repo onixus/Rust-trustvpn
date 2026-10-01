@@ -38,4 +38,12 @@ for manager in NetworkManager systemd-networkd; do
 done
 systemctl daemon-reload
 systemctl enable --now "rtrust-service@$uid.service"
-systemctl is-active --quiet "rtrust-service@$uid.service"
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if systemctl is-active --quiet "rtrust-service@$uid.service" &&
+        busctl --system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetNameOwner s org.rtrusttunnel.Service >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 1
+done
+echo 'The service did not publish its authenticated IPC broker.' >&2
+exit 1

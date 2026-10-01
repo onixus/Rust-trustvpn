@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::Write,
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     os::unix::fs::{MetadataExt, PermissionsExt},
 };
 const JOURNAL: &str = "/run/rtrust/full.json";
@@ -17,6 +17,8 @@ struct Journal {
     version: u32,
     uid: u32,
     dns: Ipv4Addr,
+    #[serde(default)]
+    endpoints: Vec<IpAddr>,
 }
 pub struct FullRoutes {
     journal: Journal,
@@ -97,11 +99,26 @@ impl FullRoutes {
             .map_err(|_| "Полный туннель требует работающий systemd-resolved и resolvectl")?;
         Ok(())
     }
-    pub fn install(uid: u32, dns: Ipv4Addr) -> Result<Self, String> {
+    pub fn install(uid: u32, dns: Ipv4Addr, addresses: &[String]) -> Result<Self, String> {
+        let mut endpoints = addresses
+            .iter()
+            .map(|address| {
+                address
+                    .parse::<SocketAddr>()
+                    .map(|a| a.ip())
+                    .map_err(|_| "Numeric endpoint required")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        endpoints.sort();
+        endpoints.dedup();
+        if endpoints.is_empty() || endpoints.len() > 64 {
+            return Err("Invalid endpoint addresses".into());
+        }
         let journal = Journal {
-            version: 2,
+            version: 3,
             uid,
             dns,
+            endpoints,
         };
         let mut file = tempfile::NamedTempFile::new_in("/run/rtrust")
             .map_err(|_| "Cannot create full-tunnel journal")?;
@@ -125,6 +142,23 @@ impl FullRoutes {
         };
         // Atomic firewall transaction precedes every DNS/routing mutation.
         nft(&guard_script())?;
+        // Reverse-path validation must find the endpoint through the physical
+        // route even when TUN is gone. This route alone grants no direct access:
+        // nftables still admits only the marked service transport on that link.
+        // Main-table lookup follows physical gateway changes without stale routes.
+        for endpoint in &guard.journal.endpoints {
+            ip(&[
+                family(*endpoint),
+                "rule",
+                "add",
+                "priority",
+                "10528",
+                "to",
+                &endpoint.to_string(),
+                "lookup",
+                "main",
+            ])?;
+        }
         for family in ["-4", "-6"] {
             ip(&[
                 family, "rule", "add", "priority", "10529", "fwmark", "0x5254", "lookup", "main",
@@ -192,10 +226,13 @@ impl FullRoutes {
             .map_err(|_| "Cannot read journal")?;
         let journal: Journal =
             serde_json::from_slice(&bytes).map_err(|_| "Invalid full-tunnel journal")?;
-        if !matches!(journal.version, 1 | 2) || journal.uid != uid {
+        if !matches!(journal.version, 1..=3) || journal.uid != uid {
             return Err("Recovery journal owner mismatch".into());
         }
         rtrust_control::validate_dns(journal.dns)?;
+        if (journal.version == 3 && journal.endpoints.is_empty()) || journal.endpoints.len() > 64 {
+            return Err("Invalid endpoint route journal".into());
+        }
         Self {
             journal,
             active: true,
@@ -206,6 +243,19 @@ impl FullRoutes {
     pub fn release(&mut self) -> Result<(), String> {
         if std::path::Path::new("/sys/class/net").join(DEVICE).exists() {
             command("/usr/bin/resolvectl", &["revert", DEVICE])?;
+        }
+        for endpoint in &self.journal.endpoints {
+            let _ = ip(&[
+                family(*endpoint),
+                "rule",
+                "del",
+                "priority",
+                "10528",
+                "to",
+                &endpoint.to_string(),
+                "lookup",
+                "main",
+            ]);
         }
         let families: &[&str] = if self.journal.version >= 2 {
             &["-4", "-6"]
@@ -223,7 +273,7 @@ impl FullRoutes {
             if rules.iter().any(|r| {
                 r["table"].as_u64() == Some(51830)
                     || r["table"].as_str() == Some(TABLE)
-                    || r["priority"].as_u64() == Some(10529)
+                    || matches!(r["priority"].as_u64(), Some(10528 | 10529))
             }) {
                 return Err("Policy cleanup failed; firewall guard retained".into());
             }
@@ -255,6 +305,9 @@ impl FullRoutes {
         self.active = false;
         Ok(())
     }
+}
+fn family(address: IpAddr) -> &'static str {
+    if address.is_ipv4() { "-4" } else { "-6" }
 }
 impl Drop for FullRoutes {
     fn drop(&mut self) {

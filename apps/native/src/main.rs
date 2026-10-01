@@ -44,6 +44,29 @@ fn open_window() -> Task<Message> {
         .map(|_| Message::Tick)
 }
 fn main() -> iced::Result {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args == ["--ci-storage-smoke"] || args == ["--ci-storage-read"] {
+        let result = if args == ["--ci-storage-smoke"] {
+            rtrust_store::platform_probe::run()
+        } else {
+            rtrust_store::platform_probe::child()
+        };
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        println!("PASS isolated encrypted storage and OS keyring across processes");
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    if args == ["--ci-autostart-enable"] || args == ["--ci-autostart-disable"] {
+        if let Err(error) = flatpak_startup::request(args == ["--ci-autostart-enable"]) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        println!("PASS Background portal autostart response");
+        return Ok(());
+    }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if std::env::args_os()
         .skip(1)

@@ -1,0 +1,58 @@
+# Pacman lifecycle hooks. Refuse to replace a service that protects live traffic.
+_rtrust_idle() {
+    for marker in /run/rtrust/full.json /run/rtrust/lease.json /var/lib/rtrust/always-on.rtrust; do
+        if [ -e "$marker" ] || [ -L "$marker" ]; then
+            echo 'R-TrustTunnel: disable always-on, disconnect and recover VPN before changing this package.' >&2
+            return 1
+        fi
+    done
+}
+_rtrust_owner() {
+    [ -f /var/lib/rtrust/desktop-uid ] || return 0
+    owner=$(cat /var/lib/rtrust/desktop-uid) || return 1
+    case "$owner" in ''|*[!0-9]*|0) return 1;; esac
+    printf '%s' "$owner"
+}
+_rtrust_stop() {
+    _rtrust_idle || return 1
+    owner=$(_rtrust_owner) || return 1
+    [ -n "$owner" ] || return 0
+    systemctl stop "rtrust-service@$owner.service" || return 1
+    if ! _rtrust_idle; then
+        systemctl start "rtrust-service@$owner.service"
+        return 1
+    fi
+}
+_rtrust_reload() {
+    systemctl daemon-reload
+    busctl --system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig >/dev/null
+}
+pre_install() { _rtrust_idle; }
+pre_upgrade() { _rtrust_stop; }
+pre_remove() { _rtrust_stop; }
+post_install() {
+    _rtrust_reload
+    echo 'Open R-TrustTunnel Service Setup from the desktop menu, then install/open the Flatpak.'
+}
+post_upgrade() {
+    _rtrust_reload || return 1
+    owner=$(_rtrust_owner) || return 1
+    if [ -n "$owner" ]; then
+        systemctl start "rtrust-service@$owner.service" || return 1
+        systemctl is-active --quiet "rtrust-service@$owner.service" || return 1
+    fi
+}
+post_remove() {
+    owner=$(_rtrust_owner) || return 1
+    if [ -n "$owner" ]; then
+        for manager in NetworkManager systemd-networkd; do
+            path="/etc/systemd/system/$manager.service.d/rtrust-boot-guard.conf"
+            expected=$(printf '[Unit]\nRequires=rtrust-boot-guard@%s.service\nAfter=rtrust-boot-guard@%s.service\n' "$owner" "$owner")
+            if [ -f "$path" ] && [ "$(cat "$path")" = "$expected" ]; then rm -f "$path"; fi
+        done
+        systemctl disable "rtrust-service@$owner.service" 2>/dev/null || true
+        systemctl stop "rtrust-boot-guard@$owner.service" 2>/dev/null || true
+    fi
+    _rtrust_reload
+    # Preserve the owner and encrypted state so an explicit reinstall can recover.
+}

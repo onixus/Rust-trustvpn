@@ -1,4 +1,5 @@
 //! Encrypted-at-rest profile store; the master key is only stored in the OS keyring.
+pub mod platform_probe;
 mod sync;
 use chacha20poly1305::{
     ChaCha20Poly1305, KeyInit,

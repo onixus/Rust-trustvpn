@@ -37,7 +37,7 @@ class DNS(socketserver.BaseRequestHandler):
 class HTTP6(s.http.server.ThreadingHTTPServer):
     address_family = socket.AF_INET6
 
-def wait_state(lines, state):
+def wait_state(lines, state, diagnostic=None):
     deadline = time.monotonic() + 50
     while time.monotonic() < deadline:
         try:
@@ -47,6 +47,10 @@ def wait_state(lines, state):
         if line == "SERVICE " + state:
             return
         assert line is not None, "client exited"
+    if diagnostic is not None:
+        for line in diagnostic.read_text().splitlines()[-30:]:
+            if line.startswith(('VPN reconnect failed:', 'VPN route reattach failed:')):
+                print(line, flush=True)
     raise AssertionError("missing state: " + state)
 
 def main():
@@ -54,6 +58,9 @@ def main():
     endpoint_binary = str(pathlib.Path(sys.argv[1]).resolve())
     processes, servers = [], []
     original_resolv = pathlib.Path("/etc/resolv.conf").read_bytes()
+    # Docker masks sysctls read-only; this mount change stays in this disposable
+    # container. Values below are changed only inside the test network namespace.
+    s.command("mount", "-o", "remount,rw", "/proc/sys")
     s.command("ip", "netns", "add", s.NS)
     try:
         s.command("ip", "link", "add", "rtrust-host", "type", "veth", "peer", "name", "rtrust-client")
@@ -65,6 +72,8 @@ def main():
         s.ns("ip", "-6", "addr", "add", "fd00:99::2/64", "dev", "rtrust-client", "nodad")
         s.ns("ip", "link", "set", "rtrust-client", "up")
         s.ns("ip", "link", "set", "lo", "up")
+        s.ns("sysctl", "-w", "net.ipv4.conf.rtrust-client.rp_filter=1",
+             "net.ipv4.conf.all.src_valid_mark=0")
         s.ns("ip", "route", "add", "default", "via", "10.99.0.1")
         s.command("ip", "addr", "add", "198.18.0.1/32", "dev", "lo")
         http = s.http.server.ThreadingHTTPServer(("198.18.0.1", 0), s.HTTP)
@@ -150,6 +159,10 @@ def main():
             with s.client(profile,"--serve-full","198.18.0.1") as (client,lines):
                 for uid in (0,1000,1001): fetch(uid,"198.18.0.1")
                 lookup("198.18.0.1"); ipv6(True,True)
+                # Endpoint route exceptions support reverse-path validation;
+                # they must never grant applications a direct physical bypass.
+                for uid in (0,1000):
+                    s.app(uid,"python3","-c","import socket; socket.create_connection(('10.99.0.1',8443),timeout=1)",success=False)
                 assert "synthetic" not in pathlib.Path("/run/rtrust/full.json").read_text()
                 print("PASS whole-host IPv4 (root + two users), system getaddrinfo DNS path, IPv6 tunneled (peer checked)", flush=True)
                 s.stop(ep); wait_state(lines,"blocked")
@@ -159,13 +172,15 @@ def main():
                 before=len(peers)
                 s.app(1000,"python3","-c","import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(1); s.sendto(bytes.fromhex('abcd01000001000000000000017804746573740000010001'),('198.18.0.1',53)); s.recv(512)",success=False)
                 assert len(peers)==before
-                ep=endpoint(); wait_state(lines,"connected"); fetch(1000,"198.18.0.1"); lookup("198.18.0.1"); ipv6(True,True)
+                ep=endpoint(); wait_state(lines,"connected",d/"daemon.log"); fetch(1000,"198.18.0.1"); lookup("198.18.0.1"); ipv6(True,True)
                 s.stop(client); assert client.returncode==0
             assert s.ns("ip","-j","-4","rule","show")==baseline_rules
             assert s.ns("ip","-j","-4","route","show","table","all")==baseline_routes
             assert s.ns("ip","-j","-6","rule","show")==baseline_rules6
             assert s.ns("ip","-j","-6","route","show","table","all")==baseline_routes6, (baseline_routes6,s.ns("ip","-j","-6","route","show","table","all"))
             assert s.ns("nft","-j","list","tables")==baseline_nft
+            assert s.ns("sysctl","-n","net.ipv4.conf.all.src_valid_mark").strip()==b"0"
+            assert s.ns("sysctl","-n","net.ipv4.conf.rtrust-client.rp_filter").strip()==b"1"
             fetch(1000,"10.99.0.2"); ipv6(True); lookup("10.99.0.2")
             print("PASS endpoint loss blocks IPv4/DNS/IPv6; reconnect restores VPN; Stop restores routes/DNS/firewall",flush=True)
             with s.client(profile,"--serve-full","198.18.0.1") as (client,_):
@@ -237,6 +252,7 @@ print(exact(n).decode())
             s.command("ip","link","set","rtrust-alt-host","up")
             s.ns("ip","addr","add","10.99.1.2/30","dev","rtrust-alt")
             s.ns("ip","link","set","rtrust-alt","up")
+            s.ns("sysctl","-w","net.ipv4.conf.rtrust-alt.rp_filter=1")
             s.ns("ip","route","replace","default","via","10.99.1.1","dev","rtrust-alt")
             s.ns("ip","-6","addr","del","fd00:99::2/64","dev","rtrust-client")
             s.ns("ip","link","set","rtrust-client","down")

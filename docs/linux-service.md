@@ -21,11 +21,29 @@ x86_64 собран cross-компилятором и проверен под QE
 Weston headless, не Plasma/KDE. Результат и хеш пакета сохранены в
 `reports/flatpak-runtime/acceptance.json`.
 
-Для host broker нужны `deploy/org.rtrusttunnel.Service.conf` и переменная
-службы `RTRUST_DBUS=1` (drop-in `deploy/rtrust-flatpak.conf`). GUI-установщик
-host-службы пока не готов. Не завершены проверка физического KDE,
-Background portal, файловый portal, сохранность vault через реальный Secret
-Service, подписанный репозиторий и install/update/rollback host-пакета.
+На физическом Arch Linux x86_64 с Plasma/Wayland также пройдены
+`ci/kde_flatpak_smoke.py`, синтетический encrypted-vault/KWallet round trip
+(`--ci-storage-smoke`), выдача доступа к одному файлу через Document Portal
+и включение/выключение Background portal autostart. Эти проверки не подменяют
+ручной выбор файла в диалоге и проверку входа в новую desktop-сессию.
+
+Host broker упакован отдельно: `scripts/package-linux-host.py` создаёт Arch
+`rtrust-host-*.pkg.tar.zst`. Пакет содержит systemd-службу, D-Bus policy,
+Flatpak drop-in и пункт меню **R-TrustTunnel Service Setup** с polkit.
+Сначала установите host-пакет, откройте Service Setup от обычного пользователя,
+затем установите Flatpak. Пакет не даёт sandbox доступ к host shell.
+`ci/linux_host_package_e2e.py` проверяет реальную переустановку, обновление,
+откат и отказ транзакции при активной защите через ALPM AbortOnFail hook.
+Эта последовательность прошла на физическом Arch Linux; запуск графического
+мастера с подтверждением polkit отдельно ещё не принят.
+
+`scripts/sign-flatpak-repo.py` подписывает OSTree commits и summary ключом
+из отдельного GPG home и создаёт `.flatpakref`/`.flatpakrepo` для GUI-установки.
+`ci/flatpak_update_e2e.py` прошёл установку, обновление, явный откат и отказ
+неподписанному commit в отдельной пользовательской установке с временным ключом.
+Production-ключ и публичный HTTPS-репозиторий ещё не опубликованы; CI-ключ
+не предназначен для распространения. Холодная загрузка и сон/пробуждение
+остаются открытыми. Пакеты пока кандидаты.
 Следующий раздел описывает прежний отдельный native preview, не установку Flatpak.
 
 Дополнительно доступен [режим всего компьютера: IPv4 + DNS и nftables kill switch](linux-full-tunnel.md). Ниже описан режим выбранных сетей.
@@ -69,4 +87,4 @@ python3 scripts/service-interop.py /absolute/path/to/trusttunnel_endpoint
 
 На Linux ARM64 проверены реальные 512 KiB HTTP через TUN, изменение source address, разделение UID 1000/1001, отказ чужому UID, версия/лимит кадра, запрет второй сессии, Stop ACK и восстановление. SIGKILL службы проверяется при существующем прямом default route: выбранный UID заблокирован, другой UID доступен, перезапуск сохраняет блокировку, авторизованный Recover снимает её. Проверены два последовательных падения/восстановления endpoint: блокировка во время повторных попыток, реальный HTTP после автоматического восстановления, отсутствие дублирующихся правил и отмена переподключения при Stop. Клиент теста использует тот же Rust IPC-код, что и GUI. Повторно пройден [полный data-plane стенд](tun-preview.md): TCP/UDP/DNS, параллельные загрузки и half-close.
 
-Запуск GUI на KDE и полный lifecycle установки под systemd в этой итерации не проверены: служба в тестовом контейнере запускается напрямую. Production-сервер не изменялся.
+Сценарии namespace запускают службу напрямую. Отдельные физические проверки KDE и пакетного lifecycle перечислены выше; они не означают приёмку reboot/sleep. Production-конфигурация сервера не изменялась.

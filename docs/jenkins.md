@@ -4,7 +4,7 @@ Job: http://localhost:8081/job/rtrust-native/
 
 `Jenkinsfile` targets `macos-arm64` (native macOS host, one executor) and `windows-amd64` (native Windows 11, MSVC). Linux ARM64 native/TUN tests run in disposable Docker containers on the Mac agent, including Weston Wayland, systemd-resolved and nftables. The controller is Linux and is used only to freeze source and run security gates. The job never treats the controller as macOS.
 
-The project currently has no Git repository. `ci/snapshot.py` copies an explicit set of project directories into the controller workspace. All nodes receive the same stash; archived `source-manifest.json` contains per-file SHA-256 hashes. Reconfigure the inline job definition after changing `Jenkinsfile`. No controller restart or history deletion is required.
+The project is versioned in Git. `ci/snapshot.py` copies an explicit set of project directories into the controller workspace. All nodes receive the same stash; archived `source-manifest.json` contains per-file SHA-256 hashes. Reconfigure the inline job definition after changing `Jenkinsfile`. No controller restart or history deletion is required.
 
 Stages:
 
@@ -207,3 +207,22 @@ Delivered Windows Setup SHA256:
 Installer is in `C:\Users\onixu\Downloads\R-TrustTunnel-Windows-x64-Setup.exe`;
 the installed application was not replaced. Code matches the frozen source
 manifest; subsequent changes before delivery were documentation only.
+
+## Native Linux x86_64 acceptance (2026-10-01)
+
+`Jenkinsfile.linux` / `rtrust-linux` use the `gaming-amd64` Linux node without
+waiting for the dual-boot Windows agent. Build #5 completed SUCCESS: Gitleaks,
+Trivy, unit, Clippy, Wayland/tray, packet and full-tunnel E2E, Flatpak and Arch
+host-package builds. Builds #2–#4 retain the reconnect failures; the fix keeps
+strict reverse-path filtering enabled and restores exact routing state.
+
+The packaging stage also runs `ci/flatpak_update_e2e.py` with a private Flatpak
+installation and a temporary GPG key: signed install/update/rollback, unsigned
+commit rejection, uninstall. The test key is destroyed and never published.
+
+Physical KDE tests (`ci/kde_flatpak_smoke.py`, document/background portal probes,
+`--ci-storage-smoke`) run in the authorized desktop session. Package lifecycle
+and `ci/linux_system_e2e.py` are separate, explicitly invasive acceptance tools;
+they must not run as ordinary CI. The host-network driver requires a separate
+systemd restore timer and restores the original VPNs in its cleanup path.
+See [Linux acceptance](linux-acceptance.md) for evidence and remaining checks.

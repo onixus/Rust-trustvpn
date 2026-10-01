@@ -1,0 +1,40 @@
+// Independent Linux acceptance: the dual-boot Windows node may be offline.
+pipeline {
+  agent none
+  options { disableConcurrentBuilds(); timestamps(); timeout(time: 90, unit: 'MINUTES'); buildDiscarder(logRotator(numToKeepStr: '15')) }
+  stages {
+    stage('Source snapshot') {
+      agent { label 'built-in' }
+      steps {
+        deleteDir()
+        sh 'python3 /Users/onixus/Git/R-Trusttunnel/ci/snapshot.py .'
+        stash name: 'source', includes: '**', useDefaultExcludes: false
+        archiveArtifacts artifacts: 'source-manifest.json', fingerprint: true
+      }
+    }
+    stage('Gitleaks + Trivy') {
+      agent { label 'built-in' }
+      steps { sh 'RTRUST_TOOL_CACHE="$JENKINS_HOME/caches/rtrust-native-tools" python3 ci/run.py security python3 ci/security.py' }
+      post { always { junit 'reports/security.xml'; archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true } }
+    }
+    stage('Linux x86_64 unit, Wayland and network E2E') {
+      agent { label 'gaming-amd64' }
+      steps {
+        deleteDir()
+        unstash 'source'
+        sh 'python3 ci/run.py linux-x86_64 python3 ci/linux.py'
+      }
+      post { always { junit allowEmptyResults: true, testResults: 'reports/linux-*.xml'; archiveArtifacts artifacts: 'reports/linux-*,dist/**', allowEmptyArchive: true, fingerprint: true } }
+    }
+    stage('Flatpak and host packages') {
+      agent { label 'gaming-amd64' }
+      steps {
+        sh '''python3 ci/run.py linux-flatpak python3 scripts/package-flatpak.py --binary-dir dist/native-preview-linux
+          python3 ci/run.py linux-host-package python3 scripts/package-linux-host.py --binary dist/service-preview-linux/rtrust-service --pkgrel "$BUILD_NUMBER"
+          python3 ci/run.py linux-flatpak-update python3 ci/flatpak_update_e2e.py --repo dist/flatpak-repo
+        '''
+      }
+      post { always { junit allowEmptyResults: true, testResults: 'reports/linux-*.xml'; archiveArtifacts artifacts: 'reports/linux-*,dist/R-TrustTunnel-Linux-*.flatpak*,dist/rtrust-host-*.pkg.tar.*', allowEmptyArchive: true, fingerprint: true } }
+    }
+  }
+}

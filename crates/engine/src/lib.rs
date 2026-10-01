@@ -32,6 +32,8 @@ pub enum Error {
     Trust,
     #[error("Endpoint connection failed")]
     Connect,
+    #[error("Endpoint connection failed ({0:?})")]
+    ConnectIo(std::io::ErrorKind),
     #[error("TLS certificate or handshake validation failed")]
     Tls,
     #[error("Tunnel protocol negotiation failed")]
@@ -168,16 +170,19 @@ impl H2Session {
         let name = rustls::pki_types::ServerName::try_from(p.endpoint.hostname.clone())
             .map_err(|_| Error::Profile)?;
         let mut connected = None;
+        let mut failure = Error::Connect;
         for address in &p.endpoint.addresses {
             // A failed address must not consume the entire global timeout.
-            if let Ok(Ok(tcp)) =
-                tokio::time::timeout(Duration::from_secs(4), connect_tcp(address, mark)).await
-            {
-                connected = Some(tcp);
-                break;
+            match tokio::time::timeout(Duration::from_secs(4), connect_tcp(address, mark)).await {
+                Ok(Ok(tcp)) => {
+                    connected = Some(tcp);
+                    break;
+                }
+                Ok(Err(error)) => failure = Error::ConnectIo(error.kind()),
+                Err(_) => failure = Error::Timeout,
             }
         }
-        let tcp = connected.ok_or(Error::Connect)?;
+        let tcp = connected.ok_or(failure)?;
         tcp.set_nodelay(true)?;
         let tls = connector.connect(name, tcp).await.map_err(|_| Error::Tls)?;
         if tls.get_ref().1.alpn_protocol() != Some(b"h2".as_slice()) {

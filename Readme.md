@@ -23,7 +23,7 @@ HTTP/3 for **system VPN** is deferred to [wave 3](docs/technical-debt.md). An im
 | Platform | Implementation and validation | Remaining work |
 | --- | --- | --- |
 | Windows x64 | Native `.exe`, Setup installer, Wintun/SCM service and WFP guard. Real system-tunnel, service-crash, reconnect, upgrade and rollback checks have passed. | Cold boot and sleep/wake acceptance; delivery of the latest shared UDP recovery fix to the installed release. |
-| Linux ARM64 / x86_64 | Wayland-only native UI, TUN service, nftables guard and systemd-resolved integration. Flatpak candidates passed installed-window, tray and authenticated service IPC tests on Weston; x86_64 ran under QEMU. | Physical KDE/Plasma acceptance, host-service GUI package, combined installation/update/rollback, portal and vault acceptance inside Flatpak, signed repository. |
+| Linux ARM64 / x86_64 | Wayland native UI, TUN service, nftables and systemd-resolved. Native x86_64 CI and physical Plasma/Wayland, tray, KWallet and portals passed. Arch host-package lifecycle and signed Flatpak update/rollback tested. ARM64 retains its earlier container coverage. | Physical reboot/sleep, final GUI installer acceptance and publication of a signed HTTPS repository. |
 | macOS Apple Silicon | Native app and root LaunchDaemon using `utun`. Installed system candidate passed live IPv4/IPv6, DNS, reconnect, GUI/service-crash and recovery tests. PKG inside an unsigned DMG. | Boot always-on, sleep/network handoff, clean installation on another Mac and automatic update/rollback. No Developer ID or notarization. |
 | Android | Architecture planned around the shared Rust core and Android VpnService. | Client implementation and device acceptance. |
 

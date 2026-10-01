@@ -3,7 +3,7 @@ import hashlib,json,pathlib,shutil,sys
 source=pathlib.Path(__file__).resolve().parents[1];dest=pathlib.Path(sys.argv[1]).resolve()
 if source==dest:raise SystemExit('Snapshot requires a separate directory')
 dest.mkdir(parents=True,exist_ok=True)
-for name in ['.gitleaks.toml','.gitignore','Cargo.toml','Cargo.lock','Readme.md','readme_ru.md','LICENSE','Jenkinsfile','apps','crates','scripts','ci','server','vendor','examples','docs','deploy','packaging','.github']:
+for name in ['.gitleaks.toml','.gitignore','Cargo.toml','Cargo.lock','Readme.md','readme_ru.md','LICENSE','Jenkinsfile','Jenkinsfile.linux','apps','crates','scripts','ci','server','vendor','examples','docs','deploy','packaging','.github']:
     path=source/name
     if not path.exists():continue
     if path.is_dir():shutil.copytree(path,dest/name,dirs_exist_ok=True,ignore=shutil.ignore_patterns('__pycache__','target','.DS_Store'))

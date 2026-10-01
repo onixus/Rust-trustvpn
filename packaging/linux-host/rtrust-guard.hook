@@ -1,0 +1,11 @@
+[Trigger]
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = rtrust-host
+
+[Action]
+Description = Checking R-TrustTunnel is disconnected before changing its service...
+When = PreTransaction
+Exec = /usr/libexec/rtrust/package-guard
+AbortOnFail

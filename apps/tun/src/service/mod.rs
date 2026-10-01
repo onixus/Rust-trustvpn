@@ -290,7 +290,7 @@ async fn serve(
         }
     };
     let mut routes = match if let Some(dns) = dns {
-        FullRoutes::install(uid, dns).map(Guard::Full)
+        FullRoutes::install(uid, dns, &profile.endpoint.addresses).map(Guard::Full)
     } else {
         Routes::install(uid, networks).map(Guard::Selected)
     } {
