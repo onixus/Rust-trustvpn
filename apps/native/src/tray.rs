@@ -35,10 +35,15 @@ pub fn initialize() -> bool {
             ] {
                 menu.append(&MenuItem::with_id(id, label, true, None))?;
             }
-            Ok(TrayIconBuilder::new()
+            let icon = Icon::from_rgba(pixels(), 32, 32).expect("fixed icon dimensions");
+            let builder = TrayIconBuilder::new();
+            let builder = if cfg!(target_os = "macos") {
+                builder.with_icon_templated(icon)
+            } else {
+                builder.with_icon(icon)
+            };
+            Ok(builder
                 .with_tooltip("R-TrustTunnel")
-                .with_icon(Icon::from_rgba(pixels(), 32, 32).expect("fixed icon dimensions"))
-                .with_icon_as_template(cfg!(target_os = "macos"))
                 .with_menu(Box::new(menu))
                 .build()?)
         };
