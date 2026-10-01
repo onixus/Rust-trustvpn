@@ -120,7 +120,7 @@ Windows CI должен включать VM с реальным Wintun/WFP и re
 
 Для производительности сначала снять baseline официального клиента на одном стенде; бюджет регрессии утверждается по измерениям, не выдумывается. Soak beta ≥24 h на каждой ОС. При исправлении найденной ошибки регрессионный тест должен падать на старой версии и проходить на исправленной.
 
-## Выкатка на onixus-rf.duckdns.org
+## Выкатка на целевой сервер
 
 Реализацию проверять в отдельном staging endpoint/порте и с временным тестовым пользователем. Не использовать пользовательские passwords в fixtures/CI. Перед production: backup image+DB+config+encryption keys, restore rehearsal, сравнение effective TLS/DNS settings и действующих профилей. Readiness панели не равен readiness endpoint: отдельно проверить TLS, authentication и tunneled TCP/UDP/DNS. После обновления сохранить email/monitoring flows.
 

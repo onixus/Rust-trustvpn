@@ -1,6 +1,6 @@
 # Portal deployment, 2026-09-30
 
-The live portal is https://onixus-rf.duckdns.org/profiles. Native clients accept
+Use your portal URL, for example `https://vpn.example.com/profiles` (placeholder). Native clients accept
 HTTPS origins only. The legacy HTTP listener on port 18082 still exists; use the
 HTTPS URL for credentials and enrollment.
 

@@ -3,7 +3,7 @@
 `upstream/` contains the existing portal source with updated dependency pins. It contains no
 production database, environment file, private key or endpoint binary.
 `overlay/app/` adds profile import/export and per-device access. Deployed on
-2026-09-30 at https://onixus-rf.duckdns.org/profiles with API `/portal/v2`.
+2026-09-30 with UI route `/profiles` and API `/portal/v2`; the deployment hostname is omitted.
 The native client now has a Server panel page: enter the HTTPS origin, bind using
 a one-time code from the browser, grant device access in the browser and refresh.
 Optional native pull synchronization now tracks revisions and preserves local

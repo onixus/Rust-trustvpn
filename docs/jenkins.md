@@ -23,7 +23,7 @@ The macOS agent is a user LaunchAgent (`org.rtrust.jenkins-macos`), with EXCLUSI
 Register/update the job with the existing private Jenkins API token (the script never prints it):
 
 ```sh
-python3 ci/register_jenkins.py --token-file /Users/onixus/jenkins_home/admin-token.txt --build
+python3 ci/register_jenkins.py --token-file "$HOME/jenkins_home/admin-token.txt" --build
 ```
 
 During initial native E2E validation the Windows node UTC clock was approximately three hours behind macOS. E2E explicitly reports clock differences over five minutes. The fixture certificate validity window tolerates that known lab skew; production TLS checks are unchanged, and the Windows OS clock was not modified. Fixture creation requires OpenSSL with `req -not_before/-not_after` support (available on this Mac).

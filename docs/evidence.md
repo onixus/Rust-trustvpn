@@ -4,8 +4,8 @@
 
 ## Подтверждено сейчас
 
-- `/Users/onixus/Git/R-Trusttunnel` до подготовки документов был пустым каталогом без `.git`, исходников и AGENTS.md.
-- SSH target `onixus-rf.duckdns.org`, hostname `valeria`, Linux.
+- Рабочий каталог проекта до подготовки документов был пустым каталогом без `.git`, исходников и AGENTS.md.
+- Целевой сервер работает на Linux; SSH-адрес и hostname не публикуются.
 - Контейнер `trusttunnel-web`, image `trusttunnel-web:dns-20260929`, status `running healthy`.
 - Docker publishes TCP/UDP `8443`, web backend `127.0.0.1:18082 -> 8000`.
 - GET `http://127.0.0.1:18082/healthz` на сервере вернул `{"status":"ok"}`. Это проверка панели, не доказательство рабочего VPN data plane.
