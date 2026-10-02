@@ -4,7 +4,8 @@ import android.app.*;
 import android.content.*;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.*;
+import android.content.res.ColorStateList;
 import android.net.*;
 import android.os.*;
 import android.view.*;
@@ -19,8 +20,9 @@ public final class MainActivity extends Activity {
     private static final int PICK = 10, SAVE = 11, CONSENT = 12, QR_IMAGE = 13;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private LinearLayout rows;
-    private TextView status, defaultProfile;
-    private Button connect, routing;
+    private TextView status, defaultProfile, routingLabel, profilesHeader;
+    private View statusDot;
+    private Button connect;
     private int connectionColor;
     private ProfileVault vault;
     private final Runnable poll = new Runnable() {
@@ -47,29 +49,48 @@ public final class MainActivity extends Activity {
         super.onCreate(state); getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         vault = new ProfileVault(this);
         try { PortalSyncWorker.schedule(this); } catch (Exception ignored) { /* Reconcile again on next launch. */ }
-        LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(dp(16), dp(16), dp(16), dp(12));
-        root.setBackgroundColor(Color.rgb(48, 57, 72));
+        LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(20), dp(16), dp(20), dp(16));
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             android.graphics.Insets bars = Build.VERSION.SDK_INT >= 30 ? insets.getInsets(WindowInsets.Type.systemBars()) : insets.getSystemWindowInsets();
-            view.setPadding(dp(16) + bars.left, dp(12) + bars.top, dp(16) + bars.right, dp(12) + bars.bottom); return insets;
+            view.setPadding(dp(20) + bars.left, dp(16) + bars.top, dp(20) + bars.right, dp(16) + bars.bottom); return insets;
         });
-        TextView title = new TextView(this); title.setText("R-TrustTunnel"); title.setTextSize(23); title.setTypeface(null, Typeface.BOLD); root.addView(title);
-        TextView subtitle = new TextView(this); subtitle.setText(R.string.home_subtitle); subtitle.setTextSize(13); subtitle.setTextColor(Color.rgb(191, 205, 224)); subtitle.setPadding(0, dp(4), 0, dp(20)); root.addView(subtitle);
-        defaultProfile = new TextView(this); defaultProfile.setTextSize(20); defaultProfile.setTypeface(null, Typeface.BOLD); defaultProfile.setPadding(dp(16), dp(16), dp(16), dp(16));
-        GradientDrawable card = new GradientDrawable(); card.setColor(Color.rgb(60, 73, 92)); card.setCornerRadius(dp(12)); defaultProfile.setBackground(card); root.addView(defaultProfile);
+
+        // Header
+        TextView title = new TextView(this); title.setText("R-TrustTunnel"); title.setTextSize(26); title.setTypeface(null, Typeface.BOLD); title.setTextColor(color(R.color.text)); root.addView(title);
+        TextView subtitle = new TextView(this); subtitle.setText(R.string.home_subtitle); subtitle.setTextSize(14); subtitle.setTextColor(color(R.color.text_muted)); subtitle.setPadding(0, dp(2), 0, dp(16)); root.addView(subtitle);
+
+        // Status card: colored dot + state + default profile
+        LinearLayout hero = new LinearLayout(this); hero.setOrientation(LinearLayout.VERTICAL); hero.setBackground(card(color(R.color.surface), dp(20)));
+        hero.setPadding(dp(20), dp(18), dp(20), dp(18));
+        LinearLayout stateRow = new LinearLayout(this); stateRow.setGravity(Gravity.CENTER_VERTICAL);
+        statusDot = new View(this); GradientDrawable dot = new GradientDrawable(); dot.setShape(GradientDrawable.OVAL); dot.setColor(color(R.color.text_muted)); statusDot.setBackground(dot);
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(12), dp(12)); dotParams.setMarginEnd(dp(10)); stateRow.addView(statusDot, dotParams);
+        status = new TextView(this); status.setTextSize(20); status.setTypeface(null, Typeface.BOLD); status.setTextColor(color(R.color.text)); stateRow.addView(status);
+        hero.addView(stateRow);
+        TextView label = new TextView(this); label.setText(R.string.default_profile_label); label.setTextSize(11); label.setLetterSpacing(0.08f); label.setTextColor(color(R.color.text_muted)); label.setPadding(0, dp(14), 0, dp(2)); hero.addView(label);
+        defaultProfile = new TextView(this); defaultProfile.setTextSize(16); defaultProfile.setTextColor(color(R.color.text)); defaultProfile.setMaxLines(1); defaultProfile.setEllipsize(android.text.TextUtils.TruncateAt.END); hero.addView(defaultProfile);
+        root.addView(hero);
+
+        // Quick actions: Add · VPN apps · Settings
         LinearLayout actions = new LinearLayout(this);
-        Button add = button(getString(R.string.add_profile), this::importMenu);
-        Button settings = button(getString(R.string.home_settings), this::settingsMenu);
-        LinearLayout.LayoutParams half = new LinearLayout.LayoutParams(0, dp(48), 1); half.setMargins(0, dp(12), dp(8), dp(12)); actions.addView(add, half);
-        LinearLayout.LayoutParams other = new LinearLayout.LayoutParams(0, dp(48), 1); other.setMargins(0, dp(12), 0, dp(12)); actions.addView(settings, other); root.addView(actions);
-        routing = button(getString(R.string.vpn_apps), () -> {
+        actions.addView(action(R.drawable.ic_add, getString(R.string.add_profile), null, this::importMenu), actionParams(true));
+        LinearLayout routing = action(R.drawable.ic_apps, getString(R.string.vpn_apps), "", () -> {
             try { AppRoutingDialog.show(this, vault, this::reload); }
             catch (Exception error) { error(getString(R.string.app_selection_could_not_be_opened)); }
-        }); root.addView(routing);
-        ScrollView scroll = new ScrollView(this); rows = new LinearLayout(this); rows.setOrientation(LinearLayout.VERTICAL); scroll.addView(rows); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        }); routingLabel = (TextView) routing.getChildAt(2); actions.addView(routing, actionParams(true));
+        actions.addView(action(R.drawable.ic_settings, getString(R.string.home_settings), null, this::settingsMenu), actionParams(false));
+        LinearLayout.LayoutParams actionsRow = new LinearLayout.LayoutParams(-1, -2); actionsRow.setMargins(0, dp(14), 0, dp(20)); root.addView(actions, actionsRow);
 
-        status = new TextView(this); status.setTextSize(14); status.setPadding(0, dp(8), 0, dp(8)); root.addView(status);
-        connect = button(getString(R.string.connect_default_profile), () -> toggle()); root.addView(connect, new LinearLayout.LayoutParams(-1, dp(60)));
+        // Profiles
+        profilesHeader = new TextView(this); profilesHeader.setTextSize(13); profilesHeader.setTypeface(null, Typeface.BOLD); profilesHeader.setLetterSpacing(0.06f); profilesHeader.setTextColor(color(R.color.text_muted)); profilesHeader.setPadding(dp(4), 0, 0, dp(8)); root.addView(profilesHeader);
+        ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false); rows = new LinearLayout(this); rows.setOrientation(LinearLayout.VERTICAL); scroll.addView(rows); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        // Connect: fixed at the bottom, colored by connection state
+        connect = button(getString(R.string.connect_default_profile), () -> toggle());
+        connect.setTextSize(16); connect.setCompoundDrawablesRelativeWithIntrinsicBounds(tinted(R.drawable.ic_power, Color.WHITE), null, null, null); connect.setCompoundDrawablePadding(dp(10)); connect.setPadding(dp(20), 0, dp(20), 0);
+        LinearLayout.LayoutParams connectParams = new LinearLayout.LayoutParams(-1, dp(58)); connectParams.setMargins(0, dp(12), 0, 0); root.addView(connect, connectParams);
+        paintConnection(connectionColor(false, 0, false));
         setContentView(root); reload(); incoming(getIntent());
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 20);
@@ -86,21 +107,53 @@ public final class MainActivity extends Activity {
         }).show();
     }
     private int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
+    private int color(int id) { return getColor(id); }
+    private GradientDrawable card(int fill, int radius) { GradientDrawable bg = new GradientDrawable(); bg.setColor(fill); bg.setCornerRadius(radius); return bg; }
+    private Drawable ripple(Drawable content) { return new RippleDrawable(ColorStateList.valueOf(color(R.color.ripple)), content, content); }
+    private Drawable tinted(int id, int tint) { Drawable icon = getDrawable(id).mutate(); icon.setTint(tint); return icon; }
+    private LinearLayout.LayoutParams actionParams(boolean gap) { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, -1, 1); if (gap) p.setMarginEnd(dp(10)); return p; }
+    /** Icon tile with a caption and optional second line (e.g. "All apps"). */
+    private LinearLayout action(int icon, String caption, String detail, Runnable click) {
+        LinearLayout tile = new LinearLayout(this); tile.setOrientation(LinearLayout.VERTICAL); tile.setGravity(Gravity.CENTER);
+        tile.setPadding(dp(8), dp(14), dp(8), dp(12)); tile.setBackground(ripple(card(color(R.color.surface), dp(16)))); tile.setClickable(true); tile.setFocusable(true);
+        ImageView image = new ImageView(this); image.setImageDrawable(tinted(icon, color(R.color.accent))); tile.addView(image, new LinearLayout.LayoutParams(dp(26), dp(26)));
+        TextView text = new TextView(this); text.setText(caption); text.setTextSize(13); text.setTypeface(null, Typeface.BOLD); text.setTextColor(color(R.color.text)); text.setGravity(Gravity.CENTER); text.setMaxLines(2); text.setPadding(0, dp(8), 0, 0); tile.addView(text);
+        TextView sub = new TextView(this); sub.setTextSize(11); sub.setTextColor(color(R.color.text_muted)); sub.setGravity(Gravity.CENTER); sub.setMaxLines(1); sub.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        if (detail == null) sub.setVisibility(View.INVISIBLE); else sub.setText(detail); tile.addView(sub);
+        tile.setOnClickListener(v -> click.run()); return tile;
+    }
     private Button button(String text, Runnable click) {
         Button button = new Button(this); button.setText(text); button.setAllCaps(false); button.setGravity(Gravity.CENTER); button.setTypeface(null, Typeface.BOLD); button.setTextColor(Color.WHITE); button.setBackgroundTintList(null);
-        GradientDrawable bg = new GradientDrawable(); bg.setColor(Color.rgb(68, 83, 102)); bg.setCornerRadius(dp(10)); button.setBackground(bg);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(44)); params.setMargins(0, dp(4), 0, dp(4)); button.setLayoutParams(params);
+        button.setBackground(ripple(card(color(R.color.surface_raised), dp(14)))); button.setStateListAnimator(null);
         button.setOnClickListener(v -> click.run()); return button;
     }
+    /** Profile row: tap selects the default, the trailing menu exports or deletes. */
+    private View profileRow(String id, String name, String detail, boolean isDefault) {
+        LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL); row.setPadding(dp(16), dp(14), dp(6), dp(14));
+        GradientDrawable bg = card(color(isDefault ? R.color.accent_soft : R.color.surface), dp(16)); if (isDefault) bg.setStroke(dp(1), color(R.color.accent));
+        row.setBackground(ripple(bg)); row.setClickable(true); row.setFocusable(true);
+        ImageView mark = new ImageView(this); mark.setImageDrawable(tinted(R.drawable.ic_check, color(R.color.accent))); mark.setVisibility(isDefault ? View.VISIBLE : View.INVISIBLE);
+        LinearLayout.LayoutParams markParams = new LinearLayout.LayoutParams(dp(22), dp(22)); markParams.setMarginEnd(dp(12)); row.addView(mark, markParams);
+        LinearLayout text = new LinearLayout(this); text.setOrientation(LinearLayout.VERTICAL);
+        TextView title = new TextView(this); title.setText(name); title.setTextSize(16); title.setTypeface(null, Typeface.BOLD); title.setTextColor(color(R.color.text)); title.setMaxLines(1); title.setEllipsize(android.text.TextUtils.TruncateAt.END); text.addView(title);
+        TextView sub = new TextView(this); sub.setText(detail); sub.setTextSize(12); sub.setTextColor(color(R.color.text_muted)); sub.setMaxLines(1); sub.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE); text.addView(sub);
+        row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
+        ImageButton more = new ImageButton(this); more.setImageDrawable(tinted(R.drawable.ic_more, color(R.color.text_muted))); more.setBackground(ripple(card(Color.TRANSPARENT, dp(20)))); more.setContentDescription(getString(R.string.profile_menu));
+        row.addView(more, new LinearLayout.LayoutParams(dp(40), dp(40)));
+        row.setOnClickListener(v -> { if (!isDefault) setDefault(id); });
+        more.setOnClickListener(v -> profileActions(v, id));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.setMargins(0, 0, 0, dp(8)); row.setLayoutParams(params); return row;
+    }
     static int connectionColor(boolean active, int state, boolean problem) {
-        if (problem || state == 4 || state < 0 || state > 4) return Color.rgb(166, 53, 58);
-        if (!active) return Color.rgb(68, 83, 102);
-        return state == 2 ? Color.rgb(36, 112, 68) : Color.rgb(138, 89, 0);
+        if (problem || state == 4 || state < 0 || state > 4) return Color.rgb(229, 72, 77);
+        if (!active) return Color.rgb(77, 163, 255);
+        return state == 2 ? Color.rgb(47, 191, 113) : Color.rgb(224, 165, 38);
     }
     private void paintConnection(int color) {
         if (connectionColor == color) return;
         connectionColor = color;
-        GradientDrawable background = new GradientDrawable(); background.setColor(color); background.setCornerRadius(dp(10)); connect.setBackground(background);
+        connect.setBackground(ripple(card(color, dp(14))));
+        ((GradientDrawable) statusDot.getBackground()).setColor(TunnelService.active || !TunnelService.problem.isEmpty() ? color : color(R.color.text_muted));
     }
     @Override public void onResume() { super.onResume(); reload(); handler.post(poll); }
     @Override public void onPause() { handler.removeCallbacks(poll); super.onPause(); }
@@ -116,27 +169,43 @@ public final class MainActivity extends Activity {
         try {
             JSONObject data = vault.read(); JSONArray profiles = data.getJSONArray("profiles");
             AppRouting selection = AppRouting.read(data);
-            routing.setText(selection.selectedOnly ? getString(R.string.apps_summary, selection.packages.size()) : getString(R.string.apps_all_summary));
-            defaultProfile.setText(R.string.import_a_profile_to_get_started);
+            routingLabel.setText(selection.selectedOnly ? getString(R.string.selected_count, selection.packages.size()) : getString(R.string.all_apps));
+            defaultProfile.setText(R.string.no_default_profile);
+            profilesHeader.setText(getString(R.string.profiles_header, profiles.length()));
             for (int i = 0; i < profiles.length(); i++) {
                 JSONObject item = profiles.getJSONObject(i), profile = item.getJSONObject("profile"); String id = item.getString("id");
                 String name = profile.optString("name"); if (name.trim().isEmpty()) name = "Profile " + (i + 1);
-                if (id.equals(data.getString("default"))) defaultProfile.setText(getString(R.string.default_profile_label) + "\n" + name);
-                rows.addView(button((id.equals(data.getString("default")) ? "★ " : "") + name, () -> profileActions(id)));
+                boolean isDefault = id.equals(data.getString("default"));
+                if (isDefault) defaultProfile.setText(name);
+                String host = profile.optJSONObject("endpoint") == null ? "" : profile.getJSONObject("endpoint").optString("hostname");
+                String detail = ("hysteria2".equals(profile.optString("protocol")) ? "Hysteria 2" : "TrustTunnel") + (host.isEmpty() ? "" : " · " + host);
+                rows.addView(profileRow(id, name, detail, isDefault));
             }
-            if (profiles.length() == 0) { TextView empty = new TextView(this); empty.setText(getString(R.string.import_a_profile_to_get_started)); rows.addView(empty); }
+            if (profiles.length() == 0) {
+                LinearLayout empty = new LinearLayout(this); empty.setOrientation(LinearLayout.VERTICAL); empty.setGravity(Gravity.CENTER); empty.setPadding(dp(20), dp(28), dp(20), dp(28));
+                GradientDrawable bg = card(Color.TRANSPARENT, dp(16)); bg.setStroke(dp(1), color(R.color.outline), dp(6), dp(5)); empty.setBackground(bg);
+                TextView head = new TextView(this); head.setText(R.string.import_a_profile_to_get_started); head.setTextSize(15); head.setTypeface(null, Typeface.BOLD); head.setTextColor(color(R.color.text)); head.setGravity(Gravity.CENTER); empty.addView(head);
+                TextView hint = new TextView(this); hint.setText(R.string.empty_hint); hint.setTextSize(13); hint.setTextColor(color(R.color.text_muted)); hint.setGravity(Gravity.CENTER); hint.setPadding(0, dp(6), 0, 0); empty.addView(hint);
+                rows.addView(empty);
+            }
         } catch (Exception e) { error(getString(R.string.encrypted_profiles_could_not_be_opened)); }
     }
-    private void profileActions(String id) {
-        new AlertDialog.Builder(this).setItems(new String[]{getString(R.string.use_as_default), getString(R.string.export), getString(R.string.delete)}, (dialog, which) -> {
+    private void setDefault(String id) {
+        try {
+            vault.edit(current -> {
+                JSONArray latest = current.getJSONArray("profiles");
+                for (int i = 0; i < latest.length(); i++) if (latest.getJSONObject(i).getString("id").equals(id)) { current.put("default", id); return; }
+                throw new IOException("Profile removed during sync");
+            }); reload();
+        } catch (Exception e) { error(getString(R.string.could_not_save_profile_changes)); }
+    }
+    private void profileActions(View anchor, String id) {
+        PopupMenu menu = new PopupMenu(this, anchor, Gravity.END);
+        menu.getMenu().add(0, 1, 0, R.string.export); menu.getMenu().add(0, 2, 1, R.string.delete);
+        menu.setOnMenuItemClickListener(item -> {
             try {
                 JSONObject data = vault.read(); JSONArray profiles = data.getJSONArray("profiles");
-                if (which == 0) { vault.edit(current -> {
-                    JSONArray latest = current.getJSONArray("profiles");
-                    for (int i = 0; i < latest.length(); i++) if (latest.getJSONObject(i).getString("id").equals(id)) { current.put("default", id); return; }
-                    throw new IOException("Profile removed during sync");
-                }); reload(); }
-                else if (which == 1) {
+                if (item.getItemId() == 1) {
                     for (int i = 0; i < profiles.length(); i++) if (profiles.getJSONObject(i).getString("id").equals(id)) export(profiles.getJSONObject(i).getJSONObject("profile").toString());
                 } else new AlertDialog.Builder(this).setMessage(getString(R.string.delete_this_saved_profile)).setNegativeButton(getString(R.string.cancel), null).setPositiveButton(getString(R.string.delete_text), (d, w) -> {
                     try {
@@ -148,7 +217,9 @@ public final class MainActivity extends Activity {
                     } catch (Exception e) { error(getString(R.string.could_not_save_profile_changes)); }
                 }).show();
             } catch (Exception e) { error(getString(R.string.could_not_open_profile)); }
-        }).show();
+            return true;
+        });
+        menu.show();
     }
     private void paste() {
         EditText input = new EditText(this); input.setHint("TOML, YAML, JSON, tt:// or hy2://"); input.setMinLines(4); input.setMaxLines(10);

@@ -23,10 +23,13 @@ shows only mode-relevant network fields, and asks for a second click before
 removing a profile. Its import options are grouped under Add a profile.
 
 Android keeps the status-colored connection button at the bottom. The home
-screen shows the default profile, saved profiles and app selection. Add a profile
-opens file, paste and QR import; Settings opens server synchronization and system
-Always-on VPN controls. New Android navigation labels are localized in English
-and Russian. Profile storage and tunnel behavior are unchanged.
+screen uses a dark Material theme: a status card with a state dot and the
+default profile, three icon tiles (Add profile, VPN apps with the current
+selection, Settings) and a card list of saved profiles with host and protocol.
+Tapping a profile makes it the default; its trailing menu exports or deletes it.
+Add a profile opens file, paste and QR import; Settings opens server
+synchronization and system Always-on VPN controls. Android labels are localized
+in English and Russian. Profile storage and tunnel behavior are unchanged.
 
 ## Packaging
 
