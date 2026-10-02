@@ -11,18 +11,23 @@ pub(crate) fn remove_until_absent(
     loop {
         // A successful enumeration with no match is not proof of removal: the
         // driver registry key may be temporarily unavailable during PnP changes.
-        let attempt = remove()?;
-        let reason = match absent() {
-            Ok(()) => return Ok(()),
-            Err(reason) => reason,
+        // A removal error on a device already being torn down is retried until
+        // the deadline; the interface table is never consulted after a failed
+        // removal, so protection is retained if it keeps failing.
+        let failure = match remove() {
+            Err(error) => error,
+            Ok(attempt) => match absent() {
+                Ok(()) => return Ok(()),
+                // The PnP summary distinguishes "no matching device" from
+                // "removed but still listed" on the next field failure.
+                Err(reason) => format!(
+                    "Wintun adapter removal is still pending: {reason}; last removal: {attempt}"
+                ),
+            },
         };
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            // The PnP summary distinguishes "no matching device" from
-            // "removed but still listed" on the next field failure.
-            return Err(format!(
-                "Wintun adapter removal is still pending: {reason}; last removal: {attempt}"
-            ));
+            return Err(failure);
         }
         std::thread::sleep(interval.min(remaining));
     }
@@ -71,6 +76,26 @@ mod tests {
             assert!(error.contains(reason));
             assert!(error.contains("last removal: matched 0"));
         }
+    }
+
+    #[test]
+    fn transient_deletion_error_is_retried_before_the_deadline() {
+        let attempts = Cell::new(0);
+        remove_until_absent(
+            || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    Err("Cannot remove owned Wintun device (13)".into())
+                } else {
+                    Ok("matched 1".into())
+                }
+            },
+            || Ok(()),
+            Duration::from_secs(1),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(attempts.get(), 2);
     }
 
     #[test]
