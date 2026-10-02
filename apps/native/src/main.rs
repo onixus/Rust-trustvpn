@@ -6,6 +6,8 @@ mod conflicts;
 use rtrust_desktop::connection;
 #[cfg(target_os = "linux")]
 mod flatpak_startup;
+#[cfg(target_os = "macos")]
+mod open_url;
 mod portal;
 mod sync;
 mod tray;
@@ -88,6 +90,8 @@ fn main() -> iced::Result {
         println!("PASS authenticated service channel and maintenance lease");
         return Ok(());
     }
+    #[cfg(target_os = "macos")]
+    open_url::install();
     iced::daemon(
         || {
             let (app, task) = App::boot();
@@ -730,6 +734,13 @@ impl App {
                             return self.update(Message::Save);
                         }
                     }
+                }
+                #[cfg(target_os = "macos")]
+                if !self.busy
+                    && let Some(link) = open_url::take()
+                {
+                    self.apply_import(Profile::import(&link).map(Some).map_err(|e| e.to_string()));
+                    return Self::show_window();
                 }
                 if self.tray_ready {
                     let events = tray::poll();
