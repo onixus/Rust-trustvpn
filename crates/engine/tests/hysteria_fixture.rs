@@ -89,3 +89,88 @@ async fn official_server_tcp_payload_udp_fragmentation_and_multiplexing() {
         rtrust_profile::Secret::new("wrong-obfuscation-password");
     assert!(Session::connect(&wrong).await.is_err());
 }
+
+/// Exchanges `payload` with the fixture's length-prefixed SHA-256 echo.
+async fn digest_exchange(session: &Session, target: &str, payload: &[u8]) {
+    let mut tcp = session.open_tcp(target).await.unwrap();
+    tcp.write_u32(payload.len() as u32).await.unwrap();
+    tcp.write_all(payload).await.unwrap();
+    let mut response = vec![];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tcp.read_to_end(&mut response),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        response,
+        format!("{:x}", Sha256::digest(payload)).as_bytes()
+    );
+}
+#[tokio::test]
+#[ignore = "run through ci/hysteria_interop.py"]
+async fn official_server_port_hopping_bandwidth_and_quic_options() {
+    let path = std::env::var("RTRUST_HYSTERIA_HOP_FIXTURE").unwrap();
+    let input = zeroize::Zeroizing::new(std::fs::read_to_string(path).unwrap());
+    let profile = Profile::import(&input).unwrap();
+    assert!(!profile.hysteria2.as_ref().unwrap().hop_ports.is_empty());
+    let session = Session::connect(&profile).await.unwrap();
+    let target = format!(
+        "127.0.0.1:{}",
+        std::env::var("RTRUST_HYSTERIA_TCP").unwrap()
+    );
+    let udp_port = std::env::var("RTRUST_HYSTERIA_UDP").unwrap();
+    // One stream stays open across several 5-second hops.
+    let chunk: Vec<u8> = (0..16 * 1024).map(|n| (n * 7) as u8).collect();
+    let rounds = 7;
+    let mut long = session.open_tcp(&target).await.unwrap();
+    long.write_u32((chunk.len() * rounds) as u32).await.unwrap();
+    let mut digest = Sha256::new();
+    for round in 0..rounds {
+        long.write_all(&chunk).await.unwrap();
+        digest.update(&chunk);
+        let payload: Vec<u8> = (0..256 * 1024).map(|n| (n + round) as u8).collect();
+        digest_exchange(&session, &target, &payload).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    let mut response = vec![];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        long.read_to_end(&mut response),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(response, format!("{:x}", digest.finalize()).as_bytes());
+    let mut udp_tunnel = session.open_udp().await.unwrap();
+    let datagram = udp::Datagram {
+        source: "10.0.0.2:12000".parse().unwrap(),
+        destination: format!("127.0.0.1:{udp_port}").parse().unwrap(),
+        payload: vec![42; 3000],
+    };
+    udp_tunnel
+        .write_all(&udp::encode(&datagram, "hop").unwrap())
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        udp::read(&mut udp_tunnel),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(reply.payload, datagram.payload);
+    // Brutal at 20 Mbit/s (quinn paces 1.25x) bounds a 5 MB upload to well over
+    // a second; loopback without the negotiated rate finishes far sooner.
+    let bulk: Vec<u8> = (0..5_000_000).map(|n| n as u8).collect();
+    let started = std::time::Instant::now();
+    digest_exchange(&session, &target, &bulk).await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= std::time::Duration::from_millis(1200),
+        "{elapsed:?}"
+    );
+    assert!(elapsed <= std::time::Duration::from_secs(8), "{elapsed:?}");
+    session.health().await.unwrap();
+}

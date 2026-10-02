@@ -1,5 +1,7 @@
 //! Hysteria 2 QUIC transport, independent of TrustTunnel HTTP/3 CONNECT.
+mod brutal;
 mod datagrams;
+mod hop;
 mod obfs;
 use super::*;
 use quinn::Runtime;
@@ -51,12 +53,43 @@ impl HysteriaSession {
             quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|_| Error::Tls)?;
         let mut config = quinn::ClientConfig::new(Arc::new(quic));
         let mut transport = quinn::TransportConfig::default();
-        transport.keep_alive_interval(Some(Duration::from_secs(10)));
+        let quic = &options.quic;
+        transport.keep_alive_interval(Some(Duration::from_secs(quic.keep_alive())));
         transport.max_idle_timeout(Some(
-            Duration::from_secs(30)
+            Duration::from_secs(quic.idle_timeout())
                 .try_into()
                 .map_err(|_| Error::Protocol)?,
         ));
+        if quic.stream_receive_window != 0 {
+            transport.stream_receive_window(
+                quic.stream_receive_window
+                    .try_into()
+                    .map_err(|_| Error::Profile)?,
+            );
+        }
+        if quic.connection_receive_window != 0 {
+            transport.receive_window(
+                quic.connection_receive_window
+                    .try_into()
+                    .map_err(|_| Error::Profile)?,
+            );
+        }
+        let fallback: Arc<dyn quinn::congestion::ControllerFactory + Send + Sync> =
+            match options.congestion.as_str() {
+                "bbr" => Arc::new(quinn::congestion::BbrConfig::default()),
+                "reno" => Arc::new(quinn::congestion::NewRenoConfig::default()),
+                _ => Arc::new(quinn::congestion::CubicConfig::default()),
+            };
+        // Brutal is enabled after authentication only if the server agrees on a rate.
+        let rate = brutal::Rate::default();
+        if options.up_bps == 0 {
+            transport.congestion_controller_factory(fallback);
+        } else {
+            transport.congestion_controller_factory(Arc::new(brutal::Factory {
+                rate: rate.clone(),
+                fallback,
+            }));
+        }
         transport.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
         // Apply backpressure between fragments instead of queuing megabytes of
         // unreliable datagrams that can overwhelm the peer's receive queue.
@@ -81,36 +114,21 @@ impl HysteriaSession {
                         .collect()
                 };
             for address in addresses {
-                let socket = std::net::UdpSocket::bind(if address.is_ipv4() {
-                    "0.0.0.0:0"
+                let factory = socket_factory(address, mark, protector.cloned());
+                let socket: Arc<dyn quinn::AsyncUdpSocket> = if options.hop_ports.is_empty() {
+                    factory().map_err(|_| Error::Connect)?
                 } else {
-                    "[::]:0"
-                })
-                .map_err(|_| Error::Connect)?;
-                socket.set_nonblocking(true)?;
-                #[cfg(unix)]
-                {
-                    use std::os::fd::AsRawFd;
-                    #[cfg(target_os = "linux")]
-                    if let Some(mark) = mark {
-                        let result = unsafe {
-                            libc::setsockopt(
-                                socket.as_raw_fd(),
-                                libc::SOL_SOCKET,
-                                libc::SO_MARK,
-                                (&mark as *const u32).cast(),
-                                std::mem::size_of_val(&mark) as libc::socklen_t,
-                            )
-                        };
-                        if result != 0 {
-                            return Err(Error::Connect);
-                        }
-                    }
-                    if let Some(protect) = protector {
-                        protect(socket.as_raw_fd())?;
-                    }
-                }
-                let socket = quinn::TokioRuntime.wrap_udp_socket(socket)?;
+                    Arc::new(
+                        hop::Hopping::new(
+                            address,
+                            rtrust_profile::hysteria::port_ranges(&options.hop_ports)
+                                .map_err(|_| Error::Profile)?,
+                            options.hop_interval(),
+                            factory,
+                        )
+                        .map_err(|_| Error::Connect)?,
+                    )
+                };
                 let socket: Arc<dyn quinn::AsyncUdpSocket> =
                     if options.salamander.expose().is_empty() {
                         socket
@@ -159,7 +177,8 @@ impl HysteriaSession {
             .method("POST")
             .uri("https://hysteria/auth")
             .header("Hysteria-Auth", auth)
-            .header("Hysteria-CC-RX", "0")
+            .header("Hysteria-CC-RX", (options.down_bps / 8).to_string())
+            .header("Hysteria-Padding", padding(rand::random_range(256..2048)))
             .body(())
             .map_err(|_| Error::Profile)?;
         let mut stream = sender
@@ -171,6 +190,13 @@ impl HysteriaSession {
         if response.status().as_u16() != 233 {
             return Err(Error::Authentication);
         }
+        rate.set(brutal::negotiate(
+            response
+                .headers()
+                .get("Hysteria-CC-RX")
+                .and_then(|v| v.to_str().ok()),
+            options.up_bps / 8,
+        ));
         let udp = response
             .headers()
             .get("Hysteria-UDP")
@@ -224,7 +250,9 @@ impl HysteriaSession {
             varint(0x401, &mut header)?;
             varint(target.len() as u64, &mut header)?;
             header.extend_from_slice(target.as_bytes());
-            varint(0, &mut header)?;
+            let pad = padding(rand::random_range(64..512));
+            varint(pad.len() as u64, &mut header)?;
+            header.extend_from_slice(pad.as_bytes());
             send.write_all(&header).await.map_err(|_| Error::Io)?;
             let status = recv.read_u8().await?;
             let message = read_varint(&mut recv).await?;
@@ -258,6 +286,56 @@ impl HysteriaSession {
     pub async fn open_udp(&self) -> Result<Tunnel> {
         datagrams::open(self.clone()).await
     }
+}
+/// Every transport socket, including each port-hopping replacement, is marked
+/// or protected before its first packet; failure never falls back to a plain socket.
+fn socket_factory(
+    address: std::net::SocketAddr,
+    mark: Option<u32>,
+    protector: Option<SocketProtector>,
+) -> hop::SocketFactory {
+    Box::new(move || {
+        let socket = std::net::UdpSocket::bind(if address.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        })?;
+        socket.set_nonblocking(true)?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            #[cfg(target_os = "linux")]
+            if let Some(mark) = mark {
+                let result = unsafe {
+                    libc::setsockopt(
+                        socket.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_MARK,
+                        (&mark as *const u32).cast(),
+                        std::mem::size_of_val(&mark) as libc::socklen_t,
+                    )
+                };
+                if result != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            if let Some(protect) = &protector {
+                protect(socket.as_raw_fd())?;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = mark;
+        #[cfg(not(unix))]
+        let _ = &protector;
+        quinn::TokioRuntime.wrap_udp_socket(socket)
+    })
+}
+/// Random alphanumeric padding with the official client's length ranges.
+fn padding(len: usize) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    (0..len)
+        .map(|_| CHARS[rand::random_range(0..CHARS.len())] as char)
+        .collect()
 }
 struct Abort(tokio::task::JoinHandle<()>);
 impl Abort {

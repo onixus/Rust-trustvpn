@@ -14,12 +14,175 @@ pub struct Hysteria2 {
     pub salamander: Secret,
     #[serde(default)]
     pub pin_sha256: String,
+    /// Port-hopping set such as `443,20000-30000`; empty disables hopping.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hop_ports: String,
+    /// Hop interval bounds in seconds; zero selects the upstream default.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub hop_interval_min: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub hop_interval_max: u64,
+    /// Bandwidth in bits per second; zero leaves congestion control automatic.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub up_bps: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub down_bps: u64,
+    /// `bbr` or `reno` when no upload bandwidth is set; empty keeps the engine default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub congestion: String,
+    #[serde(default, skip_serializing_if = "Quic::is_default")]
+    pub quic: Quic,
+}
+/// QUIC flow-control and liveness settings. Zero selects the upstream default.
+#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Quic {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub stream_receive_window: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub connection_receive_window: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_idle_timeout_secs: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub keep_alive_secs: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_path_mtu_discovery: bool,
+}
+impl Quic {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+    fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("stream receive window", self.stream_receive_window),
+            ("connection receive window", self.connection_receive_window),
+        ] {
+            if value != 0 && !(MIN_WINDOW..=MAX_WINDOW).contains(&value) {
+                return Err(Error::Field(name));
+            }
+        }
+        if self.max_idle_timeout_secs != 0 && !(4..=120).contains(&self.max_idle_timeout_secs) {
+            return Err(Error::Field("QUIC idle timeout"));
+        }
+        if self.keep_alive_secs != 0
+            && (!(2..=60).contains(&self.keep_alive_secs)
+                || self.keep_alive_secs >= self.idle_timeout())
+        {
+            return Err(Error::Field("QUIC keep-alive period"));
+        }
+        Ok(())
+    }
+    pub fn idle_timeout(&self) -> u64 {
+        if self.max_idle_timeout_secs == 0 {
+            30
+        } else {
+            self.max_idle_timeout_secs
+        }
+    }
+    pub fn keep_alive(&self) -> u64 {
+        if self.keep_alive_secs == 0 {
+            10.min(self.idle_timeout() / 2)
+        } else {
+            self.keep_alive_secs
+        }
+    }
+}
+const MIN_WINDOW: u64 = 16 * 1024;
+const MAX_WINDOW: u64 = 64 * 1024 * 1024;
+const MIN_HOP: u64 = 5;
+const DEFAULT_HOP: u64 = 30;
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+/// Parses a port set such as `443,20000-30000` into sorted, merged ranges.
+pub fn port_ranges(spec: &str) -> Result<Vec<(u16, u16)>> {
+    if spec.is_empty() || spec.len() > 1024 {
+        return Err(Error::Field("hop ports"));
+    }
+    let mut ranges = vec![];
+    for part in spec.split(',') {
+        let (start, end) = part.split_once('-').unwrap_or((part, part));
+        let parse = |s: &str| {
+            s.parse::<u16>()
+                .ok()
+                .filter(|p| *p != 0 && s.bytes().all(|b| b.is_ascii_digit()))
+                .ok_or(Error::Field("hop ports"))
+        };
+        let (start, end) = (parse(start)?, parse(end)?);
+        ranges.push((start.min(end), start.max(end)));
+    }
+    if ranges.len() > 64 {
+        return Err(Error::Field("hop ports"));
+    }
+    ranges.sort_unstable();
+    let mut merged: Vec<(u16, u16)> = vec![];
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some(last) if start <= last.1.saturating_add(1) => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    Ok(merged)
+}
+/// A lone port is written as `p-p`: upstream treats it as hopping on one
+/// port, which still rotates the local socket.
+fn format_ports(ranges: &[(u16, u16)]) -> String {
+    if let [(a, b)] = ranges
+        && a == b
+    {
+        return format!("{a}-{a}");
+    }
+    ranges
+        .iter()
+        .map(|(a, b)| {
+            if a == b {
+                a.to_string()
+            } else {
+                format!("{a}-{b}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 impl Hysteria2 {
+    /// Seconds between hops as `(min, max)`; equal values hop at a fixed interval.
+    pub fn hop_interval(&self) -> (u64, u64) {
+        match (self.hop_interval_min, self.hop_interval_max) {
+            (0, 0) => (DEFAULT_HOP, DEFAULT_HOP),
+            (min, max) => (min, max),
+        }
+    }
     pub fn validate(&self) -> Result<()> {
         if self.salamander.expose().len() > 4096 {
             return Err(Error::Field("obfuscation password"));
         }
+        if !self.hop_ports.is_empty() {
+            let ranges = port_ranges(&self.hop_ports)?;
+            if format_ports(&ranges) != self.hop_ports {
+                return Err(Error::Field("hop ports"));
+            }
+        }
+        let (min, max) = self.hop_interval();
+        if (self.hop_interval_min == 0) != (self.hop_interval_max == 0)
+            || min < MIN_HOP
+            || max < min
+            || max > 24 * 3600
+            || (self.hop_ports.is_empty() && self.hop_interval_min != 0)
+        {
+            return Err(Error::Field("hop interval"));
+        }
+        // 100 Gbit/s bounds arithmetic in congestion control.
+        if self.up_bps > 100_000_000_000
+            || self.down_bps > 100_000_000_000
+            || (self.up_bps != 0 && self.up_bps < 65_536)
+            || (self.down_bps != 0 && self.down_bps < 65_536)
+        {
+            return Err(Error::Field("bandwidth"));
+        }
+        if !matches!(self.congestion.as_str(), "" | "bbr" | "reno") {
+            return Err(Error::Field("congestion"));
+        }
+        self.quic.validate()?;
         if !self.pin_sha256.is_empty()
             && (self.pin_sha256.len() != 64
                 || !self.pin_sha256.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -84,7 +247,8 @@ pub fn link(input: &str) -> Result<Profile> {
     if input.len() > MAX_LINK {
         return Err(Error::TooLarge);
     }
-    let url = url::Url::parse(input).map_err(|_| Error::Syntax)?;
+    let (input, hop_ports) = split_link_ports(input)?;
+    let url = url::Url::parse(&input).map_err(|_| Error::Syntax)?;
     if !matches!(url.scheme(), "hy2" | "hysteria2") || !matches!(url.path(), "" | "/") {
         return Err(Error::Syntax);
     }
@@ -139,10 +303,50 @@ pub fn link(input: &str) -> Result<Profile> {
         Hysteria2 {
             salamander: Secret::new(password),
             pin_sha256: pin,
+            hop_ports,
+            ..Default::default()
         },
         decode(url.fragment().unwrap_or_default())?,
     )
 }
+/// Replaces a multi-port authority (`host:443,20000-30000`) with its first port
+/// so the URL parser accepts it, returning the canonical hop set separately.
+fn split_link_ports(input: &str) -> Result<(String, String)> {
+    let start = input.find("://").ok_or(Error::Syntax)? + 3;
+    let end = input[start..]
+        .find(['/', '?', '#'])
+        .map_or(input.len(), |n| start + n);
+    let authority = &input[start..end];
+    let host_start = authority.rfind('@').map_or(0, |n| n + 1);
+    let (host, ports) = split_ports(&authority[host_start..])?;
+    if ports.is_empty() {
+        return Ok((input.into(), String::new()));
+    }
+    let ranges = port_ranges(&ports)?;
+    let first = ranges[0].0;
+    Ok((
+        format!(
+            "{}{}{host}:{first}{}",
+            &input[..start],
+            &authority[..host_start],
+            &input[end..]
+        ),
+        format_ports(&ranges),
+    ))
+}
+/// Splits `host:ports` when the port part is a multi-port set; plain ports stay attached.
+fn split_ports(server: &str) -> Result<(&str, String)> {
+    let colon = match server.rfind(':') {
+        Some(n) if !server[n..].contains(']') => n,
+        _ => return Ok((server, String::new())),
+    };
+    let ports = &server[colon + 1..];
+    if !ports.contains([',', '-']) {
+        return Ok((server, String::new()));
+    }
+    Ok((&server[..colon], ports.into()))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClientConfig {
@@ -155,6 +359,151 @@ struct ClientConfig {
     obfs: Option<Obfs>,
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    transport: Option<Transport>,
+    #[serde(default)]
+    bandwidth: Option<Bandwidth>,
+    #[serde(default)]
+    congestion: Option<Congestion>,
+    #[serde(default)]
+    quic: Option<QuicConfig>,
+    // Local listener modes of the official client have no meaning for a system
+    // VPN profile and carry no transport or security settings.
+    #[serde(default, rename = "socks5")]
+    _socks5: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "http")]
+    _http: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "tcpForwarding")]
+    _tcp_forwarding: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "udpForwarding")]
+    _udp_forwarding: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "tcpTProxy")]
+    _tcp_tproxy: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "udpTProxy")]
+    _udp_tproxy: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "tcpRedirect")]
+    _tcp_redirect: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "tun")]
+    _tun: Option<serde::de::IgnoredAny>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Transport {
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    udp: Option<UdpTransport>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UdpTransport {
+    #[serde(default)]
+    hop_interval: Option<String>,
+    #[serde(default)]
+    min_hop_interval: Option<String>,
+    #[serde(default)]
+    max_hop_interval: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Bandwidth {
+    #[serde(default)]
+    up: Option<Scalar>,
+    #[serde(default)]
+    down: Option<Scalar>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Congestion {
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    bbr_profile: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct QuicConfig {
+    #[serde(default)]
+    init_stream_receive_window: Option<u64>,
+    #[serde(default)]
+    max_stream_receive_window: Option<u64>,
+    #[serde(default)]
+    init_conn_receive_window: Option<u64>,
+    #[serde(default)]
+    max_conn_receive_window: Option<u64>,
+    #[serde(default)]
+    max_idle_timeout: Option<String>,
+    #[serde(default)]
+    keep_alive_period: Option<String>,
+    #[serde(default, rename = "disablePathMTUDiscovery")]
+    disable_path_mtu_discovery: Option<bool>,
+}
+/// YAML allows bandwidth as a bare number or a string with units.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Scalar {
+    Number(u64),
+    Text(String),
+}
+/// Go-style duration (`30s`, `1m30s`, `500ms`) rounded to whole seconds.
+fn duration_secs(text: &str, field: &'static str) -> Result<u64> {
+    let mut rest = text.trim();
+    if rest.is_empty() || rest.len() > 32 {
+        return Err(Error::Field(field));
+    }
+    let mut nanos: u128 = 0;
+    while !rest.is_empty() {
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .ok_or(Error::Field(field))?;
+        let value: f64 = rest[..digits].parse().map_err(|_| Error::Field(field))?;
+        rest = &rest[digits..];
+        let unit = rest
+            .find(|c: char| c.is_ascii_digit() || c == '.')
+            .unwrap_or(rest.len());
+        let scale: f64 = match &rest[..unit] {
+            "ns" => 1.0,
+            "us" | "µs" => 1e3,
+            "ms" => 1e6,
+            "s" => 1e9,
+            "m" => 60e9,
+            "h" => 3600e9,
+            _ => return Err(Error::Field(field)),
+        };
+        rest = &rest[unit..];
+        nanos += (value * scale) as u128;
+    }
+    let secs = nanos / 1_000_000_000;
+    if !nanos.is_multiple_of(1_000_000_000) || secs == 0 || secs > 24 * 3600 {
+        return Err(Error::Field(field));
+    }
+    Ok(secs as u64)
+}
+/// Bandwidth in bits per second; units follow the official client (decimal SI).
+fn bandwidth_bps(value: &Scalar) -> Result<u64> {
+    let text = match value {
+        Scalar::Number(n) => return Ok(*n),
+        Scalar::Text(t) => t.trim().to_ascii_lowercase(),
+    };
+    let split = text
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(text.len());
+    let number: f64 = text[..split]
+        .parse()
+        .map_err(|_| Error::Field("bandwidth"))?;
+    let scale: f64 = match text[split..].trim() {
+        "" | "b" | "bps" => 1.0,
+        "k" | "kb" | "kbps" => 1e3,
+        "m" | "mb" | "mbps" => 1e6,
+        "g" | "gb" | "gbps" => 1e9,
+        "t" | "tb" | "tbps" => 1e12,
+        _ => return Err(Error::Field("bandwidth")),
+    };
+    let bps = number * scale;
+    if !bps.is_finite() || bps < 0.0 || bps > u64::MAX as f64 {
+        return Err(Error::Field("bandwidth"));
+    }
+    Ok(bps as u64)
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -192,29 +541,112 @@ pub fn config(value: Value) -> Result<Profile> {
         }
         let mut p = link(&c.server)?;
         if !c.name.is_empty() {
-            p.name = c.name;
-            p.validate()?
+            p.name = c.name.clone();
         }
+        extended(&c, p.hysteria2.as_mut().ok_or(Error::Field("hysteria2"))?)?;
+        p.validate()?;
         return Ok(p);
     }
-    let password = match c.obfs {
+    let password = match &c.obfs {
         Some(o) if o.kind == "salamander" && !o.salamander.password.is_empty() => {
-            o.salamander.password
+            o.salamander.password.clone()
         }
         Some(_) => return Err(Error::Field("obfs")),
         None => String::new(),
     };
-    base(
-        &c.server,
-        c.auth,
-        c.tls.sni,
-        c.tls.insecure,
-        Hysteria2 {
-            salamander: Secret::new(password),
-            pin_sha256: c.tls.pin.replace(':', "").to_ascii_lowercase(),
-        },
-        c.name,
-    )
+    let (host, ports) = split_ports(&c.server)?;
+    let (server, hop_ports) = if ports.is_empty() {
+        (c.server.clone(), String::new())
+    } else {
+        let ranges = port_ranges(&ports)?;
+        (format!("{host}:{}", ranges[0].0), format_ports(&ranges))
+    };
+    let mut options = Hysteria2 {
+        salamander: Secret::new(password),
+        pin_sha256: c.tls.pin.replace(':', "").to_ascii_lowercase(),
+        hop_ports,
+        ..Default::default()
+    };
+    extended(&c, &mut options)?;
+    base(&server, c.auth, c.tls.sni, c.tls.insecure, options, c.name)
+}
+/// Transport, bandwidth, congestion and QUIC sections of the official client config.
+fn extended(c: &ClientConfig, o: &mut Hysteria2) -> Result<()> {
+    if let Some(t) = &c.transport {
+        if !matches!(t.kind.as_deref(), None | Some("udp")) {
+            return Err(Error::Field("transport"));
+        }
+        if let Some(u) = &t.udp {
+            let field = "hop interval";
+            match (&u.hop_interval, &u.min_hop_interval, &u.max_hop_interval) {
+                (None, None, None) => {}
+                (Some(fixed), None, None) => {
+                    o.hop_interval_min = duration_secs(fixed, field)?;
+                    o.hop_interval_max = o.hop_interval_min;
+                }
+                (None, Some(min), Some(max)) => {
+                    o.hop_interval_min = duration_secs(min, field)?;
+                    o.hop_interval_max = duration_secs(max, field)?;
+                }
+                _ => return Err(Error::Field(field)),
+            }
+            // Upstream accepts an interval without hop ports and ignores it.
+            if o.hop_ports.is_empty() {
+                o.hop_interval_min = 0;
+                o.hop_interval_max = 0;
+            }
+        }
+    }
+    if let Some(b) = &c.bandwidth {
+        o.up_bps = b.up.as_ref().map(bandwidth_bps).transpose()?.unwrap_or(0);
+        o.down_bps = b.down.as_ref().map(bandwidth_bps).transpose()?.unwrap_or(0);
+    }
+    if let Some(cc) = &c.congestion {
+        o.congestion = match cc.kind.as_deref() {
+            None | Some("") => String::new(),
+            Some(kind @ ("bbr" | "reno")) => kind.into(),
+            Some(_) => return Err(Error::Field("congestion")),
+        };
+        // Quinn implements one BBR variant; other profiles are not equivalent.
+        if !matches!(
+            cc.bbr_profile.as_deref(),
+            None | Some("") | Some("standard")
+        ) {
+            return Err(Error::Field("congestion bbrProfile"));
+        }
+    }
+    if let Some(q) = &c.quic {
+        let window = |init: Option<u64>, max: Option<u64>, field| match (init, max) {
+            (Some(i), Some(m)) if i > m => Err(Error::Field(field)),
+            (i, m) => Ok(m.or(i).unwrap_or(0)),
+        };
+        o.quic = Quic {
+            stream_receive_window: window(
+                q.init_stream_receive_window,
+                q.max_stream_receive_window,
+                "stream receive window",
+            )?,
+            connection_receive_window: window(
+                q.init_conn_receive_window,
+                q.max_conn_receive_window,
+                "connection receive window",
+            )?,
+            max_idle_timeout_secs: q
+                .max_idle_timeout
+                .as_deref()
+                .map(|d| duration_secs(d, "QUIC idle timeout"))
+                .transpose()?
+                .unwrap_or(0),
+            keep_alive_secs: q
+                .keep_alive_period
+                .as_deref()
+                .map(|d| duration_secs(d, "QUIC keep-alive period"))
+                .transpose()?
+                .unwrap_or(0),
+            disable_path_mtu_discovery: q.disable_path_mtu_discovery.unwrap_or(false),
+        };
+    }
+    Ok(())
 }
 pub fn yaml(input: &str) -> Result<Profile> {
     let options = serde_saphyr::options! {with_snippet:false,emit_comments:false,reject_unsupported_tags:true,budget:serde_saphyr::budget!{max_documents:1,max_depth:16,max_nodes:2048,max_aliases:0}};
@@ -246,7 +678,18 @@ pub fn encode(p: &Profile) -> Result<String> {
         }
     }
     url.set_fragment(Some(&p.name));
-    Ok(url.to_string())
+    let mut text = url.to_string();
+    if !options.hop_ports.is_empty() {
+        let port = url.port_or_known_default().ok_or(Error::Syntax)?;
+        let host = url.host_str().ok_or(Error::Syntax)?;
+        let single = format!("@{host}:{port}/");
+        let at = text.find(&single).ok_or(Error::Syntax)?;
+        text.replace_range(
+            at..at + single.len(),
+            &format!("@{host}:{}/", options.hop_ports),
+        );
+    }
+    Ok(text)
 }
 
 impl Protocol {
@@ -272,6 +715,91 @@ mod tests {
             Profile::import(&p.export(Format::Json).unwrap().content).unwrap(),
             p
         );
+    }
+    #[test]
+    fn port_hopping_links_roundtrip() {
+        let p =
+            Profile::import("hy2://secret@vpn.example:20000-20010,443,20005-20020/#Hop").unwrap();
+        let h = p.hysteria2.as_ref().unwrap();
+        assert_eq!(h.hop_ports, "443,20000-20020");
+        assert_eq!(p.endpoint.addresses, ["vpn.example:443"]);
+        assert_eq!(h.hop_interval(), (30, 30));
+        let link = p.export(Format::Link).unwrap().content.clone();
+        assert!(link.contains("@vpn.example:443,20000-20020/"), "{link}");
+        assert_eq!(Profile::import(&link).unwrap(), p);
+        assert_eq!(
+            Profile::import(&p.export(Format::Json).unwrap().content).unwrap(),
+            p
+        );
+        // One port in range form keeps upstream's local-socket rotation.
+        let single = Profile::import("hy2://secret@[2001:db8::1]:4443-4443/").unwrap();
+        assert_eq!(single.hysteria2.as_ref().unwrap().hop_ports, "4443-4443");
+        assert_eq!(single.endpoint.addresses, ["[2001:db8::1]:4443"]);
+        let link = single.export(Format::Link).unwrap().content.clone();
+        assert_eq!(Profile::import(&link).unwrap(), single);
+        let plain = Profile::import("hy2://secret@vpn.example:8443/").unwrap();
+        assert!(plain.hysteria2.unwrap().hop_ports.is_empty());
+        for bad in [
+            "hy2://secret@vpn.example:0-10/",
+            "hy2://secret@vpn.example:1-2,x/",
+            "hy2://secret@vpn.example:443,/",
+            "hy2://secret@vpn.example:70000-70001/",
+        ] {
+            assert!(Profile::import(bad).is_err(), "{bad}");
+        }
+    }
+    #[test]
+    fn yaml_transport_bandwidth_and_quic() {
+        let p = Profile::import(
+            "server: vpn.example:443,30000-30100\nauth: secret\ntransport:\n  type: udp\n  udp:\n    minHopInterval: 15s\n    maxHopInterval: 1m\nbandwidth:\n  up: 100 mbps\n  down: 1.5 Gbps\ncongestion:\n  type: reno\nquic:\n  initStreamReceiveWindow: 8388608\n  maxStreamReceiveWindow: 16777216\n  maxConnReceiveWindow: 33554432\n  maxIdleTimeout: 60s\n  keepAlivePeriod: 20s\n  disablePathMTUDiscovery: true\nsocks5:\n  listen: 127.0.0.1:1080\nlazy: false\n",
+        );
+        assert!(p.is_err(), "lazy is not a client-mode section");
+        let p = Profile::import(
+            "server: vpn.example:443,30000-30100\nauth: secret\ntransport:\n  type: udp\n  udp:\n    minHopInterval: 15s\n    maxHopInterval: 1m\nbandwidth:\n  up: 100 mbps\n  down: 1.5 Gbps\ncongestion:\n  type: reno\nquic:\n  initStreamReceiveWindow: 8388608\n  maxStreamReceiveWindow: 16777216\n  maxConnReceiveWindow: 33554432\n  maxIdleTimeout: 60s\n  keepAlivePeriod: 20s\n  disablePathMTUDiscovery: true\nsocks5:\n  listen: 127.0.0.1:1080\n",
+        )
+        .unwrap();
+        let h = p.hysteria2.as_ref().unwrap();
+        assert_eq!(h.hop_ports, "443,30000-30100");
+        assert_eq!(h.hop_interval(), (15, 60));
+        assert_eq!((h.up_bps, h.down_bps), (100_000_000, 1_500_000_000));
+        assert_eq!(h.congestion, "reno");
+        assert_eq!(
+            h.quic,
+            Quic {
+                stream_receive_window: 16 * 1024 * 1024,
+                connection_receive_window: 32 * 1024 * 1024,
+                max_idle_timeout_secs: 60,
+                keep_alive_secs: 20,
+                disable_path_mtu_discovery: true,
+            }
+        );
+        assert_eq!(
+            Profile::import(&p.export(Format::Json).unwrap().content).unwrap(),
+            p
+        );
+        let fixed = Profile::import(
+            "server: hy2://secret@vpn.example:443-445/\ntransport:\n  udp:\n    hopInterval: 1m30s\nbandwidth:\n  up: 20m\n",
+        )
+        .unwrap();
+        let h = fixed.hysteria2.as_ref().unwrap();
+        assert_eq!((h.hop_interval(), h.up_bps), ((90, 90), 20_000_000));
+        for bad in [
+            "server: vpn.example:443-445\nauth: x\ntransport:\n  udp:\n    hopInterval: 4s\n",
+            "server: vpn.example:443-445\nauth: x\ntransport:\n  udp:\n    hopInterval: 10s\n    minHopInterval: 10s\n    maxHopInterval: 20s\n",
+            "server: vpn.example:443-445\nauth: x\ntransport:\n  udp:\n    minHopInterval: 30s\n    maxHopInterval: 10s\n",
+            "server: vpn.example:443-445\nauth: x\ntransport:\n  type: wechat-video\n",
+            "server: vpn.example\nauth: x\nbandwidth:\n  up: 100 furlongs\n",
+            "server: vpn.example\nauth: x\nbandwidth:\n  up: 1 kbps\n",
+            "server: vpn.example\nauth: x\ncongestion:\n  type: cubic\n",
+            "server: vpn.example\nauth: x\ncongestion:\n  type: bbr\n  bbrProfile: aggressive\n",
+            "server: vpn.example\nauth: x\nquic:\n  maxIdleTimeout: 2s\n",
+            "server: vpn.example\nauth: x\nquic:\n  keepAlivePeriod: 1s\n",
+            "server: vpn.example\nauth: x\nquic:\n  maxStreamReceiveWindow: 1024\n",
+            "server: vpn.example\nauth: x\nquic:\n  disableChromeParrot: true\n",
+            "server: vpn.example\nauth: x\nrealm:\n  stunTimeout: 5s\n",
+        ] {
+            assert!(Profile::import(bad).is_err(), "{bad}");
+        }
     }
     #[test]
     fn yaml_strict_security_options() {

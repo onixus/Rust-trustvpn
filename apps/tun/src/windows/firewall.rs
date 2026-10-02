@@ -127,19 +127,22 @@ fn add_in(
     };
     check(unsafe { FwpmFilterAdd0(engine.0, &filter, ptr::null_mut(), ptr::null_mut()) })
 }
+/// `ports` replaces each endpoint's own port with these ranges (Hysteria port hopping).
 pub fn install(
     luid: u64,
     endpoints: &[SocketAddrV4],
     protocol: rtrust_profile::Protocol,
+    ports: &[(u16, u16)],
 ) -> Result<(), String> {
-    install_in(luid, endpoints, FULL, false, protocol)
+    install_in(luid, endpoints, FULL, false, protocol, ports)
 }
 pub fn install_boot(
     luid: u64,
     endpoints: &[SocketAddrV4],
     protocol: rtrust_profile::Protocol,
+    ports: &[(u16, u16)],
 ) -> Result<(), String> {
-    install_in(luid, endpoints, BOOT, true, protocol)
+    install_in(luid, endpoints, BOOT, true, protocol, ports)
 }
 fn install_in(
     mut luid: u64,
@@ -147,7 +150,11 @@ fn install_in(
     space: Space,
     boot: bool,
     protocol: rtrust_profile::Protocol,
+    ports: &[(u16, u16)],
 ) -> Result<(), String> {
+    if ports.len() > 64 {
+        return Err("Too many endpoint port ranges".into());
+    }
     let existed = active_in(space)?;
     if !boot && existed {
         return Err("WFP guard already active; explicitly recover before reconnecting".into());
@@ -252,6 +259,32 @@ fn install_in(
                                 },
                             },
                         ));
+                        if !ports.is_empty() {
+                            for (low, high) in ports {
+                                let mut range = FWP_RANGE0 {
+                                    valueLow: FWP_VALUE0 {
+                                        r#type: FWP_UINT16,
+                                        Anonymous: FWP_VALUE0_0 { uint16: *low },
+                                    },
+                                    valueHigh: FWP_VALUE0 {
+                                        r#type: FWP_UINT16,
+                                        Anonymous: FWP_VALUE0_0 { uint16: *high },
+                                    },
+                                };
+                                let mut port = condition(
+                                    FWPM_CONDITION_IP_REMOTE_PORT,
+                                    FWP_RANGE_TYPE,
+                                    FWP_CONDITION_VALUE0_0 {
+                                        rangeValue: &mut range,
+                                    },
+                                );
+                                port.matchType = FWP_MATCH_RANGE;
+                                let mut ranged = conditions.clone();
+                                ranged.push(port);
+                                add(&engine, layer, true, &mut ranged)?;
+                            }
+                            continue;
+                        }
                         conditions.push(condition(
                             FWPM_CONDITION_IP_REMOTE_PORT,
                             FWP_UINT16,

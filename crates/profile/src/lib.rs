@@ -159,6 +159,15 @@ impl Profile {
             &self.endpoint.upstream_protocol
         }
     }
+    /// Server UDP port ranges a firewall must allow for Hysteria port hopping;
+    /// empty when only the endpoint address ports are used.
+    pub fn hop_port_ranges(&self) -> Vec<(u16, u16)> {
+        self.hysteria2
+            .as_ref()
+            .filter(|h| !h.hop_ports.is_empty())
+            .and_then(|h| hysteria::port_ranges(&h.hop_ports).ok())
+            .unwrap_or_default()
+    }
     pub fn formats(&self) -> &'static [Format] {
         if self.protocol == Protocol::Hysteria2 {
             &[Format::Json, Format::Link]
