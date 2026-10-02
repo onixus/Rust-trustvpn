@@ -52,7 +52,7 @@ def answer_dns():
         qtype=struct.unpack('!H',data[i+1:i+3])[0]
         # Do not map OS connectivity checks and unrelated names to the same
         # test IP: domain routing deliberately keeps shared-IP conflicts in VPN.
-        known=bool(labels) and labels[-1]==b'example'
+        known=bool(labels) and (labels[-1]==b'example' or labels[-2:]==[b'fixture',b'test'])
         answer=b'\xc0\x0c'+struct.pack('!HHIH',1,1,60,4)+socket.inet_aton('10.231.243.2') if qtype==1 and known else b''
         result=data[:2]+struct.pack('!HHHHH',0x8180 if known else 0x8183,1,int(bool(answer)),0,0)+data[12:end]+answer
         dns.sendto(result,addr)

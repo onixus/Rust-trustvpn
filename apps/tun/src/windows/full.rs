@@ -290,7 +290,7 @@ pub fn recover() -> Result<(), String> {
         if journal.version != 2 || journal.routes.len() > 128 {
             return Err("Unsupported recovery journal".into());
         }
-        routes::remove_owned_adapter(&journal.adapter)?;
+        routes::recover_owned_adapter(&journal.adapter)?;
         for item in &journal.routes {
             let mut current = route(item);
             let code = unsafe { GetIpForwardEntry2(&mut current) };
@@ -303,10 +303,6 @@ pub fn recover() -> Result<(), String> {
             }
             check(unsafe { DeleteIpForwardEntry2(&current) })?;
         }
-    }
-    // Keep protection until asynchronous Wintun removal has finished.
-    if journal_path.exists() {
-        routes::wait_removed()?;
     }
     // Routes are cleaned before lifting the persistent network block.
     firewall::remove()?;

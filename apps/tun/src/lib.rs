@@ -1,4 +1,6 @@
 //! Experimental bounded IPv4 data plane. No routing, DNS or firewall changes.
+#[cfg(any(target_os = "windows", test))]
+mod adapter_cleanup;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod always_on;
 #[cfg(any(target_os = "linux", target_os = "windows"))]

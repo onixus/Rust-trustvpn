@@ -2,7 +2,7 @@
 Never called by ordinary CI. Preserves GUI, vault, SCM identity and original service.
 """
 import argparse, hashlib, json, os, pathlib, shutil, subprocess, sys, time, uuid
-p=argparse.ArgumentParser();p.add_argument('fixture',type=pathlib.Path);p.add_argument('--allow-existing-installation',action='store_true');p.add_argument('--service-sha256',required=True);a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('fixture',type=pathlib.Path);p.add_argument('--allow-existing-installation',action='store_true');p.add_argument('--service-sha256',required=True);p.add_argument('--crash-cycles',type=int,choices=range(1,4),default=1);a=p.parse_args()
 assert a.allow_existing_installation,'Explicit authorization required'
 sys.stdout.reconfigure(encoding='utf-8',errors='replace')
 sys.stderr.reconfigure(encoding='utf-8',errors='replace')
@@ -11,6 +11,9 @@ SERVICE=pathlib.Path(os.environ['ProgramFiles'])/'RTrustTunnel Service'
 SOURCE=ROOT/'dist/native-preview-windows/rtrust-service.exe'
 WORK=pathlib.Path(os.environ['ProgramData'])/('RTrustTunnel-E2E-'+uuid.uuid4().hex)
 TASK=WORK.name
+# Each additional crash gets the same bounded SCM/reconnect allowance.
+worker_minutes=5+3*(a.crash_cycles-1)
+rollback_minutes=worker_minutes+1
 
 def ps(code):
     r=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',"$ErrorActionPreference='Stop'; "+code],capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=90)
@@ -49,6 +52,7 @@ fixture_data=json.loads(a.fixture.read_text())
 physical=json.loads(ps("ConvertTo-Json -Compress -InputObject @(Get-NetAdapter -Physical | Where-Object Status -eq Up | Select-Object -ExpandProperty Name)"))
 assert len(physical)==1,'Handoff test requires one known active physical adapter'
 fixture_data['network_handoff_alias']=physical[0]
+fixture_data['always_on_crash_cycles']=a.crash_cycles
 (WORK/'fixture.json').write_text(json.dumps(fixture_data))
 adapter=physical[0].replace("'","''")
 # Recovery is independent of Python/Jenkins and survives network loss.
@@ -72,15 +76,15 @@ Start-Service RTrustTunnel
 (WORK/'run.ps1').write_text(f"$PSDefaultParameterValues['Out-File:Encoding']='utf8'; [Console]::OutputEncoding=[Text.Encoding]::UTF8\n& '{runtime/'python.exe'}' -X utf8 -I '{WORK/'windows_full_e2e.py'}' '{WORK/'fixture.json'}' *> '{WORK/'worker.log'}'\n",encoding='utf-8-sig')
 armed=False;changed=False
 try:
-    ps(f"$p=New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest; $s=New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 8); $a=New-ScheduledTaskAction -Execute \"$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -Argument '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{WORK/'recover.ps1'}\"'; $t=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(6); Register-ScheduledTask -TaskName '{TASK}-recovery' -Principal $p -Action $a -Trigger $t -Settings $s | Out-Null")
+    ps(f"$p=New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest; $s=New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 8); $a=New-ScheduledTaskAction -Execute \"$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -Argument '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{WORK/'recover.ps1'}\"'; $t=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes({rollback_minutes}); Register-ScheduledTask -TaskName '{TASK}-recovery' -Principal $p -Action $a -Trigger $t -Settings $s | Out-Null")
     armed=True
     ps("Stop-Service RTrustTunnel; (Get-Service RTrustTunnel).WaitForStatus('Stopped',[TimeSpan]::FromSeconds(30))")
     (SERVICE/'rtrust-service.exe').write_bytes(binary);changed=True
     run(SERVICE/'rtrust-service.exe','--wfp-self-test')
     ps('Start-Service RTrustTunnel')
-    ps(f"$p=New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest; $s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5); $a=New-ScheduledTaskAction -Execute \"$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -Argument '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{WORK/'run.ps1'}\"'; Register-ScheduledTask -TaskName '{TASK}' -Principal $p -Action $a -Settings $s | Out-Null; Start-ScheduledTask -TaskName '{TASK}'")
-    print('E2E running with independent six-minute service/network rollback: '+str(WORK),flush=True)
-    deadline=time.monotonic()+310
+    ps(f"$p=New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest; $s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes {worker_minutes}); $a=New-ScheduledTaskAction -Execute \"$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -Argument '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{WORK/'run.ps1'}\"'; Register-ScheduledTask -TaskName '{TASK}' -Principal $p -Action $a -Settings $s | Out-Null; Start-ScheduledTask -TaskName '{TASK}'")
+    print(f'E2E running with independent {rollback_minutes}-minute service/network rollback: '+str(WORK),flush=True)
+    deadline=time.monotonic()+worker_minutes*60+10
     while time.monotonic()<deadline and not (WORK/'result.json').exists():time.sleep(1)
     assert (WORK/'result.json').exists(),'E2E timeout; timed recovery remains armed'
     result=json.loads((WORK/'result.json').read_text())
