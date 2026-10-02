@@ -66,7 +66,13 @@ def main():
     publish=os.environ.get('RTRUST_ANDROID_FIXTURE_PUBLISH','127.0.0.1:')
     network = container = False
     try:
-        run('docker', 'network', 'create', '--subnet', '10.231.243.0/29', '--ipv6', '--subnet', 'fd00:5254:243::/64', NAME); network = True
+        # Bypass checks reach the target directly. If the emulator runs on another
+        # host, that host routes 10.231.243.0/29 here over the named interface.
+        # Docker drops direct access to container IPs from foreign interfaces;
+        # trust only that interface, only for this fixture network.
+        trusted = os.environ.get('RTRUST_ANDROID_FIXTURE_TRUSTED_IFACE')
+        options = ['--opt', 'com.docker.network.bridge.trusted_host_interfaces=' + trusted] if trusted else []
+        run('docker', 'network', 'create', '--subnet', '10.231.243.0/29', '--ipv6', '--subnet', 'fd00:5254:243::/64', *options, NAME); network = True
         run('docker', 'run', '-d', '--name', NAME, '--network', NAME, '--ip', IP, '--ip6', 'fd00:5254:243::2', '--user', f'{os.getuid()}:{os.getgid()}', '--cap-drop=ALL', '--sysctl', 'net.ipv4.ip_unprivileged_port_start=0', '--security-opt=no-new-privileges', '--read-only', '--tmpfs', '/tmp', '-p', f'{publish}:4433/{transport}', '-v', f'{ROOT}:/fixture:ro,z', '-v', f'{Path("ci/windows_fixture_server.py").resolve()}:/server.py:ro,z', 'python:3.11-slim', 'python', '/server.py'); container = True
         port = int(run('docker', 'port', NAME, f'4433/{transport}').rsplit(':', 1)[1])
         if not hysteria:
