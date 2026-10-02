@@ -37,6 +37,9 @@ impl Secret {
     pub fn expose(&self) -> &str {
         &self.0
     }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 impl fmt::Debug for Secret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -433,6 +436,24 @@ impl Profile {
                     }
                     if !self.endpoint.has_ipv6 {
                         losses.push("IPv6 restriction is only preserved in JSON");
+                    }
+                    if let Some(h) = &self.hysteria2 {
+                        if h.hop_interval_min != 0 {
+                            losses.push("Port hopping interval is only preserved in JSON");
+                        }
+                        if h.up_bps != 0
+                            || h.down_bps != 0
+                            || !h.congestion.is_empty()
+                            || h.quic != Default::default()
+                        {
+                            losses.push("Bandwidth, congestion and QUIC settings are only preserved in JSON");
+                        }
+                        if !h.client_certificate.is_empty() {
+                            losses.push("Client certificate is only preserved in JSON");
+                        }
+                        if h.gecko.as_ref().is_some_and(|g| *g != Default::default()) {
+                            losses.push("Gecko packet sizes are only preserved in JSON");
+                        }
                     }
                     if !self.extensions.is_empty()
                         || !self.endpoint.extra.is_empty()

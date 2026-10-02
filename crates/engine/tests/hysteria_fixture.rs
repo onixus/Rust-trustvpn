@@ -174,3 +174,58 @@ async fn official_server_port_hopping_bandwidth_and_quic_options() {
     assert!(elapsed <= std::time::Duration::from_secs(8), "{elapsed:?}");
     session.health().await.unwrap();
 }
+#[tokio::test]
+#[ignore = "run through ci/hysteria_interop.py"]
+async fn official_server_gecko_obfuscation_and_mutual_tls() {
+    let read = |name: &str| {
+        let path = std::env::var(name).unwrap();
+        let input = zeroize::Zeroizing::new(std::fs::read_to_string(path).unwrap());
+        Profile::import(&input).unwrap()
+    };
+    let profile = read("RTRUST_HYSTERIA_GECKO_FIXTURE");
+    assert!(profile.hysteria2.as_ref().unwrap().gecko.is_some());
+    let session = Session::connect(&profile).await.unwrap();
+    let target = format!(
+        "127.0.0.1:{}",
+        std::env::var("RTRUST_HYSTERIA_TCP").unwrap()
+    );
+    let payload: Vec<u8> = (0..512 * 1024).map(|n| (n * 3) as u8).collect();
+    digest_exchange(&session, &target, &payload).await;
+    let mut udp_tunnel = session.open_udp().await.unwrap();
+    let datagram = udp::Datagram {
+        source: "10.0.0.2:12000".parse().unwrap(),
+        destination: format!(
+            "127.0.0.1:{}",
+            std::env::var("RTRUST_HYSTERIA_UDP").unwrap()
+        )
+        .parse()
+        .unwrap(),
+        payload: vec![7; 1400],
+    };
+    udp_tunnel
+        .write_all(&udp::encode(&datagram, "gecko").unwrap())
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        udp::read(&mut udp_tunnel),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(reply.payload, datagram.payload);
+    // The server requires the client certificate.
+    let mut anonymous = profile.clone();
+    let options = anonymous.hysteria2.as_mut().unwrap();
+    assert!(!options.client_certificate.is_empty());
+    options.client_certificate.clear();
+    options.client_key = rtrust_profile::Secret::new("");
+    assert!(Session::connect(&anonymous).await.is_err());
+    // Gecko and Salamander are not interchangeable in either direction.
+    let mut plain = profile.clone();
+    plain.hysteria2.as_mut().unwrap().gecko = None;
+    assert!(Session::connect(&plain).await.is_err());
+    let mut mismatch = read("RTRUST_HYSTERIA_FIXTURE");
+    mismatch.hysteria2.as_mut().unwrap().gecko = profile.hysteria2.unwrap().gecko;
+    assert!(Session::connect(&mismatch).await.is_err());
+}

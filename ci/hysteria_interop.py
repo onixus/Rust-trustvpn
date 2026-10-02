@@ -103,16 +103,32 @@ def main():
         relay=Relay(('127.0.0.1',port),16)
         hopping={**profile,'name':'Isolated Hysteria hopping','hysteria2':{'salamander':obfs,'hop_ports':relay.ports(),'hop_interval_min':5,'hop_interval_max':5,'up_bps':20_000_000,'down_bps':50_000_000,'congestion':'reno','quic':{'stream_receive_window':4194304,'connection_receive_window':16777216,'max_idle_timeout_secs':20,'keep_alive_secs':4}},'endpoint':{**profile['endpoint'],'addresses':[f'127.0.0.1:{relay.listen[0]}']}}
         hop_client=work/'hop.json';hop_client.write_text(json.dumps(hopping));hop_client.chmod(0o600)
-        with (work/'server.log').open('wb') as log:
+        # A second official server uses Gecko, which cannot coexist with Salamander on one listener.
+        probe=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);probe.bind(('127.0.0.1',0));gecko_port=probe.getsockname()[1];probe.close()
+        # It also requires mutual TLS with a separate client CA.
+        quiet={'check':True,'stdout':subprocess.DEVNULL,'stderr':subprocess.DEVNULL}
+        subprocess.run(['openssl','req','-x509','-newkey','ec','-pkeyopt','ec_paramgen_curve:P-256','-nodes','-days','1','-subj','/CN=Fixture client CA','-keyout',str(work/'client-ca.key'),'-out',str(work/'client-ca.pem')],**quiet)
+        subprocess.run(['openssl','req','-newkey','ec','-pkeyopt','ec_paramgen_curve:P-256','-nodes','-subj','/CN=fixture-client','-keyout',str(work/'client.key'),'-out',str(work/'client.csr')],**quiet)
+        (work/'client.ext').write_text('basicConstraints=critical,CA:FALSE\nextendedKeyUsage=clientAuth\n')
+        subprocess.run(['openssl','x509','-req','-in',str(work/'client.csr'),'-CA',str(work/'client-ca.pem'),'-CAkey',str(work/'client-ca.key'),'-CAcreateserial','-days','1','-extfile',str(work/'client.ext'),'-out',str(work/'client.pem')],**quiet)
+        gecko_config={**config,'listen':f'127.0.0.1:{gecko_port}','tls':{**config['tls'],'clientCA':str(work/'client-ca.pem')},'obfs':{'type':'gecko','gecko':{'password':obfs,'minPacketSize':600,'maxPacketSize':1400}}}
+        gecko_server=work/'gecko-server.json';gecko_server.write_text(json.dumps(gecko_config));gecko_server.chmod(0o600)
+        gecko={**profile,'name':'Isolated Hysteria Gecko','hysteria2':{'salamander':obfs,'gecko':{'min_packet_size':700,'max_packet_size':1300},'client_certificate':(work/'client.pem').read_text(),'client_key':(work/'client.key').read_text()},'endpoint':{**profile['endpoint'],'addresses':[f'127.0.0.1:{gecko_port}']}}
+        gecko_client=work/'gecko.json';gecko_client.write_text(json.dumps(gecko));gecko_client.chmod(0o600)
+        with (work/'server.log').open('wb') as log,(work/'gecko-server.log').open('wb') as gecko_log:
             process=subprocess.Popen([str(executable),'server','-c',str(server)],stdout=log,stderr=log,env={**os.environ,'HYSTERIA_DISABLE_UPDATE_CHECK':'1'})
+            gecko_process=subprocess.Popen([str(executable),'server','-c',str(gecko_server)],stdout=gecko_log,stderr=gecko_log,env={**os.environ,'HYSTERIA_DISABLE_UPDATE_CHECK':'1'})
             try:
                 time.sleep(.5)
-                if process.poll() is not None:raise RuntimeError('Hysteria fixture did not start')
-                env={**os.environ,'RTRUST_HYSTERIA_FIXTURE':str(client),'RTRUST_HYSTERIA_HOP_FIXTURE':str(hop_client),'RTRUST_HYSTERIA_MAX_UDP':'8192' if platform.system()=='Darwin' else '65507','RTRUST_HYSTERIA_TCP':str(tcp.getsockname()[1]),'RTRUST_HYSTERIA_UDP':str(udp.getsockname()[1])}
+                if process.poll() is not None or gecko_process.poll() is not None:raise RuntimeError('Hysteria fixture did not start')
+                env={**os.environ,'RTRUST_HYSTERIA_FIXTURE':str(client),'RTRUST_HYSTERIA_HOP_FIXTURE':str(hop_client),'RTRUST_HYSTERIA_GECKO_FIXTURE':str(gecko_client),'RTRUST_HYSTERIA_MAX_UDP':'8192' if platform.system()=='Darwin' else '65507','RTRUST_HYSTERIA_TCP':str(tcp.getsockname()[1]),'RTRUST_HYSTERIA_UDP':str(udp.getsockname()[1])}
                 subprocess.run(['cargo','test','--locked','-p','rtrust-engine','--test','hysteria_fixture','--','--ignored','--test-threads','1'],cwd=ROOT,env=env,check=True,timeout=240)
                 # Each hop must use a new client socket and the set must be spread over server ports.
                 if len(relay.sources)<3 or len(relay.used)<2:raise RuntimeError(f'Port hopping not observed: {len(relay.sources)} client sockets, {len(relay.used)} server ports')
-            finally:process.terminate();process.wait(timeout=10);tcp.close();udp.close();relay.close();print("UDP fixture payload lengths:",seen)
+            finally:
+                for p in (process,gecko_process):p.terminate();p.wait(timeout=10)
+                tcp.close();udp.close();relay.close();print("UDP fixture payload lengths:",seen)
     print('PASS official Hysteria 2: TCP payload, UDP fragmentation and independent sessions')
+    print('PASS official Hysteria 2 Gecko + mutual TLS: fragmented handshake, TCP/UDP, missing client certificate and Salamander mismatch rejected')
     print(f'PASS official Hysteria 2 port hopping: {len(relay.sources)} client sockets over {len(relay.used)} of 16 server ports, Brutal/reno and QUIC options')
 if __name__=='__main__':main()

@@ -1,6 +1,7 @@
 //! Hysteria 2 QUIC transport, independent of TrustTunnel HTTP/3 CONNECT.
 mod brutal;
 mod datagrams;
+mod gecko;
 mod hop;
 mod obfs;
 use super::*;
@@ -49,6 +50,9 @@ impl HysteriaSession {
         }
         let mut tls = tls_config(p)?;
         tls.alpn_protocols = vec![b"h3".to_vec()];
+        if !options.client_certificate.is_empty() {
+            tls.client_auth_cert_resolver = Arc::new(ClientCertificate::load(options)?);
+        }
         let quic =
             quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|_| Error::Tls)?;
         let mut config = quinn::ClientConfig::new(Arc::new(quic));
@@ -139,6 +143,15 @@ impl HysteriaSession {
                             key: Zeroizing::new(options.salamander.expose().as_bytes().to_vec()),
                         })
                     };
+                let socket: Arc<dyn quinn::AsyncUdpSocket> = match &options.gecko {
+                    None => socket,
+                    Some(g) => Arc::new(gecko::Gecko {
+                        inner: socket,
+                        min: g.min_packet_size.into(),
+                        max: g.max_packet_size.into(),
+                        state: Default::default(),
+                    }),
+                };
                 let mut endpoint = quinn::Endpoint::new_with_abstract_socket(
                     quinn::EndpointConfig::default(),
                     None,
@@ -285,6 +298,38 @@ impl HysteriaSession {
     }
     pub async fn open_udp(&self) -> Result<Tunnel> {
         datagrams::open(self.clone()).await
+    }
+}
+/// Mutual TLS identity; offered whenever the server requests a certificate,
+/// as the official client does.
+#[derive(Debug)]
+struct ClientCertificate(Arc<rustls::sign::CertifiedKey>);
+impl ClientCertificate {
+    fn load(options: &rtrust_profile::Hysteria2) -> Result<Self> {
+        let chain = rustls_pemfile::certs(&mut options.client_certificate.as_bytes())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| Error::Profile)?;
+        let key = rustls_pemfile::private_key(&mut options.client_key.expose().as_bytes())
+            .map_err(|_| Error::Profile)?
+            .ok_or(Error::Profile)?;
+        let provider = rustls::crypto::ring::default_provider();
+        let key = provider
+            .key_provider
+            .load_private_key(key)
+            .map_err(|_| Error::Profile)?;
+        Ok(Self(Arc::new(rustls::sign::CertifiedKey::new(chain, key))))
+    }
+}
+impl rustls::client::ResolvesClientCert for ClientCertificate {
+    fn resolve(
+        &self,
+        _: &[&[u8]],
+        _: &[rustls::SignatureScheme],
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        Some(self.0.clone())
+    }
+    fn has_certs(&self) -> bool {
+        true
     }
 }
 /// Every transport socket, including each port-hopping replacement, is marked

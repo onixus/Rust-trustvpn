@@ -32,6 +32,29 @@ pub struct Hysteria2 {
     pub congestion: String,
     #[serde(default, skip_serializing_if = "Quic::is_default")]
     pub quic: Quic,
+    /// Gecko obfuscation over Salamander with the same password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gecko: Option<Gecko>,
+    /// Mutual TLS: PEM certificate chain and private key, embedded in JSON only.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_certificate: String,
+    #[serde(default, skip_serializing_if = "Secret::is_empty")]
+    pub client_key: Secret,
+}
+/// Datagram size range for padded Gecko handshake fragments.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Gecko {
+    pub min_packet_size: u16,
+    pub max_packet_size: u16,
+}
+impl Default for Gecko {
+    fn default() -> Self {
+        Self {
+            min_packet_size: 512,
+            max_packet_size: 1200,
+        }
+    }
 }
 /// QUIC flow-control and liveness settings. Zero selects the upstream default.
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
@@ -156,6 +179,26 @@ impl Hysteria2 {
         if self.salamander.expose().len() > 4096 {
             return Err(Error::Field("obfuscation password"));
         }
+        if self.client_certificate.is_empty() != self.client_key.expose().is_empty()
+            || self.client_key.expose().len() > 16 * 1024
+        {
+            return Err(Error::Field("client certificate"));
+        }
+        if !self.client_certificate.is_empty() {
+            pem_der(&self.client_certificate).map_err(|_| Error::Field("client certificate"))?;
+            let mut key = self.client_key.expose().as_bytes();
+            if !matches!(rustls_pemfile::private_key(&mut key), Ok(Some(_))) {
+                return Err(Error::Field("client key"));
+            }
+        }
+        if let Some(g) = &self.gecko
+            && (self.salamander.expose().len() < 4
+                || g.min_packet_size == 0
+                || g.min_packet_size > g.max_packet_size
+                || g.max_packet_size > 2048)
+        {
+            return Err(Error::Field("gecko"));
+        }
         if !self.hop_ports.is_empty() {
             let ranges = port_ranges(&self.hop_ports)?;
             if format_ports(&ranges) != self.hop_ports {
@@ -267,11 +310,11 @@ pub fn link(input: &str) -> Result<Profile> {
         return Err(Error::Field("Hysteria URI option"));
     }
     let obfs = params.remove("obfs").unwrap_or_default();
-    if !matches!(obfs.as_str(), "" | "salamander") {
+    if !matches!(obfs.as_str(), "" | "salamander" | "gecko") {
         return Err(Error::Field("obfs"));
     }
     let password = params.remove("obfs-password").unwrap_or_default();
-    if (obfs == "salamander") != !password.is_empty() {
+    if obfs.is_empty() != password.is_empty() {
         return Err(Error::Field("obfs-password"));
     }
     let insecure = match params.remove("insecure").as_deref() {
@@ -304,6 +347,7 @@ pub fn link(input: &str) -> Result<Profile> {
             salamander: Secret::new(password),
             pin_sha256: pin,
             hop_ports,
+            gecko: (obfs == "gecko").then(Gecko::default),
             ..Default::default()
         },
         decode(url.fragment().unwrap_or_default())?,
@@ -520,7 +564,19 @@ struct Tls {
 struct Obfs {
     #[serde(rename = "type")]
     kind: String,
-    salamander: ObfsSecret,
+    #[serde(default)]
+    salamander: Option<ObfsSecret>,
+    #[serde(default)]
+    gecko: Option<GeckoConfig>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct GeckoConfig {
+    password: String,
+    #[serde(default)]
+    min_packet_size: Option<u16>,
+    #[serde(default)]
+    max_packet_size: Option<u16>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -547,12 +603,28 @@ pub fn config(value: Value) -> Result<Profile> {
         p.validate()?;
         return Ok(p);
     }
-    let password = match &c.obfs {
-        Some(o) if o.kind == "salamander" && !o.salamander.password.is_empty() => {
-            o.salamander.password.clone()
+    let (password, gecko) = match &c.obfs {
+        Some(Obfs {
+            kind,
+            salamander: Some(s),
+            gecko: None,
+        }) if kind == "salamander" && !s.password.is_empty() => (s.password.clone(), None),
+        Some(Obfs {
+            kind,
+            salamander: None,
+            gecko: Some(g),
+        }) if kind == "gecko" && !g.password.is_empty() => {
+            let default = Gecko::default();
+            (
+                g.password.clone(),
+                Some(Gecko {
+                    min_packet_size: g.min_packet_size.unwrap_or(default.min_packet_size),
+                    max_packet_size: g.max_packet_size.unwrap_or(default.max_packet_size),
+                }),
+            )
         }
         Some(_) => return Err(Error::Field("obfs")),
-        None => String::new(),
+        None => (String::new(), None),
     };
     let (host, ports) = split_ports(&c.server)?;
     let (server, hop_ports) = if ports.is_empty() {
@@ -565,6 +637,7 @@ pub fn config(value: Value) -> Result<Profile> {
         salamander: Secret::new(password),
         pin_sha256: c.tls.pin.replace(':', "").to_ascii_lowercase(),
         hop_ports,
+        gecko,
         ..Default::default()
     };
     extended(&c, &mut options)?;
@@ -673,7 +746,14 @@ pub fn encode(p: &Profile) -> Result<String> {
             q.append_pair("pinSHA256", &options.pin_sha256);
         }
         if !options.salamander.expose().is_empty() {
-            q.append_pair("obfs", "salamander");
+            q.append_pair(
+                "obfs",
+                if options.gecko.is_some() {
+                    "gecko"
+                } else {
+                    "salamander"
+                },
+            );
             q.append_pair("obfs-password", options.salamander.expose());
         }
     }
@@ -800,6 +880,45 @@ mod tests {
         ] {
             assert!(Profile::import(bad).is_err(), "{bad}");
         }
+    }
+    #[test]
+    fn gecko_and_client_certificate_options() {
+        let p =
+            Profile::import("hy2://secret@vpn.example/?obfs=gecko&obfs-password=pass1234").unwrap();
+        let h = p.hysteria2.as_ref().unwrap();
+        assert_eq!(h.gecko, Some(Gecko::default()));
+        let link = p.export(Format::Link).unwrap().content.clone();
+        assert!(link.contains("obfs=gecko"), "{link}");
+        assert_eq!(Profile::import(&link).unwrap(), p);
+        let p = Profile::import(
+            "server: vpn.example\nauth: x\nobfs:\n  type: gecko\n  gecko:\n    password: pass1234\n    minPacketSize: 600\n",
+        )
+        .unwrap();
+        assert_eq!(
+            p.hysteria2.as_ref().unwrap().gecko,
+            Some(Gecko {
+                min_packet_size: 600,
+                max_packet_size: 1200
+            })
+        );
+        let losses = p.export(Format::Link).unwrap().losses.clone();
+        assert!(losses.iter().any(|l| l.contains("Gecko")));
+        for bad in [
+            "hy2://secret@vpn.example/?obfs=gecko&obfs-password=abc",
+            "hy2://secret@vpn.example/?obfs=gecko",
+            "server: vpn.example\nauth: x\nobfs:\n  type: gecko\n  gecko:\n    password: pass1234\n    maxPacketSize: 4096\n",
+            "server: vpn.example\nauth: x\nobfs:\n  type: gecko\n  gecko:\n    password: pass1234\n    minPacketSize: 900\n    maxPacketSize: 800\n",
+            "server: vpn.example\nauth: x\nobfs:\n  type: salamander\n  gecko:\n    password: pass1234\n",
+            // Certificate files are never read implicitly.
+            "server: vpn.example\nauth: x\ntls:\n  clientCertificate: client.crt\n  clientKey: client.key\n",
+        ] {
+            assert!(Profile::import(bad).is_err(), "{bad}");
+        }
+        let mut p = Profile::import("hy2://secret@vpn.example/").unwrap();
+        let h = p.hysteria2.as_mut().unwrap();
+        h.client_certificate =
+            "-----BEGIN CERTIFICATE-----\nMAA=\n-----END CERTIFICATE-----\n".into();
+        assert!(p.validate().is_err(), "certificate without key");
     }
     #[test]
     fn yaml_strict_security_options() {
