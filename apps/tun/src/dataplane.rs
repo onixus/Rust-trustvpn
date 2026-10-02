@@ -70,6 +70,15 @@ pub async fn run_with_dns(
                 let len = received?;
                 if !((len>=20 && incoming[0]>>4==4 && incoming[12..16]==address.octets()) || (len>=40 && incoming[0]>>4==6 && incoming[8..24]==crate::ipv6::ADDRESS.octets())) {continue;}
                 let Some(incoming) = assembler.push(&incoming[..len]) else { continue; };
+                // The endpoint cannot relay IPv6: refuse locally, never via the
+                // underlying network, so the application falls back to IPv4.
+                if !session.ipv6() && incoming[0] >> 4 == 6 {
+                    if packet::parse(&incoming).is_some()
+                        && let Some(reply) = crate::ipv6::refuse(&incoming) {
+                            tokio::time::timeout(Duration::from_secs(2), device.send(&reply)).await??;
+                    }
+                    continue;
+                }
                 match packet::parse(&incoming) {
                     Some(Packet::Tcp { key, .. }) if (key.0.ip() == address || key.0.ip() == crate::ipv6::ADDRESS) => stack.ingest(incoming, |key, mut remote| {
                         let session = session.clone();
@@ -87,13 +96,21 @@ pub async fn run_with_dns(
                                     return Ok(());
                                 }
                             }
+                            if key.1.port() == 53 && !session.ipv6() {
+                                return rtrust_engine::dns::forward_tcp_without_aaaa(&session, key.1, &mut remote).await;
+                            }
                             let mut tunnel = session.open_tcp(&key.1.to_string()).await?;
                             tokio::io::copy_bidirectional(&mut remote, &mut tunnel).await?;
                             Ok(())
                         })
                     }),
                     Some(Packet::Udp(d)) if (d.source.ip() == address || d.source.ip() == crate::ipv6::ADDRESS) => {
-                        if d.destination.port() == 53 && !dns.is_empty() {
+                        if d.destination.port() == 53 && !session.ipv6()
+                            && let Some(payload) = rtrust_engine::dns::aaaa_nodata(&d.payload) {
+                            if let Some(bytes) = packet::udp_packet(&Datagram { source: d.destination, destination: d.source, payload }) {
+                                tokio::time::timeout(Duration::from_secs(2), device.send(&bytes)).await??;
+                            }
+                        } else if d.destination.port() == 53 && !dns.is_empty() {
                             if dns_jobs.len() < 32 {
                                 let dns = dns.clone(); let session = session.clone();
                                 let router = routing.as_ref().map(|r| r.0.clone());

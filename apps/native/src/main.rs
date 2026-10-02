@@ -164,6 +164,8 @@ struct App {
     session: Option<Session>,
     connecting: bool,
     connection_name: String,
+    /// Whether the connected endpoint relays IPv6; otherwise IPv6 is refused locally.
+    connection_ipv6: bool,
     proxy_port: String,
     mode: Mode,
     networks: String,
@@ -288,6 +290,7 @@ impl App {
             session: None,
             connecting: false,
             connection_name: String::new(),
+            connection_ipv6: true,
             proxy_port: "1080".into(),
             mode: Mode::Socks,
             networks: String::new(),
@@ -823,6 +826,7 @@ impl App {
                     let epoch = self.connection_epoch;
                     self.connecting = true;
                     self.connection_name = profile.name.clone();
+                    self.connection_ipv6 = profile.endpoint.has_ipv6;
                     self.status = if mode == Mode::Socks {
                         "Подключение к серверу…"
                     } else {
@@ -850,7 +854,7 @@ impl App {
                 match result {
                     Ok(session) => {
                         self.session = Some(session);
-                        self.status = if self.mode == Mode::Socks { "SOCKS5 включён. Для DNS выберите разрешение имён через прокси." } else if self.saved_connection.mode == rtrust_store::Mode::Full { "IPv4, IPv6 и DNS всего компьютера через VPN. Пересылка между интерфейсами заблокирована." } else { "Выбранные IPv4-сети подключены через службу. Остальной трафик и системный DNS не изменены." }.into();
+                        self.status = if self.mode == Mode::Socks { "SOCKS5 включён. Для DNS выберите разрешение имён через прокси." } else if self.saved_connection.mode == rtrust_store::Mode::Full && self.connection_ipv6 { "IPv4, IPv6 и DNS всего компьютера через VPN. Пересылка между интерфейсами заблокирована." } else if self.saved_connection.mode == rtrust_store::Mode::Full { "IPv4 и DNS всего компьютера через VPN. Сервер без IPv6: IPv6 заблокирован, приложения переходят на IPv4. Пересылка между интерфейсами заблокирована." } else { "Выбранные IPv4-сети подключены через службу. Остальной трафик и системный DNS не изменены." }.into();
                         return self.monitor_connection();
                     }
                     Err(error) => {

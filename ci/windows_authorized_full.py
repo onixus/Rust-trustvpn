@@ -2,7 +2,9 @@
 Never called by ordinary CI. Preserves GUI, vault, SCM identity and original service.
 """
 import argparse, hashlib, json, os, pathlib, shutil, subprocess, sys, time, uuid
-p=argparse.ArgumentParser();p.add_argument('fixture',type=pathlib.Path);p.add_argument('--allow-existing-installation',action='store_true');p.add_argument('--service-sha256',required=True);p.add_argument('--crash-cycles',type=int,choices=range(1,4),default=1);a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('fixture',type=pathlib.Path);p.add_argument('--allow-existing-installation',action='store_true');p.add_argument('--service-sha256',required=True);p.add_argument('--crash-cycles',type=int,choices=range(1,4),default=1)
+# windows_production_e2e.py runs the same rollback-guarded flow with production profiles.
+p.add_argument('--worker',choices=['windows_full_e2e.py','windows_production_e2e.py'],default='windows_full_e2e.py');a=p.parse_args()
 assert a.allow_existing_installation,'Explicit authorization required'
 sys.stdout.reconfigure(encoding='utf-8',errors='replace')
 sys.stderr.reconfigure(encoding='utf-8',errors='replace')
@@ -47,7 +49,7 @@ for item in base.iterdir():
     if item.is_file() and (item.name=='python.exe' or item.suffix.lower()=='.dll'):shutil.copy2(item,runtime/item.name)
 for name in ['Lib','DLLs']:
     shutil.copytree(base/name,runtime/name,ignore=shutil.ignore_patterns('site-packages','__pycache__','test','tests','idlelib','ensurepip','tkinter'))
-for name in ['windows_full_e2e.py','windows_service_e2e.py']:shutil.copy2(ROOT/'ci'/name,WORK/name)
+for name in [a.worker,'windows_service_e2e.py']:shutil.copy2(ROOT/'ci'/name,WORK/name)
 fixture_data=json.loads(a.fixture.read_text())
 physical=json.loads(ps("ConvertTo-Json -Compress -InputObject @(Get-NetAdapter -Physical | Where-Object Status -eq Up | Select-Object -ExpandProperty Name)"))
 assert len(physical)==1,'Handoff test requires one known active physical adapter'
@@ -73,7 +75,7 @@ Start-Service RTrustTunnel
 'RESTORED' | Set-Content '{WORK/'recovered'}'
 """
 (WORK/'recover.ps1').write_text(recovery,encoding='utf-8-sig')
-(WORK/'run.ps1').write_text(f"$PSDefaultParameterValues['Out-File:Encoding']='utf8'; [Console]::OutputEncoding=[Text.Encoding]::UTF8\n& '{runtime/'python.exe'}' -X utf8 -I '{WORK/'windows_full_e2e.py'}' '{WORK/'fixture.json'}' *> '{WORK/'worker.log'}'\n",encoding='utf-8-sig')
+(WORK/'run.ps1').write_text(f"$PSDefaultParameterValues['Out-File:Encoding']='utf8'; [Console]::OutputEncoding=[Text.Encoding]::UTF8\n& '{runtime/'python.exe'}' -X utf8 -I '{WORK/a.worker}' '{WORK/'fixture.json'}' *> '{WORK/'worker.log'}'\n",encoding='utf-8-sig')
 armed=False;changed=False
 try:
     ps(f"$p=New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest; $s=New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 8); $a=New-ScheduledTaskAction -Execute \"$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -Argument '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{WORK/'recover.ps1'}\"'; $t=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes({rollback_minutes}); Register-ScheduledTask -TaskName '{TASK}-recovery' -Principal $p -Action $a -Trigger $t -Settings $s | Out-Null")

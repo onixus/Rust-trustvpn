@@ -25,6 +25,8 @@ pub struct Controller {
     pub revision: u64,
     pub session: Option<connection::Session>,
     pub status: String,
+    /// Shown while connected and healthy; empty means the plain "Connected".
+    connected_note: &'static str,
     pending: Option<Profile>,
 }
 impl Controller {
@@ -36,6 +38,7 @@ impl Controller {
             revision: 0,
             session: None,
             status: String::new(),
+            connected_note: "",
             pending: None,
         }
     }
@@ -47,6 +50,7 @@ impl Controller {
             revision: 0,
             session: None,
             status: String::new(),
+            connected_note: "",
             pending: None,
         })
     }
@@ -160,17 +164,27 @@ impl Controller {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(",");
+        let ipv4_only = mode == connection::Mode::Full && !p.endpoint.has_ipv6;
         self.session = Some(
             connection::Session::start(p, mode, c.socks_port, networks, c.dns.to_string()).await?,
         );
-        self.status.clear();
+        self.connected_note = if ipv4_only {
+            "Connected · IPv4 and DNS. The server has no IPv6, so IPv6 is blocked and apps use IPv4."
+        } else {
+            ""
+        };
+        self.status = self.connected_note.into();
         Ok(())
+    }
+    pub fn connected_note(&self) -> &'static str {
+        self.connected_note
     }
     pub async fn disconnect(&mut self) -> Result<(), String> {
         if let Some(session) = self.session.as_ref() {
             session.clone().stop().await?;
             self.session = None;
         }
+        self.connected_note = "";
         self.status.clear();
         Ok(())
     }
@@ -203,6 +217,7 @@ mod tests {
             revision: 7,
             session: None,
             status: String::new(),
+            connected_note: "",
             pending: None,
         };
         let value = serde_json::to_value(controller.view()).unwrap();

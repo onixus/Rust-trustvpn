@@ -56,6 +56,12 @@ Wintun 0.14.1 берётся с [официального сайта](https://ww
 
 `ci/windows_full_runner.py` запускает full-tunnel E2E отдельной защищённой SYSTEM-задачей с независимым таймером восстановления сети. Проверяются TCP/UDP, системный DNS, блокировка ранее открытых соединений, перезапуск endpoint, аварии GUI/службы, сохранение защиты после перезапуска службы и восстановление исходных маршрутов. `ci/windows_installer_e2e.py` проверяет настоящий Setup: install, upgrade, GUI smoke, WFP canary и uninstall. Эти тесты требуют отдельного разрешения на изменение сети CI-машины; для текущей Windows-ноды оно дано пользователем.
 
+`ci/windows_authorized_full.py` выполняет тот же сценарий на уже установленной у пользователя службе: временно подменяет `rtrust-service.exe` проверенным артефактом CI и восстанавливает исходные хеши и SCM по таймеру или после завершения. С `--worker windows_production_e2e.py` он проверяет одноразовые боевые профили: TLS к Google/example, системный и UDP DNS, WFP-защиту и восстановление после гибели IPC. Разрешение имён остаётся системным, поэтому на dual-stack хосте проверяется и IPv6, включая переход на IPv4 для endpoint без IPv6. Файл с профилями передаётся аргументом и в репозиторий не попадает:
+
+```powershell
+python ci\windows_authorized_full.py <fixture.json> --allow-existing-installation --service-sha256 <sha256 rtrust-service.exe> --worker windows_production_e2e.py
+```
+
 ## Проверенная поставка 30 сентября 2026
 
 [Jenkins #23](http://localhost:8081/job/rtrust-native/23/) завершён `SUCCESS`, `building=false`. Unit, Clippy, GUI smoke, install/upgrade/uninstall, HTTP/2+HTTP/3 interop, выбранные сети и полный Windows tunnel E2E прошли. Gitleaks: 0; Trivy HIGH/CRITICAL: 0. Проверен автоматический SCM restart после SIGKILL с сохранением WFP-защиты и восстановлением через GUI IPC. Linux/Wayland и macOS регрессии также прошли.
