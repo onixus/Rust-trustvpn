@@ -64,8 +64,11 @@ public final class TunnelService extends VpnService {
     private Network availableNetwork() {
         for (Network network : connectivity.getAllNetworks()) {
             NetworkCapabilities caps = connectivity.getNetworkCapabilities(network);
+            // Only a foreground network accepts sockets from an ordinary app: a background
+            // one (e.g. mobile data kept up next to Wi-Fi) rejects bindSocket with EPERM.
             if (caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) return network;
+                && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND)) return network;
         }
         return null;
     }
@@ -113,7 +116,7 @@ public final class TunnelService extends VpnService {
             }
         };
         connectivity.registerNetworkCallback(new NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(), callback);
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).addCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND).build(), callback);
         // Establish the blocking TUN before waiting for connectivity or endpoint DNS.
         // The system's lockdown policy also protects the interval before service startup.
         JSONArray addresses = endpoint.getJSONArray("addresses");
