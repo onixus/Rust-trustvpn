@@ -19,8 +19,9 @@ system-tunnel work.
 Supported client configuration fields:
 
 - `server`, including a port-hopping set (`vpn.example:443,20000-30000`), `auth`, `name`;
-- `tls.sni`; `tls.pinSHA256` and `tls.insecure` are preserved for round trip but
-  rejected at connection time (see below);
+- `tls.sni`; `tls.pinSHA256` (SHA-256 of the server's leaf certificate, checked in
+  addition to normal validation); `tls.insecure` is preserved for round trip but
+  rejected at connection time;
 - `obfs` of type `salamander` or `gecko` (`password`, `minPacketSize`, `maxPacketSize`);
 - `transport.udp.hopInterval`, or `minHopInterval` with `maxHopInterval` (at least 5 s;
   Go durations such as `7.5s` or `1m30s`, kept to the millisecond);
@@ -93,14 +94,15 @@ not interchangeable.
 
 ### Not supported
 
-Insecure TLS and certificate pin overrides (see below), ECH, Hysteria Realms,
+Insecure TLS (alone or with a pin), ECH, Hysteria Realms,
 Chrome QUIC fingerprint parroting, mimic, `fastOpen`/`lazy`, and the
 `conservative`/`aggressive` BBR profiles are rejected rather than silently
 ignored. There is no ICMP relay in Hysteria 2.
 
-- **Certificate pin.** `pinSHA256` would be an additional check on top of
-  normal CA validation; enabling it changes the TLS verification path and is
-  pending an explicit decision. `insecure`, alone or with a pin, stays rejected.
+- **Certificate pin.** As in the official client since 2.6.4, `pinSHA256` hashes
+  only the leaf certificate (`:` and `-` separators are ignored). Unlike the
+  official client it never replaces CA and hostname validation: a matching pin
+  on an untrusted certificate is rejected.
 - **ECH** needs HPKE, which the `ring` crypto provider lacks; rustls offers it
   only through aws-lc-rs, a new native build dependency on every platform.
 

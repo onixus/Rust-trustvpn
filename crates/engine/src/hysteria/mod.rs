@@ -43,12 +43,16 @@ impl HysteriaSession {
         protector: Option<&SocketProtector>,
     ) -> Result<Self> {
         let options = p.hysteria2.as_ref().ok_or(Error::Profile)?;
-        if p.endpoint.skip_verification || !options.pin_sha256.is_empty() {
+        if p.endpoint.skip_verification {
             return Err(Error::Unsupported(
                 "Hysteria certificate verification override",
             ));
         }
         let mut tls = tls_config(p)?;
+        if !options.pin_sha256.is_empty() {
+            tls.dangerous()
+                .set_certificate_verifier(Arc::new(PinnedCertificate::new(p, options)?));
+        }
         tls.alpn_protocols = vec![b"h3".to_vec()];
         if !options.client_certificate.is_empty() {
             tls.client_auth_cert_resolver = Arc::new(ClientCertificate::load(options)?);
@@ -298,6 +302,75 @@ impl HysteriaSession {
     }
     pub async fn open_udp(&self) -> Result<Tunnel> {
         datagrams::open(self.clone()).await
+    }
+}
+/// `pinSHA256` as in the official client (leaf certificate only), but strictly
+/// in addition to normal chain and hostname validation, never instead of it.
+#[derive(Debug)]
+struct PinnedCertificate {
+    verified: Arc<rustls::client::WebPkiServerVerifier>,
+    pin: [u8; 32],
+}
+impl PinnedCertificate {
+    fn new(p: &Profile, options: &rtrust_profile::Hysteria2) -> Result<Self> {
+        let mut pin = [0; 32];
+        for (byte, pair) in pin.iter_mut().zip(options.pin_sha256.as_bytes().chunks(2)) {
+            *byte = std::str::from_utf8(pair)
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                .ok_or(Error::Profile)?;
+        }
+        let verified = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(trust_roots(&p.endpoint.certificate)?),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .map_err(|_| Error::Trust)?;
+        Ok(Self { verified, pin })
+    }
+}
+impl rustls::client::danger::ServerCertVerifier for PinnedCertificate {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let verified = self.verified.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        )?;
+        use sha2::Digest;
+        if sha2::Sha256::digest(end_entity.as_ref()).as_slice() != self.pin {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ));
+        }
+        Ok(verified)
+    }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.verified.verify_tls12_signature(message, cert, dss)
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.verified.verify_tls13_signature(message, cert, dss)
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.verified.supported_verify_schemes()
     }
 }
 /// Mutual TLS identity; offered whenever the server requests a certificate,

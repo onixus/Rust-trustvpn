@@ -26,12 +26,12 @@
 ## Hysteria 2: границы preview
 
 Hysteria 2 добавлен отдельным протоколом и не закрывает W3-HTTP3.
-Port hopping, Gecko, mTLS, bandwidth/Brutal, congestion и QUIC-параметры
+Port hopping, Gecko, mTLS, `pinSHA256`, bandwidth/Brutal, congestion и QUIC-параметры
 реализованы и проверены против официального сервера 2.12.3 (loopback).
 Остаются:
 
-- `pinSHA256` (дополнительная проверка поверх CA) — ждёт решения пользователя,
-  так как меняет путь TLS-проверки; `insecure` по-прежнему отклоняется;
+- `insecure` (в том числе вместе с `pinSHA256`) по-прежнему отклоняется: пин
+  реализован только как дополнительная проверка поверх CA;
 - ECH — требует HPKE из aws-lc-rs (новая нативная зависимость на всех платформах);
 - Realms, Chrome parroting, mimic, `fastOpen`/`lazy` — не планируются;
 - Windows runtime и установленный macOS full-tunnel для Hysteria, длительные

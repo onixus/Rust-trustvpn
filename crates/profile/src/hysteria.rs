@@ -333,11 +333,7 @@ pub fn link(input: &str) -> Result<Profile> {
         url.host().ok_or(Error::Field("server"))?,
         url.port().unwrap_or(443)
     );
-    let pin = params
-        .remove("pinSHA256")
-        .unwrap_or_default()
-        .replace(':', "")
-        .to_ascii_lowercase();
+    let pin = normalize_pin(&params.remove("pinSHA256").unwrap_or_default());
     base(
         &server,
         auth,
@@ -352,6 +348,10 @@ pub fn link(input: &str) -> Result<Profile> {
         },
         decode(url.fragment().unwrap_or_default())?,
     )
+}
+/// Upstream normalization: lowercase hex with `:` and `-` separators removed.
+fn normalize_pin(pin: &str) -> String {
+    pin.replace([':', '-'], "").to_ascii_lowercase()
 }
 /// Replaces a multi-port authority (`host:443,20000-30000`) with its first port
 /// so the URL parser accepts it, returning the canonical hop set separately.
@@ -636,7 +636,7 @@ pub fn config(value: Value) -> Result<Profile> {
     };
     let mut options = Hysteria2 {
         salamander: Secret::new(password),
-        pin_sha256: c.tls.pin.replace(':', "").to_ascii_lowercase(),
+        pin_sha256: normalize_pin(&c.tls.pin),
         hop_ports,
         gecko,
         ..Default::default()
@@ -884,6 +884,28 @@ mod tests {
         ] {
             assert!(Profile::import(bad).is_err(), "{bad}");
         }
+    }
+    #[test]
+    fn certificate_pin_is_normalized_like_upstream() {
+        let pin = "BA:88-45:17".to_string() + &":AB".repeat(28);
+        let expected = "ba884517".to_string() + &"ab".repeat(28);
+        let link = format!("hy2://secret@vpn.example/?pinSHA256={pin}");
+        assert_eq!(
+            Profile::import(&link)
+                .unwrap()
+                .hysteria2
+                .unwrap()
+                .pin_sha256,
+            expected
+        );
+        let yaml = format!("server: vpn.example\nauth: x\ntls:\n  pinSHA256: {pin}\n");
+        let p = Profile::import(&yaml).unwrap();
+        assert_eq!(p.hysteria2.as_ref().unwrap().pin_sha256, expected);
+        assert_eq!(
+            Profile::import(&p.export(Format::Link).unwrap().content).unwrap(),
+            p
+        );
+        assert!(Profile::import("hy2://secret@vpn.example/?pinSHA256=abcd").is_err());
     }
     #[test]
     fn upstream_valid_timers_and_windows_are_accepted() {

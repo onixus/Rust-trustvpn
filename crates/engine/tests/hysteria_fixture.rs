@@ -78,6 +78,26 @@ async fn official_server_tcp_payload_udp_fragmentation_and_multiplexing() {
         assert_eq!(ra.destination, a.source);
         assert_eq!(rb.destination, b.source);
     }
+    // pinSHA256 is checked on the leaf certificate in addition to CA validation.
+    let leaf = rustls_pemfile::certs(&mut profile.endpoint.certificate.as_bytes())
+        .next()
+        .unwrap()
+        .unwrap();
+    let pin = format!("{:x}", Sha256::digest(leaf.as_ref()));
+    let mut pinned = profile.clone();
+    pinned.hysteria2.as_mut().unwrap().pin_sha256 = pin.clone();
+    let session = Session::connect(&pinned).await.unwrap();
+    session.health().await.unwrap();
+    let mut wrong = pinned.clone();
+    wrong.hysteria2.as_mut().unwrap().pin_sha256 = "00".repeat(32);
+    assert!(matches!(
+        Session::connect(&wrong).await,
+        Err(rtrust_engine::Error::Tls)
+    ));
+    // A matching pin never replaces chain validation.
+    wrong = pinned;
+    wrong.endpoint.certificate.clear();
+    assert!(Session::connect(&wrong).await.is_err());
     let mut wrong = profile.clone();
     wrong.endpoint.password = rtrust_profile::Secret::new("wrong-password");
     assert!(Session::connect(&wrong).await.is_err());
