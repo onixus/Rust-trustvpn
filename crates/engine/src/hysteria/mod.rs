@@ -58,9 +58,9 @@ impl HysteriaSession {
         let mut config = quinn::ClientConfig::new(Arc::new(quic));
         let mut transport = quinn::TransportConfig::default();
         let quic = &options.quic;
-        transport.keep_alive_interval(Some(Duration::from_secs(quic.keep_alive())));
+        transport.keep_alive_interval(Some(Duration::from_millis(quic.keep_alive_period_ms())));
         transport.max_idle_timeout(Some(
-            Duration::from_secs(quic.idle_timeout())
+            Duration::from_millis(quic.idle_timeout_ms())
                 .try_into()
                 .map_err(|_| Error::Protocol)?,
         ));
@@ -127,7 +127,7 @@ impl HysteriaSession {
                             address,
                             rtrust_profile::hysteria::port_ranges(&options.hop_ports)
                                 .map_err(|_| Error::Profile)?,
-                            options.hop_interval(),
+                            options.hop_interval_ms(),
                             factory,
                         )
                         .map_err(|_| Error::Connect)?,

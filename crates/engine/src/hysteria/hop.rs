@@ -16,6 +16,7 @@ pub struct Hopping {
     /// Address given to quinn; replies from any hop port are reported as this.
     peer: SocketAddr,
     ports: Vec<(u16, u16)>,
+    /// Milliseconds between hops as `(min, max)`.
     interval: (u64, u64),
     factory: SocketFactory,
     state: Mutex<State>,
@@ -108,8 +109,9 @@ fn pick(ports: &[(u16, u16)]) -> u16 {
     }
     ports[0].0
 }
+/// Interval in milliseconds, uniform in `[min, max]`.
 fn delay((min, max): (u64, u64)) -> Duration {
-    Duration::from_secs(if min == max {
+    Duration::from_millis(if min == max {
         min
     } else {
         rand::random_range(min..=max)
@@ -208,8 +210,9 @@ mod tests {
             let port = pick(&ports);
             assert!(port == 443 || (20000..=20002).contains(&port), "{port}");
         }
-        assert!((5..=9).contains(&delay((5, 9)).as_secs()));
-        assert_eq!(delay((30, 30)).as_secs(), 30);
+        let random = delay((5_000, 9_500)).as_millis();
+        assert!((5_000..=9_500).contains(&random), "{random}");
+        assert_eq!(delay((7_500, 7_500)).as_millis(), 7_500);
     }
     #[tokio::test]
     async fn hops_to_new_socket_and_reports_one_peer() {
@@ -229,7 +232,7 @@ mod tests {
             Hopping::new(
                 peer,
                 ports.iter().map(|p| (*p, *p)).collect(),
-                (1, 1),
+                (1_000, 1_000),
                 factory,
             )
             .unwrap(),

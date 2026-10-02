@@ -22,10 +22,12 @@ Supported client configuration fields:
 - `tls.sni`; `tls.pinSHA256` and `tls.insecure` are preserved for round trip but
   rejected at connection time (see below);
 - `obfs` of type `salamander` or `gecko` (`password`, `minPacketSize`, `maxPacketSize`);
-- `transport.udp.hopInterval`, or `minHopInterval` with `maxHopInterval` (at least 5 s);
+- `transport.udp.hopInterval`, or `minHopInterval` with `maxHopInterval` (at least 5 s;
+  Go durations such as `7.5s` or `1m30s`, kept to the millisecond);
 - `bandwidth.up`/`down` (`bps`/`kbps`/`mbps`/`gbps`/`tbps`, decimal bits per second);
 - `congestion.type` (`bbr` or `reno`; only the `standard` BBR profile);
-- `quic` receive windows, `maxIdleTimeout` (4–120 s), `keepAlivePeriod` (2–60 s)
+- `quic` receive windows (at least 16 KiB, no upper limit as upstream),
+  `maxIdleTimeout` (4–120 s), `keepAlivePeriod` (2–60 s, independent of the idle timeout)
   and `disablePathMTUDiscovery` (always in effect: the transport uses a fixed
   1200-byte QUIC MTU).
 

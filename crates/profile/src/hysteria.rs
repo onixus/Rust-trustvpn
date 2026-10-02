@@ -17,11 +17,11 @@ pub struct Hysteria2 {
     /// Port-hopping set such as `443,20000-30000`; empty disables hopping.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub hop_ports: String,
-    /// Hop interval bounds in seconds; zero selects the upstream default.
+    /// Hop interval bounds in milliseconds; zero selects the upstream default.
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub hop_interval_min: u64,
+    pub hop_interval_min_ms: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub hop_interval_max: u64,
+    pub hop_interval_max_ms: u64,
     /// Bandwidth in bits per second; zero leaves congestion control automatic.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub up_bps: u64,
@@ -65,9 +65,9 @@ pub struct Quic {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub connection_receive_window: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub max_idle_timeout_secs: u64,
+    pub max_idle_timeout_ms: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub keep_alive_secs: u64,
+    pub keep_alive_ms: u64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disable_path_mtu_discovery: bool,
 }
@@ -80,40 +80,40 @@ impl Quic {
             ("stream receive window", self.stream_receive_window),
             ("connection receive window", self.connection_receive_window),
         ] {
+            // Upstream sets only a minimum; the maximum is QUIC's varint range.
             if value != 0 && !(MIN_WINDOW..=MAX_WINDOW).contains(&value) {
                 return Err(Error::Field(name));
             }
         }
-        if self.max_idle_timeout_secs != 0 && !(4..=120).contains(&self.max_idle_timeout_secs) {
+        // Upstream bounds; the two periods are independent, as in the official client.
+        if self.max_idle_timeout_ms != 0 && !(4_000..=120_000).contains(&self.max_idle_timeout_ms) {
             return Err(Error::Field("QUIC idle timeout"));
         }
-        if self.keep_alive_secs != 0
-            && (!(2..=60).contains(&self.keep_alive_secs)
-                || self.keep_alive_secs >= self.idle_timeout())
-        {
+        if self.keep_alive_ms != 0 && !(2_000..=60_000).contains(&self.keep_alive_ms) {
             return Err(Error::Field("QUIC keep-alive period"));
         }
         Ok(())
     }
-    pub fn idle_timeout(&self) -> u64 {
-        if self.max_idle_timeout_secs == 0 {
-            30
+    pub fn idle_timeout_ms(&self) -> u64 {
+        if self.max_idle_timeout_ms == 0 {
+            30_000
         } else {
-            self.max_idle_timeout_secs
+            self.max_idle_timeout_ms
         }
     }
-    pub fn keep_alive(&self) -> u64 {
-        if self.keep_alive_secs == 0 {
-            10.min(self.idle_timeout() / 2)
+    /// Upstream default of 10 s, kept below a shorter configured idle timeout.
+    pub fn keep_alive_period_ms(&self) -> u64 {
+        if self.keep_alive_ms == 0 {
+            10_000.min(self.idle_timeout_ms() / 2)
         } else {
-            self.keep_alive_secs
+            self.keep_alive_ms
         }
     }
 }
 const MIN_WINDOW: u64 = 16 * 1024;
-const MAX_WINDOW: u64 = 64 * 1024 * 1024;
-const MIN_HOP: u64 = 5;
-const DEFAULT_HOP: u64 = 30;
+const MAX_WINDOW: u64 = (1 << 62) - 1;
+const MIN_HOP_MS: u64 = 5_000;
+const DEFAULT_HOP_MS: u64 = 30_000;
 fn is_zero(n: &u64) -> bool {
     *n == 0
 }
@@ -168,10 +168,10 @@ fn format_ports(ranges: &[(u16, u16)]) -> String {
         .join(",")
 }
 impl Hysteria2 {
-    /// Seconds between hops as `(min, max)`; equal values hop at a fixed interval.
-    pub fn hop_interval(&self) -> (u64, u64) {
-        match (self.hop_interval_min, self.hop_interval_max) {
-            (0, 0) => (DEFAULT_HOP, DEFAULT_HOP),
+    /// Milliseconds between hops as `(min, max)`; equal values hop at a fixed interval.
+    pub fn hop_interval_ms(&self) -> (u64, u64) {
+        match (self.hop_interval_min_ms, self.hop_interval_max_ms) {
+            (0, 0) => (DEFAULT_HOP_MS, DEFAULT_HOP_MS),
             (min, max) => (min, max),
         }
     }
@@ -205,12 +205,12 @@ impl Hysteria2 {
                 return Err(Error::Field("hop ports"));
             }
         }
-        let (min, max) = self.hop_interval();
-        if (self.hop_interval_min == 0) != (self.hop_interval_max == 0)
-            || min < MIN_HOP
+        let (min, max) = self.hop_interval_ms();
+        if (self.hop_interval_min_ms == 0) != (self.hop_interval_max_ms == 0)
+            || min < MIN_HOP_MS
             || max < min
-            || max > 24 * 3600
-            || (self.hop_ports.is_empty() && self.hop_interval_min != 0)
+            || max > 24 * 3600 * 1000
+            || (self.hop_ports.is_empty() && self.hop_interval_min_ms != 0)
         {
             return Err(Error::Field("hop interval"));
         }
@@ -489,8 +489,8 @@ enum Scalar {
     Number(u64),
     Text(String),
 }
-/// Go-style duration (`30s`, `1m30s`, `500ms`) rounded to whole seconds.
-fn duration_secs(text: &str, field: &'static str) -> Result<u64> {
+/// Go-style duration (`30s`, `1m30s`, `7.5s`, `500ms`) in whole milliseconds.
+fn duration_ms(text: &str, field: &'static str) -> Result<u64> {
     let mut rest = text.trim();
     if rest.is_empty() || rest.len() > 32 {
         return Err(Error::Field(field));
@@ -517,11 +517,12 @@ fn duration_secs(text: &str, field: &'static str) -> Result<u64> {
         rest = &rest[unit..];
         nanos += (value * scale) as u128;
     }
-    let secs = nanos / 1_000_000_000;
-    if !nanos.is_multiple_of(1_000_000_000) || secs == 0 || secs > 24 * 3600 {
+    // Sub-millisecond precision has no effect on these timers.
+    let ms = (nanos + 500_000) / 1_000_000;
+    if ms == 0 || ms > 24 * 3600 * 1000 {
         return Err(Error::Field(field));
     }
-    Ok(secs as u64)
+    Ok(ms as u64)
 }
 /// Bandwidth in bits per second; units follow the official client (decimal SI).
 fn bandwidth_bps(value: &Scalar) -> Result<u64> {
@@ -654,19 +655,19 @@ fn extended(c: &ClientConfig, o: &mut Hysteria2) -> Result<()> {
             match (&u.hop_interval, &u.min_hop_interval, &u.max_hop_interval) {
                 (None, None, None) => {}
                 (Some(fixed), None, None) => {
-                    o.hop_interval_min = duration_secs(fixed, field)?;
-                    o.hop_interval_max = o.hop_interval_min;
+                    o.hop_interval_min_ms = duration_ms(fixed, field)?;
+                    o.hop_interval_max_ms = o.hop_interval_min_ms;
                 }
                 (None, Some(min), Some(max)) => {
-                    o.hop_interval_min = duration_secs(min, field)?;
-                    o.hop_interval_max = duration_secs(max, field)?;
+                    o.hop_interval_min_ms = duration_ms(min, field)?;
+                    o.hop_interval_max_ms = duration_ms(max, field)?;
                 }
                 _ => return Err(Error::Field(field)),
             }
             // Upstream accepts an interval without hop ports and ignores it.
             if o.hop_ports.is_empty() {
-                o.hop_interval_min = 0;
-                o.hop_interval_max = 0;
+                o.hop_interval_min_ms = 0;
+                o.hop_interval_max_ms = 0;
             }
         }
     }
@@ -704,16 +705,16 @@ fn extended(c: &ClientConfig, o: &mut Hysteria2) -> Result<()> {
                 q.max_conn_receive_window,
                 "connection receive window",
             )?,
-            max_idle_timeout_secs: q
+            max_idle_timeout_ms: q
                 .max_idle_timeout
                 .as_deref()
-                .map(|d| duration_secs(d, "QUIC idle timeout"))
+                .map(|d| duration_ms(d, "QUIC idle timeout"))
                 .transpose()?
                 .unwrap_or(0),
-            keep_alive_secs: q
+            keep_alive_ms: q
                 .keep_alive_period
                 .as_deref()
-                .map(|d| duration_secs(d, "QUIC keep-alive period"))
+                .map(|d| duration_ms(d, "QUIC keep-alive period"))
                 .transpose()?
                 .unwrap_or(0),
             disable_path_mtu_discovery: q.disable_path_mtu_discovery.unwrap_or(false),
@@ -803,7 +804,7 @@ mod tests {
         let h = p.hysteria2.as_ref().unwrap();
         assert_eq!(h.hop_ports, "443,20000-20020");
         assert_eq!(p.endpoint.addresses, ["vpn.example:443"]);
-        assert_eq!(h.hop_interval(), (30, 30));
+        assert_eq!(h.hop_interval_ms(), (30_000, 30_000));
         let link = p.export(Format::Link).unwrap().content.clone();
         assert!(link.contains("@vpn.example:443,20000-20020/"), "{link}");
         assert_eq!(Profile::import(&link).unwrap(), p);
@@ -840,7 +841,7 @@ mod tests {
         .unwrap();
         let h = p.hysteria2.as_ref().unwrap();
         assert_eq!(h.hop_ports, "443,30000-30100");
-        assert_eq!(h.hop_interval(), (15, 60));
+        assert_eq!(h.hop_interval_ms(), (15_000, 60_000));
         assert_eq!((h.up_bps, h.down_bps), (100_000_000, 1_500_000_000));
         assert_eq!(h.congestion, "reno");
         assert_eq!(
@@ -848,8 +849,8 @@ mod tests {
             Quic {
                 stream_receive_window: 16 * 1024 * 1024,
                 connection_receive_window: 32 * 1024 * 1024,
-                max_idle_timeout_secs: 60,
-                keep_alive_secs: 20,
+                max_idle_timeout_ms: 60_000,
+                keep_alive_ms: 20_000,
                 disable_path_mtu_discovery: true,
             }
         );
@@ -862,7 +863,10 @@ mod tests {
         )
         .unwrap();
         let h = fixed.hysteria2.as_ref().unwrap();
-        assert_eq!((h.hop_interval(), h.up_bps), ((90, 90), 20_000_000));
+        assert_eq!(
+            (h.hop_interval_ms(), h.up_bps),
+            ((90_000, 90_000), 20_000_000)
+        );
         for bad in [
             "server: vpn.example:443-445\nauth: x\ntransport:\n  udp:\n    hopInterval: 4s\n",
             "server: vpn.example:443-445\nauth: x\ntransport:\n  udp:\n    hopInterval: 10s\n    minHopInterval: 10s\n    maxHopInterval: 20s\n",
@@ -880,6 +884,28 @@ mod tests {
         ] {
             assert!(Profile::import(bad).is_err(), "{bad}");
         }
+    }
+    #[test]
+    fn upstream_valid_timers_and_windows_are_accepted() {
+        let p = Profile::import(
+            "server: vpn.example:443-450\nauth: x\ntransport:\n  udp:\n    hopInterval: 7.5s\nquic:\n  keepAlivePeriod: 45s\n  maxIdleTimeout: 2500ms\n  maxConnReceiveWindow: 134217728\n",
+        );
+        assert!(p.is_err(), "idle timeout below 4 s");
+        let p = Profile::import(
+            "server: vpn.example:443-450\nauth: x\ntransport:\n  udp:\n    minHopInterval: 7500ms\n    maxHopInterval: 1m0.25s\nquic:\n  keepAlivePeriod: 45s\n  maxStreamReceiveWindow: 268435456\n  maxConnReceiveWindow: 134217728\n",
+        )
+        .unwrap();
+        let h = p.hysteria2.as_ref().unwrap();
+        assert_eq!(h.hop_interval_ms(), (7_500, 60_250));
+        // A keep-alive longer than the idle timeout is valid upstream.
+        assert_eq!(h.quic.keep_alive_period_ms(), 45_000);
+        assert_eq!(h.quic.idle_timeout_ms(), 30_000);
+        assert_eq!(h.quic.connection_receive_window, 128 * 1024 * 1024);
+        assert_eq!(h.quic.stream_receive_window, 256 * 1024 * 1024);
+        assert_eq!(
+            Profile::import(&p.export(Format::Json).unwrap().content).unwrap(),
+            p
+        );
     }
     #[test]
     fn gecko_and_client_certificate_options() {

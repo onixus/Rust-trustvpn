@@ -101,7 +101,7 @@ def main():
         server=work/'server.json';server.write_text(json.dumps(config));server.chmod(0o600)
         client=work/'client.json';client.write_text(json.dumps(profile));client.chmod(0o600)
         relay=Relay(('127.0.0.1',port),16)
-        hopping={**profile,'name':'Isolated Hysteria hopping','hysteria2':{'salamander':obfs,'hop_ports':relay.ports(),'hop_interval_min':5,'hop_interval_max':5,'up_bps':20_000_000,'down_bps':50_000_000,'congestion':'reno','quic':{'stream_receive_window':4194304,'connection_receive_window':16777216,'max_idle_timeout_secs':20,'keep_alive_secs':4}},'endpoint':{**profile['endpoint'],'addresses':[f'127.0.0.1:{relay.listen[0]}']}}
+        hopping={**profile,'name':'Isolated Hysteria hopping','hysteria2':{'salamander':obfs,'hop_ports':relay.ports(),'hop_interval_min_ms':5000,'hop_interval_max_ms':5000,'up_bps':20_000_000,'down_bps':50_000_000,'congestion':'reno','quic':{'stream_receive_window':4194304,'connection_receive_window':16777216,'max_idle_timeout_ms':20000,'keep_alive_ms':4000}},'endpoint':{**profile['endpoint'],'addresses':[f'127.0.0.1:{relay.listen[0]}']}}
         hop_client=work/'hop.json';hop_client.write_text(json.dumps(hopping));hop_client.chmod(0o600)
         # A second official server uses Gecko, which cannot coexist with Salamander on one listener.
         probe=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);probe.bind(('127.0.0.1',0));gecko_port=probe.getsockname()[1];probe.close()

@@ -438,7 +438,7 @@ impl Profile {
                         losses.push("IPv6 restriction is only preserved in JSON");
                     }
                     if let Some(h) = &self.hysteria2 {
-                        if h.hop_interval_min != 0 {
+                        if h.hop_interval_min_ms != 0 {
                             losses.push("Port hopping interval is only preserved in JSON");
                         }
                         if h.up_bps != 0
