@@ -8,7 +8,14 @@ def binary():
     asset,digest=ASSETS[(platform.system(),platform.machine())]
     target=pathlib.Path(os.environ.get('RTRUST_HYSTERIA_CACHE',str(ROOT/'.ci-tools/hysteria')))/asset;target.parent.mkdir(parents=True,exist_ok=True)
     if not target.exists() or hashlib.sha256(target.read_bytes()).hexdigest()!=digest:
-        with urllib.request.urlopen('https://github.com/HyNetworks/hysteria/releases/download/'+RELEASE+'/'+asset,timeout=60) as response:data=response.read(64*1024*1024)
+        # GitHub release downloads occasionally stall; retry before failing the stage.
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen('https://github.com/HyNetworks/hysteria/releases/download/'+RELEASE+'/'+asset,timeout=60) as response:data=response.read(64*1024*1024)
+                break
+            except OSError:
+                if attempt==3:raise
+                time.sleep(5*(attempt+1))
         if hashlib.sha256(data).hexdigest()!=digest:raise RuntimeError('Hysteria release checksum mismatch')
         target.write_bytes(data);target.chmod(0o755)
     return target
