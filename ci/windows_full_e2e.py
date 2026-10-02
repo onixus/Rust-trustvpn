@@ -1,5 +1,5 @@
 """Runs as an isolated scheduled task: Jenkins may disconnect during full VPN."""
-import json,os,pathlib,socket,subprocess,sys,time,urllib.request
+import json,os,pathlib,socket,ssl,subprocess,sys,time,urllib.request
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parent))
 import windows_service_e2e as fixture
 ROOT=pathlib.Path(__file__).resolve().parent
@@ -24,6 +24,23 @@ def recover():
     fixture.ps("Stop-Service RTrustTunnel -ErrorAction SilentlyContinue; (Get-Service RTrustTunnel).WaitForStatus('Stopped',[TimeSpan]::FromSeconds(25))")
     subprocess.run([str(SERVICE),'--disable-always-on'],check=True,timeout=45)
     fixture.ps('Start-Service RTrustTunnel')
+
+def adapter_diagnostics():
+    # Capture the blocked state, not the already-cleaned state in finally.
+    # Do not collect profile, policy, keys, or endpoint credentials.
+    script=r"""
+$ErrorActionPreference='Stop'
+Get-CimInstance Win32_Service -Filter "Name='RTrustTunnel'" | Select-Object State,ProcessId | Format-List
+Get-NetAdapter -IncludeHidden | Where-Object Name -eq RTrustTunnel | Select-Object Name,InterfaceGuid,InterfaceIndex,Status | Format-List
+Get-PnpDevice -Class Net | Where-Object InstanceId -like 'SWD\WINTUN\*' | Select-Object Status,InstanceId,Problem | Format-List
+$journal=Join-Path $env:ProgramFiles 'RTrustTunnel Service/full-state.json'
+if(Test-Path $journal) { Get-Content $journal -Raw | ConvertFrom-Json | Select-Object version,adapter | Format-List }
+"""
+    try:
+        result=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',script],capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=10)
+        print('Wintun pending snapshot:',result.stdout,result.stderr,flush=True)
+    except subprocess.TimeoutExpired:
+        print('Wintun pending snapshot timed out',flush=True)
 
 def main():
     global pipe
@@ -68,9 +85,14 @@ def main():
     resume=urllib.request.Request(fixture.FIXTURE['control']+'/resume',data=b'',headers={'Authorization':'Bearer '+fixture.FIXTURE['control_token']})
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(resume,timeout=5) as r:assert r.status==204
     until=time.monotonic()+10
+    tls=ssl.create_default_context(cadata=fixture.FIXTURE['base']['certificate'])
+    tls.set_alpn_protocols(['h2'])
     while True:
         try:
-            with socket.create_connection((host,int(port)),timeout=1):break
+            # Docker's published TCP port accepts connections before the
+            # restarted endpoint is ready. Require its verified TLS handshake.
+            with socket.create_connection((host,int(port)),timeout=1) as tcp:
+                with tls.wrap_socket(tcp,server_hostname=fixture.FIXTURE['base']['hostname']):break
         except OSError:
             assert time.monotonic()<until,'Endpoint did not resume';time.sleep(.2)
     start();fixture.verify_traffic()
@@ -102,10 +124,14 @@ def main():
     def connected():
         until=time.monotonic()+120
         previous=None
+        snapshot_at=time.monotonic()+10
         while time.monotonic()<until:
             response=ipc('AlwaysOnStatus')
             if response!=previous:print(response,flush=True);previous=response
             if response['state']=='Connected':return
+            if time.monotonic()>=snapshot_at:
+                adapter_diagnostics()
+                snapshot_at=float('inf')
             time.sleep(.5)
         raise AssertionError(response)
     p=dict(schema_version=1,name='Always-on E2E',endpoint=fixture.FIXTURE['base'])
@@ -114,12 +140,17 @@ def main():
     assert fixture.FIXTURE['base']['password'].encode() not in (SERVICE.parent/'always-on.rtrust').read_bytes()
     for op in ['PrepareUpdate','Recover']:
         assert ipc(op)['state']=='Error'
-    fixture.ps("$p=(Get-CimInstance Win32_Service -Filter \"Name='RTrustTunnel'\").ProcessId; Stop-Process -Id $p -Force")
-    time.sleep(1);blocked(host,control.port)
-    until=time.monotonic()+30
-    while fixture.ps('(Get-Service RTrustTunnel).Status')!='Running':
-        assert time.monotonic()<until;time.sleep(.5)
-    connected();fixture.verify_traffic()
+    cycles=fixture.FIXTURE.get('always_on_crash_cycles',1)
+    assert type(cycles) is int and 1<=cycles<=3,'Invalid crash cycle count'
+    for cycle in range(cycles):
+        started=time.monotonic()
+        fixture.ps("$p=(Get-CimInstance Win32_Service -Filter \"Name='RTrustTunnel'\").ProcessId; Stop-Process -Id $p -Force")
+        time.sleep(1);blocked(host,control.port)
+        until=time.monotonic()+30
+        while fixture.ps('(Get-Service RTrustTunnel).Status')!='Running':
+            assert time.monotonic()<until;time.sleep(.5)
+        connected();fixture.verify_traffic()
+        print(f'PASS always-on crash {cycle+1}/{cycles}: traffic restored in {time.monotonic()-started:.1f}s',flush=True)
     final_baseline=before
     alias=fixture.FIXTURE.get('network_handoff_alias')
     if alias:

@@ -208,7 +208,17 @@ pub fn wait_removed() -> Result<(), String> {
 /// Resolve the network GUID in the administrator-owned journal to its actual
 /// PnP instance. Wintun's NetCfgInstanceId and SWD instance ID are not equivalent.
 /// Enumeration is restricted to Wintun; never remove by display name or driver.
-pub fn remove_owned_adapter(guid: &str) -> Result<(), String> {
+pub fn recover_owned_adapter(guid: &str) -> Result<(), String> {
+    crate::adapter_cleanup::remove_until_absent(
+        || remove_owned_adapter(guid),
+        unused_adapter,
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_millis(500),
+    )
+}
+
+/// Returns a summary for diagnostics; success does not prove removal.
+fn remove_owned_adapter(guid: &str) -> Result<String, String> {
     use windows_sys::Win32::{
         Devices::DeviceAndDriverInstallation::*,
         Foundation::{ERROR_NO_MORE_ITEMS, GetLastError},
@@ -233,11 +243,14 @@ pub fn remove_owned_adapter(guid: &str) -> Result<(), String> {
             std::ptr::null(),
             enumerator.as_ptr(),
             std::ptr::null_mut(),
+            // Not DIGCF_PRESENT: a crashed owner can leave the device in
+            // surprise removal while its interface is still listed.
             DIGCF_ALLCLASSES,
         );
         if set == -1 {
             return Err("Cannot enumerate Wintun devices".into());
         }
+        let (mut matched, mut unreadable, mut reboot) = (0u32, 0u32, false);
         let result = (|| {
             for index in 0..4096 {
                 let mut data = SP_DEVINFO_DATA {
@@ -246,7 +259,9 @@ pub fn remove_owned_adapter(guid: &str) -> Result<(), String> {
                 };
                 if SetupDiEnumDeviceInfo(set, index, &mut data) == 0 {
                     return if GetLastError() == ERROR_NO_MORE_ITEMS {
-                        Ok(())
+                        Ok(format!(
+                            "matched {matched}, unreadable {unreadable}, reboot required {reboot}"
+                        ))
                     } else {
                         Err("Wintun enumeration failed".into())
                     };
@@ -260,6 +275,7 @@ pub fn remove_owned_adapter(guid: &str) -> Result<(), String> {
                     KEY_QUERY_VALUE,
                 );
                 if key == -1isize as HKEY {
+                    unreadable += 1;
                     continue;
                 }
                 let mut value = [0u16; 40];
@@ -275,6 +291,7 @@ pub fn remove_owned_adapter(guid: &str) -> Result<(), String> {
                 );
                 RegCloseKey(key);
                 if code != 0 {
+                    unreadable += 1;
                     continue;
                 }
                 let end = value.iter().position(|v| *v == 0).unwrap_or(value.len());
@@ -283,13 +300,24 @@ pub fn remove_owned_adapter(guid: &str) -> Result<(), String> {
                 if !value.eq_ignore_ascii_case(&expected) {
                     continue;
                 }
+                matched += 1;
                 if SetupDiCallClassInstaller(DIF_REMOVE, set, &data) == 0 {
                     return Err(format!(
                         "Cannot remove owned Wintun device ({})",
                         GetLastError()
                     ));
                 }
-                return Ok(());
+                let mut params = SP_DEVINSTALL_PARAMS_W {
+                    cbSize: std::mem::size_of::<SP_DEVINSTALL_PARAMS_W>() as u32,
+                    ..Default::default()
+                };
+                if SetupDiGetDeviceInstallParamsW(set, &data, &mut params) != 0
+                    && params.Flags & (DI_NEEDREBOOT | DI_NEEDRESTART) != 0
+                {
+                    reboot = true;
+                }
+                // Keep enumerating: never let an earlier matching instance
+                // hide another still-present instance during PnP teardown.
             }
             Err("Too many Wintun devices".into())
         })();
