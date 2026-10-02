@@ -47,11 +47,3 @@ idempotency and download roundtrip. It passed against the deployed server using 
 temporary synthetic account, then removed that account and its data. Automated
 browser E2E remains outstanding. Migration was tested on a database copy and the
 old image read that migrated copy; an actual production rollback was not exercised.
-
-## Unified administration console
-
-The additive `console/` sidecar provides a shared admin UI for the existing
-TrustTunnel portal, H UI, R-TrustTunnel updates, routing, email and Telegram.
-Production entry: `https://onixus-rf.duckdns.org/console/` with the existing portal
-admin login. See [acceptance and scope](../docs/unified-console.md) and
-[operations/security](console/README.md). It does not replace the VPN endpoints.

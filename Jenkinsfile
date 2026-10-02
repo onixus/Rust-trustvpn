@@ -36,8 +36,6 @@ pipeline {
               .ci-server/bin/pip install -r server/test-environment/requirements.txt
               cargo build -p rtrust-codec --locked
               python3 ci/run.py macos-portal .ci-server/bin/python server/tests/test_exchange.py
-              python3 ci/run.py macos-console .ci-server/bin/python server/tests/test_console.py
-              python3 ci/run.py macos-console-installer .ci-server/bin/python server/tests/test_console_installer.py
               cargo build -p rtrust-portal --example portal_e2e --locked
               python3 ci/run.py macos-portal-native .ci-server/bin/python server/tests/native_exchange.py
               python3 ci/run.py macos-clippy cargo clippy --workspace --all-targets --locked -- -D warnings
