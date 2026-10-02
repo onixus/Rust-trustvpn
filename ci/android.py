@@ -59,12 +59,12 @@ cp target/x86_64-linux-android/release/librtrust_android.so /out/x86_64/
 cp target/aarch64-linux-android/release/librtrust_android.so /out/arm64-v8a/
 '''
     try:
-        run(['docker', 'run', '--rm', '--name', NAME, '-v', f'{ROOT}:/work:ro', '-v', f'{ndk}:/ndk:ro',
-             '-v', f'{libs}:/out', '-v', 'rtrust-android-target:/work/target', '-v', 'rtrust-android-cargo:/usr/local/cargo',
+        run(['docker', 'run', '--rm', '--name', NAME, '-v', f'{ROOT}:/work:ro,z', '-v', f'{ndk}:/ndk:ro,z',
+             '-v', f'{libs}:/out:z', '-v', 'rtrust-android-target:/work/target', '-v', 'rtrust-android-cargo:/usr/local/cargo',
              '-w', '/work', IMAGE, 'sh', '-c', script], timeout=2400)
     finally:
         subprocess.run(['docker', 'rm', '-f', NAME], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-        run(['docker', 'run', '--rm', '--network', 'none', '-v', f'{libs}:/out', IMAGE, 'chown', '-hR', f'{os.getuid()}:{os.getgid()}', '/out'], timeout=60)
+        run(['docker', 'run', '--rm', '--network', 'none', '-v', f'{libs}:/out:z', IMAGE, 'chown', '-hR', f'{os.getuid()}:{os.getgid()}', '/out'], timeout=60)
     run([args.gradle, '-p', str(ROOT / 'apps/android'), '--no-daemon', 'assembleDebug', 'assembleRelease', 'assembleDebugAndroidTest', 'lintDebug'], env=env, timeout=1200)
     run(['python3', 'ci/android_smoke.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
     for protocol in ('trusttunnel','hysteria2'):
