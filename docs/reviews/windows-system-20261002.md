@@ -3,10 +3,11 @@
 Overall result: **issues found; not a clean release gate**. The final isolated
 full-tunnel worker passed, but earlier always-on restarts timed out, and the
 production TrustTunnel profile failed with automatic address-family selection.
-The Wintun recovery candidate described below has local checks only; neither
-finding is claimed resolved on the Windows machine.
+The Wintun recovery candidate described below later passed one native
+three-crash always-on run (see "Native verification"); the restart finding is
+improved but not closed by a single run.
 
-## Wintun recovery candidate (not yet accepted)
+## Wintun recovery candidate
 
 The original recovery code called PnP removal once, then only polled the
 interface table for 30 seconds. A temporarily unreadable driver registry key
@@ -68,6 +69,37 @@ refused, and subsequent direct SSH/RDP probes timed out. The candidate has not
 been installed. Required next gate: native Windows build and repeated service
 crash/always-on recovery, full WFP/Wintun traffic and cleanup tests. Keep the
 independent scheduled rollback enabled. Preserve the earlier timeout evidence.
+
+## Native verification (2026-10-02, 14:37)
+
+Branch `fix/wintun-recovery-diagnostics` (commit `73788f8`) was built natively
+on the Windows node (`cargo build --release -p rtrust-tun --locked`); service
+SHA-256 `63fe9187cfcb3a1ce8597af9cbe5d8f7c384faf34f009fdc22fe96f828983dbd`.
+Native `cargo test -p rtrust-tun` (18 tests) and `clippy -D warnings` passed.
+
+`windows_authorized_full.py --crash-cycles 3` against a fresh Docker fixture:
+**passed** (`success: true`). Always-on traffic recovered after each forced
+service kill in 26.2 s, 14.7 s and 14.7 s (previously stuck `Blocked` beyond
+120 s). Full WFP/Wintun suite, physical Ethernet loss/restore and explicit
+disable passed. The 10-second diagnostic snapshot fired once (first crash) and
+showed no remaining `RTrustTunnel` adapter or Wintun device, only the journal,
+so that delay was not a stuck adapter. The pending-removal message was never
+hit, so the new PnP summary was not exercised.
+
+Afterwards: original #78 service hash `fd79462c…77bf8a3`, SCM state Running,
+WFP self-test passed, no policy/journal/key, no test scheduled tasks, no
+`RTrustTunnel` adapter. Runner log:
+`reports/windows-system-20261002/windows-always-on-3crash-fix.log`.
+
+Run conditions: the user's AmneziaVPN tunnel was disconnected for the run
+(its kill switch had been dropping inbound LAN traffic, which made the node
+look offline). The runner was started as an elevated interactive scheduled task
+so the Ethernet handoff could not kill it. An orphaned, empty fixture network
+`rtrust-wintun-82647252` from the earlier session blocked the Docker fixture
+and was removed.
+
+Because the original failure was intermittent, one clean pass is not proof.
+Recommended before closing: repeat the three-crash run several times.
 
 The user explicitly authorized testing the existing Windows installation,
 changing its agent and temporarily disrupting its network. Tests ran on the
