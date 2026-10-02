@@ -41,7 +41,7 @@ final class AppRoutingAcceptance {
                 ViewGroup content = activity.findViewById(android.R.id.content);
                 LinearLayout root = (LinearLayout) content.getChildAt(0);
                 View last = root.getChildAt(root.getChildCount() - 1);
-                check(last instanceof Button && ((Button) last).getText().toString().equals("Connect default profile"), "Connect button is fixed below profile list");
+                check(last instanceof Button && ((Button) last).getText().toString().equals(activity.getString(R.string.connect_default_profile)), "Connect button is fixed below profile list");
             });
         } finally { test.runOnMainSync(activity::finish); }
     }
