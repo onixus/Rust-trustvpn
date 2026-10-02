@@ -209,9 +209,92 @@ pub async fn forward_tcp<T: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
+/// Empty NOERROR answer (NODATA) for a single AAAA question. Used when the
+/// endpoint has no IPv6 egress, so applications pick IPv4 instead of opening
+/// IPv6 flows that the endpoint would reject.
+pub fn aaaa_nodata(query: &[u8]) -> Option<Vec<u8>> {
+    use hickory_proto::op::{Message, MessageType, OpCode};
+    let question = Message::from_vec(query).ok()?;
+    if question.metadata.message_type != MessageType::Query
+        || question.metadata.op_code != OpCode::Query
+        || question.queries.len() != 1
+        || question.queries[0].query_type() != hickory_proto::rr::RecordType::AAAA
+    {
+        return None;
+    }
+    let mut answer = Message::new(question.metadata.id, MessageType::Response, OpCode::Query);
+    answer.metadata.recursion_desired = question.metadata.recursion_desired;
+    answer.metadata.recursion_available = true;
+    answer.metadata.checking_disabled = question.metadata.checking_disabled;
+    answer.add_query(question.queries[0].clone());
+    answer.to_vec().ok()
+}
+/// DNS over TCP through the tunnel with AAAA questions answered locally.
+/// The tunnel stream opens only for the first question that needs it.
+pub async fn forward_tcp_without_aaaa<T: AsyncRead + AsyncWrite + Unpin>(
+    session: &Session,
+    destination: std::net::SocketAddr,
+    stream: &mut T,
+) -> Result<()> {
+    let mut tunnel = None;
+    loop {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let query = read_message(stream).await?;
+            let answer = match aaaa_nodata(&query) {
+                Some(answer) => answer,
+                None => {
+                    if tunnel.is_none() {
+                        tunnel = Some(session.open_tcp(&destination.to_string()).await?);
+                    }
+                    let tunnel = tunnel.as_mut().unwrap();
+                    tunnel.write_u16(query.len() as u16).await?;
+                    tunnel.write_all(&query).await?;
+                    let answer = read_message(tunnel).await?;
+                    validate_answer(&query, &answer)?;
+                    answer
+                }
+            };
+            stream.write_u16(answer.len() as u16).await?;
+            stream.write_all(&answer).await?;
+            Ok::<_, Error>(())
+        })
+        .await
+        .map_err(|_| Error::Timeout)??;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn query(kind: hickory_proto::rr::RecordType) -> Vec<u8> {
+        use hickory_proto::op::{Message, MessageType, OpCode, Query};
+        let mut m = Message::new(0x1234, MessageType::Query, OpCode::Query);
+        m.metadata.recursion_desired = true;
+        m.add_query(Query::query("example.com.".parse().unwrap(), kind));
+        m.to_vec().unwrap()
+    }
+    #[test]
+    fn aaaa_gets_valid_empty_answer() {
+        let q = query(hickory_proto::rr::RecordType::AAAA);
+        let answer = aaaa_nodata(&q).unwrap();
+        validate_answer(&q, &answer).unwrap();
+        let m = hickory_proto::op::Message::from_vec(&answer).unwrap();
+        assert!(m.answers.is_empty());
+        assert_eq!(
+            m.metadata.response_code,
+            hickory_proto::op::ResponseCode::NoError
+        );
+        assert!(m.metadata.recursion_desired);
+    }
+    #[test]
+    fn other_questions_pass_through() {
+        assert!(aaaa_nodata(&query(hickory_proto::rr::RecordType::A)).is_none());
+        assert!(aaaa_nodata(&query(hickory_proto::rr::RecordType::HTTPS)).is_none());
+        assert!(aaaa_nodata(b"garbage").is_none());
+        let mut response = query(hickory_proto::rr::RecordType::AAAA);
+        response[2] |= 0x80;
+        assert!(aaaa_nodata(&response).is_none());
+    }
     #[test]
     fn encrypted_dns_never_accepts_cleartext_or_ambiguous_credentials() {
         for uri in [

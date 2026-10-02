@@ -19,6 +19,7 @@ s = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(s)
 s.NS = "rtrust-full-test"
 peers = []
+kinds = []
 
 class DNS(socketserver.BaseRequestHandler):
     def handle(self):
@@ -29,7 +30,12 @@ class DNS(socketserver.BaseRequestHandler):
         end += 1
         kind = int.from_bytes(data[end:end+2], "big")
         question = data[12:end+4]
-        answer = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 0, 4) + socket.inet_aton("198.18.0.1") if kind == 1 else b""
+        answer = b""
+        if kind == 1:
+            answer = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 0, 4) + socket.inet_aton("198.18.0.1")
+        elif kind == 28:
+            answer = b"\xc0\x0c" + struct.pack("!HHIH", 28, 1, 0, 16) + socket.inet_pton(socket.AF_INET6, "fd00:99::1")
+        kinds.append(kind)
         response = data[:2] + struct.pack("!HHHHH", 0x8180, 1, bool(answer), 0, 0) + question + answer
         peers.append(self.client_address[0])
         sock.sendto(response, self.client_address)
@@ -325,6 +331,38 @@ print(exact(n).decode())
             fetch(1000,"10.99.0.2");ipv6(True)
             assert s.ns("nft","-j","list","tables")==baseline_nft
             print("PASS early boot guard and corrupted policy fail closed; explicit disable restores network",flush=True)
+            if not hysteria:
+                # Production TrustTunnel endpoints may run without IPv6 egress
+                # (has_ipv6=false). IPv6 must fail locally and at once, so
+                # applications fall back to IPv4 instead of a mid-TLS reset.
+                s.stop(ep)
+                (d/"vpn.toml").write_text("ipv6_available=false\n"+(d/"vpn.toml").read_text())
+                ep=endpoint()
+                v4=d/"profile-v4.json"
+                value=json.loads(profile.read_text());value["endpoint"]["has_ipv6"]=False
+                v4.write_text(json.dumps(value));v4.chmod(0o600);os.chown(v4,1000,1000)
+                probe="""import socket,sys,time
+start=time.monotonic()
+try:socket.create_connection(('fd00:99::1',int(sys.argv[1])),timeout=5)
+except ConnectionRefusedError:pass
+else:raise SystemExit('IPv6 TCP was not refused')
+assert time.monotonic()-start<2,'IPv6 TCP refusal was not immediate'
+u=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM);u.settimeout(3);u.connect(('fd00:99::1',9));u.send(b'x')
+try:u.recv(16)
+except socket.timeout:raise SystemExit('IPv6 UDP got no ICMPv6 refusal')
+except OSError:pass
+else:raise SystemExit('IPv6 UDP unexpectedly answered')
+"""
+                with s.client(v4,"--serve-full","198.18.0.1") as (client,_):
+                    fetch(1000,"198.18.0.1");lookup("198.18.0.1")
+                    s.app(1000,"python3","-c",probe,str(http6.server_port))
+                    start=len(kinds)
+                    result=s.app(1000,"python3","-c","import socket,sys; print(sorted({a[4][0] for a in socket.getaddrinfo(sys.argv[1],80,0,socket.SOCK_STREAM)}))",f"dual-{time.time_ns()}.rtrust.test")
+                    assert result.strip()==b"['198.18.0.1']",result
+                    assert kinds[start:] and 28 not in kinds[start:],kinds[start:]
+                    s.stop(client);assert client.returncode==0
+                fetch(1000,"10.99.0.2");ipv6(True)
+                print("PASS endpoint without IPv6: IPv6 TCP refused at once, UDP gets ICMPv6, AAAA answered empty locally, IPv4 and DNS through VPN",flush=True)
 
 
     except BaseException:

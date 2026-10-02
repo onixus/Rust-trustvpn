@@ -93,8 +93,9 @@ pub fn check_capabilities(p: &Profile) -> Result<()> {
     Ok(())
 }
 
+/// The flag records whether the endpoint relays IPv6 (`has_ipv6` in the profile).
 #[derive(Clone)]
-pub struct Session(Transport);
+pub struct Session(Transport, bool);
 #[derive(Clone)]
 enum Transport {
     H2(H2Session),
@@ -106,16 +107,21 @@ impl Session {
         check_capabilities(p)?;
         tokio::time::timeout(Duration::from_secs(20), async {
             if p.protocol == rtrust_profile::Protocol::Hysteria2 {
-                return Ok(Self(Transport::Hysteria(
-                    hysteria::HysteriaSession::connect(p, None, None).await?,
-                )));
+                return Ok(Self(
+                    Transport::Hysteria(hysteria::HysteriaSession::connect(p, None, None).await?),
+                    p.endpoint.has_ipv6,
+                ));
             }
             if p.endpoint.upstream_protocol == "http3" {
-                Ok(Self(Transport::H3(
-                    h3transport::H3Session::connect(p).await?,
-                )))
+                Ok(Self(
+                    Transport::H3(h3transport::H3Session::connect(p).await?),
+                    p.endpoint.has_ipv6,
+                ))
             } else {
-                Ok(Self(Transport::H2(H2Session::connect(p).await?)))
+                Ok(Self(
+                    Transport::H2(H2Session::connect(p).await?),
+                    p.endpoint.has_ipv6,
+                ))
             }
         })
         .await
@@ -132,7 +138,7 @@ impl Session {
             )
             .await
             .map_err(|_| Error::Timeout)?
-            .map(|s| Self(Transport::Hysteria(s)));
+            .map(|s| Self(Transport::Hysteria(s), p.endpoint.has_ipv6));
         }
         if p.endpoint.upstream_protocol != "http2" || mark == 0 {
             return Err(Error::Unsupported("marked transport requires HTTP/2"));
@@ -143,7 +149,7 @@ impl Session {
         )
         .await
         .map_err(|_| Error::Timeout)??;
-        Ok(Self(Transport::H2(session)))
+        Ok(Self(Transport::H2(session), p.endpoint.has_ipv6))
     }
     #[cfg(unix)]
     pub async fn connect_protected(p: &Profile, protector: &SocketProtector) -> Result<Self> {
@@ -155,7 +161,7 @@ impl Session {
             )
             .await
             .map_err(|_| Error::Timeout)?
-            .map(|s| Self(Transport::Hysteria(s)));
+            .map(|s| Self(Transport::Hysteria(s), p.endpoint.has_ipv6));
         }
         if p.endpoint.upstream_protocol != "http2" {
             return Err(Error::Unsupported("protected transport requires HTTP/2"));
@@ -175,7 +181,11 @@ impl Session {
         )
         .await
         .map_err(|_| Error::Timeout)??;
-        Ok(Self(Transport::H2(session)))
+        Ok(Self(Transport::H2(session), p.endpoint.has_ipv6))
+    }
+    /// False when the endpoint has no IPv6 egress; IPv6 flows must fail locally.
+    pub fn ipv6(&self) -> bool {
+        self.1
     }
     pub async fn health(&self) -> Result<()> {
         match &self.0 {

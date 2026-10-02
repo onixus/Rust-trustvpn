@@ -30,7 +30,8 @@ async fn ui_ready(app: tauri::AppHandle) -> Result<(), String> {
 async fn view(state: State<'_, Shared>) -> Result<View, String> {
     let mut c = state.lock().await;
     if let Some(session) = &c.session {
-        c.status = session.health().await.err().unwrap_or_default();
+        let health = session.health().await;
+        c.status = health.err().unwrap_or_else(|| c.connected_note().into());
     }
     Ok(c.view())
 }
