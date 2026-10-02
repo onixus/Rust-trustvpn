@@ -111,7 +111,10 @@ final class NetworkAcceptance {
             check(Arrays.stream(InetAddress.getAllByName("rtrust-" + System.nanoTime() + ".example")).anyMatch(ip -> ip.getHostAddress().equals(v4)), "System DNS through tunnel");
             byte[] control = request(v4, 8082, "POST /cycle HTTP/1.0\r\nHost: fixture\r\nAuthorization: Bearer " + fixture.getString("control_token") + "\r\nContent-Length: 0\r\n\r\n");
             check(new String(control, StandardCharsets.US_ASCII).contains("204"), "Endpoint outage scheduled");
-            await(3, largeUdpDigest ? 40000 : 10000);
+            // Hysteria notices a silent server only by QUIC idle timeout: about 37 s after
+            // the last reply (keep-alive restart + 30 s) plus the 5 s health poll, measured
+            // against the official server. The fixture restores it 45 s after scheduling.
+            await(3, largeUdpDigest ? 50000 : 10000);
             check(TunnelService.active, "TUN retained during reconnect");
             boolean blocked = false;
             try (Socket socket = new Socket()) { socket.connect(new InetSocketAddress(v4, 8080), 2000); }
