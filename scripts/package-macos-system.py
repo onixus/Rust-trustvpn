@@ -46,7 +46,10 @@ def main():
             CFBundleExecutable=frontend, CFBundleIdentifier='org.rtrusttunnel.Native',
             CFBundleName='R-TrustTunnel', CFBundlePackageType='APPL', CFBundleIconFile='rtrust.icns',
             CFBundleShortVersionString=version, CFBundleVersion=version,
-            NSHighResolutionCapable=True)))
+            NSHighResolutionCapable=True,
+            # Only the primary app claims profile links so LaunchServices has one handler.
+            CFBundleURLTypes=[dict(CFBundleURLName='org.rtrusttunnel.profile-link',
+                CFBundleURLSchemes=['tt','hy2','hysteria2'])])))
         (app / 'Resources').mkdir()
         shutil.copy2(ROOT / 'packaging/branding/icon.icns', app / 'Resources/rtrust.icns')
         secondary=None

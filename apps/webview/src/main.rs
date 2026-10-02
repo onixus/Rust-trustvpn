@@ -3,6 +3,15 @@ use rtrust_desktop::{Controller, Summary, View};
 use tauri::{Manager, State};
 use tokio::sync::Mutex;
 type Shared = Mutex<Controller>;
+fn note_pending(c: &mut Controller, result: Result<Summary, String>) {
+    c.status = match result {
+        Ok(p) => format!(
+            "Pending import: {}. Confirm in the Profiles section.",
+            p.name
+        ),
+        Err(e) => e,
+    };
+}
 #[tauri::command]
 async fn ui_ready(app: tauri::AppHandle) -> Result<(), String> {
     if !std::env::args().any(|s| s == "--ci-smoke") {
@@ -292,15 +301,7 @@ fn main() {
                     controller.preview(text)
                 })
         };
-        match result {
-            Ok(p) => {
-                controller.status = format!(
-                    "Pending import: {}. Confirm in the Profiles section.",
-                    p.name
-                )
-            }
-            Err(e) => controller.status = e,
-        }
+        note_pending(&mut controller, result);
     }
     tauri::Builder::default()
         .manage(Mutex::new(controller))
@@ -404,6 +405,27 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("Desktop application runtime")
         .run(|app, event| {
+            // macOS hands tt:// and hy2:// links to the running app as Apple
+            // Events; Windows and Linux pass them as the first argument instead.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &event
+                && let Some(link) = urls
+                    .iter()
+                    .rev()
+                    .find(|url| ["tt", "hy2", "hysteria2"].contains(&url.scheme()))
+            {
+                let (app, link) = (app.clone(), zeroize::Zeroizing::new(link.to_string()));
+                tauri::async_runtime::spawn(async move {
+                    let shared = app.state::<Shared>();
+                    let mut c = shared.lock().await;
+                    let result = c.preview(&link);
+                    note_pending(&mut c, result);
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                });
+            }
             if let tauri::RunEvent::ExitRequested {
                 api, code: None, ..
             } = event

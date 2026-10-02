@@ -35,11 +35,17 @@ Name: "native"; Description: "Native desktop interface"; Types: native both
 Name: "webview"; Description: "WebView desktop interface"; Types: webview both
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: checkedonce
-Name: "ttprotocol"; Description: "Open tt:// profile links with R-TrustTunnel"; Flags: unchecked
+Name: "ttprotocol"; Description: "Open tt:// and hy2:// profile links with R-TrustTunnel"; Flags: unchecked
 [Registry]
-Root: HKLM; Subkey: "Software\Classes\tt"; ValueType: string; ValueName: ""; ValueData: "URL:TrustTunnel profile"; Tasks: ttprotocol; Check: CanRegisterTT; Flags: uninsdeletekey
-Root: HKLM; Subkey: "Software\Classes\tt"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Tasks: ttprotocol; Check: CanRegisterTT
-Root: HKLM; Subkey: "Software\Classes\tt\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{code:GetUiExe}"" ""%1"""; Tasks: ttprotocol; Check: CanRegisterTT
+Root: HKLM; Subkey: "Software\Classes\tt"; ValueType: string; ValueName: ""; ValueData: "URL:TrustTunnel profile"; Tasks: ttprotocol; Check: CanRegisterScheme('tt'); Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Classes\tt"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Tasks: ttprotocol; Check: CanRegisterScheme('tt')
+Root: HKLM; Subkey: "Software\Classes\tt\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{code:GetUiExe}"" ""%1"""; Tasks: ttprotocol; Check: CanRegisterScheme('tt')
+Root: HKLM; Subkey: "Software\Classes\hy2"; ValueType: string; ValueName: ""; ValueData: "URL:Hysteria 2 profile"; Tasks: ttprotocol; Check: CanRegisterScheme('hy2'); Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Classes\hy2"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Tasks: ttprotocol; Check: CanRegisterScheme('hy2')
+Root: HKLM; Subkey: "Software\Classes\hy2\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{code:GetUiExe}"" ""%1"""; Tasks: ttprotocol; Check: CanRegisterScheme('hy2')
+Root: HKLM; Subkey: "Software\Classes\hysteria2"; ValueType: string; ValueName: ""; ValueData: "URL:Hysteria 2 profile"; Tasks: ttprotocol; Check: CanRegisterScheme('hysteria2'); Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Classes\hysteria2"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Tasks: ttprotocol; Check: CanRegisterScheme('hysteria2')
+Root: HKLM; Subkey: "Software\Classes\hysteria2\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{code:GetUiExe}"" ""%1"""; Tasks: ttprotocol; Check: CanRegisterScheme('hysteria2')
 [Files]
 Source: "..\..\packaging\branding\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\dist\native-preview-windows\rtrust-update.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -77,10 +83,10 @@ function GetCustomSetupExitCode(): Integer;
 begin
   if ServiceReady then Result := 0 else Result := 1;
 end;
-function CanRegisterTT(): Boolean;
+function CanRegisterScheme(Scheme: String): Boolean;
 var Existing: String;
 begin
-  Result := not RegQueryStringValue(HKLM, 'Software\Classes\tt\shell\open\command', '', Existing);
+  Result := not RegQueryStringValue(HKLM, 'Software\Classes\' + Scheme + '\shell\open\command', '', Existing);
   if not Result then Result := (Pos(ExpandConstant('{app}\R-TrustTunnel.exe'), Existing) > 0) or (Pos(ExpandConstant('{app}\R-TrustTunnel-WebView.exe'), Existing) > 0);
 end;
 function RunService(Action: String): Boolean;

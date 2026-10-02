@@ -6,5 +6,5 @@ Exec=rtrust-native %U
 Icon=org.rtrusttunnel.Native
 Terminal=false
 Categories=Network;Security;
-MimeType=x-scheme-handler/tt;application/toml;
+MimeType=x-scheme-handler/tt;x-scheme-handler/hy2;x-scheme-handler/hysteria2;application/toml;
 StartupNotify=true
