@@ -1,5 +1,5 @@
 """Download official pinned tools into the job workspace, never globally."""
-import hashlib,json,pathlib,platform,subprocess,tarfile,sys,os,shutil,tempfile
+import hashlib,json,pathlib,platform,subprocess,tarfile,sys,os,tempfile
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 def install(name):
     key=platform.system()+'-'+platform.machine()
@@ -7,11 +7,19 @@ def install(name):
     directory=ROOT/'.ci-tools'/name;directory.mkdir(parents=True,exist_ok=True)
     archive=directory/'download.tar.gz'
     cache=pathlib.Path(os.environ['RTRUST_TOOL_CACHE'])/item['sha256'] if os.environ.get('RTRUST_TOOL_CACHE') else None
-    if cache and cache.is_file() and hashlib.sha256(cache.read_bytes()).hexdigest()==item['sha256']:
-        shutil.copyfile(cache,archive)
+    # Jobs share the cache and run this concurrently: read it once, and treat a
+    # file that another job is replacing as a miss.
+    cached=None
+    if cache:
+        try:cached=cache.read_bytes()
+        except OSError:pass
+    cached=cached if cached is not None and hashlib.sha256(cached).hexdigest()==item['sha256'] else None
+    if cached is not None:archive.write_bytes(cached)
     if not archive.exists() or hashlib.sha256(archive.read_bytes()).hexdigest()!=item['sha256']:
         subprocess.run(['curl','-fLsS','--connect-timeout','15','--max-time','120','--retry','2',item['url'],'-o',str(archive)],check=True)
-    if cache and hashlib.sha256(archive.read_bytes()).hexdigest()==item['sha256']:
+    # Publish only what the cache lacks. Rewriting a valid entry on every run made
+    # it vanish for a moment under a concurrent job (rename is not atomic on VirtioFS).
+    if cache and cached is None and hashlib.sha256(archive.read_bytes()).hexdigest()==item['sha256']:
         cache.parent.mkdir(parents=True,exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=cache.parent,delete=False) as f:
             temporary=pathlib.Path(f.name);f.write(archive.read_bytes())

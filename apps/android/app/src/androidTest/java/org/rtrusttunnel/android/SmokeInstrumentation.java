@@ -75,7 +75,14 @@ public final class SmokeInstrumentation extends Instrumentation {
             result.putString("stream", "PASS: JNI codec, four formats, redaction, Keystore persistence, encrypted file, tamper rejection, invalid FD, portal sync, QR camera/image, Russian resources, export recreation, Always-on declaration\n");
             finish(-1, result);
         } catch (Throwable error) {
-            result.putString("stream", "FAIL: " + error.getClass().getSimpleName() + (error instanceof AssertionError ? ": " + error.getMessage() : "") + "\n"); finish(1, result);
+            // Exception messages may carry addresses or profile data; the failing test
+            // lines are safe and tell which step failed.
+            StringBuilder where = new StringBuilder(); int frames = 0;
+            for (StackTraceElement frame : error.getStackTrace()) {
+                if (!frame.getClassName().startsWith("org.rtrusttunnel.android.") || frames == 3) continue;
+                where.append(frames++ == 0 ? " at " : " < ").append(frame.getFileName()).append(':').append(frame.getLineNumber());
+            }
+            result.putString("stream", "FAIL: " + error.getClass().getSimpleName() + (error instanceof AssertionError ? ": " + error.getMessage() : "") + where + "\n"); finish(1, result);
         }
     }
 }
