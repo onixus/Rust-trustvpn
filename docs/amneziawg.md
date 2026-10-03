@@ -124,7 +124,7 @@ Each mode checks TCP payload integrity over IPv4 and IPv6, eight parallel
 streams, a destination resolved by DNS inside the tunnel, a refused port, UDP
 echo on independent streams from 1 to 20000 bytes (fragmented above 1252), and rejection of a wrong preshared key. The third
 mode also holds a stream open across several key rotations. The fixture creates
-no TUN device and changes no routes or an existing VPN; it needs Go 1.25.
+no TUN device and changes no routes or an existing VPN; it needs Go 1.26.
 
 Not established by this fixture: a system full tunnel on any platform with an
 AmneziaWG profile, Android VpnService, a production server, cookie replies of a

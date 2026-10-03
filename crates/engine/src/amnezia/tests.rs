@@ -2,8 +2,13 @@ use super::{device::Device, *};
 use base64::Engine;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-const AWG3: &str = "Jc = 3\nJmin = 20\nJmax = 60\nS1 = 15\nS2 = 20\nS3 = 12\nS4 = 16\nH1 = 100-200\nH2 = 300-310\nH3 = 400-500\nH4 = 600-700\nI1 = <b 0xc0ff><r 16><t>\nHeaderProtectionKey = AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\nContentPaddingAddition = 8-40\nRandomTrailers = on\n";
+const OPTIONS: &str = "Jc = 3\nJmin = 20\nJmax = 60\nS1 = 15\nS2 = 20\nS3 = 12\nS4 = 16\nH1 = 100-200\nH2 = 300-310\nH3 = 400-500\nH4 = 600-700\nI1 = <b 0xc0ff><r 16><t>\nContentPaddingAddition = 8-40\nRandomTrailers = on\n";
 
+/// AmneziaWG 3 options with a synthetic header protection key, built at
+/// run time so that no key-shaped literal sits in the source.
+fn awg3(key: u8) -> String {
+    format!("{OPTIONS}HeaderProtectionKey = {}\n", b64([key; 32]))
+}
 fn b64(bytes: [u8; 32]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
@@ -75,7 +80,8 @@ fn plain_wireguard_layout_is_unchanged_without_options() {
 
 #[test]
 fn obfuscated_handshake_and_data_in_both_directions() {
-    for extra in ["", AWG3] {
+    for extra in [String::new(), awg3(1)] {
+        let extra = extra.as_str();
         let (mut client, mut server) = pair(extra);
         let now = Instant::now();
         client.send_keepalive(now);
@@ -110,12 +116,12 @@ fn obfuscated_handshake_and_data_in_both_directions() {
 #[test]
 fn mismatched_obfuscation_never_reaches_the_handshake() {
     for other in [
-        AWG3.replace("AAEC", "BAEC"),
-        AWG3.replace("S1 = 15", "S1 = 14"),
-        AWG3.replace("H1 = 100-200", "H1 = 201-250"),
+        awg3(2),
+        awg3(1).replace("S1 = 15", "S1 = 14"),
+        awg3(1).replace("H1 = 100-200", "H1 = 201-250"),
         String::new(),
     ] {
-        let (mut client, _) = pair(AWG3);
+        let (mut client, _) = pair(&awg3(1));
         let (_, mut server) = pair(&other);
         let now = Instant::now();
         client.send_keepalive(now);
@@ -151,7 +157,7 @@ fn handshake_retransmits_and_gives_up_after_the_configured_attempts() {
 
 #[test]
 fn keys_rotate_and_expire_on_the_configured_timers() {
-    let (mut client, mut server) = pair(AWG3);
+    let (mut client, mut server) = pair(&awg3(1));
     let start = Instant::now();
     establish(&mut client, &mut server, start);
     let up = packet([10, 8, 1, 2], 100);
