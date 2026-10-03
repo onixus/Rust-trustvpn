@@ -52,7 +52,7 @@ def main():
     (ROOT / 'hosts.toml').write_text('[[main_hosts]]\nhostname="localhost"\ncert_chain_path="cert.pem"\nprivate_key_path="key.pem"\n')
     (ROOT / 'credentials.toml').write_text(f'[[client]]\nusername="interop"\npassword="{password}"\n')
     for name in ['key.pem', 'control-token', 'credentials.toml']: (ROOT / name).chmod(0o600)
-    (ROOT/'hysteria.json').unlink(missing_ok=True)
+    (ROOT/'hysteria.json').unlink(missing_ok=True);(ROOT/'outage-seconds').unlink(missing_ok=True)
     if hysteria:
         from hysteria_interop import binary
         import shutil
@@ -60,6 +60,9 @@ def main():
         obfs=secrets.token_urlsafe(32)
         (ROOT/'hysteria.json').write_text(json.dumps({'listen':':4433','tls':{'cert':'/fixture/cert.pem','key':'/fixture/key.pem'},'auth':{'type':'password','password':password},'obfs':{'type':'salamander','salamander':{'password':obfs}}}))
         (ROOT/'hysteria.json').chmod(0o600)
+        # The app notices a silent QUIC server after about 42 s; the default 45 s
+        # outage left the acceptance test three seconds to observe it.
+        (ROOT/'outage-seconds').write_text('60')
     transport='udp' if hysteria else 'tcp'
     # The emulator reaches the fixture at 10.0.2.2. When it runs on another host
     # (e.g. Windows hosting the agent VM), that host forwards one fixed port here.

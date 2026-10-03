@@ -12,7 +12,10 @@ class Control(http.server.BaseHTTPRequestHandler):
         elif self.path=='/cycle':
             # QUIC has no TCP EOF when the endpoint process disappears. Keep
             # it down past the client's 30-second idle deadline and health poll.
-            duration=45 if pathlib.Path('/fixture/hysteria.json').exists() else 12
+            # A fixture may lengthen it: a client that detects the outage only
+            # by idle timeout needs a margin before the endpoint returns.
+            override=pathlib.Path('/fixture/outage-seconds')
+            duration=int(override.read_text()) if override.exists() else 45 if pathlib.Path('/fixture/hysteria.json').exists() else 12
             threading.Timer(1,paused.set).start();threading.Timer(duration,paused.clear).start()
         else:self.send_error(404);return
         self.send_response(204);self.end_headers()
