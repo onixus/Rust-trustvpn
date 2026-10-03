@@ -81,3 +81,18 @@ were verified. Setup was delivered to the Windows user's Downloads directory.
 
 Setup SHA-256: `31202330accd7dc2b34ea0dfbb38964a99ae8acd092007ceaf5f9591703a53c2`.
 Sequence 4 was withheld from latest; sequence 5 was prepared locally but not published.
+
+## Delivered sequence 7
+
+Native build #93 completed SUCCESS. Version 0.4.0 / sequence 7 passed the genuine
+signed 6→7 upgrade on the authorized Windows host on 2026-10-03 with a sequence-6
+test runner: injected failed health check, verified rollback to 6 and successful
+retry to 7 in 16.49 seconds. The existing encrypted vault (real profiles, not a
+synthetic one) stayed byte-identical and decryptable, autostart was unchanged,
+the service runs as LocalSystem, and the installed GUI, updater, service and
+wintun.dll hashes match build #93. Sequence 7 was then promoted to latest for
+`windows-x86_64`. The Windows full tunnel was not rerun with the installed 0.4.0 build.
+
+Setup SHA-256: `938a957a97e6a244162367a7d8759f7763f07432ec07f507f9d7eda5d2a65e28`.
+The `macos-aarch64` manifest of sequence 7 is published under its versioned path
+but not promoted; no macOS latest manifest exists yet.
