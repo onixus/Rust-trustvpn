@@ -122,7 +122,18 @@ func serve(path string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	peer := device.NewDevice(tunnel, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, ""))
+	// RTRUST_FIXTURE_VERBOSE logs handshakes and peer endpoints, never keys.
+	level := device.LogLevelError
+	if os.Getenv("RTRUST_FIXTURE_VERBOSE") != "" {
+		level = device.LogLevelVerbose
+	}
+	// RTRUST_FIXTURE_LISTEN pins the listener to one address of a host with
+	// several interfaces, so that replies leave from that address.
+	bind := conn.NewDefaultBind()
+	if listen := os.Getenv("RTRUST_FIXTURE_LISTEN"); listen != "" {
+		bind = &boundBind{address: netip.MustParseAddr(listen)}
+	}
+	peer := device.NewDevice(tunnel, bind, device.NewLogger(level, ""))
 	if err := peer.IpcSet(string(uapi)); err != nil {
 		log.Fatal(err)
 	}

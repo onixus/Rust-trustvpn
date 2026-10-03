@@ -105,7 +105,9 @@ PersistentKeepalive = 22-30
 
 - Amnezia `vpn://` share links and the Amnezia application's JSON container;
   export the native AmneziaWG `.conf` instead.
-- Several peers, roaming to a new peer address, and `ListenPort`.
+- Several peers, roaming to a new peer address, and `ListenPort`. Replies are
+  accepted only from the endpoint address of the profile: a multi-homed server
+  that answers from another of its addresses is not heard.
 - ICMP relay (ping through the tunnel), as for Hysteria 2.
 - `AllowedIPs` does not program routes: the application routing policy decides
   what enters the tunnel. It is kept for export and filters the source address

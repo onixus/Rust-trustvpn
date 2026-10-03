@@ -112,8 +112,11 @@ def main():
         with tempfile.TemporaryDirectory(prefix="rtrust-full-") as directory:
             d = pathlib.Path(directory); d.chmod(0o711)
             def spawn(args, filename, namespace=False, cwd=None):
+                # The AmneziaWG peer listens on the endpoint address only: after the
+                # handoff the client reaches it through another interface of this
+                # host, and a wildcard listener would answer from that interface.
                 with (d / filename).open("wb") as log:
-                    p = subprocess.Popen((["ip", "netns", "exec", s.NS] if namespace else []) + args, stdout=log, stderr=log, cwd=cwd)
+                    p = subprocess.Popen((["ip", "netns", "exec", s.NS] if namespace else []) + args, stdout=log, stderr=log, cwd=cwd, env=dict(os.environ, RTRUST_FIXTURE_LISTEN="10.99.0.1"))
                 processes.append(p)
                 return p
             pathlib.Path("/run/dbus").mkdir(exist_ok=True)
@@ -307,6 +310,7 @@ print(exact(n).decode())
                         if time.monotonic()>until:
                             print(ipc("AlwaysOnStatus"),flush=True)
                             print((d/"daemon.log").read_text(),flush=True)
+                            print("Endpoint log:\n"+(d/"endpoint.log").read_text()[-6000:],flush=True)
                             raise
                         time.sleep(.5)
             traffic_returns()
