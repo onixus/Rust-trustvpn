@@ -43,6 +43,8 @@ TrustTunnel HTTP/3 for **system VPN** is deferred to [wave 3](docs/technical-deb
 
 Hysteria 2 configurations and links select the new QUIC transport automatically. TCP, UDP and Salamander are implemented in the shared engine. See [supported fields and verification limits](docs/hysteria2.md); platform acceptance of this addition is in progress.
 
+AmneziaWG 3 `awg-quick` configurations select an in-process WireGuard transport with the AmneziaWG obfuscation layer (junk and signature packets, prefixes, type ranges, header protection, padding). It is verified against the official `amneziawg-go` 3.1 on loopback only; see [supported options and limits](docs/amneziawg.md).
+
 ## Platform status
 
 | Platform | Implementation and validation | Remaining work |

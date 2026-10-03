@@ -179,7 +179,7 @@ public final class MainActivity extends Activity {
                 boolean isDefault = id.equals(data.getString("default"));
                 if (isDefault) defaultProfile.setText(name);
                 String host = profile.optJSONObject("endpoint") == null ? "" : profile.getJSONObject("endpoint").optString("hostname");
-                String detail = ("hysteria2".equals(profile.optString("protocol")) ? "Hysteria 2" : "TrustTunnel") + (host.isEmpty() ? "" : " · " + host);
+                String detail = protocolName(profile) + (host.isEmpty() ? "" : " · " + host);
                 rows.addView(profileRow(id, name, detail, isDefault));
             }
             if (profiles.length() == 0) {
@@ -236,7 +236,7 @@ public final class MainActivity extends Activity {
             if (!parsed.getBoolean("ok")) { error(getString(R.string.invalid_profile)); return; }
             JSONObject profile = parsed.getJSONObject("profile"), endpoint = profile.getJSONObject("endpoint");
             String warning = endpoint.optBoolean("skip_verification") ? getString(R.string.nwarning_certificate_verification_is_disabled_in) : "";
-            new AlertDialog.Builder(this).setTitle(getString(R.string.import_profile_text)).setMessage(profile.optString("name", "") + "\n" + endpoint.getString("hostname") + " · " + ("hysteria2".equals(profile.optString("protocol")) ? "Hysteria 2" : "TrustTunnel") + warning + getString(R.string.ncredentials_will_be_encrypted_on_this))
+            new AlertDialog.Builder(this).setTitle(getString(R.string.import_profile_text)).setMessage(profile.optString("name", "") + "\n" + endpoint.getString("hostname") + " · " + protocolName(profile) + warning + getString(R.string.ncredentials_will_be_encrypted_on_this))
                 .setNegativeButton(getString(R.string.cancel), null).setPositiveButton(getString(R.string.import_confirm), (d, w) -> {
                     try {
                         vault.edit(data -> { JSONArray list = data.getJSONArray("profiles");
@@ -248,12 +248,18 @@ public final class MainActivity extends Activity {
                 }).show();
         } catch (Exception e) { error(getString(R.string.invalid_or_oversized_profile)); }
     }
+    private static String protocolName(JSONObject profile) {
+        String protocol = profile.optString("protocol");
+        return "hysteria2".equals(protocol) ? "Hysteria 2" : "amneziawg".equals(protocol) ? "AmneziaWG" : "TrustTunnel";
+    }
     private void export(String raw) {
-        final boolean hysteria;
-        try {hysteria="hysteria2".equals(new JSONObject(raw).optString("protocol"));}catch(Exception e){error(getString(R.string.could_not_export_this_profile));return;}
-        String[] formats=hysteria?new String[]{"JSON",getString(R.string.tt_link)}:new String[]{"JSON",getString(R.string.endpoint_toml),getString(R.string.cli_toml),getString(R.string.tt_link)};
+        final String protocol;
+        try {protocol=new JSONObject(raw).optString("protocol");}catch(Exception e){error(getString(R.string.could_not_export_this_profile));return;}
+        final boolean hysteria="hysteria2".equals(protocol),amnezia="amneziawg".equals(protocol);
+        String[] formats=hysteria?new String[]{"JSON",getString(R.string.tt_link)}:amnezia?new String[]{"JSON","AmneziaWG .conf"}:new String[]{"JSON",getString(R.string.endpoint_toml),getString(R.string.cli_toml),getString(R.string.tt_link)};
         new AlertDialog.Builder(this).setTitle(getString(R.string.export_contains_credentials)).setItems(formats, (d, choice) -> {
-            int format=hysteria&&choice==1?3:choice;
+            // Rust codec format indices: 3 is a link, 4 an AmneziaWG config.
+            int format=choice==1?(hysteria?3:amnezia?4:1):choice;
             try {
                 JSONObject output = new JSONObject(NativeCore.INSTANCE.export(raw, format));
                 if (!output.getBoolean("ok")) { error(output.optString("message")); return; }
@@ -261,8 +267,8 @@ public final class MainActivity extends Activity {
                     .setNegativeButton(getString(R.string.cancel), null).setPositiveButton(getString(R.string.choose_file), (confirm, which) -> {
                         try { vault.pendingExport(output.getString("content")); }
                         catch (Exception e) { error(getString(R.string.export_failed)); return; }
-                        startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).setType(format == 0 ? "application/json" : format == 3 ? "text/plain" : "application/toml").addCategory(Intent.CATEGORY_OPENABLE)
-                            .putExtra(Intent.EXTRA_TITLE, "rtrust-profile." + (format == 0 ? "json" : format == 3 ? "txt" : "toml")), SAVE);
+                        startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).setType(format == 0 ? "application/json" : format >= 3 ? "text/plain" : "application/toml").addCategory(Intent.CATEGORY_OPENABLE)
+                            .putExtra(Intent.EXTRA_TITLE, "rtrust-profile." + (format == 0 ? "json" : format == 3 ? "txt" : format == 4 ? "conf" : "toml")), SAVE);
                     }).show();
             } catch (Exception e) { error(getString(R.string.could_not_export_this_profile)); }
         }).show();

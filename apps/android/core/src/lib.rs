@@ -21,6 +21,7 @@ pub fn export_profile(input: &str, format: i32) -> Result<Zeroizing<String>, Str
         1 => Format::EndpointToml,
         2 => Format::CliToml,
         3 => Format::Link,
+        4 => Format::Conf,
         _ => return Err("Unknown export format".into()),
     };
     let export = profile.export(format).map_err(|e| e.to_string())?;
