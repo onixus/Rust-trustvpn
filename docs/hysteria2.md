@@ -137,7 +137,19 @@ endpoint loss/reconnect, process crash, Always-on and network handoff for both
 protocols. Android #26 passed emulator VpnService and reinstall/upgrade tests.
 Huawei passed production Hysteria 2 and encrypted DNS from a separate app UID.
 macOS #66 passed transport/build/package/UI checks; installed macOS Hysteria
-full-tunnel and Windows runtime acceptance remain unverified.
+full tunnel remains unverified.
+
+On 3 October 2026 the branch build passed physical checks against the production
+server. On Windows (`windows_authorized_full.py`, timed rollback to the installed
+service) both Hysteria 2 and TrustTunnel passed the full tunnel with WFP, IPC death
+fail-closed and exact route recovery (`windows_production_e2e.py`). With
+`windows_sleep_e2e.py --sleep-minutes 30` a Hysteria full-tunnel session survived
+real S3 sleep: the System log shows the suspend and the timer wake, the service
+was Connected again 12 s after resume and TLS, egress and UDP DNS passed. On a
+Poco X3 (Android 12, MIUI) the VPN stayed connected through 30 minutes of forced
+deep Doze with every sample egressing through the tunnel, and traffic flowed right
+after wake. The same device passed the Android smoke, Hysteria network acceptance
+and upgrade suites against a LAN fixture.
 
 Protocol references: [URI scheme](https://v2.hysteria.network/docs/developers/URI-Scheme/),
 [wire protocol](https://v2.hysteria.network/docs/developers/Protocol/),

@@ -34,8 +34,10 @@ Port hopping, Gecko, mTLS, `pinSHA256`, bandwidth/Brutal, congestion и QUIC-п�
   реализован только как дополнительная проверка поверх CA;
 - ECH — требует HPKE из aws-lc-rs (новая нативная зависимость на всех платформах);
 - Realms, Chrome parroting, mimic, `fastOpen`/`lazy` — не планируются;
-- Windows runtime и установленный macOS full-tunnel для Hysteria, длительные
-  физические проверки hopping/Brutal на реальной сети.
+- установленный macOS full-tunnel для Hysteria и физические проверки
+  hopping/Brutal на реальной сети (сервер без port-range и bandwidth);
+- Windows runtime, 30-минутный сон S3 и Android Doze проверены 3 октября против
+  боевого сервера; cold boot и Always-on после сна пока не проверены.
 
 Официальный сервер ограничивает UDP-ответы буфером 4096 байт и не сохраняет
 TCP half-close; эти сценарии нельзя объявлять полностью поддержанными. Потеря
