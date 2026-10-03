@@ -1,7 +1,7 @@
 # Android native preview
 
 The Android client uses native Android widgets (Java), a foreground `VpnService`
-and the same Rust profile codec, TrustTunnel HTTP/2 and Hysteria 2 transports and IPv4/IPv6 packet engine as
+and the same Rust profile codec, TrustTunnel HTTP/2, Hysteria 2 and AmneziaWG transports and IPv4/IPv6 packet engine as
 the desktop client. There is no WebView, CLI subprocess or privileged host service.
 Baseline: Android 10/API 29+, arm64-v8a; x86_64 is also built for emulator testing.
 Acceptance uses Android 16/API 36 x86_64 and physical POCO X3 NFC and Huawei DEL-LX9 phones running Android 12/API 31.
@@ -45,6 +45,9 @@ do not disable that protection or publish real profiles to create documentation.
   answers; conflicting shared-IP identities conservatively stay on VPN.
 - Hysteria 2 links and client YAML/JSON are detected automatically; see
   [protocol support and limits](hysteria2.md). JSON preserves the complete profile.
+- AmneziaWG `awg-quick` configurations are detected automatically; see
+  [supported options and limits](amneziawg.md). The emulator acceptance covers it;
+  no physical device has run it yet.
 - Profiles and default selection are encrypted with AES-256-GCM and an Android
   Keystore key. Atomic writes, authenticated reads, no plaintext fallback and
   no automatic reset on corruption. Files live in `noBackupFilesDir`; application

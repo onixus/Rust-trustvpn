@@ -25,12 +25,15 @@
 
 ## AmneziaWG 3: границы preview
 
-AmneziaWG добавлен отдельным протоколом ([amneziawg.md](amneziawg.md)) и проверен
-только на уровне движка против официального `amneziawg-go` 3.1 (loopback).
+AmneziaWG добавлен отдельным протоколом ([amneziawg.md](amneziawg.md)). Проверен
+на уровне движка против официального `amneziawg-go` 3.1 (loopback) и в Android
+VpnService на эмуляторе (сетевая приёмка `ci/android.py`, третий протокол).
 Остаются:
 
-- системный full-tunnel (Windows/Linux/macOS) и Android VpnService с профилем
-  AmneziaWG, боевой сервер, Always-on, сон и смена сети;
+- системный full-tunnel (Windows/Linux/macOS) с профилем AmneziaWG, физическое
+  Android-устройство, боевой сервер, Always-on, сон и смена сети;
+- без трафика приложение не замечает пропавший сервер: у WireGuard нет
+  соединения, обнаружение идёт по четырём неотвеченным handshake;
 - ссылки `vpn://` приложения Amnezia; несколько peer; roaming;
 - ICMP внутри туннеля;
 - cookie-ответы перегруженного сервера не проверены против эталона;

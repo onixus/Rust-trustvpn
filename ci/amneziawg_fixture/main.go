@@ -1,6 +1,9 @@
 // Reference AmneziaWG peer for interoperability tests: the official
 // amneziawg-go device on a userspace network stack. It creates no TUN device
 // and changes no routes; the only host socket is the UDP listener.
+//
+// plain|awg2|awg3 serve built-in loopback targets for the engine tests.
+// keygen and serve run a forwarding peer for the Android emulator fixture.
 package main
 
 import (
@@ -9,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -51,7 +55,7 @@ func obfuscation(mode string, protection [32]byte) (string, string) {
 	case "awg2":
 		return "jc=4\njmin=40\njmax=70\ns1=15\ns2=18\ns3=20\ns4=23\nh1=100000-200000\nh2=300000-400000\nh3=500000-600000\nh4=700000-800000\n",
 			"Jc = 4\nJmin = 40\nJmax = 70\nS1 = 15\nS2 = 18\nS3 = 20\nS4 = 23\nH1 = 100000-200000\nH2 = 300000-400000\nH3 = 500000-600000\nH4 = 700000-800000\nI1 = <b 0xc0ffee><r 32><rc 8><rd 4><t>\nI2 = <r 64>\n"
-	case "awg3":
+	case "awg3", "android":
 		// With random trailers the reference classifies a datagram by its type
 		// range alone, so the ranges stay narrow: a wide one would claim
 		// transport packets as handshake messages.
@@ -59,11 +63,74 @@ func obfuscation(mode string, protection [32]byte) (string, string) {
 				"header_protection_key=" + hex.EncodeToString(protection[:]) + "\ncontent_padding_addition=0-48\nrandom_trailers=true\ndisable_cookies=true\n",
 			"Jc = 5\nJmin = 64\nJmax = 256\nS1 = 33\nS2 = 12\nS3 = 40\nS4 = 17\nH1 = 1163027011-1163027074\nH2 = 2948113920-2948113983\nH3 = 377210880-377210911\nH4 = 3731148800-3731149055\n" +
 				"I1 = <b 0x16030100><r 48><t>\nHeaderProtectionKey = " + b64(protection) + "\nContentPaddingAddition = 16-96\nRandomTrailers = on\nDisableCookies = on\n" +
-				// Short client-side timers so a test stream crosses several rekeys.
-				"RekeyAfterTime = 3-5\nKeepaliveTimeout = 2-3\nRejectAfterTime = 30\n"
+				timers(mode)
 	}
 	log.Fatalf("unknown mode %q", mode)
 	return "", ""
+}
+
+// Short client-side timers so a loopback test stream crosses several rekeys.
+// The Android profile keeps WireGuard's own timing.
+func timers(mode string) string {
+	if mode == "awg3" {
+		return "RekeyAfterTime = 3-5\nKeepaliveTimeout = 2-3\nRejectAfterTime = 30\n"
+	}
+	return ""
+}
+
+// keygen writes the server configuration and the client profile of a
+// forwarding peer. The caller fills in the endpoint address and DNS.
+func keygen(directory string) {
+	serverKey, clientKey, preshared, protection := random(), random(), random(), random()
+	serverLines, _ := obfuscation("android", protection)
+	uapi := fmt.Sprintf("private_key=%x\nlisten_port=4433\n%spublic_key=%x\npreshared_key=%x\nallowed_ip=10.8.1.2/32\nallowed_ip=fd00:8::2/128\n",
+		serverKey, serverLines, public(clientKey), preshared)
+	profile := map[string]any{
+		"schema_version": 1, "protocol": "amneziawg", "name": "AmneziaWG fixture",
+		"amneziawg": map[string]any{
+			"public_key": b64(public(serverKey)), "preshared_key": b64(preshared),
+			"addresses": []string{"10.8.1.2/32", "fd00:8::2/128"}, "allowed_ips": []string{"0.0.0.0/0", "::/0"}, "mtu": mtu,
+			"jc": 5, "jmin": 64, "jmax": 256, "paddings": []int{33, 12, 40, 17},
+			"headers":                  []string{"1163027011-1163027074", "2948113920-2948113983", "377210880-377210911", "3731148800-3731149055"},
+			"signatures":               []string{"<b 0x16030100><r 48><t>", "", "", "", ""},
+			"header_protection_key":    b64(protection),
+			"content_padding_addition": "16-96", "random_trailers": true, "disable_cookies": true,
+		},
+		"endpoint": map[string]any{
+			"hostname": "fixture.invalid", "addresses": []string{"127.0.0.1:4433"},
+			"username": "amneziawg", "password": b64(clientKey), "has_ipv6": true, "upstream_protocol": "http3",
+		},
+	}
+	encoded, err := json.Marshal(profile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for name, text := range map[string][]byte{"amneziawg.uapi": []byte(uapi), "amneziawg-client.json": encoded} {
+		if err := os.WriteFile(directory+"/"+name, text, 0o600); err != nil {
+			log.Fatal(err)
+		}
+	}
+}
+
+// serve runs the forwarding peer until the process is terminated.
+func serve(path string) {
+	uapi, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	tunnel, err := newForwardTun(mtu)
+	if err != nil {
+		log.Fatal(err)
+	}
+	peer := device.NewDevice(tunnel, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, ""))
+	if err := peer.IpcSet(string(uapi)); err != nil {
+		log.Fatal(err)
+	}
+	if err := peer.Up(); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("ready")
+	select {}
 }
 
 func serveTCP(listener net.Listener) {
@@ -131,8 +198,19 @@ func serveDNS(socket net.PacketConn) {
 }
 
 func main() {
-	if len(os.Args) != 3 {
-		log.Fatal("usage: amneziawg_fixture plain|awg2|awg3 <client config path>")
+	if len(os.Args) < 3 || len(os.Args) > 4 || (len(os.Args) == 4 && os.Args[1] != "serve") {
+		log.Fatal("usage: amneziawg_fixture plain|awg2|awg3 <client config path> | keygen <directory> | serve <uapi file> [loopback alias]")
+	}
+	switch os.Args[1] {
+	case "keygen":
+		keygen(os.Args[2])
+		return
+	case "serve":
+		if len(os.Args) == 4 {
+			loopbackAlias = netip.MustParseAddr(os.Args[3])
+		}
+		serve(os.Args[2])
+		return
 	}
 	mode, path := os.Args[1], os.Args[2]
 	probe, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})

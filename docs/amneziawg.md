@@ -126,7 +126,23 @@ echo on independent streams from 1 to 20000 bytes (fragmented above 1252), and r
 mode also holds a stream open across several key rotations. The fixture creates
 no TUN device and changes no routes or an existing VPN; it needs Go 1.26.
 
-Not established by this fixture: a system full tunnel on any platform with an
-AmneziaWG profile, Android VpnService, a production server, cookie replies of a
-loaded server, and throughput. Flows are terminated twice (TUN stack and tunnel
+The same script runs the forwarding peer of the Android fixture against local
+targets: TCP, a refused port and fragmented UDP.
+
+**Android.** `ci/android.py` runs the emulator network acceptance with a third
+protocol, `amneziawg`, next to TrustTunnel and Hysteria 2. The fixture container
+runs the official device with header protection, content padding and random
+trailers as a forwarding peer: a userspace stack terminates the tunnel's flows
+and relays them to the test targets, so the container has no TUN device and no
+capabilities. CI nodes without Go build it in a digest-pinned `golang` image
+(`ci/amneziawg_server.py`). The test covers VpnService over IPv4 and IPv6 (TCP
+512 KiB, UDP 1 to 60000 bytes), system DNS, a 60-second peer outage with the
+blocking TUN retained and reconnect, per-app and per-flow routing, an IPv4-only
+endpoint and an unavailable endpoint at start. WireGuard has no connection to
+lose, so the app notices a silent peer only through unanswered traffic; the test
+keeps probing while it waits.
+
+Not established: a system full tunnel on Windows, Linux or macOS with an
+AmneziaWG profile, a physical Android device, a production server, cookie
+replies of a loaded server, and throughput. Flows are terminated twice (TUN stack and tunnel
 stack), which costs CPU compared with a packet-level WireGuard client.

@@ -128,3 +128,49 @@ async fn reference_peer_tcp_udp_dns_and_rekey() {
     );
     assert!(started.elapsed() < Duration::from_secs(21));
 }
+
+/// The forwarding peer of the Android fixture relays tunnel flows to real
+/// sockets; the targets here are plain servers of the test runner.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run through ci/amneziawg_interop.py"]
+async fn forwarding_peer_relays_tcp_and_fragmented_udp() {
+    let path = std::env::var("RTRUST_AMNEZIAWG_FORWARD").unwrap();
+    let tcp = std::env::var("RTRUST_AMNEZIAWG_TCP").unwrap();
+    let echo = std::env::var("RTRUST_AMNEZIAWG_UDP").unwrap();
+    let input = zeroize::Zeroizing::new(std::fs::read_to_string(&path).unwrap());
+    let session = Session::connect(&Profile::import(&input).unwrap())
+        .await
+        .unwrap();
+    digest(&session, &tcp, &payload(512 * 1024, 5), Duration::ZERO).await;
+    // Nothing listens on port 1: the peer resets instead of leaving it open.
+    let host = tcp.rsplit_once(':').unwrap().0;
+    assert!(session.open_tcp(&format!("{host}:1")).await.is_err());
+    let mut stream = session.open_udp().await.unwrap();
+    // macOS limits a loopback datagram to 9216 bytes on the target side.
+    let limit: usize = std::env::var("RTRUST_AMNEZIAWG_MAX_UDP")
+        .unwrap()
+        .parse()
+        .unwrap();
+    for size in [1, 1472, 5000, 8192, 60_000]
+        .into_iter()
+        .filter(|n| *n <= limit)
+    {
+        let sent = udp::Datagram {
+            source: "10.0.0.2:12000".parse().unwrap(),
+            destination: echo.parse().unwrap(),
+            payload: payload(size, 7),
+        };
+        stream
+            .write_all(&udp::encode(&sent, "forward").unwrap())
+            .await
+            .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(10), udp::read(&mut stream))
+            .await
+            .unwrap_or_else(|_| panic!("UDP timeout for payload {size}"))
+            .unwrap();
+        assert_eq!(
+            (reply.payload, reply.source),
+            (sent.payload, sent.destination)
+        );
+    }
+}

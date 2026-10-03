@@ -82,7 +82,7 @@ try:
         if paused.is_set() and process:
             process.terminate();process.wait(timeout=5);process=None
         if not paused.is_set() and process is None:
-            command=['/fixture/hysteria','server','-c','/fixture/hysteria.json'] if pathlib.Path('/fixture/hysteria.json').exists() else ['/fixture/trusttunnel_endpoint','/fixture/vpn.toml','/fixture/hosts.toml','--jobs','2']
+            command=['/fixture/hysteria','server','-c','/fixture/hysteria.json'] if pathlib.Path('/fixture/hysteria.json').exists() else ['/fixture/amneziawg','serve','/fixture/amneziawg.uapi'] if pathlib.Path('/fixture/amneziawg.uapi').exists() else ['/fixture/trusttunnel_endpoint','/fixture/vpn.toml','/fixture/hosts.toml','--jobs','2']
             process=subprocess.Popen(command,cwd='/fixture')
         time.sleep(.2)
 finally:
