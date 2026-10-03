@@ -26,14 +26,20 @@
 ## AmneziaWG 3: границы preview
 
 AmneziaWG добавлен отдельным протоколом ([amneziawg.md](amneziawg.md)). Проверен
-на уровне движка против официального `amneziawg-go` 3.1 (loopback) и в Android
-VpnService на эмуляторе (сетевая приёмка `ci/android.py`, третий протокол).
+на уровне движка против официального `amneziawg-go` 3.1 (loopback), в Android
+VpnService на эмуляторе (сетевая приёмка `ci/android.py`, третий протокол), в
+Linux full-tunnel (`scripts/full-tunnel-interop.py --amneziawg`, в CI) и в Windows
+full-tunnel (авторизованный прогон, не в CI).
 Остаются:
 
-- системный full-tunnel (Windows/Linux/macOS) с профилем AmneziaWG, физическое
-  Android-устройство, боевой сервер, Always-on, сон и смена сети;
+- системный full-tunnel на macOS с профилем AmneziaWG, физическое
+  Android-устройство, боевой сервер, сон Windows;
 - без трафика приложение не замечает пропавший сервер: у WireGuard нет
   соединения, обнаружение идёт по четырём неотвеченным handshake;
+- Windows: авторизованный прогон `ci/windows_authorized_full.py` с AmneziaWG на
+  существующей установке прошёл 3 раза из 4; один сбой — сброс блокировки после
+  обрыва GUI вернул не `Idle` — случился до того, как тест начал печатать ответ
+  службы, причина не установлена. В обычном Jenkins этот сценарий не запускается;
 - ссылки `vpn://` приложения Amnezia; несколько peer; roaming;
 - ICMP внутри туннеля;
 - cookie-ответы перегруженного сервера не проверены против эталона;

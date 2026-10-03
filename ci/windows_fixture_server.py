@@ -1,5 +1,7 @@
 """Runs only in the disposable Docker endpoint fixture."""
-import http.server,pathlib,socket,subprocess,threading,time,struct,hashlib
+import http.server,os,pathlib,signal,socket,subprocess,threading,time,struct,hashlib
+# The container's own addresses; a fixture may move them off the default subnet.
+IP=os.environ.get('RTRUST_FIXTURE_IP','10.231.243.2');IP6=os.environ.get('RTRUST_FIXTURE_IP6','fd00:5254:243::2')
 BODY=bytes(range(256))*2048
 paused=threading.Event()
 token=pathlib.Path('/fixture/control-token').read_text()
@@ -30,7 +32,7 @@ server=http.server.ThreadingHTTPServer(('0.0.0.0',8080),HTTP)
 threading.Thread(target=server.serve_forever,daemon=True).start()
 class HTTP6(http.server.ThreadingHTTPServer):
     address_family=socket.AF_INET6
-server6=HTTP6(('fd00:5254:243::2',8080),HTTP)
+server6=HTTP6((IP6,8080),HTTP)
 threading.Thread(target=server6.serve_forever,daemon=True).start()
 udp=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);udp.bind(('0.0.0.0',8081))
 def echo(sock):
@@ -39,7 +41,7 @@ def echo(sock):
         response=("SHA256:"+str(len(data))+":"+hashlib.sha256(data).hexdigest()).encode() if len(data)>4000 and pathlib.Path('/fixture/hysteria.json').exists() else data
         sock.sendto(response,addr)
 threading.Thread(target=echo,args=(udp,),daemon=True).start()
-udp6=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM);udp6.bind(('fd00:5254:243::2',8081))
+udp6=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM);udp6.bind((IP6,8081))
 threading.Thread(target=echo,args=(udp6,),daemon=True).start()
 # Synthetic DNS; all A answers point to the isolated TCP/UDP target.
 dns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);dns.bind(('0.0.0.0',53))
@@ -56,7 +58,7 @@ def answer_dns():
         # Do not map OS connectivity checks and unrelated names to the same
         # test IP: domain routing deliberately keeps shared-IP conflicts in VPN.
         known=bool(labels) and (labels[-1]==b'example' or labels[-2:]==[b'fixture',b'test'])
-        answer=b'\xc0\x0c'+struct.pack('!HHIH',1,1,60,4)+socket.inet_aton('10.231.243.2') if qtype==1 and known else b''
+        answer=b'\xc0\x0c'+struct.pack('!HHIH',1,1,60,4)+socket.inet_aton(IP) if qtype==1 and known else b''
         result=data[:2]+struct.pack('!HHHHH',0x8180 if known else 0x8183,1,int(bool(answer)),0,0)+data[12:end]+answer
         dns.sendto(result,addr)
 threading.Thread(target=answer_dns,daemon=True).start()
@@ -75,15 +77,26 @@ def report_source():
         _,addr=source_udp.recvfrom(4096);source_udp.sendto(addr[0].encode('ascii'),addr)
 threading.Thread(target=report_source,daemon=True).start()
 # Start/restart only the endpoint, keeping the TCP/UDP test targets alive.
+# RTRUST_FIXTURE_FREEZE suspends the endpoint instead of stopping it. Docker
+# Desktop's userspace UDP port forward stops delivering once the listener
+# inside the container has gone away, even after it is back; a suspended
+# process keeps its socket and is as silent to the client.
+freeze=bool(os.environ.get('RTRUST_FIXTURE_FREEZE'));frozen=False
 process=None
 try:
     until=time.monotonic()+900
     while time.monotonic()<until:
-        if paused.is_set() and process:
+        if paused.is_set() and process and freeze:
+            if not frozen:process.send_signal(signal.SIGSTOP);frozen=True
+        elif paused.is_set() and process:
             process.terminate();process.wait(timeout=5);process=None
+        if not paused.is_set() and frozen:
+            process.send_signal(signal.SIGCONT);frozen=False
         if not paused.is_set() and process is None:
             command=['/fixture/hysteria','server','-c','/fixture/hysteria.json'] if pathlib.Path('/fixture/hysteria.json').exists() else ['/fixture/amneziawg','serve','/fixture/amneziawg.uapi'] if pathlib.Path('/fixture/amneziawg.uapi').exists() else ['/fixture/trusttunnel_endpoint','/fixture/vpn.toml','/fixture/hosts.toml','--jobs','2']
             process=subprocess.Popen(command,cwd='/fixture')
         time.sleep(.2)
 finally:
-    if process:process.terminate();process.wait(timeout=5)
+    if process:
+        if frozen:process.send_signal(signal.SIGCONT)
+        process.terminate();process.wait(timeout=5)

@@ -1,14 +1,18 @@
 """Official endpoint in a disposable bridge; no Mac aliases or host route changes."""
-import hashlib,json,pathlib,secrets,socket,subprocess,tarfile,time
+import argparse,hashlib,json,os,pathlib,secrets,shutil,socket,subprocess,sys,tarfile,time
 from datetime import datetime,timedelta,timezone
 ROOT=pathlib.Path('.ci-wintun').resolve()
 NAME='rtrust-wintun-'+secrets.token_hex(4)
-IP='10.231.243.2'
+# Not the Android fixture's 10.231.243.0/29: a Windows host that also serves the
+# emulator keeps a persistent route for that subnet, which would bypass the tunnel.
+IP='10.231.244.2';IP6='fd00:5254:244::2'
 def run(*args,**kwargs):
     kwargs.setdefault('timeout',90)
     return subprocess.check_output(args,**kwargs).decode().strip()
 def main():
+    parser=argparse.ArgumentParser();parser.add_argument('--protocol',choices=['trusttunnel','amneziawg'],default='trusttunnel');amnezia=parser.parse_args().protocol=='amneziawg'
     ROOT.mkdir(mode=0o700,exist_ok=True)
+    for name in ['amneziawg.uapi','amneziawg-client.json','outage-seconds']:(ROOT/name).unlink(missing_ok=True)
     token=secrets.token_urlsafe(32)
     (ROOT/'control-token').write_text(token)
     cache=pathlib.Path('.ci-tools/linux-endpoint');cache.mkdir(parents=True,exist_ok=True)
@@ -21,7 +25,7 @@ def main():
         binary=ROOT/'trusttunnel_endpoint';binary.write_bytes(tar.extractfile(member).read());binary.chmod(0o755)
     with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as route:
         route.connect(('192.168.68.116',22));host=route.getsockname()[0]
-    with socket.socket() as reserve:reserve.bind((host,0));port=reserve.getsockname()[1]
+    with socket.socket(type=socket.SOCK_DGRAM if amnezia else socket.SOCK_STREAM) as reserve:reserve.bind((host,0));port=reserve.getsockname()[1]
     with socket.socket() as reserve:reserve.bind((host,0));control_port=reserve.getsockname()[1]
     issued=datetime.now(timezone.utc)
     subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-not_before',(issued-timedelta(days=1)).strftime('%Y%m%d%H%M%SZ'),'-not_after',(issued+timedelta(days=1)).strftime('%Y%m%d%H%M%SZ'),'-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost','-addext','basicConstraints=critical,CA:FALSE','-keyout','key.pem','-out','cert.pem'],cwd=ROOT,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -29,16 +33,34 @@ def main():
     (ROOT/'vpn.toml').write_text('listen_address="0.0.0.0:4433"\nallow_private_network_connections=true\ncredentials_file="credentials.toml"\n[listen_protocols.http2]\n[icmp]\ninterface_name="eth0"\n')
     (ROOT/'hosts.toml').write_text('[[main_hosts]]\nhostname="localhost"\ncert_chain_path="cert.pem"\nprivate_key_path="key.pem"\n')
     (ROOT/'credentials.toml').write_text(f'[[client]]\nusername="interop"\npassword="{password}"\n')
+    if amnezia:
+        # The official amneziawg-go device as a forwarding peer (ci/amneziawg_fixture),
+        # built for this Docker host. Its keys are generated inside a container:
+        # the binary is a Linux one and this script may run on macOS.
+        sys.path.insert(0,str(pathlib.Path(__file__).resolve().parent))
+        from amneziawg_server import binary as build
+        import platform
+        shutil.copy2(build('arm64' if platform.machine() in ('arm64','aarch64') else 'amd64'),ROOT/'amneziawg')
+        run('docker','run','--rm','--network','none','--user',f'{os.getuid()}:{os.getgid()}','-v',f'{ROOT}:/fixture','python:3.11-slim','/fixture/amneziawg','keygen','/fixture')
+        # The service notices a silent WireGuard peer through unanswered traffic,
+        # about 35 s into an outage.
+        (ROOT/'outage-seconds').write_text('60')
+    transport='udp' if amnezia else 'tcp'
     network=False;container=False
     try:
-        run('docker','network','create','--subnet','10.231.243.0/29','--ipv6','--subnet','fd00:5254:243::/64',NAME);network=True
-        run('docker','run','-d','--rm','--name',NAME,'--network',NAME,'--ip',IP,'--ip6','fd00:5254:243::2','--cap-drop=ALL','--cap-add=NET_RAW','--security-opt=no-new-privileges','--read-only','--tmpfs','/tmp','-p',f'{host}:{port}:4433/tcp','-v',f'{ROOT}:/fixture:ro','-p',f'{host}:{control_port}:8082/tcp','-v',f'{pathlib.Path("ci/windows_fixture_server.py").resolve()}:/server.py:ro','python:3.11-slim','python','/server.py');container=True
+        run('docker','network','create','--subnet','10.231.244.0/29','--ipv6','--subnet','fd00:5254:244::/64',NAME);network=True
+        run('docker','run','-d','--rm','--name',NAME,'--network',NAME,'--ip',IP,'--ip6',IP6,'-e','RTRUST_FIXTURE_IP='+IP,'-e','RTRUST_FIXTURE_IP6='+IP6,'-e','RTRUST_FIXTURE_VERBOSE='+os.environ.get('RTRUST_FIXTURE_VERBOSE',''),'-e','RTRUST_FIXTURE_FREEZE='+('1' if amnezia else ''),'--cap-drop=ALL','--cap-add=NET_RAW','--security-opt=no-new-privileges','--read-only','--tmpfs','/tmp','-p',f'{host}:{port}:4433/{transport}','-v',f'{ROOT}:/fixture:ro','-p',f'{host}:{control_port}:8082/tcp','-v',f'{pathlib.Path("ci/windows_fixture_server.py").resolve()}:/server.py:ro','python:3.11-slim','python','/server.py');container=True
         for _ in range(150):
             try:
-                with socket.create_connection((host,port),timeout=.2):break
+                with socket.create_connection((host,control_port if amnezia else port),timeout=.2):break
             except OSError:time.sleep(.2)
         else:raise RuntimeError('Windows endpoint fixture unavailable')
-        data={'base':dict(hostname='localhost',addresses=[f'{host}:{port}'],username='interop',password=password,certificate=(ROOT/'cert.pem').read_text(),upstream_protocol='http2'),'target':IP,'target6':'fd00:5254:243::2','control':f'http://{host}:{control_port}','control_token':token,'created_at':issued.isoformat()}
+        data={'base':dict(hostname='localhost',addresses=[f'{host}:{port}'],username='interop',password=password,certificate=(ROOT/'cert.pem').read_text(),upstream_protocol='http2'),'target':IP,'target6':IP6,'control':f'http://{host}:{control_port}','control_token':token,'created_at':issued.isoformat()}
+        if amnezia:
+            profile=json.loads((ROOT/'amneziawg-client.json').read_text())
+            profile['endpoint'].update(hostname=host,addresses=[f'{host}:{port}'])
+            # "base" stays the endpoint for the address and secret checks of the drivers.
+            data.update(protocol='amneziawg',profile=profile,base=profile['endpoint'])
         manifest=ROOT/'client.json';manifest.write_text(json.dumps(data));manifest.chmod(0o600)
         (ROOT/'ready').write_text('ready')
         until=time.monotonic()+900
@@ -46,5 +68,5 @@ def main():
     finally:
         if container:run('docker','rm','-f',NAME)
         if network:run('docker','network','rm',NAME)
-        for name in ['key.pem','credentials.toml','client.json','control-token','ready']:(ROOT/name).unlink(missing_ok=True)
+        for name in ['key.pem','credentials.toml','client.json','control-token','ready','amneziawg.uapi','amneziawg-client.json']:(ROOT/name).unlink(missing_ok=True)
 if __name__=='__main__':main()

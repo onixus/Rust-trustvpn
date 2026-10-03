@@ -4,6 +4,7 @@ import os
 import pathlib
 import platform
 import secrets
+import shutil
 import signal
 import subprocess
 import tarfile
@@ -46,6 +47,9 @@ def main():
         member = next(m for m in tar if m.name.endswith("/trusttunnel_endpoint"))
         binary = CACHE / "trusttunnel_endpoint"
         binary.write_bytes(tar.extractfile(member).read()); binary.chmod(0o755)
+    # No Go in the test container: build the AmneziaWG fixture peer here.
+    from amneziawg_server import binary as amneziawg
+    shutil.copy2(amneziawg(DOCKER_ARCH), CACHE / "amneziawg-fixture")
     (ROOT / "dist").mkdir(exist_ok=True)
     # runc cannot create a nested volume mountpoint through the read-only source bind.
     (ROOT / "target").mkdir(exist_ok=True)
@@ -70,6 +74,7 @@ python3 scripts/service-interop.py /fixture/trusttunnel_endpoint
 python3 scripts/tun-interop.py /fixture/trusttunnel_endpoint
 python3 scripts/full-tunnel-interop.py /fixture/trusttunnel_endpoint
 python3 scripts/full-tunnel-interop.py /tmp/hysteria/hysteria-linux-HYSTERIA_ARCH --hysteria2
+python3 scripts/full-tunnel-interop.py /fixture/amneziawg-fixture --amneziawg
 python3 ci/linux_installer_smoke.py
 python3 scripts/package-preview.py
 mkdir -p dist/webview-libs

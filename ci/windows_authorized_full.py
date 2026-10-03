@@ -19,7 +19,8 @@ SOURCE=ROOT/'dist/native-preview-windows/rtrust-service.exe'
 WORK=pathlib.Path(os.environ['ProgramData'])/('RTrustTunnel-E2E-'+uuid.uuid4().hex)
 TASK=WORK.name
 # Each additional crash gets the same bounded SCM/reconnect allowance.
-worker_minutes=5+3*(a.crash_cycles-1)+((a.sleep_minutes or 0)+10 if a.sleep_minutes else 0)
+# An AmneziaWG outage is noticed after about 35 s instead of at once.
+worker_minutes=5+3*(a.crash_cycles-1)+((a.sleep_minutes or 0)+10 if a.sleep_minutes else 0)+(5 if json.loads(a.fixture.read_text()).get('protocol')=='amneziawg' else 0)
 rollback_minutes=worker_minutes+1
 
 def ps(code):
