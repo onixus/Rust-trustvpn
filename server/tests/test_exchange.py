@@ -11,7 +11,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 SANDBOX = tempfile.TemporaryDirectory(prefix='rtrust-portal-tests-')
 os.environ.update(DATA_DIR=SANDBOX.name, SECRET_KEY=secrets.token_urlsafe(48), ADMIN_PASSWORD=secrets.token_urlsafe(32), RTRUST_CODEC=str(ROOT/'target/debug/rtrust-codec'))
-sys.path.insert(0, str(ROOT/'server/upstream'))
+PORTAL = Path(os.environ.get('RTRUST_PORTAL_SRC', str(ROOT.parent/'tunnel/server/upstream')))
+if not (PORTAL/'app').is_dir():
+    raise SystemExit('Set RTRUST_PORTAL_SRC to server/upstream of a tunnel checkout (the portal source)')
+sys.path.insert(0, str(PORTAL))
 import app
 app.__path__.append(str(ROOT/'server/overlay/app'))
 from app import db, config, security, rtrust_profiles as exchange
