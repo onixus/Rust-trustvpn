@@ -38,6 +38,24 @@ public final class SmokeInstrumentation extends Instrumentation {
                 }
                 result.putString("stream", "PASS: upgrade " + upgrade + "\n"); finish(-1, result); return;
             }
+            String recovery = arguments.getString("recovery");
+            if (recovery != null) {
+                // Host-driven by ci/android_always_on_e2e.py: the process under test is killed,
+                // so only seeding and restoring the vault run in-process.
+                ProfileVault vault = new ProfileVault(getTargetContext()); JSONObject data = vault.read();
+                if (recovery.equals("seed")) {
+                    // TEST-NET-1 is never reached: the TUN is established and the core keeps retrying.
+                    JSONObject profile = new JSONObject(NativeCore.INSTANCE.parse("hostname='recovery.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='recovery-synthetic'\n")).getJSONObject("profile");
+                    data.put("test_previous_default", data.getString("default"));
+                    data.getJSONArray("profiles").put(new JSONObject().put("id", "recovery-test").put("profile", profile));
+                    data.put("default", "recovery-test"); vault.write(data);
+                } else if (data.has("test_previous_default")) {
+                    JSONArray old = data.getJSONArray("profiles"), kept = new JSONArray();
+                    for (int i = 0; i < old.length(); i++) if (!old.getJSONObject(i).getString("id").equals("recovery-test")) kept.put(old.get(i));
+                    data.put("profiles", kept).put("default", data.getString("test_previous_default")); data.remove("test_previous_default"); vault.write(data);
+                }
+                result.putString("stream", "PASS: recovery " + recovery + "\n"); finish(-1, result); return;
+            }
             if ("true".equals(arguments.getString("network"))) {
                 NetworkAcceptance.run(this);
                 result.putString("stream", "PASS: VPN IPv4/IPv6 TCP512KiB, UDP1/1472/5000/60000, system DNS, outage guard, reconnect, Activity close, Stop, unavailable startup DNS guard\n");
