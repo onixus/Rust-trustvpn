@@ -6,8 +6,8 @@ the desktop client. There is no WebView, CLI subprocess or privileged host servi
 Baseline: Android 10/API 29+, arm64-v8a; x86_64 is also built for emulator testing.
 Acceptance uses Android 16/API 36 x86_64 and physical POCO X3 NFC and Huawei DEL-LX9 phones running Android 12/API 31.
 
-Current published package: [v0.3.2-ui.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.2),
-versionCode **30209**, versionName **0.3.2-preview.7**, signed with the existing release identity.
+Current published package: [v0.4.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.4.0),
+versionCode **40001**, versionName **0.4.0-preview.1**, signed with the existing release identity.
 The selected Flow icon uses adaptive launcher artwork, Android 13 themed monochrome
 artwork and a separate notification icon. Android Jenkins **#30 completed SUCCESS**:
 Gitleaks/Trivy, shared Rust unit tests, both ABIs, build/lint, emulator smoke,
