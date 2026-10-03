@@ -61,8 +61,8 @@ def control(action):
     req=urllib.request.Request(FIXTURE['control']+'/'+action,data=b'',headers={'Authorization':'Bearer '+FIXTURE['control_token']})
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req,timeout=10) as response:assert response.status==204
 
-def wait_state(pipe,state):
-    until=time.monotonic()+60
+def wait_state(pipe,state,timeout=60):
+    until=time.monotonic()+timeout
     while time.monotonic()<until:
         if pipe.request(dict(op='Status'))['state']==state:return
         time.sleep(.5)

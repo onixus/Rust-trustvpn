@@ -13,10 +13,25 @@ def blocked(host,port):
         with socket.create_connection((host,port),timeout=2):pass
     except OSError:return
     raise AssertionError('Direct connection escaped WFP guard')
+# AmneziaWG fixtures carry a whole profile; "base" is its endpoint.
+AMNEZIA=fixture.FIXTURE.get('protocol')=='amneziawg'
+def profile(name):
+    return dict(fixture.FIXTURE['profile'],name=name) if 'profile' in fixture.FIXTURE else dict(schema_version=1,name=name,endpoint=fixture.FIXTURE['base'])
+def wait_blocked():
+    if not AMNEZIA:return fixture.wait_state(pipe,'Blocked')
+    # WireGuard has no connection to lose: the service notices a silent peer only
+    # when traffic goes unanswered (four handshakes, about 35 s). Supply it.
+    until=time.monotonic()+90
+    while pipe.request(dict(op='Status'))['state']!='Blocked':
+        if time.monotonic()>until:raise TimeoutError('Service did not reach Blocked')
+        try:
+            with socket.create_connection((fixture.TARGET,8080),timeout=1):pass
+        except OSError:pass
+        time.sleep(.5)
 def start():
     global pipe
     pipe=fixture.Pipe()
-    p=dict(schema_version=1,name='Full tunnel E2E',endpoint=fixture.FIXTURE['base'])
+    p=profile('Full tunnel E2E')
     response=pipe.request(dict(op='StartFull',profile=p,dns=fixture.TARGET))
     assert response['state']=='Connected',response
 
@@ -67,27 +82,33 @@ def main():
         udp.settimeout(15)
         for size in [1,1472,5000,60000]:
             body=os.urandom(size);udp.sendto(body,(target6,8081));data,_=udp.recvfrom(65535);assert data==body
-    for address in [fixture.TARGET,target6]:
+    # AmneziaWG relays TCP and UDP only.
+    for address in [] if AMNEZIA else [fixture.TARGET,target6]:
         subprocess.run(['ping.exe','-n','2','-w','4000','-l','5000',address],check=True,timeout=15)
-    print('PASS IPv6 TCP/UDP fragmentation and dual-stack ICMP; direct endpoint traffic and old flows blocked',flush=True)
+    print('PASS IPv6 TCP/UDP fragmentation'+('' if AMNEZIA else ' and dual-stack ICMP')+'; direct endpoint traffic and old flows blocked',flush=True)
     # Pause/restart endpoint using its control port reached through the VPN itself.
     request=urllib.request.Request('http://'+fixture.TARGET+':8082/cycle',data=b'',headers={'Authorization':'Bearer '+fixture.FIXTURE['control_token']})
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request,timeout=5) as r:assert r.status==204
-    fixture.wait_state(pipe,'Blocked');blocked(host,control.port)
-    fixture.wait_state(pipe,'Connected');fixture.verify_traffic()
+    wait_blocked();blocked(host,control.port)
+    fixture.wait_state(pipe,'Connected',90);fixture.verify_traffic()
     print('PASS endpoint outage keeps guard and reconnect restores traffic',flush=True)
     # A completed transport task must not be polled a second time on Stop.
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request,timeout=5) as r:assert r.status==204
-    fixture.wait_state(pipe,'Blocked')
+    wait_blocked()
     response=pipe.request(dict(op='Stop'));assert response['state']=='Idle',response
     pipe.close();pipe=None
     assert fixture.routes()==before,'Stop during reconnect changed original routes'
     resume=urllib.request.Request(fixture.FIXTURE['control']+'/resume',data=b'',headers={'Authorization':'Bearer '+fixture.FIXTURE['control_token']})
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(resume,timeout=5) as r:assert r.status==204
     until=time.monotonic()+10
-    tls=ssl.create_default_context(cadata=fixture.FIXTURE['base']['certificate'])
-    tls.set_alpn_protocols(['h2'])
-    while True:
+    if AMNEZIA:
+        # A UDP peer has no handshake to probe from outside the tunnel; the
+        # fixture restarts it within its 0.2 s supervision interval.
+        time.sleep(2)
+    else:
+        tls=ssl.create_default_context(cadata=fixture.FIXTURE['base']['certificate'])
+        tls.set_alpn_protocols(['h2'])
+    while not AMNEZIA:
         try:
             # Docker's published TCP port accepts connections before the
             # restarted endpoint is ready. Require its verified TLS handshake.
@@ -134,7 +155,7 @@ def main():
                 snapshot_at=float('inf')
             time.sleep(.5)
         raise AssertionError(response)
-    p=dict(schema_version=1,name='Always-on E2E',endpoint=fixture.FIXTURE['base'])
+    p=profile('Always-on E2E')
     response=ipc('EnableAlwaysOn',profile=p,dns=fixture.TARGET);assert response['state']=='Blocked',response
     connected();fixture.verify_traffic()
     assert fixture.FIXTURE['base']['password'].encode() not in (SERVICE.parent/'always-on.rtrust').read_bytes()
