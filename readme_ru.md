@@ -8,25 +8,26 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 
 > **Статус проекта: development preview, 3 октября 2026 года.**
 >
-> Последний опубликованный набор пакетов — **v0.3.2-ui.2** от 1 октября. Текущая ветка main уже новее: в ней расширена поддержка Hysteria 2, проверены Windows sleep/Always-on, добавлена регистрация ссылок профилей и обновлён главный экран Android. Не все эти изменения уже входят в скачиваемые пакеты v0.3.2-ui.2.
+> Последний опубликованный набор пакетов — **v0.4.0** от 3 октября. В него вошли транспорт AmneziaWG 3 и изменения Hysteria 2, Windows, ссылок профилей и Android, сделанные после v0.3.2-ui.2. Что проверено для этих пакетов, а что нет, перечислено в [описании релиза](docs/releases/v0.4.0.md).
 
 ## Скачать
 
-Последний опубликованный preview: **[v0.3.2-ui.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.2)**.
+Последний опубликованный preview: **[v0.4.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.4.0)**.
 
 | Платформа | Пакет | Примечание |
 | --- | --- | --- |
-| macOS Apple Silicon | [DMG с Native / WebView / Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-macOS-arm64-UI-Choices.dmg) | В DMG нужно выбрать один PKG. Требуются права администратора. Developer ID и notarization пока нет. |
-| Linux x86_64, Wayland | [Native](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64.flatpak) · [WebView](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64-webview.flatpak) · [Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64-both.flatpak) | Flatpak содержит непривилегированный UI. Для системного VPN отдельно нужна host-служба. |
-| Android 10+, arm64 / x86_64 | [Подписанный APK](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Android.apk) | versionCode 30209, versionName 0.3.2-preview.7. |
-| Windows x64 | Нового пакета в v0.3.2-ui.2 нет | Реализация и актуальные runtime-проверки есть, но обновлённый публичный установщик в этот релиз не вошёл. |
+| macOS Apple Silicon | [DMG с Native / WebView / Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-macOS-arm64-UI-Choices.dmg) | В DMG нужно выбрать один PKG. Требуются права администратора. Developer ID и notarization пока нет. |
+| Linux x86_64, Wayland | [Native](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64.flatpak) · [WebView](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64-webview.flatpak) · [Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64-both.flatpak) | Flatpak содержит непривилегированный UI. Для системного VPN отдельно нужна host-служба. |
+| Android 10+, arm64 / x86_64 | [Подписанный APK](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Android.apk) | versionCode 40001, versionName 0.4.0-preview.1. |
+| Windows x64 | [Установщик](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Windows-x64-Setup.exe) | Без подписи Authenticode. Этот билд установщика перед публикацией не ставился на физический компьютер. |
 
-В релизе также опубликованы SHA256SUMS, подписи, сведения о происхождении/проверках и подписанный Linux host-пакет. См. [состав релиза](docs/releases/v0.3.2-ui.2.md).
+В релизе также опубликованы SHA256SUMS, подписи, сведения о происхождении/проверках и подписанный Linux host-пакет. См. [состав релиза](docs/releases/v0.4.0.md).
 
-## Что появилось в main после v0.3.2-ui.2
+## Что нового в v0.4.0
 
-Текущий main заметно ушёл вперёд опубликованных пакетов:
+По сравнению с v0.3.2-ui.2 в опубликованных пакетах появились:
 
+- транспорт **AmneziaWG 3**: импорт конфигурации awg-quick и набор обфускации 3.1, см. [AmneziaWG](docs/amneziawg.md);
 - существенно расширена совместимость с **Hysteria 2**: port hopping, Brutal, BBR/Reno, QUIC windows/timeouts, Salamander и Gecko, проверка pinSHA256 и встроенные mTLS credentials;
 - на Windows выполнены production full-tunnel проверки и для TrustTunnel, и для Hysteria 2;
 - на Windows пройден реальный S3 sleep/wake, включая Always-on сценарий с блокировкой трафика до автоматического восстановления;
@@ -97,7 +98,7 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 
 См. [галерею и настройки подключения](docs/screenshots/README.md).
 
-Android UI в main обновлён уже после v0.3.2-ui.2, поэтому опубликованный APK может визуально отличаться от текущих исходников.
+Обновлённый главный экран Android входит в APK v0.4.0.
 
 ## Сборка
 

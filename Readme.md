@@ -8,25 +8,26 @@ The client implements its own transport and does **not** wrap the official Trust
 
 > **Project status: development preview, October 3, 2026.**
 >
-> The latest published package set is **v0.3.2-ui.2** from October 1. The current main branch is newer and already contains additional Hysteria 2 capabilities, Windows sleep/Always-on validation, profile-link integration, and a refreshed Android home screen. Those post-release changes are not all present in the downloadable v0.3.2-ui.2 packages.
+> The latest published package set is **v0.4.0** from October 3. It adds the AmneziaWG 3 transport and includes the Hysteria 2, Windows, profile-link and Android changes made after v0.3.2-ui.2. What was and was not validated for these packages is listed in the [release scope](docs/releases/v0.4.0.md).
 
 ## Download
 
-Latest published preview: **[v0.3.2-ui.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.2)**.
+Latest published preview: **[v0.4.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.4.0)**.
 
 | Platform | Package | Notes |
 | --- | --- | --- |
-| macOS Apple Silicon | [Native / WebView / Both DMG](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-macOS-arm64-UI-Choices.dmg) | Choose one PKG from the DMG. Administrator authorization is required. No Developer ID signing or notarization yet. |
-| Linux x86_64, Wayland | [Native](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64.flatpak) · [WebView](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64-webview.flatpak) · [Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64-both.flatpak) | The Flatpak contains the unprivileged UI. System VPN also needs the separate host service. |
-| Android 10+, arm64 / x86_64 | [Signed APK](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Android.apk) | versionCode 30209, versionName 0.3.2-preview.7. |
-| Windows x64 | No new package in v0.3.2-ui.2 | The Windows implementation exists and has current runtime validation, but a refreshed public installer was not included in this release. |
+| macOS Apple Silicon | [Native / WebView / Both DMG](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-macOS-arm64-UI-Choices.dmg) | Choose one PKG from the DMG. Administrator authorization is required. No Developer ID signing or notarization yet. |
+| Linux x86_64, Wayland | [Native](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64.flatpak) · [WebView](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64-webview.flatpak) · [Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64-both.flatpak) | The Flatpak contains the unprivileged UI. System VPN also needs the separate host service. |
+| Android 10+, arm64 / x86_64 | [Signed APK](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Android.apk) | versionCode 40001, versionName 0.4.0-preview.1. |
+| Windows x64 | [Installer](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Windows-x64-Setup.exe) | Not Authenticode-signed. This build of the installer was not installed on a physical host before publication. |
 
-The release also contains SHA256SUMS, signatures, provenance/validation evidence and the signed Linux host package. See the [release scope](docs/releases/v0.3.2-ui.2.md).
+The release also contains SHA256SUMS, signatures, provenance/validation evidence and the signed Linux host package. See the [release scope](docs/releases/v0.4.0.md).
 
-## What is in main after v0.3.2-ui.2
+## What is new in v0.4.0
 
-Main currently contains several changes newer than the published package set:
+Compared with v0.3.2-ui.2, the published packages now contain:
 
+- an **AmneziaWG 3** transport: awg-quick configuration import and the 3.1 obfuscation set, see [AmneziaWG](docs/amneziawg.md);
 - substantially expanded **Hysteria 2** compatibility: port hopping, Brutal bandwidth mode, BBR/Reno selection, QUIC windows/timeouts, Salamander and Gecko obfuscation, leaf-certificate pinSHA256 checking, and embedded mutual-TLS client credentials;
 - production Windows full-tunnel checks for both TrustTunnel and Hysteria 2;
 - real Windows S3 sleep/wake validation, including an Always-on session that stayed fail-closed and reconnected after resume;
@@ -97,7 +98,7 @@ The current gallery contains real Native and WebView desktop captures from the v
 
 See [screenshots and connection settings](docs/screenshots/README.md).
 
-The Android UI in main has been refreshed after v0.3.2-ui.2, so the published APK may not yet match the newest source layout.
+The refreshed Android home screen is included in the v0.4.0 APK.
 
 ## Build
 
