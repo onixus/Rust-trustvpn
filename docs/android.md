@@ -210,8 +210,16 @@ Recovery therefore establishes the blocking TUN first and then checks. If this
 app is no longer the Always-on VPN, it closes the TUN immediately and stays
 disconnected. Recovery needs the app to be opened. A reboot, toggling Always-on
 or an app update also restarts the VPN through the system. A background
-watchdog is not implemented. App recovery has been verified on the emulator, but
-not yet on the POCO X3 NFC.
+watchdog is not implemented.
+
+On October 3, 2026 the recovery was also checked on the POCO X3 NFC (Android 12,
+MIUI), using a Hysteria 2 profile with system Always-on and lockdown enabled.
+After `am crash` and after a native SIGABRT, there was no restart within 30 s.
+A direct TCP probe from the shell UID was blocked during that time. Opening the
+app restored the VPN within 1 s, and the probe then passed through the tunnel.
+SIGKILL could not be sent there without root, because MIUI `run-as` refuses it.
+The case of Always-on being disabled while the process is dead was checked only
+on the emulator.
 
 QR camera permission is requested only when scanning; camera/image decoding is
 local and always leads to the normal profile confirmation. File export is explicit
