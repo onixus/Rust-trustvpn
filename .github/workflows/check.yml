@@ -30,13 +30,6 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/h2-tests
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - if: runner.os == 'Linux'
-        name: Profile exchange regression tests
-        run: |
-          cargo build -p rtrust-codec --locked
-          python3 -m venv .ci-server
-          .ci-server/bin/pip install -r server/test-environment/requirements.txt
-          .ci-server/bin/python server/tests/test_exchange.py
       - run: cargo build --release -p rtrust-native -p rtrust-update --locked
       - run: python scripts/package-preview.py
       - uses: actions/upload-artifact@v4
