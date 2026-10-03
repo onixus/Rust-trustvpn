@@ -43,8 +43,8 @@ class DNS(socketserver.BaseRequestHandler):
 class HTTP6(s.http.server.ThreadingHTTPServer):
     address_family = socket.AF_INET6
 
-def wait_state(lines, state, diagnostic=None):
-    deadline = time.monotonic() + 50
+def wait_state(lines, state, diagnostic=None, timeout=50):
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             line = lines.get(timeout=max(.1, deadline-time.monotonic()))
@@ -63,6 +63,9 @@ def main():
     assert os.geteuid() == 0 and pathlib.Path("/.dockerenv").exists(), "Disposable root Docker required"
     endpoint_binary = str(pathlib.Path(sys.argv[1]).resolve())
     hysteria = "--hysteria2" in sys.argv[2:]
+    # The forwarding peer of ci/amneziawg_fixture: the official amneziawg-go
+    # device relaying tunnel flows to the targets of this script.
+    amnezia = "--amneziawg" in sys.argv[2:]
     processes, servers = [], []
     original_resolv = pathlib.Path("/etc/resolv.conf").read_bytes()
     # Docker masks sysctls read-only; this mount change stays in this disposable
@@ -152,11 +155,17 @@ def main():
                 value=json.loads(profile.read_text());value.update(protocol="hysteria2",hysteria2={"salamander":"synthetic-obfs"})
                 value['endpoint']['upstream_protocol']='http3';profile.write_text(json.dumps(value))
                 (d/'hysteria.json').write_text(json.dumps({'listen':'10.99.0.1:8443','tls':{'cert':'cert.pem','key':'key.pem'},'auth':{'type':'password','password':'synthetic-full-test'},'obfs':{'type':'salamander','salamander':{'password':'synthetic-obfs'}}}))
+            if amnezia:
+                s.command(endpoint_binary,"keygen",str(d))
+                uapi=d/'amneziawg.uapi';uapi.write_text(uapi.read_text().replace('listen_port=4433','listen_port=8443'))
+                value=json.loads((d/'amneziawg-client.json').read_text())
+                value['endpoint'].update(hostname='localhost',addresses=['10.99.0.1:8443']);profile.write_text(json.dumps(value))
+            secret=json.loads(profile.read_text())['endpoint']['password']
             profile.chmod(0o600); os.chown(profile,1000,1000)
             def endpoint():
-                args=[endpoint_binary,"server","-c","hysteria.json"] if hysteria else [endpoint_binary,"vpn.toml","hosts.toml","--jobs","2"]
+                args=[endpoint_binary,"server","-c","hysteria.json"] if hysteria else [endpoint_binary,"serve","amneziawg.uapi"] if amnezia else [endpoint_binary,"vpn.toml","hosts.toml","--jobs","2"]
                 p = spawn(args,"endpoint.log",cwd=d)
-                if hysteria:
+                if hysteria or amnezia:
                     time.sleep(.5)
                     assert p.poll() is None, (d/'endpoint.log').read_text()
                     return p
@@ -165,6 +174,19 @@ def main():
                         with socket.create_connection(("10.99.0.1",8443), timeout=.1): return p
                     except OSError: time.sleep(.05)
                 raise AssertionError((d/"endpoint.log").read_text())
+            def wait_blocked(lines):
+                if not amnezia: return wait_state(lines,"blocked")
+                # WireGuard has no connection to lose: the service notices a
+                # silent peer only when traffic goes unanswered (four handshakes,
+                # about 35 s). A host always has some; the test supplies it.
+                done=threading.Event()
+                def traffic():
+                    while not done.is_set():
+                        subprocess.run(["ip","netns","exec",s.NS,"setpriv","--reuid=1000","--regid=1000","--clear-groups","curl","--noproxy","*","-s","--max-time","1","-o","/dev/null",url],capture_output=True)
+                        done.wait(1)
+                thread=threading.Thread(target=traffic,daemon=True);thread.start()
+                try: wait_state(lines,"blocked",timeout=80)
+                finally: done.set();thread.join()
             def daemon():
                 p=spawn([str(s.ROOT/"target/debug/rtrust-service"),"1000"],"daemon.log",True)
                 time.sleep(.3)
@@ -179,9 +201,9 @@ def main():
                 # they must never grant applications a direct physical bypass.
                 for uid in (0,1000):
                     s.app(uid,"python3","-c","import socket; socket.create_connection(('10.99.0.1',8443),timeout=1)",success=False)
-                assert "synthetic" not in pathlib.Path("/run/rtrust/full.json").read_text()
+                assert "synthetic" not in pathlib.Path("/run/rtrust/full.json").read_text() and secret not in pathlib.Path("/run/rtrust/full.json").read_text()
                 print("PASS whole-host IPv4 (root + two users), system getaddrinfo DNS path, IPv6 tunneled (peer checked)", flush=True)
-                s.stop(ep); wait_state(lines,"blocked")
+                s.stop(ep); wait_blocked(lines)
                 for uid in (0,1000,1001): s.app(uid,"curl","--noproxy","*","-sSf","--max-time","2",url,success=False)
                 ipv6(False)
                 # Direct DNS attempt cannot reach the physical resolver during outage.
@@ -253,7 +275,7 @@ print(exact(n).decode())
             assert ipc("EnableAlwaysOn",profile=json.loads(profile.read_text()),dns="198.18.0.1")["state"]=="Blocked"
             connected(); fetch(1000,"198.18.0.1"); ipv6(True,True)
             assert policy.stat().st_mode & 0o077 == 0
-            assert b'synthetic-full-test' not in policy.read_bytes()
+            assert secret.encode() not in policy.read_bytes()
             for op in ("Recover","PrepareUpdate"):
                 assert ipc(op)["state"]=="Error"
             service.kill();service.wait(timeout=5)
@@ -274,10 +296,11 @@ print(exact(n).decode())
             s.ns("ip","link","set","rtrust-client","down")
             s.ns("ip","addr","del","10.99.0.2/30","dev","rtrust-client")
             assert b'dev rtrust-alt' in s.ns("ip","route","get","10.99.0.1","mark","0x5254")
-            if not hysteria:
+            if not (hysteria or amnezia):
                 s.ns("python3","-c","import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,36,0x5254); s.settimeout(3); s.connect(('10.99.0.1',8443)); print('PASS marked endpoint TCP after physical handoff')")
             def traffic_returns():
-                until=time.monotonic()+70
+                # AmneziaWG first has to notice the dead path through unanswered traffic.
+                until=time.monotonic()+(130 if amnezia else 70)
                 while True:
                     try:fetch(1000,"198.18.0.1");ipv6(True,True);return
                     except AssertionError:
@@ -331,7 +354,7 @@ print(exact(n).decode())
             fetch(1000,"10.99.0.2");ipv6(True)
             assert s.ns("nft","-j","list","tables")==baseline_nft
             print("PASS early boot guard and corrupted policy fail closed; explicit disable restores network",flush=True)
-            if not hysteria:
+            if not (hysteria or amnezia):
                 # Production TrustTunnel endpoints may run without IPv6 egress
                 # (has_ipv6=false). IPv6 must fail locally and at once, so
                 # applications fall back to IPv4 instead of a mid-TLS reset.
