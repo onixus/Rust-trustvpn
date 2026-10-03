@@ -5068,6 +5068,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tun-rs",
+ "windows 0.61.3",
  "windows-service",
  "windows-sys 0.61.2",
  "zbus",

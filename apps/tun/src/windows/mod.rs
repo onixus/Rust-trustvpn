@@ -248,7 +248,7 @@ async fn serve(
                 )
                 .await;
             }
-            routes::unused_adapter()?;
+            routes::settled_adapter()?;
             reply(pipe, State::Idle, "Служба зарезервирована для обновления").await?;
             tokio::select! { _=stop.changed()=>{}, _=read::<Request>(pipe)=>{} }
             return Ok(());
@@ -272,7 +272,7 @@ async fn serve(
         )
         .await;
     }
-    routes::unused_adapter()?;
+    routes::settled_adapter()?;
     if dns.is_none()
         && let Err(error) = routes::preflight(&networks)
     {
