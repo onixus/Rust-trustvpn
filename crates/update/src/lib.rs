@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 pub const ORIGIN: &str = "https://onixus-rf.duckdns.org";
-pub const CURRENT_SEQUENCE: u64 = 6;
+pub const CURRENT_SEQUENCE: u64 = 7;
 pub const CURRENT_IPC: u32 = 1;
 const ROOT: &[u8] = include_bytes!("root.pub");
 const MAX_PACKAGE: u64 = 256 * 1024 * 1024;
