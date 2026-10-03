@@ -37,9 +37,9 @@ public final class MainActivity extends Activity {
                 String action = TunnelService.active ? getString(R.string.disconnect) : getString(R.string.connect_default_profile);
                 connect.setEnabled(!TunnelService.active || !TunnelService.alwaysOn);
                 if (!connect.getText().toString().equals(action)) connect.setText(action);
-                paintConnection(connectionColor(TunnelService.active, state.optInt("state", -1), !TunnelService.problem.isEmpty()));
+                paintConnection(connectionColor(TunnelService.active, state.optInt("state", -1), !TunnelService.problem.isEmpty()), TunnelService.active || !TunnelService.problem.isEmpty());
             } catch (Exception ignored) {
-                paintConnection(Color.rgb(166, 53, 58));
+                paintConnection(connectionColor(false, 0, true), true);
                 if (!status.getText().toString().equals(getString(R.string.vpn_status_unavailable))) status.setText(getString(R.string.vpn_status_unavailable));
             }
             handler.postDelayed(this, 500);
@@ -90,7 +90,7 @@ public final class MainActivity extends Activity {
         connect = button(getString(R.string.connect_default_profile), () -> toggle());
         connect.setTextSize(16); connect.setCompoundDrawablesRelativeWithIntrinsicBounds(tinted(R.drawable.ic_power, Color.WHITE), null, null, null); connect.setCompoundDrawablePadding(dp(10)); connect.setPadding(dp(20), 0, dp(20), 0);
         LinearLayout.LayoutParams connectParams = new LinearLayout.LayoutParams(-1, dp(58)); connectParams.setMargins(0, dp(12), 0, 0); root.addView(connect, connectParams);
-        paintConnection(connectionColor(false, 0, false));
+        paintConnection(connectionColor(false, 0, false), false);
         setContentView(root); reload(); incoming(getIntent());
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 20);
@@ -149,11 +149,12 @@ public final class MainActivity extends Activity {
         if (!active) return Color.rgb(77, 163, 255);
         return state == 2 ? Color.rgb(47, 191, 113) : Color.rgb(224, 165, 38);
     }
-    private void paintConnection(int color) {
+    /** {@code lit} colors the status dot; an idle tunnel keeps it neutral. */
+    private void paintConnection(int color, boolean lit) {
         if (connectionColor == color) return;
         connectionColor = color;
         connect.setBackground(ripple(card(color, dp(14))));
-        ((GradientDrawable) statusDot.getBackground()).setColor(TunnelService.active || !TunnelService.problem.isEmpty() ? color : color(R.color.text_muted));
+        ((GradientDrawable) statusDot.getBackground()).setColor(lit ? color : color(R.color.text_muted));
     }
     @Override public void onResume() { super.onResume(); reload(); handler.post(poll); }
     @Override public void onPause() { handler.removeCallbacks(poll); super.onPause(); }
