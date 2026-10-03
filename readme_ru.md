@@ -164,7 +164,7 @@ SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS
 5. Для fail-closed поведения после гибели процесса включите в Android **Always-on VPN** и **Block connections without VPN**.
 6. Server profiles можно регистрировать и синхронизировать через portal integration.
 
-В текущих исходниках заданы Android minSdk 29, targetSdk 36, versionCode 30209 и versionName 0.3.2-preview.7.
+В текущих исходниках заданы Android minSdk 29, targetSdk 36, versionCode 40001 и versionName 0.4.0-preview.1.
 
 См. [Android](docs/android.md) и [обмен профилями](docs/portal.md).
 
