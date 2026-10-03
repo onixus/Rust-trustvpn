@@ -137,7 +137,15 @@ final class NetworkAcceptance {
             // the last reply (keep-alive restart + 30 s) plus the 5 s health poll, measured
             // against the official server. The fixture restores it 60 s after scheduling,
             // so detection has a margin on both sides.
-            await(3, largeUdpDigest ? 55000 : 10000);
+            // WireGuard has no connection to lose: a silent AmneziaWG peer is noticed
+            // only when traffic goes unanswered, so keep some flowing while waiting.
+            long detected = SystemClock.elapsedRealtime() + fixture.optInt("outage_detection_ms", largeUdpDigest ? 55000 : 10000);
+            while (state() != 3) {
+                if (SystemClock.elapsedRealtime() > detected) throw new AssertionError("VPN state timeout, expected 3, got " + NativeCore.INSTANCE.status());
+                try (Socket probe = new Socket()) { probe.connect(new InetSocketAddress(v4, 8080), 1000); }
+                catch (IOException expected) { }
+                Thread.sleep(500);
+            }
             check(TunnelService.active, "TUN retained during reconnect");
             // The endpoint may return between the state check and this connection. A
             // connection that succeeds must then arrive through the tunnel, never
@@ -149,7 +157,7 @@ final class NetworkAcceptance {
                 if (body >= 0) during = response.substring(body + 4).trim();
             } catch (IOException expected) { }
             check(during == null || during.isEmpty() || !during.equals(direct), "No direct fallback during outage");
-            await(2, 45000); tcp(v4); tcp(v6);
+            await(2, fixture.optInt("recovery_ms", 45000)); tcp(v4); tcp(v6);
             Activity finished = activity; test.runOnMainSync(finished::finish); activity = null;
             Thread.sleep(1500); check(TunnelService.active && state() == 2, "Activity close retains VPN"); tcp(v4);
             context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP));
