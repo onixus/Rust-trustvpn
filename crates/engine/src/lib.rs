@@ -68,12 +68,6 @@ pub fn check_capabilities(p: &Profile) -> Result<()> {
     if e.skip_verification {
         return Err(Error::Unsupported("disabled certificate verification"));
     }
-    if p.hysteria2
-        .as_ref()
-        .is_some_and(|h| !h.pin_sha256.is_empty())
-    {
-        return Err(Error::Unsupported("Hysteria certificate pin override"));
-    }
     if !e.custom_sni.is_empty() && e.custom_sni != e.hostname {
         return Err(Error::Unsupported("separate SNI and verification identity"));
     }
@@ -474,6 +468,17 @@ fn tls_config(p: &Profile) -> Result<rustls::ClientConfig> {
     tls_config_with_ca(&p.endpoint.certificate)
 }
 fn tls_config_with_ca(certificate: &str) -> Result<rustls::ClientConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|_| Error::Tls)?
+        .with_root_certificates(trust_roots(certificate)?)
+        .with_no_client_auth();
+
+    Ok(config)
+}
+/// The profile's custom CA, or the platform roots when none is embedded.
+fn trust_roots(certificate: &str) -> Result<rustls::RootCertStore> {
     let mut roots = rustls::RootCertStore::empty();
     if certificate.is_empty() {
         #[cfg(target_os = "android")]
@@ -494,14 +499,7 @@ fn tls_config_with_ca(certificate: &str) -> Result<rustls::ClientConfig> {
     if roots.is_empty() {
         return Err(Error::Trust);
     }
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|_| Error::Tls)?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-
-    Ok(config)
+    Ok(roots)
 }
 
 async fn connect_tcp(

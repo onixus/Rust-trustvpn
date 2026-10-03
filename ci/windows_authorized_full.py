@@ -4,7 +4,12 @@ Never called by ordinary CI. Preserves GUI, vault, SCM identity and original ser
 import argparse, hashlib, json, os, pathlib, shutil, subprocess, sys, time, uuid
 p=argparse.ArgumentParser();p.add_argument('fixture',type=pathlib.Path);p.add_argument('--allow-existing-installation',action='store_true');p.add_argument('--service-sha256',required=True);p.add_argument('--crash-cycles',type=int,choices=range(1,4),default=1)
 # windows_production_e2e.py runs the same rollback-guarded flow with production profiles.
-p.add_argument('--worker',choices=['windows_full_e2e.py','windows_production_e2e.py'],default='windows_full_e2e.py');a=p.parse_args()
+p.add_argument('--worker',choices=['windows_full_e2e.py','windows_production_e2e.py','windows_sleep_e2e.py'],default='windows_full_e2e.py')
+# windows_sleep_e2e.py suspends the host; worker and rollback deadlines include the sleep.
+p.add_argument('--sleep-minutes',type=int,choices=range(1,121),default=None)
+p.add_argument('--always-on',action='store_true',help='Sleep with the service always-on tunnel instead of a client session');a=p.parse_args()
+assert not a.always_on or a.sleep_minutes,'--always-on applies to the sleep worker'
+assert (a.worker=='windows_sleep_e2e.py')==(a.sleep_minutes is not None),'--sleep-minutes is required by, and only valid for, the sleep worker'
 assert a.allow_existing_installation,'Explicit authorization required'
 sys.stdout.reconfigure(encoding='utf-8',errors='replace')
 sys.stderr.reconfigure(encoding='utf-8',errors='replace')
@@ -14,7 +19,7 @@ SOURCE=ROOT/'dist/native-preview-windows/rtrust-service.exe'
 WORK=pathlib.Path(os.environ['ProgramData'])/('RTrustTunnel-E2E-'+uuid.uuid4().hex)
 TASK=WORK.name
 # Each additional crash gets the same bounded SCM/reconnect allowance.
-worker_minutes=5+3*(a.crash_cycles-1)
+worker_minutes=5+3*(a.crash_cycles-1)+((a.sleep_minutes or 0)+10 if a.sleep_minutes else 0)
 rollback_minutes=worker_minutes+1
 
 def ps(code):
@@ -55,6 +60,7 @@ physical=json.loads(ps("ConvertTo-Json -Compress -InputObject @(Get-NetAdapter -
 assert len(physical)==1,'Handoff test requires one known active physical adapter'
 fixture_data['network_handoff_alias']=physical[0]
 fixture_data['always_on_crash_cycles']=a.crash_cycles
+if a.sleep_minutes:fixture_data['sleep_minutes']=a.sleep_minutes;fixture_data['sleep_always_on']=a.always_on
 (WORK/'fixture.json').write_text(json.dumps(fixture_data))
 adapter=physical[0].replace("'","''")
 # Recovery is independent of Python/Jenkins and survives network loss.

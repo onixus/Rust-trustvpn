@@ -255,7 +255,14 @@ async fn serve(
             _ = stream.read(&mut unexpected) => return Err("IPC closed during connect".into()),
         }
     };
-    let guard = match Guard::install(uid, networks, dns, endpoints, profile.protocol) {
+    let guard = match Guard::install(
+        uid,
+        networks,
+        dns,
+        endpoints,
+        profile.protocol,
+        &profile.hop_port_ranges(),
+    ) {
         Ok(guard) => guard,
         Err(error) => return reply(&mut stream, State::Blocked, &error).await,
     };

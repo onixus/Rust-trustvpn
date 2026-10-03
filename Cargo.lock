@@ -4906,6 +4906,7 @@ dependencies = [
  "ipnet",
  "libc",
  "quinn",
+ "quinn-proto",
  "rand 0.9.5",
  "rcgen",
  "rtrust-profile",
