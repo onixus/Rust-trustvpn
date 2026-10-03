@@ -59,6 +59,9 @@ pub struct Device {
     last_initiation: Option<Instant>,
     attempts: u32,
     max_attempts: u32,
+    /// Initiations sent since the last completed handshake. Unlike `attempts`
+    /// it is not reset by new traffic, so it can tell that the peer is gone.
+    unanswered: u32,
     /// IP packets waiting for a session; an empty one is a keepalive.
     staged: VecDeque<Vec<u8>>,
     /// Largest datagram seen: the bound for random padding and trailers.
@@ -104,9 +107,9 @@ impl Device {
             max_attempts: pick(timing.attempts),
             timing,
             allowed: o
-                .allowed_ips
-                .iter()
-                .filter_map(|a| a.parse().ok())
+                .allowed_networks()
+                .into_iter()
+                .filter_map(|(ip, prefix)| ipnet::IpNet::new(ip, prefix).ok())
                 .collect(),
             handshake: None,
             current: None,
@@ -116,6 +119,7 @@ impl Device {
             last_timestamp: [0; 12],
             last_initiation: None,
             attempts: 0,
+            unanswered: 0,
             staged: VecDeque::new(),
             window: DEFAULT_WINDOW,
             retransmit: None,
@@ -137,8 +141,8 @@ impl Device {
     pub fn failed(&self) -> bool {
         self.failed
     }
-    pub fn attempts(&self) -> u32 {
-        self.attempts
+    pub fn unanswered(&self) -> u32 {
+        self.unanswered
     }
     pub fn take_output(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.out)
@@ -180,6 +184,7 @@ impl Device {
     fn complete(&mut self) {
         self.retransmit = None;
         self.attempts = 0;
+        self.unanswered = 0;
         self.max_attempts = pick(self.timing.attempts);
         self.sent_last_minute = false;
         self.established = true;
@@ -210,6 +215,7 @@ impl Device {
             return;
         };
         self.last_initiation = Some(now);
+        self.unanswered = self.unanswered.saturating_add(1);
         self.handshake = Some(state);
         self.out.extend(self.wire.preamble());
         self.out

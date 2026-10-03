@@ -177,6 +177,7 @@ pub fn key(text: &str, field: &'static str) -> Result<[u8; 32]> {
     bytes.zeroize();
     key
 }
+/// `ip` or `ip/prefix`; a bare address is a host route, as in WireGuard.
 fn address(text: &str, field: &'static str) -> Result<(IpAddr, u8)> {
     let (ip, prefix) = text
         .split_once('/')
@@ -206,6 +207,13 @@ impl AmneziaWg {
         self.addresses
             .iter()
             .filter_map(|a| address(a, "address").ok())
+            .collect()
+    }
+    /// AllowedIPs as networks; entries without a prefix are single hosts.
+    pub fn allowed_networks(&self) -> Vec<(IpAddr, u8)> {
+        self.allowed_ips
+            .iter()
+            .filter_map(|a| address(a, "allowed IPs").ok())
             .collect()
     }
     /// H1–H4 with the WireGuard message types as defaults.
@@ -342,6 +350,8 @@ pub fn conf(input: &str) -> Result<Profile> {
             }
             continue;
         }
+        // As awg-quick: a comment may follow a value.
+        let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() || line.starts_with(';') {
             continue;
         }
@@ -576,6 +586,24 @@ mod tests {
         ] {
             assert!(Profile::import(&sample(extra)).is_err(), "{extra}");
         }
+        let commented = sample("MTU = 1300 # path limit").replace(
+            "AllowedIPs = 0.0.0.0/0, ::/0",
+            "AllowedIPs = 10.8.1.1, fd00::/64 # server only",
+        );
+        let p = Profile::import(&commented).unwrap();
+        let o = p.amneziawg.as_ref().unwrap();
+        assert_eq!(o.mtu, 1300);
+        assert_eq!(
+            o.allowed_networks(),
+            [
+                ("10.8.1.1".parse().unwrap(), 32),
+                ("fd00::".parse().unwrap(), 64)
+            ]
+        );
+        // A service resolves the endpoint before connecting: still one peer.
+        let mut resolved = p.clone();
+        resolved.endpoint.addresses = vec!["192.0.2.1:51820".into(), "[2001:db8::1]:51820".into()];
+        resolved.validate().unwrap();
         let two_peers = format!("{}[Peer]\nPublicKey = {KEY}\n", sample(""));
         assert!(Profile::import(&two_peers).is_err());
         assert!(Profile::import(&sample("").replace("vpn.example:51820", "vpn.example")).is_err());

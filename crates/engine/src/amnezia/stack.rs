@@ -1,12 +1,15 @@
 //! Userspace TCP/IP endpoint inside the tunnel: outgoing TCP connections and
 //! UDP sockets from the interface address, bridged to bounded channels.
-use super::Command;
+use super::{
+    Command,
+    datagram::{self, Incoming, Reassembly},
+};
 use crate::{Error, Result, udp::Datagram};
 use bytes::Bytes;
 use smoltcp::{
     iface::{Config, Interface, SocketHandle, SocketSet},
     phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken},
-    socket::{tcp, udp},
+    socket::tcp,
     time::{Duration as SmolDuration, Instant as SmolInstant},
     wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint},
 };
@@ -23,7 +26,6 @@ const MAX_UDP_TUNNELS: usize = 64;
 const MAX_UDP_SOCKETS: usize = 256;
 const UDP_IDLE: Duration = Duration::from_secs(60);
 const TCP_BUFFER: usize = 64 * 1024;
-const UDP_BUFFER: usize = 32 * 1024;
 const QUEUE: usize = 512;
 
 struct Packets {
@@ -78,10 +80,11 @@ struct TcpFlow {
     up_closed: bool,
 }
 struct UdpTunnel {
+    id: u64,
     up: mpsc::Receiver<Datagram>,
     down: mpsc::Sender<Datagram>,
-    /// Application source address to its local socket.
-    sockets: HashMap<SocketAddr, (SocketHandle, u16, Instant)>,
+    /// Application source address to its local port and last use.
+    sources: HashMap<SocketAddr, (u16, Instant)>,
 }
 
 pub struct Stack {
@@ -91,7 +94,14 @@ pub struct Stack {
     tcp: Vec<TcpFlow>,
     udp: Vec<UdpTunnel>,
     ports: HashSet<u16>,
-    families: (bool, bool),
+    /// Local UDP port to its stream and application source address.
+    bindings: HashMap<u16, (u64, SocketAddr)>,
+    reassembly: Reassembly,
+    /// UDP packets built outside the TCP/IP stack, waiting for the next poll.
+    datagrams: Vec<Vec<u8>>,
+    next_id: u64,
+    addresses: (Option<IpAddr>, Option<IpAddr>),
+    mtu: usize,
     epoch: Instant,
 }
 
@@ -127,7 +137,12 @@ impl Stack {
             tcp: vec![],
             udp: vec![],
             ports: HashSet::new(),
-            families: (v4.is_some(), v6.is_some()),
+            bindings: HashMap::new(),
+            reassembly: Reassembly::default(),
+            datagrams: vec![],
+            next_id: rand::random(),
+            addresses: (v4.map(|a| a.0), v6.map(|a| a.0)),
+            mtu,
             epoch: Instant::now(),
         }
     }
@@ -141,8 +156,30 @@ impl Stack {
     }
     /// A decrypted IP packet from the peer. A full queue drops it; TCP retransmits.
     pub fn input(&mut self, packet: Vec<u8>) {
-        if self.device.input.len() < QUEUE {
-            self.device.input.push_back(packet);
+        match self.reassembly.input(packet, Instant::now()) {
+            Incoming::Other(packet) => {
+                if self.device.input.len() < QUEUE {
+                    self.device.input.push_back(packet);
+                }
+            }
+            Incoming::Datagram(source, destination, payload) => {
+                let Some((id, application)) = self.bindings.get(&destination.port()) else {
+                    return;
+                };
+                let Some(tunnel) = self.udp.iter_mut().find(|t| t.id == *id) else {
+                    return;
+                };
+                if let Some((_, seen)) = tunnel.sources.get_mut(application) {
+                    *seen = Instant::now();
+                }
+                // A full stream drops the datagram, as a socket buffer would.
+                let _ = tunnel.down.try_send(Datagram {
+                    source,
+                    destination: *application,
+                    payload,
+                });
+            }
+            Incoming::Consumed => {}
         }
     }
     /// When the stack needs to run again without new input.
@@ -199,10 +236,12 @@ impl Stack {
             Command::Udp { up, down } => {
                 // Over capacity the stream is dropped: its reader sees it closed.
                 if self.udp.len() < MAX_UDP_TUNNELS {
+                    self.next_id = self.next_id.wrapping_add(1);
                     self.udp.push(UdpTunnel {
+                        id: self.next_id,
                         up,
                         down,
-                        sockets: HashMap::new(),
+                        sources: HashMap::new(),
                     });
                 }
             }
@@ -279,7 +318,6 @@ impl Stack {
         }
     }
     fn pump_udp(&mut self) {
-        let limit = self.device.mtu;
         let mut index = 0;
         while index < self.udp.len() {
             let mut closed = self.udp[index].down.is_closed();
@@ -292,71 +330,46 @@ impl Stack {
                         break;
                     }
                 };
-                let v6 = datagram.destination.is_ipv6();
-                // No fragmentation inside the tunnel: larger datagrams are dropped.
-                let fits = datagram.payload.len() + if v6 { 48 } else { 28 } <= limit;
-                if !fits || !(if v6 { self.families.1 } else { self.families.0 }) {
-                    continue;
-                }
-                let known = self.udp[index].sockets.get_mut(&datagram.source);
-                let handle = match known {
-                    Some((handle, _, seen)) => {
+                let local = match datagram.destination {
+                    SocketAddr::V4(_) => self.addresses.0,
+                    SocketAddr::V6(_) => self.addresses.1,
+                };
+                let Some(local) = local else { continue };
+                let known = self.udp[index].sources.get_mut(&datagram.source);
+                let port = match known {
+                    Some((port, seen)) => {
                         *seen = Instant::now();
-                        *handle
+                        *port
                     }
                     None => {
-                        if self.udp[index].sockets.len() >= MAX_UDP_SOCKETS {
+                        if self.udp[index].sources.len() >= MAX_UDP_SOCKETS {
                             continue;
                         }
                         let Some(port) = self.port() else { continue };
-                        let buffer = || {
-                            udp::PacketBuffer::new(
-                                vec![udp::PacketMetadata::EMPTY; 32],
-                                vec![0; UDP_BUFFER],
-                            )
-                        };
-                        let mut socket = udp::Socket::new(buffer(), buffer());
-                        if socket.bind(port).is_err() {
-                            self.ports.remove(&port);
-                            continue;
-                        }
-                        let handle = self.sockets.add(socket);
-                        self.udp[index]
-                            .sockets
-                            .insert(datagram.source, (handle, port, Instant::now()));
-                        handle
+                        let tunnel = &mut self.udp[index];
+                        tunnel
+                            .sources
+                            .insert(datagram.source, (port, Instant::now()));
+                        self.bindings.insert(port, (tunnel.id, datagram.source));
+                        port
                     }
                 };
-                // A full send buffer drops the datagram, as a real socket would.
-                let _ = self
-                    .sockets
-                    .get_mut::<udp::Socket>(handle)
-                    .send_slice(&datagram.payload, IpEndpoint::from(datagram.destination));
+                self.next_id = self.next_id.wrapping_add(1);
+                // Larger than the MTU: fragmented here, reassembled by the peer.
+                self.datagrams.extend(datagram::packets(
+                    SocketAddr::new(local, port),
+                    datagram.destination,
+                    &datagram.payload,
+                    self.mtu,
+                    self.next_id as u32,
+                ));
             }
-            let tunnel = &mut self.udp[index];
-            for (source, (handle, _, seen)) in tunnel.sockets.iter_mut() {
-                let socket = self.sockets.get_mut::<udp::Socket>(*handle);
-                while socket.can_recv() {
-                    let Ok(permit) = tunnel.down.try_reserve() else {
-                        break;
-                    };
-                    let Ok((payload, meta)) = socket.recv() else {
-                        break;
-                    };
-                    *seen = Instant::now();
-                    permit.send(Datagram {
-                        source: SocketAddr::new(meta.endpoint.addr.into(), meta.endpoint.port),
-                        destination: *source,
-                        payload: payload.to_vec(),
-                    });
-                }
-            }
-            let (sockets, ports) = (&mut self.sockets, &mut self.ports);
-            tunnel.sockets.retain(|_, (handle, port, seen)| {
+            let (ports, bindings) = (&mut self.ports, &mut self.bindings);
+            self.udp[index].sources.retain(|_, (port, seen)| {
                 let keep = !closed && seen.elapsed() < UDP_IDLE;
                 if !keep {
-                    sockets.remove(*handle);
                     ports.remove(port);
+                    bindings.remove(port);
                 }
                 keep
             });
@@ -386,6 +399,8 @@ impl Stack {
             }
             !closed
         });
-        self.device.output.drain(..).collect()
+        let mut output: Vec<_> = self.device.output.drain(..).collect();
+        output.append(&mut self.datagrams);
+        output
     }
 }

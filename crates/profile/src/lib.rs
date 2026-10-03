@@ -363,10 +363,8 @@ impl Profile {
             (Protocol::AmneziaWg, None, Some(options)) => {
                 options.validate()?;
                 amnezia::key(self.endpoint.password.expose(), "private key")?;
-                if self.endpoint.upstream_protocol != "http3"
-                    || self.original_cli.is_some()
-                    || self.endpoint.addresses.len() != 1
-                {
+                // Several addresses are the resolved addresses of the one peer.
+                if self.endpoint.upstream_protocol != "http3" || self.original_cli.is_some() {
                     return Err(Error::Field("protocol"));
                 }
             }

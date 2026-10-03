@@ -194,15 +194,23 @@ impl Keypair {
     }
 }
 
-/// Sliding anti-replay window (RFC 6479) over 2048 counters.
-#[derive(Default)]
+/// Sliding anti-replay window (RFC 6479) with the reference's 8128 counters.
 pub struct Replay {
     last: u64,
     started: bool,
     bitmap: [u64; Self::WORDS],
 }
+impl Default for Replay {
+    fn default() -> Self {
+        Self {
+            last: 0,
+            started: false,
+            bitmap: [0; Self::WORDS],
+        }
+    }
+}
 impl Replay {
-    const WORDS: usize = 32;
+    const WORDS: usize = 128;
     const WINDOW: u64 = (Self::WORDS as u64 - 1) * 64;
     pub fn accept(&mut self, counter: u64) -> bool {
         if counter >= REJECT_AFTER_MESSAGES {
@@ -431,9 +439,12 @@ mod tests {
         let mut r = Replay::default();
         assert!(r.accept(0) && !r.accept(0));
         assert!(r.accept(5) && r.accept(3) && !r.accept(3));
-        assert!(r.accept(5000) && r.accept(5000 - Replay::WINDOW));
-        assert!(!r.accept(5000 - Replay::WINDOW - 1) && !r.accept(5));
-        assert!(r.accept(1 << 40) && !r.accept(5000));
+        // As amneziawg-go: (128 - 1) * 64 counters behind the newest are accepted.
+        assert_eq!(Replay::WINDOW, 8128);
+        assert!(r.accept(9000) && r.accept(9000 - Replay::WINDOW));
+        assert!(!r.accept(9000 - Replay::WINDOW - 1) && !r.accept(5));
+        assert!(r.accept(9000 - 3000) && !r.accept(9000 - 3000));
+        assert!(r.accept(1 << 40) && !r.accept(9000));
         assert!(!r.accept(REJECT_AFTER_MESSAGES));
     }
 }

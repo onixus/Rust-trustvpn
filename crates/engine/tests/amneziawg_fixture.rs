@@ -62,7 +62,9 @@ async fn reference_peer_tcp_udp_dns_and_rekey() {
     // Independent UDP streams; replies return to the right application source.
     let mut first = session.open_udp().await.unwrap();
     let mut second = session.open_udp().await.unwrap();
-    for size in [1, 512, 1232] {
+    // Above 1252 bytes a datagram exceeds the 1280-byte tunnel MTU and is
+    // fragmented inside the tunnel in both directions.
+    for size in [1, 512, 1232, 1252, 1253, 1400, 1472, 4000, 20_000] {
         let a = udp::Datagram {
             source: "10.0.0.2:12000".parse().unwrap(),
             destination: "10.8.1.1:7".parse().unwrap(),

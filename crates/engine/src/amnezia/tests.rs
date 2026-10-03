@@ -142,7 +142,7 @@ fn handshake_retransmits_and_gives_up_after_the_configured_attempts() {
         sent += client.take_output().len();
     }
     // The reference retries while attempts <= maximum: three retransmissions.
-    assert_eq!(sent, 3);
+    assert_eq!((sent, client.unanswered()), (3, 4));
     assert!(client.failed() && !client.established());
     // New traffic starts over.
     client.send_ip(packet([10, 8, 1, 2], 40), start + Duration::from_secs(60));
@@ -192,4 +192,27 @@ fn passive_keepalive_answers_received_data() {
     assert!(server.receive(&mut out[0].clone(), now).is_none());
     server.timers(start + Duration::from_secs(16));
     assert!(server.take_output().is_empty());
+}
+
+#[test]
+fn a_vanished_peer_is_noticed_while_traffic_keeps_flowing() {
+    let (mut client, mut server) = pair("");
+    let start = Instant::now();
+    establish(&mut client, &mut server, start);
+    assert_eq!(client.unanswered(), 0);
+    // The key is past REKEY_AFTER_TIME, so every packet asks for a handshake
+    // and restarts the reference's attempt counter; the peer never answers.
+    for second in 121..150 {
+        let now = start + Duration::from_secs(second);
+        client.timers(now);
+        client.send_ip(packet([10, 8, 1, 2], 100), now);
+        client.take_output();
+    }
+    assert!(client.unanswered() >= 4, "{}", client.unanswered());
+    // An answer clears it.
+    let now = start + Duration::from_secs(156);
+    client.send_ip(packet([10, 8, 1, 2], 100), now);
+    deliver(&mut client, &mut server, now);
+    deliver(&mut server, &mut client, now);
+    assert_eq!(client.unanswered(), 0);
 }

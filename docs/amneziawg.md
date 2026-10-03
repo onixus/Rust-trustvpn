@@ -29,8 +29,11 @@ Supported `awg-quick` keys (case-insensitive):
   `ContentPaddingAddition`, `RandomTrailers`, `DisableCookies`, `RekeyAfterTime`,
   `RekeyTimeout`, `RejectAfterTime`, `KeepaliveTimeout`, `MaxHandshakeAttempts`
   and a ranged `PersistentKeepalive` (`a`, `a-b` or `(off)`);
-- `[Peer]` (exactly one): `PublicKey`, `PresharedKey`, `Endpoint`, `AllowedIPs`,
-  `PersistentKeepalive`.
+- `[Peer]` (exactly one): `PublicKey`, `PresharedKey`, `Endpoint`, `AllowedIPs`
+  (an entry without a prefix is a single host), `PersistentKeepalive`.
+
+A `#` comment may follow a value, as in `awg-quick`. Up to three resolved
+addresses of the endpoint are tried in order.
 
 `ListenPort`, `FwMark`, `Table` and `SaveConfig` are ignored. `PreUp`/`PostUp`/
 `PreDown`/`PostDown` are rejected: shell hooks are never executed. Unknown keys,
@@ -73,7 +76,7 @@ PersistentKeepalive = 22-30
 ## Protocol behaviour
 
 - **Cryptography** is WireGuard's Noise_IKpsk2 (Curve25519, ChaCha20-Poly1305,
-  BLAKE2s) with the 2048-packet replay window; both the initiator and the
+  BLAKE2s) with the reference's 8128-packet replay window; both the initiator and the
   responder role are implemented, so a server-initiated rekey works.
 - **Header protection** XORs the handshake messages and the 16-byte transport
   header with ChaCha20 keyed by `HeaderProtectionKey`; the nonce is the first 12
@@ -85,12 +88,18 @@ PersistentKeepalive = 22-30
 - **Timers** follow the reference state machine with the configured ranges:
   retransmission with jitter, rekey on send and before rejection, passive and
   persistent keepalive, key expiry and zeroing.
-- **Health.** Three unanswered handshake retransmissions (about 15 s with the
-  default timeout) mark the session unhealthy so the caller can reconnect, e.g.
-  after a network change; the reference alone would keep retrying for 90 s.
+- **Health.** Four initiations without an answer (about 15 s with the default
+  timeout) mark the session unhealthy so the caller can reconnect, e.g. after a
+  network change. The count is independent of new traffic, which restarts the
+  reference's own attempt counter.
 - With `RandomTrailers` the reference classifies a datagram by its type range
   alone, so wide `H1`–`H3` ranges claim transport packets as handshake messages
   and drop them. This client mirrors that rule; keep those ranges narrow.
+
+- **UDP larger than the tunnel MTU** is fragmented at the IP layer inside the
+  tunnel and reassembled on receipt (IPv4 and IPv6), so the 1500-byte outer TUN
+  and the 1280-byte default tunnel MTU need no agreement. Reassembly state is
+  bounded (64 datagrams, 2 MiB, 10 s); overlapping fragments discard the datagram.
 
 ## Not supported
 
@@ -98,9 +107,6 @@ PersistentKeepalive = 22-30
   export the native AmneziaWG `.conf` instead.
 - Several peers, roaming to a new peer address, and `ListenPort`.
 - ICMP relay (ping through the tunnel), as for Hysteria 2.
-- IP fragmentation inside the tunnel: a UDP datagram larger than the MTU minus
-  28 bytes (48 for IPv6) is dropped. With the default MTU of 1280 this is 1252
-  bytes; QUIC and DNS fit.
 - `AllowedIPs` does not program routes: the application routing policy decides
   what enters the tunnel. It is kept for export and filters the source address
   of received packets.
@@ -116,7 +122,7 @@ unmodified WireGuard; junk, signature packets, prefixes and type ranges; and the
 3.x header protection, content padding, random trailers and configured timers.
 Each mode checks TCP payload integrity over IPv4 and IPv6, eight parallel
 streams, a destination resolved by DNS inside the tunnel, a refused port, UDP
-echo on independent streams, and rejection of a wrong preshared key. The third
+echo on independent streams from 1 to 20000 bytes (fragmented above 1252), and rejection of a wrong preshared key. The third
 mode also holds a stream open across several key rotations. The fixture creates
 no TUN device and changes no routes or an existing VPN; it needs Go 1.25.
 

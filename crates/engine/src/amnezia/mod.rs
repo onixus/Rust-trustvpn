@@ -1,6 +1,7 @@
 //! AmneziaWG 3 transport. WireGuard carries IP packets, while the engine
 //! exposes TCP streams and UDP messages, so the session terminates them in a
 //! userspace TCP/IP stack bound to the interface address of the profile.
+mod datagram;
 mod device;
 mod noise;
 mod stack;
@@ -15,9 +16,12 @@ use std::{
 };
 use tokio::sync::{Notify, mpsc, oneshot};
 
-/// Handshake retransmissions without an answer before the session reports
-/// itself unhealthy; the reference keeps retrying, a caller may reconnect.
-const STALLED_ATTEMPTS: u32 = 3;
+/// Initiations without an answer (the first and three retransmissions) before
+/// the session reports itself unhealthy; the reference keeps retrying, a
+/// caller may reconnect.
+const STALLED_INITIATIONS: u32 = 4;
+/// Endpoint addresses tried within the caller's 20 s connection budget.
+const MAX_ADDRESSES: usize = 3;
 
 pub(crate) enum Command {
     Tcp {
@@ -114,8 +118,9 @@ impl AmneziaSession {
                 );
             }
         }
-        // The caller allows 20 s in total; one retransmission fits per address.
-        let patience = Duration::from_secs((15 / addresses.len().max(1) as u64).max(6));
+        // One retransmission (5 s by default) fits per address: 18, 9 or 6 s each.
+        addresses.truncate(MAX_ADDRESSES);
+        let patience = Duration::from_secs(18 / addresses.len().max(1) as u64);
         let interface = options.interface_addresses();
         let families = (
             interface.iter().any(|(ip, _)| ip.is_ipv4()),
@@ -377,7 +382,7 @@ async fn run(
             let _ = socket.try_send(&datagram);
         }
         unhealthy.store(
-            device.failed() || device.attempts() >= STALLED_ATTEMPTS,
+            device.failed() || device.unanswered() >= STALLED_INITIATIONS,
             Ordering::Relaxed,
         );
         if device.established()
