@@ -44,6 +44,7 @@ pipeline {
               python3 ci/run.py macos-smoke python3 ci/smoke.py
               python3 ci/run.py macos-webview python3 ci/webview_smoke.py
               python3 ci/run.py macos-hysteria python3 ci/hysteria_interop.py
+              python3 ci/run.py macos-amneziawg python3 ci/amneziawg_interop.py
               python3 scripts/package-preview.py
               python3 ci/run.py macos-dmg python3 scripts/package-macos-dmg.py
               python3 ci/run.py macos-system-package python3 scripts/package-macos-system.py

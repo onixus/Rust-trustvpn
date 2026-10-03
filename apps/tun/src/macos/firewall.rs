@@ -67,10 +67,11 @@ pub(super) fn policy(
         format!("pass out quick on {DEVICE} all no state"),
     ];
     if full {
-        let transport = if protocol == rtrust_profile::Protocol::Hysteria2 {
-            "udp"
-        } else {
+        // Hysteria 2 and AmneziaWG are UDP transports.
+        let transport = if protocol == rtrust_profile::Protocol::TrustTunnel {
             "tcp"
+        } else {
+            "udp"
         };
         let flags = if transport == "tcp" { " flags any" } else { "" };
         // Hysteria port hopping sends to any port of the server's set.

@@ -6,6 +6,8 @@ pub enum Protocol {
     #[default]
     TrustTunnel,
     Hysteria2,
+    #[serde(rename = "amneziawg")]
+    AmneziaWg,
 }
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

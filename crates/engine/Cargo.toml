@@ -12,6 +12,10 @@ base64.workspace = true
 zeroize.workspace = true
 bytes = "1"
 blake2 = "0.10"
+chacha20 = "0.9"
+chacha20poly1305 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp"] }
 rand = "0.9"
 sha2 = "0.10"
 h2 = "0.4"

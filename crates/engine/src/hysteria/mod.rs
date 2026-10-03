@@ -1,6 +1,6 @@
 //! Hysteria 2 QUIC transport, independent of TrustTunnel HTTP/3 CONNECT.
 mod brutal;
-mod datagrams;
+pub(crate) mod datagrams;
 mod gecko;
 mod hop;
 mod obfs;

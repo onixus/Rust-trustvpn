@@ -252,10 +252,11 @@ fn install_in(
                             FWPM_CONDITION_IP_PROTOCOL,
                             FWP_UINT8,
                             FWP_CONDITION_VALUE0_0 {
-                                uint8: if protocol == rtrust_profile::Protocol::Hysteria2 {
-                                    17
-                                } else {
+                                // Hysteria 2 and AmneziaWG are UDP transports.
+                                uint8: if protocol == rtrust_profile::Protocol::TrustTunnel {
                                     6
+                                } else {
+                                    17
                                 },
                             },
                         ));

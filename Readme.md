@@ -74,6 +74,8 @@ Unsupported or intentionally rejected options include insecure TLS, ECH, Hysteri
 
 See [Hysteria 2 support and limits](docs/hysteria2.md).
 
+AmneziaWG 3 `awg-quick` configurations select an in-process WireGuard transport with the AmneziaWG obfuscation layer (junk and signature packets, prefixes, type ranges, header protection, padding). It is verified against the official `amneziawg-go` 3.1 on loopback only; see [supported options and limits](docs/amneziawg.md).
+
 ## Platform status
 
 | Platform | Current state | Important remaining work |

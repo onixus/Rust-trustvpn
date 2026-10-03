@@ -23,6 +23,22 @@
 Это отложенная функциональность, а не заявление о поддержке HTTP/3 в TUN.
 
 
+## AmneziaWG 3: границы preview
+
+AmneziaWG добавлен отдельным протоколом ([amneziawg.md](amneziawg.md)) и проверен
+только на уровне движка против официального `amneziawg-go` 3.1 (loopback).
+Остаются:
+
+- системный full-tunnel (Windows/Linux/macOS) и Android VpnService с профилем
+  AmneziaWG, боевой сервер, Always-on, сон и смена сети;
+- ссылки `vpn://` приложения Amnezia; несколько peer; roaming;
+- ICMP внутри туннеля;
+- cookie-ответы перегруженного сервера не проверены против эталона;
+- двойная терминация потоков (стек TUN и стек туннеля): пропускная способность
+  не измерялась;
+- стадия `ci/amneziawg_interop.py` добавлена только в macOS Jenkins (нужен Go 1.26);
+  в Linux-образе Go нет.
+
 ## Hysteria 2: границы preview
 
 Hysteria 2 добавлен отдельным протоколом и не закрывает W3-HTTP3.
