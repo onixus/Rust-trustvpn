@@ -128,7 +128,9 @@ def main():
     global pipe
     minutes = int(fixture.FIXTURE['sleep_minutes'])
     profile = next(p for p in fixture.FIXTURE['profiles'] if p.get('protocol') == 'hysteria2')
-    host = profile['endpoint']['addresses'][0].rsplit(':', 1)[0]
+    # Probe by IP, resolved before the guard: a hostname would fail DNS while the
+    # tunnel is down and make blocked() pass without WFP doing anything.
+    host = socket.gethostbyname(profile['endpoint']['addresses'][0].rsplit(':', 1)[0])
     canary = 8443
     with socket.create_connection((host, canary), timeout=10): pass
     if fixture.FIXTURE.get('sleep_always_on'):
