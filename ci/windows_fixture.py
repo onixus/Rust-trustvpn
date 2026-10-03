@@ -3,7 +3,9 @@ import argparse,hashlib,json,os,pathlib,secrets,shutil,socket,subprocess,sys,tar
 from datetime import datetime,timedelta,timezone
 ROOT=pathlib.Path('.ci-wintun').resolve()
 NAME='rtrust-wintun-'+secrets.token_hex(4)
-IP='10.231.243.2'
+# Not the Android fixture's 10.231.243.0/29: a Windows host that also serves the
+# emulator keeps a persistent route for that subnet, which would bypass the tunnel.
+IP='10.231.244.2';IP6='fd00:5254:244::2'
 def run(*args,**kwargs):
     kwargs.setdefault('timeout',90)
     return subprocess.check_output(args,**kwargs).decode().strip()
@@ -46,14 +48,14 @@ def main():
     transport='udp' if amnezia else 'tcp'
     network=False;container=False
     try:
-        run('docker','network','create','--subnet','10.231.243.0/29','--ipv6','--subnet','fd00:5254:243::/64',NAME);network=True
-        run('docker','run','-d','--rm','--name',NAME,'--network',NAME,'--ip',IP,'--ip6','fd00:5254:243::2','--cap-drop=ALL','--cap-add=NET_RAW','--security-opt=no-new-privileges','--read-only','--tmpfs','/tmp','-p',f'{host}:{port}:4433/{transport}','-v',f'{ROOT}:/fixture:ro','-p',f'{host}:{control_port}:8082/tcp','-v',f'{pathlib.Path("ci/windows_fixture_server.py").resolve()}:/server.py:ro','python:3.11-slim','python','/server.py');container=True
+        run('docker','network','create','--subnet','10.231.244.0/29','--ipv6','--subnet','fd00:5254:244::/64',NAME);network=True
+        run('docker','run','-d','--rm','--name',NAME,'--network',NAME,'--ip',IP,'--ip6',IP6,'-e','RTRUST_FIXTURE_IP='+IP,'-e','RTRUST_FIXTURE_IP6='+IP6,'-e','RTRUST_FIXTURE_VERBOSE='+os.environ.get('RTRUST_FIXTURE_VERBOSE',''),'-e','RTRUST_FIXTURE_FREEZE='+('1' if amnezia else ''),'--cap-drop=ALL','--cap-add=NET_RAW','--security-opt=no-new-privileges','--read-only','--tmpfs','/tmp','-p',f'{host}:{port}:4433/{transport}','-v',f'{ROOT}:/fixture:ro','-p',f'{host}:{control_port}:8082/tcp','-v',f'{pathlib.Path("ci/windows_fixture_server.py").resolve()}:/server.py:ro','python:3.11-slim','python','/server.py');container=True
         for _ in range(150):
             try:
                 with socket.create_connection((host,control_port if amnezia else port),timeout=.2):break
             except OSError:time.sleep(.2)
         else:raise RuntimeError('Windows endpoint fixture unavailable')
-        data={'base':dict(hostname='localhost',addresses=[f'{host}:{port}'],username='interop',password=password,certificate=(ROOT/'cert.pem').read_text(),upstream_protocol='http2'),'target':IP,'target6':'fd00:5254:243::2','control':f'http://{host}:{control_port}','control_token':token,'created_at':issued.isoformat()}
+        data={'base':dict(hostname='localhost',addresses=[f'{host}:{port}'],username='interop',password=password,certificate=(ROOT/'cert.pem').read_text(),upstream_protocol='http2'),'target':IP,'target6':IP6,'control':f'http://{host}:{control_port}','control_token':token,'created_at':issued.isoformat()}
         if amnezia:
             profile=json.loads((ROOT/'amneziawg-client.json').read_text())
             profile['endpoint'].update(hostname=host,addresses=[f'{host}:{port}'])

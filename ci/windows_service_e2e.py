@@ -64,9 +64,10 @@ def control(action):
 def wait_state(pipe,state,timeout=60):
     until=time.monotonic()+timeout
     while time.monotonic()<until:
-        if pipe.request(dict(op='Status'))['state']==state:return
+        response=pipe.request(dict(op='Status'))
+        if response['state']==state:return
         time.sleep(.5)
-    raise TimeoutError('Service did not reach '+state)
+    raise TimeoutError('Service did not reach '+state+'; last status: '+repr((response['state'],response.get('message'))))
 
 def no_routes():
     for _ in range(60):

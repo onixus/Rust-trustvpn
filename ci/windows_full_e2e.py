@@ -21,13 +21,16 @@ def wait_blocked():
     if not AMNEZIA:return fixture.wait_state(pipe,'Blocked')
     # WireGuard has no connection to lose: the service notices a silent peer only
     # when traffic goes unanswered (four handshakes, about 35 s). Supply it.
+    # Datagrams, not TCP: the service's stack accepts a connection before the
+    # peer answers, and Windows keeps the Wintun interface while such a
+    # connection lingers, so a following Stop would find its removal pending.
     until=time.monotonic()+90
-    while pipe.request(dict(op='Status'))['state']!='Blocked':
-        if time.monotonic()>until:raise TimeoutError('Service did not reach Blocked')
-        try:
-            with socket.create_connection((fixture.TARGET,8080),timeout=1):pass
-        except OSError:pass
-        time.sleep(.5)
+    with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as probe:
+        while pipe.request(dict(op='Status'))['state']!='Blocked':
+            if time.monotonic()>until:raise TimeoutError('Service did not reach Blocked')
+            try:probe.sendto(b'outage probe',(fixture.TARGET,8081))
+            except OSError:pass
+            time.sleep(1)
 def start():
     global pipe
     pipe=fixture.Pipe()
@@ -95,7 +98,12 @@ def main():
     # A completed transport task must not be polled a second time on Stop.
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request,timeout=5) as r:assert r.status==204
     wait_blocked()
-    response=pipe.request(dict(op='Stop'));assert response['state']=='Idle',response
+    # With AmneziaWG this Stop comes some 40 s into the outage. Windows then
+    # tends to keep the closed adapter listed; the service has to make it
+    # refresh its adapter list instead of waiting for the row to go away.
+    response=pipe.request(dict(op='Stop'))
+    if response['state']!='Idle':adapter_diagnostics()
+    assert response['state']=='Idle',response
     pipe.close();pipe=None
     assert fixture.routes()==before,'Stop during reconnect changed original routes'
     resume=urllib.request.Request(fixture.FIXTURE['control']+'/resume',data=b'',headers={'Authorization':'Bearer '+fixture.FIXTURE['control_token']})
@@ -120,7 +128,7 @@ def main():
     print('PASS Stop while transport is down; no completed-task panic and exact route recovery',flush=True)
     # Abrupt GUI/IPC disconnect retains guard; only explicit recovery opens network.
     pipe.close();pipe=None;time.sleep(2);blocked(host,control.port)
-    recovery=fixture.Pipe();assert recovery.request(dict(op='Recover'))['state']=='Idle';recovery.close()
+    recovery=fixture.Pipe();response=recovery.request(dict(op='Recover'));recovery.close();assert response['state']=='Idle',response
     with socket.create_connection((host,control.port),timeout=5):pass
     assert fixture.routes()==before,'Routes changed after crash recovery'
     print('PASS GUI crash retains guard; explicit recovery restores original routes',flush=True)
@@ -132,7 +140,7 @@ def main():
         assert time.monotonic()<deadline,'SCM did not automatically restart crashed service'
         time.sleep(.5)
     blocked(host,control.port)
-    recovery=fixture.Pipe();assert recovery.request(dict(op='Recover'))['state']=='Idle';recovery.close()
+    recovery=fixture.Pipe();response=recovery.request(dict(op='Recover'));recovery.close();assert response['state']=='Idle',response
     assert fixture.routes()==before,'Routes changed after service crash recovery'
     print('PASS service SIGKILL/automatic SCM restart retains guard; explicit recovery restores routes',flush=True)
     start();assert pipe.request(dict(op='Stop'))['state']=='Idle';pipe.close();pipe=None

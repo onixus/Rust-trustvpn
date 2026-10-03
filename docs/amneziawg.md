@@ -144,7 +144,16 @@ endpoint and an unavailable endpoint at start. WireGuard has no connection to
 lose, so the app notices a silent peer only through unanswered traffic; the test
 keeps probing while it waits.
 
-Not established: a system full tunnel on Windows, Linux or macOS with an
-AmneziaWG profile, a physical Android device, a production server, cookie
-replies of a loaded server, and throughput. Flows are terminated twice (TUN stack and tunnel
+**Desktop full tunnel.** `scripts/full-tunnel-interop.py --amneziawg` runs the
+Linux system service with an AmneziaWG profile in CI (`ci/linux.py`): whole-host
+IPv4 and IPv6, system DNS, peer outage with the firewall guard, client and
+service crashes, always-on and a physical interface handoff. On Windows,
+`ci/windows_fixture.py --protocol amneziawg` with `ci/windows_authorized_full.py`
+covers the same on an installed service; that run is authorized manually and is
+not part of ordinary CI. Both use the forwarding peer; the outage steps send
+traffic, since a silent peer is noticed only through unanswered handshakes.
+
+Not established: a system full tunnel on macOS with an AmneziaWG profile, a
+physical Android device, a production server, cookie replies of a loaded
+server, and throughput. Flows are terminated twice (TUN stack and tunnel
 stack), which costs CPU compared with a packet-level WireGuard client.
