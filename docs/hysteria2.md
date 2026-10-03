@@ -151,6 +151,15 @@ deep Doze with every sample egressing through the tunnel, and traffic flowed rig
 after wake. The same device passed the Android smoke, Hysteria network acceptance
 and upgrade suites against a LAN fixture.
 
+Always-on after sleep, also against the production server: on Windows
+(`--always-on --sleep-minutes 30`) the service-owned tunnel was Blocked until it
+reconnected on its own right after resume, traffic passed, and disabling it left
+no service routes (only the idle Wi-Fi adapter gained link-local routes). On the
+Poco X3 with system Always-on and "Block connections without VPN", 30 minutes of
+deep Doze kept every sample in the tunnel. After a crash of the app process
+(`am crash`) lockdown blocked all traffic with no leak, but MIUI did not schedule
+a service restart; the VPN stays down until the app reconnects.
+
 Protocol references: [URI scheme](https://v2.hysteria.network/docs/developers/URI-Scheme/),
 [wire protocol](https://v2.hysteria.network/docs/developers/Protocol/),
 [official UDP implementation](https://github.com/HyNetworks/hysteria/blob/app/v2.12.3/core/server/udp.go).

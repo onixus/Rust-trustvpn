@@ -36,8 +36,12 @@ Port hopping, Gecko, mTLS, `pinSHA256`, bandwidth/Brutal, congestion и QUIC-п�
 - Realms, Chrome parroting, mimic, `fastOpen`/`lazy` — не планируются;
 - установленный macOS full-tunnel для Hysteria и физические проверки
   hopping/Brutal на реальной сети (сервер без port-range и bandwidth);
-- Windows runtime, 30-минутный сон S3 и Android Doze проверены 3 октября против
-  боевого сервера; cold boot и Always-on после сна пока не проверены.
+- Windows runtime, 30-минутный сон S3 (сеанс и Always-on службы) и Android Doze
+  с системным Always-on проверены 3 октября против боевого сервера; cold boot
+  пока не проверен;
+- Android на MIUI после крэша процесса не перезапускает VPN (утечки нет, трафик
+  заблокирован lockdown); проверить с разрешением «Автозапуск» и при
+  необходимости восстанавливать подключение из приложения.
 
 Официальный сервер ограничивает UDP-ответы буфером 4096 байт и не сохраняет
 TCP half-close; эти сценарии нельзя объявлять полностью поддержанными. Потеря

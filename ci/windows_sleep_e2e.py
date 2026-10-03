@@ -1,8 +1,9 @@
 """Authorized physical Windows sleep/wake E2E with a production profile.
 
 Run through windows_authorized_full.py --worker windows_sleep_e2e.py --sleep-minutes N.
-Keeps a full-tunnel session across S3 sleep, then checks that the WFP guard held,
-the service reconnected on its own and traffic flows. A resume-capable waitable
+Keeps a full-tunnel session (or, with --always-on, the service-owned always-on
+tunnel) across S3 sleep, then checks that the WFP guard held, the service
+reconnected on its own and traffic flows. A resume-capable waitable
 timer wakes the host; the System event log proves that it actually slept.
 The fixture JSON (never committed) holds "profiles" like windows_production_e2e.py
 and "sleep_minutes" from the runner.
@@ -76,6 +77,53 @@ def sleep_for(minutes):
     assert elapsed >= minutes * 60 - 30, f'Woke too early after {elapsed:.0f} s'
     assert events, 'No Power-Troubleshooter wake event: the host did not sleep'
 
+def compare_routes(after, label, endpoint):
+    """Sleep can renew DHCP or IPv6 routes. Only service-owned leftovers fail."""
+    gone, added = sorted(set(before) - set(after)), sorted(set(after) - set(before))
+    if not gone and not added: return
+    for route in gone: log(label + ' route missing: ' + route)
+    for route in added: log(label + ' route added: ' + route)
+    wintun = fixture.ps("@(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object InterfaceDescription -match 'Wintun' | Select-Object -ExpandProperty ifIndex) -join ','")
+    owned = {i for i in wintun.split(',') if i}
+    def service(route):
+        prefix, index, _, metric = route.split('|')
+        return (metric == '21076' or index in owned or prefix in ('0.0.0.0/1', '128.0.0.0/1', '::/1', '8000::/1')
+                or prefix == endpoint + '/32')
+    leaked = [r for r in gone + added if service(r)]
+    assert not leaked, label + ' left service routes: ' + str(leaked)
+    log(label + ': only non-service routes changed across sleep')
+
+def ipc(op, **values):
+    p = fixture.Pipe()
+    try: return p.request(dict(op=op, **values))
+    finally: p.close()
+
+def always_on_connected(host, canary, label):
+    """Polls the service-owned always-on state; the guard must hold throughout."""
+    states = []; until = time.monotonic() + 180
+    while time.monotonic() < until:
+        state = ipc('AlwaysOnStatus')['state']
+        if not states or states[-1] != state: states.append(state); log(label + ' always-on state: ' + state)
+        if state == 'Connected': return states
+        assert state in ('Blocked', 'Connecting', 'Reconnecting'), state
+        blocked(host, canary); time.sleep(1)
+    raise AssertionError(states)
+
+def always_on(profile, host, canary, minutes):
+    """Always-on survives sleep without any client session or lease."""
+    response = ipc('EnableAlwaysOn', profile=profile, dns='1.1.1.1')
+    assert response['state'] in ('Blocked', 'Connected'), response
+    always_on_connected(host, canary, 'Before sleep')
+    traffic('always-on before sleep'); blocked(host, canary)
+    sleep_for(minutes)
+    blocked(host, canary)
+    states = always_on_connected(host, canary, 'After wake')
+    traffic('always-on after sleep'); blocked(host, canary)
+    response = ipc('DisableAlwaysOn'); assert response['state'] == 'Idle', response
+    compare_routes(fixture.routes(), 'Always-on disabled', socket.gethostbyname(host))
+    with socket.create_connection((host, canary), timeout=10): pass
+    return states
+
 def main():
     global pipe
     minutes = int(fixture.FIXTURE['sleep_minutes'])
@@ -83,6 +131,8 @@ def main():
     host = profile['endpoint']['addresses'][0].rsplit(':', 1)[0]
     canary = 8443
     with socket.create_connection((host, canary), timeout=10): pass
+    if fixture.FIXTURE.get('sleep_always_on'):
+        return always_on(dict(profile, name='Always-on sleep E2E'), host, canary, minutes)
     pipe = fixture.Pipe(); answer = pipe.request(dict(op='StartFull', profile=profile, dns='1.1.1.1'))
     assert answer['state'] == 'Connected', answer
     traffic('before sleep'); blocked(host, canary)
@@ -102,7 +152,7 @@ def main():
     pipe.close(); pipe = None; time.sleep(2)
     p = fixture.Pipe(); response = p.request(dict(op='Recover')); p.close()
     assert response['state'] == 'Idle', response
-    assert fixture.routes() == before, 'Recovery after sleep changed baseline routes'
+    compare_routes(fixture.routes(), 'Recovered', socket.gethostbyname(host))
     with socket.create_connection((host, canary), timeout=10): pass
     return states
 
