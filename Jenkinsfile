@@ -35,6 +35,7 @@ pipeline {
               python3 -m venv .ci-server
               .ci-server/bin/pip install -r server/test-environment/requirements.txt
               cargo build -p rtrust-codec --locked
+              export RTRUST_PORTAL_SRC="${RTRUST_PORTAL_SRC:-$HOME/Git/tunnel/server/upstream}"
               python3 ci/run.py macos-portal .ci-server/bin/python server/tests/test_exchange.py
               cargo build -p rtrust-portal --example portal_e2e --locked
               python3 ci/run.py macos-portal-native .ci-server/bin/python server/tests/native_exchange.py
