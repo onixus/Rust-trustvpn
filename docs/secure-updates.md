@@ -91,7 +91,8 @@ retry to 7 in 16.49 seconds. The existing encrypted vault (real profiles, not a
 synthetic one) stayed byte-identical and decryptable, autostart was unchanged,
 the service runs as LocalSystem, and the installed GUI, updater, service and
 wintun.dll hashes match build #93. Sequence 7 was then promoted to latest for
-`windows-x86_64`. The Windows full tunnel was not rerun with the installed 0.4.0 build.
+`windows-x86_64`. Afterwards the authorized Windows full-tunnel run passed once
+with TrustTunnel and once with AmneziaWG on the service binary of build #93.
 
 Setup SHA-256: `938a957a97e6a244162367a7d8759f7763f07432ec07f507f9d7eda5d2a65e28`.
 The `macos-aarch64` manifest of sequence 7 is published under its versioned path
