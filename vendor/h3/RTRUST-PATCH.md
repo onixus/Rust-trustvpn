@@ -4,7 +4,9 @@ Upstream: h3 0.0.8, MIT, source commit
 `22c1aa3f44d1463cd7644c8f654fffc9a6da305c`.
 Original crates.io archive SHA-256:
 `10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662bec4a9d016056b3be`.
-Upstream LICENSE is retained. The root workspace pins this copy through
+Upstream LICENSE is retained. The archive's own `Cargo.lock` (development
+pins, not used by this workspace) is removed; dependency versions come from the
+root `Cargo.lock`. The root workspace pins this copy through
 `[patch.crates-io]`; it affects the TrustTunnel HTTP/3 transport and the
 Hysteria 2 authentication request.
 

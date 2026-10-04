@@ -29,6 +29,23 @@ event wakes the reader, which observes the finished stream. h3 GREASE frames are
 disabled: a GREASE frame + FIN would be another unknown-frame-only FIN. The
 change is harmless for a conforming HTTP/3 server.
 
+## Endpoint 1.1.0 lost responses
+
+The endpoint answers `_check` and failed CONNECT requests with
+`send_response(eof)` and drops the stream at once. When the QUIC stream is
+blocked (a large download in flight, a slow path), the response is queued and
+the drop finishes the stream without it. RFC 9114 makes a request stream that
+ends before response HEADERS a connection error, so h3 closed the connection
+and with it every tunnelled flow. The dataplane's 5 s health check made this
+frequent: on the Android emulator 5 of 10 network acceptance runs over HTTP/3
+failed (truncated downloads, resets, UDP timeouts) against 0 of 10 over
+HTTP/2; a Linux netem reproduction (10 ms ±5 ms delay, 25 % reordering, 1 %
+loss) broke 2 of 100 downloads.
+
+A vendored h3 0.0.8 ([patch notes](../vendor/h3/RTRUST-PATCH.md)) fails only
+that request. A health check whose response is lost counts as healthy once the
+same connection's first check returned 200, which also proves the credentials.
+
 ## Transport bypass
 
 The QUIC socket is routed around the tunnel before its first packet, exactly as
@@ -51,7 +68,9 @@ check (every 5 s, 10 s timeout) detects a dead endpoint.
 
 - `crates/engine/tests/h3_transport.rs`: in-process HTTP/3 endpoint; half-close
   with empty, 1-byte and 300 KB bodies; wrong password; protect hook runs once per
-  fresh socket before the first packet, denial fails closed, hostnames rejected.
+  fresh socket before the first packet, denial fails closed, hostnames rejected; a
+  response finished without HEADERS fails only its request while another tunnel
+  and later health checks continue.
 - `scripts/interop.py` (macOS, official endpoint 1.1.0): SOCKS5 half-close with
   empty, 1-byte, short and 512 KiB bodies over HTTP/2 and HTTP/3. 320 additional
   half-close connections (sequential with a random delay before FIN, and 8 in
