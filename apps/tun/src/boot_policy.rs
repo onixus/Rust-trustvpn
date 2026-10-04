@@ -19,11 +19,6 @@ impl Policy {
             .validate()
             .map_err(|_| "Invalid always-on profile")?;
         rtrust_control::validate_dns(self.dns)?;
-        if self.profile.protocol == rtrust_profile::Protocol::TrustTunnel
-            && self.profile.endpoint.upstream_protocol != "http2"
-        {
-            return Err("Always-on requires HTTP/2".into());
-        }
         for endpoint in &self.profile.endpoint.addresses {
             let endpoint: SocketAddr = endpoint
                 .parse()

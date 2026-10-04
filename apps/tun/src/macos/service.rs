@@ -250,7 +250,7 @@ async fn serve(
         tokio::select! {
             result = tokio::time::timeout(Duration::from_secs(30), device::Prepared::connect(&profile)) => match result {
                 Ok(Ok(prepared)) => prepared,
-                _ => return reply(&mut stream, State::Error, "Не удалось открыть TUN: проверьте профиль HTTP/2, TLS и доступность endpoint").await,
+                _ => return reply(&mut stream, State::Error, "Не удалось открыть TUN: проверьте профиль, TLS и доступность endpoint").await,
             },
             _ = stream.read(&mut unexpected) => return Err("IPC closed during connect".into()),
         }
@@ -260,7 +260,7 @@ async fn serve(
         networks,
         dns,
         endpoints,
-        profile.protocol,
+        profile.udp_transport(),
         &profile.hop_port_ranges(),
     ) {
         Ok(guard) => guard,

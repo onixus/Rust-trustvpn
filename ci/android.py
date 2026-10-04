@@ -67,7 +67,7 @@ cp target/aarch64-linux-android/release/librtrust_android.so /out/arm64-v8a/
         run(['docker', 'run', '--rm', '--network', 'none', '-v', f'{libs}:/out:z', IMAGE, 'chown', '-hR', f'{os.getuid()}:{os.getgid()}', '/out'], timeout=60)
     run([args.gradle, '-p', str(ROOT / 'apps/android'), '--no-daemon', 'assembleDebug', 'assembleRelease', 'assembleDebugAndroidTest', 'lintDebug'], env=env, timeout=1200)
     run(['python3', 'ci/android_smoke.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
-    for protocol in ('trusttunnel','hysteria2','amneziawg'):
+    for protocol in ('trusttunnel','http3','hysteria2','amneziawg'):
         print('Android network protocol:',protocol,flush=True)
         if protocol == 'hysteria2':
             # Download and verify the pinned tool before timing server readiness.

@@ -11,8 +11,8 @@ The Hysteria implementation uses QUIC, HTTP/3 authentication, multiplexed TCP
 streams and UDP datagrams, with optional Salamander obfuscation. It does not run
 an external client process. Android protects and binds the QUIC socket before
 sending traffic; desktop system services use the corresponding endpoint bypass
-and firewall rules. Hysteria 2 is separate from the deferred TrustTunnel HTTP/3
-system-tunnel work.
+and firewall rules. Hysteria 2 is separate from TrustTunnel
+HTTP/3 ([HTTP/3](http3.md)), which shares only the socket bypass.
 
 ## Import and export
 

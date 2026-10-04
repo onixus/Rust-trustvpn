@@ -43,7 +43,7 @@
     <string name="paste_config_or_tt_link">"Paste config or tt:// / hy2:// link"</string>
     <string name="vpn_apps">"VPN apps"</string>
     <string name="app_selection_could_not_be_opened">"App selection could not be opened. Existing settings are preserved."</string>
-    <string name="vpn_uses_http_for_protection_after">"Protocol is selected from the profile: TrustTunnel HTTP/2, Hysteria 2 or AmneziaWG. For protection after the app stops, enable system blocking without VPN."</string>
+    <string name="vpn_uses_http_for_protection_after">"Protocol is selected from the profile: TrustTunnel HTTP/2 or HTTP/3, Hysteria 2 or AmneziaWG. For protection after the app stops, enable system blocking without VPN."</string>
     <string name="import_a_profile_to_get_started">"Import a profile to get started."</string>
     <string name="encrypted_profiles_could_not_be_opened">"Encrypted profiles could not be opened. Existing data has been preserved."</string>
     <string name="export">"Export…"</string>

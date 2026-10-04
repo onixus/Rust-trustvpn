@@ -1,10 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/profile", "crates/desktop", "apps/webview", "crates/update", "crates/portal", "crates/engine", "crates/store", "crates/control", "apps/native", "apps/inspect", "apps/tun", "apps/codec", "apps/android/core"]
-exclude = ["vendor/h2"]
+exclude = ["vendor/h2", "vendor/h3"]
 
 [patch.crates-io]
 h2 = { path = "vendor/h2" }
+h3 = { path = "vendor/h3" }
 
 [workspace.package]
 version = "0.4.0"

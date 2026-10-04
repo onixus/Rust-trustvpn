@@ -1,11 +1,7 @@
 # Desktop lifecycle
 
-Windows and Linux TUN/full-tunnel use HTTP/2 regardless of the imported profile's
-HTTP/3 preference. This is applied to a runtime copy before IPC; saved configs,
-exports and SOCKS5 retain their original transport. Certificate verification,
-hostname, credentials and endpoint addresses remain unchanged. The endpoint must
-accept HTTP/2 on the configured port. HTTP/3 system tunneling is not implemented.
-macOS currently supports SOCKS5 (HTTP/2 and HTTP/3), not a system tunnel.
+SOCKS5, TUN and full tunnel use the profile's transport, HTTP/2 or HTTP/3,
+without a runtime rewrite or automatic fallback. See [HTTP/3](http3.md).
 
 Profile add/replace/delete/rename, default selection and connection settings are
 automatically saved after a short debounce. The existing encrypted vault and OS

@@ -26,7 +26,7 @@ and [actual UI screenshots](screenshots/README.md).
 The working tree now includes a root LaunchDaemon, reserved `utun5254`, authenticated
 Unix IPC restricted to the configured desktop UID, selected IPv4 networks and
 full IPv4/IPv6 tunnel modes. The native UI uses the same IPC contract as Windows
-and Linux and preserves stored HTTP/3 profiles while selecting HTTP/2 at runtime.
+and Linux and uses the profile's transport, HTTP/2 or HTTP/3 ([HTTP/3](http3.md)).
 
 The service adds only its own PF anchor, routes tagged with `RTF_PROTO2`, and a
 SystemConfiguration DNS entry. Recovery verifies ownership before deletion.

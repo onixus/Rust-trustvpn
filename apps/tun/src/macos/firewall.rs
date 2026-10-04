@@ -59,7 +59,7 @@ pub(super) fn policy(
     full: bool,
     networks: &[rtrust_control::Ipv4Net],
     endpoints: &[SocketAddrV4],
-    protocol: rtrust_profile::Protocol,
+    udp: bool,
     ports: &[(u16, u16)],
 ) -> String {
     let mut rules = vec![
@@ -67,12 +67,8 @@ pub(super) fn policy(
         format!("pass out quick on {DEVICE} all no state"),
     ];
     if full {
-        // Hysteria 2 and AmneziaWG are UDP transports.
-        let transport = if protocol == rtrust_profile::Protocol::TrustTunnel {
-            "tcp"
-        } else {
-            "udp"
-        };
+        // QUIC (HTTP/3, Hysteria 2) and AmneziaWG use UDP.
+        let transport = if udp { "udp" } else { "tcp" };
         let flags = if transport == "tcp" { " flags any" } else { "" };
         // Hysteria port hopping sends to any port of the server's set.
         let hop = ports
@@ -171,15 +167,14 @@ mod tests {
     #[test]
     fn hysteria_hop_ports_open_only_the_server_port_set() {
         let endpoint: SocketAddrV4 = "192.0.2.10:443".parse().unwrap();
-        let hysteria = rtrust_profile::Protocol::Hysteria2;
-        let plain = policy(501, true, &[], &[endpoint], hysteria, &[]);
+        let plain = policy(501, true, &[], &[endpoint], true, &[]);
         assert!(plain.contains("proto udp to 192.0.2.10 port 443 user root no state"));
         let hop = policy(
             501,
             true,
             &[],
             &[endpoint],
-            hysteria,
+            true,
             &[(443, 443), (20000, 20010)],
         );
         assert!(

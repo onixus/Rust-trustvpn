@@ -2,7 +2,7 @@
 pipeline {
   agent none
   options { disableConcurrentBuilds(); timestamps(); timeout(time: 120, unit: 'MINUTES'); buildDiscarder(logRotator(numToKeepStr: '15')) }
-  parameters { booleanParam(name: 'RUN_WINDOWS', defaultValue: true, description: 'Explicitly defer Windows when its node is offline'); booleanParam(name: 'RUN_LINUX', defaultValue: true, description: 'Run additional Linux ARM checks; x86 Linux has an independent pipeline'); booleanParam(name: 'WINDOWS_SYSTEM_E2E', defaultValue: false, description: 'Run invasive installer/Wintun tests only on an idle Windows test host without a user installation') }
+  parameters { booleanParam(name: 'RUN_WINDOWS', defaultValue: true, description: 'Explicitly defer Windows when its node is offline'); booleanParam(name: 'RUN_LINUX', defaultValue: true, description: 'Run additional Linux ARM checks; x86 Linux has an independent pipeline'); booleanParam(name: 'WINDOWS_SYSTEM_E2E', defaultValue: false, description: 'Run invasive installer/Wintun tests only on an idle Windows test host without a user installation'); choice(name: 'WINDOWS_TRANSPORT', choices: ['trusttunnel', 'http3'], description: 'TrustTunnel transport of the Wintun service E2E: HTTP/2 (trusttunnel) or HTTP/3') }
   stages {
     stage('Source snapshot') {
       agent { label 'built-in' }
@@ -161,7 +161,7 @@ pipeline {
             try {
               sh '''rm -rf .ci-wintun
                 export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
-                JENKINS_NODE_COOKIE=rtrust-wintun-fixture python3 ci/windows_fixture.py > wintun-fixture.log 2>&1 &
+                JENKINS_NODE_COOKIE=rtrust-wintun-fixture python3 ci/windows_fixture.py --protocol "${WINDOWS_TRANSPORT:-trusttunnel}" > wintun-fixture.log 2>&1 &
                 echo $! > wintun-fixture.pid
                 for i in $(seq 1 180); do
                   test -f .ci-wintun/ready && exit 0

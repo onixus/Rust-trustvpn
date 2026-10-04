@@ -90,3 +90,17 @@ fn legacy_embedded_link_conflicts_are_rejected() {
         legacy[field] = original;
     }
 }
+
+#[test]
+fn udp_transport_follows_the_profile_transport() {
+    let mut profile =
+        Profile::import(include_str!("../../../examples/demo.endpoint.toml")).unwrap();
+    profile.endpoint.upstream_protocol = "http2".into();
+    assert!(!profile.udp_transport());
+    profile.endpoint.upstream_protocol = "http3".into();
+    assert!(profile.udp_transport());
+    profile.protocol = rtrust_profile::Protocol::Hysteria2;
+    assert!(profile.udp_transport());
+    profile.protocol = rtrust_profile::Protocol::AmneziaWg;
+    assert!(profile.udp_transport());
+}

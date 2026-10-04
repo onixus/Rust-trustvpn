@@ -148,11 +148,6 @@ async fn pinned(
     profile: &rtrust_profile::Profile,
     networks: &[rtrust_control::Ipv4Net],
 ) -> Result<rtrust_profile::Profile, String> {
-    if profile.protocol == rtrust_profile::Protocol::TrustTunnel
-        && profile.endpoint.upstream_protocol != "http2"
-    {
-        return Err("Wintun currently requires HTTP/2".into());
-    }
     let mut result = profile.clone();
     let mut addresses = Vec::new();
     for address in &profile.endpoint.addresses {
@@ -333,7 +328,7 @@ async fn serve(
             index,
             &full::endpoints(&profile)?,
             dns,
-            profile.protocol,
+            profile.udp_transport(),
             &profile.hop_port_ranges(),
         )?;
         vec!["0.0.0.0/1".parse().unwrap(), "128.0.0.0/1".parse().unwrap()]
@@ -483,7 +478,7 @@ pub(crate) fn boot_guard(policy: Option<&crate::boot_policy::Policy>) -> Result<
     firewall::install_boot(
         0,
         &endpoints,
-        policy.map(|p| p.profile.protocol).unwrap_or_default(),
+        policy.is_some_and(|p| p.profile.udp_transport()),
         &policy
             .map(|p| p.profile.hop_port_ranges())
             .unwrap_or_default(),
@@ -535,11 +530,12 @@ mod tests {
             .unwrap();
         assert_eq!(p.endpoint.addresses, ["198.18.0.2:443"]);
         assert_eq!(p.endpoint.hostname, profile.endpoint.hostname);
+        // HTTP/3 is pinned the same way; only the WFP permit switches to UDP.
         profile.endpoint.upstream_protocol = "http3".into();
-        assert!(
-            pinned(&profile, &["10.231.243.2/32".parse().unwrap()])
-                .await
-                .is_err()
-        );
+        let p = pinned(&profile, &["10.231.243.2/32".parse().unwrap()])
+            .await
+            .unwrap();
+        assert_eq!(p.endpoint.addresses, ["198.18.0.2:443"]);
+        assert!(p.udp_transport());
     }
 }

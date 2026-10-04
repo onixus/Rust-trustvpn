@@ -50,10 +50,9 @@ Compared with v0.3.2-ui.2, the published packages now contain:
 
 ### TrustTunnel
 
-- Native Rust HTTP/2 transport for system VPN.
-- SOCKS5 mode over HTTP/2 or HTTP/3.
+- Native Rust HTTP/2 and HTTP/3 transports for system VPN and SOCKS5; the profile selects the transport, with no silent fallback, see [HTTP/3](docs/http3.md).
 - IPv4/IPv6 TCP and UDP handling, DNS, ICMP where supported by the platform dataplane, bounded fragmentation handling, reconnect and fail-closed protection.
-- Imported TrustTunnel HTTP/3 profiles are preserved, but **TrustTunnel HTTP/3 system VPN is still deferred**. System-tunnel sessions currently use HTTP/2.
+- HTTP/3 system VPN is in the current main, not in the v0.4.0 packages: those still run system tunnels over HTTP/2.
 
 ### Hysteria 2
 

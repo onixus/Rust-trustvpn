@@ -407,7 +407,7 @@ impl rustls::client::ResolvesClientCert for ClientCertificate {
 }
 /// Every transport socket, including each port-hopping replacement, is marked
 /// or protected before its first packet; failure never falls back to a plain socket.
-fn socket_factory(
+pub(crate) fn socket_factory(
     address: std::net::SocketAddr,
     mark: Option<u32>,
     protector: Option<SocketProtector>,

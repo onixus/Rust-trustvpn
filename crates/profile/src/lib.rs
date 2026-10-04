@@ -170,6 +170,14 @@ impl Profile {
             Protocol::TrustTunnel => &self.endpoint.upstream_protocol,
         }
     }
+    /// True when the transport to the server is UDP (QUIC or WireGuard), so a
+    /// kill switch must admit UDP rather than TCP to the endpoint.
+    pub fn udp_transport(&self) -> bool {
+        match self.protocol {
+            Protocol::Hysteria2 | Protocol::AmneziaWg => true,
+            Protocol::TrustTunnel => self.endpoint.upstream_protocol == "http3",
+        }
+    }
     /// Server UDP port ranges a firewall must allow for Hysteria port hopping;
     /// empty when only the endpoint address ports are used.
     pub fn hop_port_ranges(&self) -> Vec<(u16, u16)> {

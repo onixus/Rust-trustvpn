@@ -284,7 +284,7 @@ async fn serve(
         tokio::select! {
             result = crate::linux::Prepared::connect_mode(&profile, routes::DEVICE, routes::ADDRESS.parse().unwrap(), full) => match result {
                 Ok(prepared) => prepared,
-                Err(_) => return reply(&mut stream, State::Error, "Не удалось открыть TUN: проверьте профиль HTTP/2, TLS и доступность endpoint").await,
+                Err(_) => return reply(&mut stream, State::Error, "Не удалось открыть TUN: проверьте профиль, TLS и доступность endpoint").await,
             },
             _ = stream.read(&mut unexpected) => return Err("IPC closed during connect".into()),
         }

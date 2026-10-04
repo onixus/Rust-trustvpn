@@ -2,25 +2,27 @@
 
 ## W3-HTTP3 — TrustTunnel HTTP/3 для системного VPN
 
-Статус: отложено в волну 3 по решению пользователя, 2026-09-30.
+Статус: реализовано, 2026-10-04 ([HTTP/3](http3.md)). Native runtime, always-on и
+Android больше не подменяют HTTP/3 на HTTP/2; автоматического fallback нет.
 
-Область: HTTP/3 в системном packet-tunnel, прежде всего Windows Wintun и Linux TUN/full-tunnel; адаптеры Android/macOS также принимаются отдельно в этой волне после появления их системного VPN. HTTP/3 для SOCKS5 уже
-реализован и остаётся в текущей поставке. Сейчас native UI выбирает HTTP/2
-для runtime-копии системного подключения, сохраняя исходный профиль без изменений.
+Сделано:
+- interop-проблема half-close с endpoint 1.1.0 воспроизведена и найдена в
+  endpoint (FIN без DATA не будит читателя потока); клиент шлёт пустой DATA-кадр
+  перед FIN и не шлёт GREASE;
+- QUIC-сокет помечается (`SO_MARK`) или защищается (`protect`) до первого пакета;
+  WFP и PF пропускают UDP к endpoint для HTTP/3-профилей;
+- QUIC keepalive 10 с, idle timeout 30 с;
+- Linux TUN и full tunnel E2E против endpoint 1.1.0 для HTTP/3, включая потерю
+  endpoint, reconnect, аварии GUI/службы, always-on, смену сети и boot guard.
 
-Работы и критерии приёмки:
-- QUIC transport в системном packet-to-flow пути, корректные TCP half-close и
-  backpressure; воспроизвести и устранить interop-проблему с endpoint 1.1.0.
-- QUIC endpoint bypass, reconnect, смена адреса endpoint и сети без маршрутизации
-  транспорта в собственный TUN и без обхода kill switch.
-- TCP/UDP/DNS, долгие потоки, потеря/блокировка UDP, MTU, sleep/resume,
-  аварии GUI/службы и восстановление маршрутов/WFP/nftables.
-- Реальный E2E на Windows и Linux против официального endpoint, отрицательные
-  TLS/auth tests; сохранить действующие HTTP/2 и SOCKS HTTP/3 проверки.
-- Убрать принудительный HTTP/2 из native runtime только после этих проверок.
-  Политика fallback должна быть явной; TLS verification не ослабляется.
+- endpoint 1.1.0 теряет ответ заблокированного потока (`_check`, отказ CONNECT);
+  вендорный h3 ограничивает ошибку этим запросом, а не всем соединением;
+- Windows: авторизованный full-tunnel прогон на установленной службе; Android:
+  приёмка на эмуляторе по HTTP/2 и HTTP/3 (HTTP/3 — 10 из 10).
 
-Это отложенная функциональность, а не заявление о поддержке HTTP/3 в TUN.
+Остаётся проверить HTTP/3: системную службу macOS, физическое Android-устройство,
+сон Windows, боевой сервер и сети с блокировкой/ограничением UDP. Windows
+Wintun/full-tunnel E2E в Jenkins запускается параметром `WINDOWS_TRANSPORT=http3`.
 
 
 ## AmneziaWG 3: границы preview

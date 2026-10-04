@@ -37,7 +37,6 @@ impl Session {
         networks: String,
         dns: String,
     ) -> Result<Self, String> {
-        let profile = runtime_profile(profile, mode);
         let _ = &dns;
         match mode {
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -114,39 +113,5 @@ impl Session {
                 }
             }
         }
-    }
-}
-
-// TUN's packet transport is HTTP/2 on both Windows and Linux. Keep the stored
-// profile unchanged so SOCKS and exports retain the user's HTTP/3 preference.
-fn runtime_profile(mut profile: rtrust_profile::Profile, mode: Mode) -> rtrust_profile::Profile {
-    if mode != Mode::Socks && profile.protocol == rtrust_profile::Protocol::TrustTunnel {
-        profile.endpoint.upstream_protocol = "http2".into();
-    }
-    profile
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn transport_is_selected_for_runtime_without_rewriting_profile() {
-        let mut profile =
-            rtrust_profile::Profile::import(include_str!("../../../examples/demo.endpoint.toml"))
-                .unwrap();
-        profile.endpoint.upstream_protocol = "http3".into();
-        assert_eq!(
-            runtime_profile(profile.clone(), Mode::Socks)
-                .endpoint
-                .upstream_protocol,
-            "http3"
-        );
-        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-        for mode in [Mode::Tun, Mode::Full] {
-            let effective = runtime_profile(profile.clone(), mode);
-            assert_eq!(effective.endpoint.upstream_protocol, "http2");
-            assert_eq!(effective.endpoint.hostname, profile.endpoint.hostname);
-            assert_eq!(effective.endpoint.certificate, profile.endpoint.certificate);
-        }
-        assert_eq!(profile.endpoint.upstream_protocol, "http3");
     }
 }

@@ -8,6 +8,15 @@ struct State {
     driver: tokio::task::JoinHandle<()>,
     connection: quinn::Connection,
     _endpoint: quinn::Endpoint,
+    /// Set by the first `_check` answered with 200 (credentials accepted).
+    verified: std::sync::atomic::AtomicBool,
+}
+/// Endpoint 1.1.0 can finish a CONNECT stream without the response it queued
+/// (vendor/h3/RTRUST-PATCH.md). The patched h3 reports that for this stream
+/// only instead of closing the connection.
+enum Answer {
+    Response(Box<Stream>),
+    Lost,
 }
 impl Drop for State {
     fn drop(&mut self) {
@@ -18,26 +27,61 @@ impl Drop for State {
 #[derive(Clone)]
 pub(super) struct H3Session(Arc<State>);
 impl H3Session {
-    pub async fn connect(p: &Profile) -> Result<Self> {
+    /// `mark`/`protector` route the QUIC socket around the system tunnel; they
+    /// require numeric endpoint addresses so no DNS query enters the tunnel.
+    pub async fn connect(
+        p: &Profile,
+        mark: Option<u32>,
+        protector: Option<&SocketProtector>,
+    ) -> Result<Self> {
         let mut tls = tls_config(p)?;
         tls.alpn_protocols = vec![b"h3".to_vec()];
         let quic =
             quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|_| Error::Tls)?;
-        let config = quinn::ClientConfig::new(Arc::new(quic));
+        let mut config = quinn::ClientConfig::new(Arc::new(quic));
+        // A system tunnel may sit idle; keepalives stop the 30 s idle timeout
+        // from tearing down the session, while a dead path still surfaces.
+        let mut transport = quinn::TransportConfig::default();
+        transport.keep_alive_interval(Some(Duration::from_secs(10)));
+        transport.max_idle_timeout(Some(
+            Duration::from_secs(30)
+                .try_into()
+                .map_err(|_| Error::Profile)?,
+        ));
+        config.transport_config(Arc::new(transport));
+        let bypass = mark.is_some() || protector.is_some();
         let mut connected = None;
-        for address in &p.endpoint.addresses {
-            let resolved = tokio::net::lookup_host(address)
-                .await
-                .map_err(|_| Error::Connect)?;
-            for addr in resolved.take(8) {
-                let bind = if addr.is_ipv4() {
-                    "0.0.0.0:0"
-                } else {
-                    "[::]:0"
+        let mut failure = Error::Connect;
+        'addresses: for address in &p.endpoint.addresses {
+            let resolved: Vec<std::net::SocketAddr> = if bypass {
+                vec![address.parse().map_err(|_| {
+                    Error::Unsupported(
+                        "resolve endpoint on the underlying network before VPN setup",
+                    )
+                })?]
+            } else {
+                tokio::net::lookup_host(address)
+                    .await
+                    .map_err(|_| Error::Connect)?
+                    .take(8)
+                    .collect()
+            };
+            for addr in resolved {
+                // Marked/protected before the first packet; never a plain fallback.
+                let socket = match hysteria::socket_factory(addr, mark, protector.cloned())() {
+                    Ok(socket) => socket,
+                    Err(error) => {
+                        failure = Error::ConnectIo(error.kind());
+                        continue;
+                    }
                 };
-                let mut endpoint =
-                    quinn::Endpoint::client(bind.parse().map_err(|_| Error::Connect)?)
-                        .map_err(|_| Error::Connect)?;
+                let mut endpoint = quinn::Endpoint::new_with_abstract_socket(
+                    quinn::EndpointConfig::default(),
+                    None,
+                    socket,
+                    Arc::new(quinn::TokioRuntime),
+                )
+                .map_err(|_| Error::Connect)?;
                 endpoint.set_default_client_config(config.clone());
                 let connecting = endpoint
                     .connect(addr, &p.endpoint.hostname)
@@ -45,18 +89,20 @@ impl H3Session {
                 match tokio::time::timeout(Duration::from_secs(4), connecting).await {
                     Ok(Ok(connection)) => {
                         connected = Some((endpoint, connection));
-                        break;
+                        break 'addresses;
                     }
                     Ok(Err(quinn::ConnectionError::TransportError(_))) => return Err(Error::Tls),
-                    _ => continue,
+                    Ok(Err(_)) => failure = Error::Connect,
+                    Err(_) => failure = Error::Timeout,
                 }
             }
-            if connected.is_some() {
-                break;
-            }
         }
-        let (endpoint, connection) = connected.ok_or(Error::Connect)?;
-        let (mut driver, sender) = h3::client::new(h3_quinn::Connection::new(connection.clone()))
+        let (endpoint, connection) = connected.ok_or(failure)?;
+        // Grease is off: endpoint 1.1.0 would see a GREASE frame + FIN as an
+        // unknown frame and miss the end of the request body (see `finish`).
+        let (mut driver, sender) = h3::client::builder()
+            .send_grease(false)
+            .build(h3_quinn::Connection::new(connection.clone()))
             .await
             .map_err(|_| Error::Protocol)?;
         let credentials = Zeroizing::new(format!(
@@ -79,9 +125,16 @@ impl H3Session {
             driver,
             connection,
             _endpoint: endpoint,
+            verified: false.into(),
         })))
     }
     async fn stream(&self, target: &str) -> Result<Stream> {
+        match self.request(target).await? {
+            Answer::Response(stream) => Ok(*stream),
+            Answer::Lost => Err(Error::Protocol),
+        }
+    }
+    async fn request(&self, target: &str) -> Result<Answer> {
         let request = Request::builder()
             .method("CONNECT")
             .uri(
@@ -103,9 +156,17 @@ impl H3Session {
             if target == "_check" {
                 stream.finish().await.map_err(|_| Error::Io)?;
             }
-            let response = stream.recv_response().await.map_err(|_| Error::Protocol)?;
+            let response = match stream.recv_response().await {
+                Ok(response) => response,
+                Err(h3::error::StreamError::StreamError { code, .. })
+                    if code == h3::error::Code::H3_FRAME_UNEXPECTED =>
+                {
+                    return Ok(Answer::Lost);
+                }
+                Err(_) => return Err(Error::Protocol),
+            };
             match response.status() {
-                StatusCode::OK => Ok(stream),
+                StatusCode::OK => Ok(Answer::Response(Box::new(stream))),
                 StatusCode::PROXY_AUTHENTICATION_REQUIRED => Err(Error::Authentication),
                 code => Err(Error::Rejected(code.as_u16())),
             }
@@ -113,9 +174,19 @@ impl H3Session {
         .await
         .map_err(|_| Error::Timeout)?
     }
+    /// A `_check` finished without its response still proves a live,
+    /// authenticated session once a first check returned 200; the endpoint
+    /// received and answered it on this connection.
     pub async fn health(&self) -> Result<()> {
-        let _ = self.stream("_check").await?;
-        Ok(())
+        use std::sync::atomic::Ordering;
+        match self.request("_check").await? {
+            Answer::Response(_) => {
+                self.0.verified.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+            Answer::Lost if self.0.verified.load(Ordering::Relaxed) => Ok(()),
+            Answer::Lost => Err(Error::Protocol),
+        }
     }
     pub async fn open(&self, target: &str) -> Result<Tunnel> {
         let stream = self.stream(target).await?;
@@ -130,8 +201,7 @@ impl H3Session {
                 loop {
                     let n = reader.read(&mut bytes).await?;
                     if n == 0 {
-                        send.finish().await.map_err(|_| Error::Io)?;
-                        return Ok::<_, Error>(());
+                        return finish(&mut send).await;
                     }
                     send.send_data(Bytes::copy_from_slice(&bytes[..n]))
                         .await
@@ -154,4 +224,19 @@ impl H3Session {
         });
         Ok(Tunnel { io: client, pump })
     }
+}
+
+/// Half-close a CONNECT stream. Endpoint 1.1.0 (quiche) wakes its stream
+/// reader only on h3 DATA events; a FIN that arrives without new DATA raises
+/// only `Finished`, so the target never sees EOF. An empty DATA frame written
+/// immediately before FIN lets quinn carry both in one STREAM frame, which
+/// raises a DATA event whose read observes the finished stream.
+async fn finish<S: h3::quic::SendStream<Bytes>>(
+    stream: &mut h3::client::RequestStream<S, Bytes>,
+) -> Result<()> {
+    stream
+        .send_data(Bytes::new())
+        .await
+        .map_err(|_| Error::Io)?;
+    stream.finish().await.map_err(|_| Error::Io)
 }
