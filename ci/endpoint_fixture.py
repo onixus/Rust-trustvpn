@@ -18,6 +18,13 @@ password=secrets.token_urlsafe(32)
 (root/'credentials.toml').write_text(f'[[client]]\nusername="interop"\npassword="{password}"\n')
 server=http.server.ThreadingHTTPServer(('127.0.0.1',0),HTTP)
 threading.Thread(target=server.serve_forever,daemon=True).start()
+# The endpoint connects to the first address "localhost" resolves to; a host
+# with IPv6 routes (e.g. a VPN client) may list ::1 first. Serve both.
+class HTTP6(http.server.ThreadingHTTPServer):address_family=socket.AF_INET6
+try:
+    server6=HTTP6(('::1',server.server_port),HTTP)
+    threading.Thread(target=server6.serve_forever,daemon=True).start()
+except OSError:pass
 udp=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);udp.bind(('127.0.0.1',0));udp.settimeout(.2)
 def echo():
     while not stop.is_set():

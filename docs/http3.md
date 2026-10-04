@@ -87,7 +87,8 @@ check (every 5 s, 10 s timeout) detects a dead endpoint.
   a QUIC-listening endpoint. On 4 October 2026 the authorized run
   (`ci/windows_authorized_full.py`, timed rollback to the installed service)
   passed: Wintun TCP/UDP/ICMP, endpoint outage and reconnect, GUI and service
-  crashes, always-on with a crash cycle, and a physical network loss.
+  crashes, always-on with a crash cycle, and a physical network loss. It passed
+  again with the final service build, including the lost-response fix.
 - Android: `ci/android.py` runs the network acceptance for TrustTunnel over
   HTTP/2 and HTTP/3 (`ci/android_fixture.py --protocol http3`). On the emulator
   HTTP/3 passed 10 of 10 interleaved runs after the lost-response fix.
