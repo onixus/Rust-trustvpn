@@ -8,6 +8,15 @@ struct State {
     driver: tokio::task::JoinHandle<()>,
     connection: quinn::Connection,
     _endpoint: quinn::Endpoint,
+    /// Set by the first `_check` answered with 200 (credentials accepted).
+    verified: std::sync::atomic::AtomicBool,
+}
+/// Endpoint 1.1.0 can finish a CONNECT stream without the response it queued
+/// (vendor/h3/RTRUST-PATCH.md). The patched h3 reports that for this stream
+/// only instead of closing the connection.
+enum Answer {
+    Response(Box<Stream>),
+    Lost,
 }
 impl Drop for State {
     fn drop(&mut self) {
@@ -116,9 +125,16 @@ impl H3Session {
             driver,
             connection,
             _endpoint: endpoint,
+            verified: false.into(),
         })))
     }
     async fn stream(&self, target: &str) -> Result<Stream> {
+        match self.request(target).await? {
+            Answer::Response(stream) => Ok(*stream),
+            Answer::Lost => Err(Error::Protocol),
+        }
+    }
+    async fn request(&self, target: &str) -> Result<Answer> {
         let request = Request::builder()
             .method("CONNECT")
             .uri(
@@ -138,11 +154,19 @@ impl H3Session {
                 .await
                 .map_err(|_| Error::Protocol)?;
             if target == "_check" {
-                finish(&mut stream).await?;
+                stream.finish().await.map_err(|_| Error::Io)?;
             }
-            let response = stream.recv_response().await.map_err(|_| Error::Protocol)?;
+            let response = match stream.recv_response().await {
+                Ok(response) => response,
+                Err(h3::error::StreamError::StreamError { code, .. })
+                    if code == h3::error::Code::H3_FRAME_UNEXPECTED =>
+                {
+                    return Ok(Answer::Lost);
+                }
+                Err(_) => return Err(Error::Protocol),
+            };
             match response.status() {
-                StatusCode::OK => Ok(stream),
+                StatusCode::OK => Ok(Answer::Response(Box::new(stream))),
                 StatusCode::PROXY_AUTHENTICATION_REQUIRED => Err(Error::Authentication),
                 code => Err(Error::Rejected(code.as_u16())),
             }
@@ -150,9 +174,19 @@ impl H3Session {
         .await
         .map_err(|_| Error::Timeout)?
     }
+    /// A `_check` finished without its response still proves a live,
+    /// authenticated session once a first check returned 200; the endpoint
+    /// received and answered it on this connection.
     pub async fn health(&self) -> Result<()> {
-        let _ = self.stream("_check").await?;
-        Ok(())
+        use std::sync::atomic::Ordering;
+        match self.request("_check").await? {
+            Answer::Response(_) => {
+                self.0.verified.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+            Answer::Lost if self.0.verified.load(Ordering::Relaxed) => Ok(()),
+            Answer::Lost => Err(Error::Protocol),
+        }
     }
     pub async fn open(&self, target: &str) -> Result<Tunnel> {
         let stream = self.stream(target).await?;

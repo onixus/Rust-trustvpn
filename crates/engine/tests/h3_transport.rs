@@ -4,8 +4,10 @@ use rtrust_profile::Profile;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// In-process HTTP/3 CONNECT endpoint: `_check` answers 200, any other target
-/// echoes the request body after the client's FIN.
+/// In-process HTTP/3 CONNECT endpoint: the first `_check` answers 200, any
+/// other target echoes the request body after the client's FIN. Like endpoint
+/// 1.1.0 with a blocked stream, it finishes `lost.invalid` and every later
+/// `_check` without a response.
 async fn endpoint() -> (Profile, tokio::task::JoinHandle<()>) {
     let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -31,6 +33,8 @@ async fn endpoint() -> (Profile, tokio::task::JoinHandle<()>) {
     .unwrap();
     let task = tokio::spawn(async move {
         while let Some(incoming) = server.accept().await {
+            // Counted per connection: each session's first check is answered.
+            let checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             tokio::spawn(async move {
                 let Ok(connection) = incoming.await else {
                     return;
@@ -40,6 +44,7 @@ async fn endpoint() -> (Profile, tokio::task::JoinHandle<()>) {
                         .await
                         .unwrap();
                 while let Ok(Some(resolver)) = h3.accept().await {
+                    let checks = checks.clone();
                     tokio::spawn(async move {
                         let (request, mut stream) = resolver.resolve_request().await.unwrap();
                         assert_eq!(request.method(), "CONNECT");
@@ -54,6 +59,14 @@ async fn endpoint() -> (Profile, tokio::task::JoinHandle<()>) {
                                     http::Response::builder().status(407).body(()).unwrap(),
                                 )
                                 .await;
+                            let _ = stream.finish().await;
+                            return;
+                        }
+                        let authority = request.uri().authority().unwrap().as_str().to_owned();
+                        let lost = authority == "lost.invalid:1"
+                            || (authority == "_check"
+                                && checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0);
+                        if lost {
                             let _ = stream.finish().await;
                             return;
                         }
@@ -158,5 +171,27 @@ async fn protected_http3_transport_invokes_hook_before_first_packet_and_fails_cl
         2,
         "must reject unprotected DNS resolution"
     );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_response_fails_only_its_stream() {
+    let (p, server) = endpoint().await;
+    let session = Session::connect(&p).await.unwrap();
+    // A lost first check cannot prove the credentials; the fixture answers it.
+    session.health().await.unwrap();
+    let mut active = session.open_tcp("192.0.2.1:7").await.unwrap();
+    active.write_all(b"before").await.unwrap();
+    assert!(matches!(
+        session.open_tcp("lost.invalid:1").await,
+        Err(Error::Protocol)
+    ));
+    // Later checks lose their response; the session stays usable.
+    session.health().await.unwrap();
+    active.write_all(b" after").await.unwrap();
+    active.shutdown().await.unwrap();
+    let mut echoed = Vec::new();
+    active.read_to_end(&mut echoed).await.unwrap();
+    assert_eq!(echoed, b"before after");
     server.abort();
 }
