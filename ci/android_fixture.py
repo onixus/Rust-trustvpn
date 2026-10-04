@@ -27,8 +27,8 @@ def run(*args, **kwargs):
     return subprocess.check_output(args, timeout=90, **kwargs).decode().strip()
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--protocol',choices=['trusttunnel','hysteria2'],default='trusttunnel');args=parser.parse_args()
-    hysteria=args.protocol=='hysteria2'
+    parser=argparse.ArgumentParser();parser.add_argument('--protocol',choices=['trusttunnel','hysteria2','amneziawg'],default='trusttunnel');args=parser.parse_args()
+    hysteria=args.protocol=='hysteria2';amnezia=args.protocol=='amneziawg'
     ROOT.mkdir(mode=0o700, exist_ok=True)
     if (ROOT / 'ready').exists():
         raise SystemExit('An Android fixture is already active')
@@ -52,7 +52,7 @@ def main():
     (ROOT / 'hosts.toml').write_text('[[main_hosts]]\nhostname="localhost"\ncert_chain_path="cert.pem"\nprivate_key_path="key.pem"\n')
     (ROOT / 'credentials.toml').write_text(f'[[client]]\nusername="interop"\npassword="{password}"\n')
     for name in ['key.pem', 'control-token', 'credentials.toml']: (ROOT / name).chmod(0o600)
-    (ROOT/'hysteria.json').unlink(missing_ok=True)
+    for name in ['hysteria.json','outage-seconds','amneziawg.uapi','amneziawg-client.json']:(ROOT/name).unlink(missing_ok=True)
     if hysteria:
         from hysteria_interop import binary
         import shutil
@@ -60,7 +60,20 @@ def main():
         obfs=secrets.token_urlsafe(32)
         (ROOT/'hysteria.json').write_text(json.dumps({'listen':':4433','tls':{'cert':'/fixture/cert.pem','key':'/fixture/key.pem'},'auth':{'type':'password','password':password},'obfs':{'type':'salamander','salamander':{'password':obfs}}}))
         (ROOT/'hysteria.json').chmod(0o600)
-    transport='udp' if hysteria else 'tcp'
+        # The app notices a silent QUIC server after about 42 s; the default 45 s
+        # outage left the acceptance test three seconds to observe it.
+        (ROOT/'outage-seconds').write_text('60')
+    if amnezia:
+        from amneziawg_server import binary
+        import shutil
+        shutil.copy2(binary(),ROOT/'amneziawg')
+        # The official amneziawg-go device with header protection, padding and
+        # trailers; it relays tunnel flows to the targets in the same container.
+        subprocess.run([str(ROOT/'amneziawg'),'keygen',str(ROOT)],check=True,timeout=30)
+        # WireGuard has no connection to lose: the app notices a silent peer
+        # after four unanswered handshakes, about 35 s into the outage.
+        (ROOT/'outage-seconds').write_text('60')
+    transport='tcp' if not (hysteria or amnezia) else 'udp'
     # The emulator reaches the fixture at 10.0.2.2. When it runs on another host
     # (e.g. Windows hosting the agent VM), that host forwards one fixed port here.
     publish=os.environ.get('RTRUST_ANDROID_FIXTURE_PUBLISH','127.0.0.1:')
@@ -75,7 +88,7 @@ def main():
         run('docker', 'network', 'create', '--subnet', '10.231.243.0/29', '--ipv6', '--subnet', 'fd00:5254:243::/64', *options, NAME); network = True
         run('docker', 'run', '-d', '--name', NAME, '--network', NAME, '--ip', IP, '--ip6', 'fd00:5254:243::2', '--user', f'{os.getuid()}:{os.getgid()}', '--cap-drop=ALL', '--sysctl', 'net.ipv4.ip_unprivileged_port_start=0', '--security-opt=no-new-privileges', '--read-only', '--tmpfs', '/tmp', '-p', f'{publish}:4433/{transport}', '-v', f'{ROOT}:/fixture:ro,z', '-v', f'{Path("ci/windows_fixture_server.py").resolve()}:/server.py:ro,z', 'python:3.11-slim', 'python', '/server.py'); container = True
         port = int(run('docker', 'port', NAME, f'4433/{transport}').rsplit(':', 1)[1])
-        if not hysteria:
+        if not (hysteria or amnezia):
             tls = ssl.create_default_context(cafile=str(ROOT / 'cert.pem'))
             tls.set_alpn_protocols(['h2'])
             for _ in range(100):
@@ -88,6 +101,12 @@ def main():
         if hysteria:
             data['large_udp_digest']=True
             data['base']={'schema_version':1,'protocol':'hysteria2','hysteria2':{'salamander':obfs},'name':'Hysteria fixture','endpoint':dict(hostname='localhost',addresses=[f'10.0.2.2:{port}'],username='hysteria2',password=password,certificate=(ROOT/'cert.pem').read_text(),upstream_protocol='http3',dns_upstreams=[IP])}
+        if amnezia:
+            base=json.loads((ROOT/'amneziawg-client.json').read_text())
+            base['endpoint'].update(hostname='10.0.2.2',addresses=[f'10.0.2.2:{port}'],dns_upstreams=[IP])
+            # The app sees the outage only through traffic, and reconnects after
+            # the peer returns at 60 s.
+            data.update(base=base,outage_detection_ms=55000,recovery_ms=75000)
         manifest = ROOT / 'client.json'; manifest.write_text(json.dumps(data)); manifest.chmod(0o600)
         (ROOT / 'ready').write_text(NAME)
         deadline = time.monotonic() + 900
@@ -99,6 +118,6 @@ def main():
     finally:
         if container: subprocess.run(['docker', 'rm', '-f', NAME], timeout=30, stdout=subprocess.DEVNULL)
         if network: subprocess.run(['docker', 'network', 'rm', NAME], timeout=30, stdout=subprocess.DEVNULL)
-        for name in ['key.pem', 'credentials.toml', 'control-token', 'client.json', 'ready', 'hysteria.json']: (ROOT / name).unlink(missing_ok=True)
+        for name in ['key.pem', 'credentials.toml', 'control-token', 'client.json', 'ready', 'hysteria.json', 'amneziawg.uapi', 'amneziawg-client.json']: (ROOT / name).unlink(missing_ok=True)
 
 if __name__ == '__main__': main()

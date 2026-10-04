@@ -1,13 +1,13 @@
 # Android native preview
 
 The Android client uses native Android widgets (Java), a foreground `VpnService`
-and the same Rust profile codec, TrustTunnel HTTP/2 and Hysteria 2 transports and IPv4/IPv6 packet engine as
+and the same Rust profile codec, TrustTunnel HTTP/2, Hysteria 2 and AmneziaWG transports and IPv4/IPv6 packet engine as
 the desktop client. There is no WebView, CLI subprocess or privileged host service.
 Baseline: Android 10/API 29+, arm64-v8a; x86_64 is also built for emulator testing.
 Acceptance uses Android 16/API 36 x86_64 and physical POCO X3 NFC and Huawei DEL-LX9 phones running Android 12/API 31.
 
-Current published package: [v0.3.2-ui.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.2),
-versionCode **30209**, versionName **0.3.2-preview.7**, signed with the existing release identity.
+Current published package: [v0.4.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.4.0),
+versionCode **40001**, versionName **0.4.0-preview.1**, signed with the existing release identity.
 The selected Flow icon uses adaptive launcher artwork, Android 13 themed monochrome
 artwork and a separate notification icon. Android Jenkins **#30 completed SUCCESS**:
 Gitleaks/Trivy, shared Rust unit tests, both ABIs, build/lint, emulator smoke,
@@ -45,6 +45,9 @@ do not disable that protection or publish real profiles to create documentation.
   answers; conflicting shared-IP identities conservatively stay on VPN.
 - Hysteria 2 links and client YAML/JSON are detected automatically; see
   [protocol support and limits](hysteria2.md). JSON preserves the complete profile.
+- AmneziaWG `awg-quick` configurations are detected automatically; see
+  [supported options and limits](amneziawg.md). The emulator acceptance covers it;
+  no physical device has run it yet.
 - Profiles and default selection are encrypted with AES-256-GCM and an Android
   Keystore key. Atomic writes, authenticated reads, no plaintext fallback and
   no automatic reset on corruption. Files live in `noBackupFilesDir`; application
@@ -98,9 +101,14 @@ The emulator tests intentionally replace this app's test installation. They cove
 - real IPv4/IPv6 TCP 512 KiB, UDP 1/1472/5000/60000 bytes and system DNS;
 - endpoint outage, blocked traffic during reconnect, recovery, Activity close
   and explicit Stop;
+- `ci/android_always_on_e2e.py` drives AOSP Settings (English UI) to switch
+  Always-on and lockdown. A `kill_switch = "always_on"` profile is refused without
+  Always-on and with Always-on but no lockdown, for both system and app starts. With
+  lockdown, the system's own Always-on start stays up and an app start passes TCP/UDP
+  traffic. Always-on is switched off again afterward;
 - process restart, reinstall and increasing-version APK upgrade, including
   preservation of the default profile and Keystore-protected credentials;
-- `ci/android_always_on_e2e.py`: system Always-on and lockdown enabled through the
+- `ci/android_process_death_e2e.py`: system Always-on and lockdown enabled through the
   AOSP Settings screen, then the VPN process killed by `am crash`, SIGKILL and a
   native SIGABRT. Each time the direct probe stays blocked, opening the app
   restores the VPN, and the app does not reconnect once Always-on is disabled.
@@ -172,32 +180,43 @@ in the server UI to invalidate its token. HTTPS redirects are never followed.
 **Always-on / block bypass** opens Android VPN settings. Enable both Always-on VPN
 and Block connections without VPN for system protection after process death or
 force-stop. The service supports offline startup. After the VPN process dies,
-Android does not restart it (see below); opening the app reconnects while it is
-still the system Always-on VPN. Blocking while stopped does not mean the tunnel is connected.
+Android usually does not restart it (see below); opening the app reconnects while
+it is still the system Always-on VPN. Blocking while stopped does not mean the tunnel is connected.
 App Disconnect is disabled while Always-on is active; change that system setting
 first. Excluded apps have no Internet under lockdown. Credentials remain in
 credential-encrypted storage; no plaintext direct-boot copy is created. Before
 first unlock the system policy, rather than an established tunnel, must provide
 blocking. Android may exempt some system traffic from VPN policy.
 
+A profile whose policy sets `kill_switch = "always_on"` connects only under system
+Always-on with Block connections without VPN; otherwise it reports that the VPN
+cannot start. Android reports Always-on/lockdown to the app only once its VPN is
+established, so the check runs right after the blocking TUN is created. The TUN
+carries no traffic before the check and is closed if the check fails.
+
 ### Process death and Always-on
 
-Neither `START_STICKY` nor Always-on restarts the VPN after its process dies.
-This was observed on the POCO X3 NFC (Android 12, MIUI, autostart allowed) and
-reproduced on the API 36 emulator. The emulator showed no restart after `am crash`,
-a native SIGABRT or SIGKILL. In each case `dumpsys activity services` kept a
-`TunnelService` record with `app=null` and no `nextRestartTime`. The AOSP
-sources (Android 12 and 15) explain this:
+After the VPN process dies, Android usually does not restart it, despite
+`START_STICKY` and Always-on. This was observed on the POCO X3 NFC (Android 12,
+MIUI, autostart allowed) and reproduced on the API 36 emulator after `am crash`,
+a native SIGABRT and SIGKILL. In those runs `dumpsys activity services` kept a
+`TunnelService` record with `app=null` and no `nextRestartTime`. Android
+sometimes handled the process death first instead. Then it logged "Scheduling
+restart of crashed service" and the VPN returned after about 1 s by itself. On
+the emulator this happened in 4 of 14 `am crash` runs, all on the 0.4.0 base,
+and never after SIGKILL or SIGABRT. The AOSP sources (Android 12 and 15) explain
+this:
 
 - When the process dies, the kernel closes the TUN. The system `Vpn` sees the
   interface removed and unbinds `TunnelService` before ActivityManager handles
   the process death. Unbinding a dead process makes `ActiveServices` detach the
   service record from that process. The later process cleanup no longer sees the
-  service, so it neither schedules a restart nor stops it. The two events race,
-  but the interface event came first in every emulator run, including SIGKILL.
-  A low-memory kill is therefore expected to behave the same way.
+  service, so it neither schedules a restart nor stops it. The two events race.
+  The interface event came first in almost every emulator run, including SIGKILL,
+  and a low-memory kill is expected to behave the same way.
 - A Java or native crash is also cleaned up through `AppErrors` as a force quit,
-  which explicitly disallows service restarts.
+  which disallows service restarts. This cleanup can also lose the race to the
+  process death notification.
 - The system starts the Always-on VPN only at boot or user unlock, when the
   Always-on setting changes, and when the app package is replaced. It does not
   start it when the process dies. MIUI autostart does not change this.

@@ -1,4 +1,5 @@
 //! TrustTunnel HTTP/2 and HTTP/3 transport. This is not a system VPN: it never modifies routes or DNS.
+mod amnezia;
 pub mod dns;
 mod h3transport;
 mod hysteria;
@@ -68,12 +69,6 @@ pub fn check_capabilities(p: &Profile) -> Result<()> {
     if e.skip_verification {
         return Err(Error::Unsupported("disabled certificate verification"));
     }
-    if p.hysteria2
-        .as_ref()
-        .is_some_and(|h| !h.pin_sha256.is_empty())
-    {
-        return Err(Error::Unsupported("Hysteria certificate pin override"));
-    }
     if !e.custom_sni.is_empty() && e.custom_sni != e.hostname {
         return Err(Error::Unsupported("separate SNI and verification identity"));
     }
@@ -101,11 +96,18 @@ enum Transport {
     H2(H2Session),
     H3(h3transport::H3Session),
     Hysteria(hysteria::HysteriaSession),
+    Amnezia(amnezia::AmneziaSession),
 }
 impl Session {
     pub async fn connect(p: &Profile) -> Result<Self> {
         check_capabilities(p)?;
         tokio::time::timeout(Duration::from_secs(20), async {
+            if p.protocol == rtrust_profile::Protocol::AmneziaWg {
+                return Ok(Self(
+                    Transport::Amnezia(amnezia::AmneziaSession::connect(p, None, None).await?),
+                    p.endpoint.has_ipv6,
+                ));
+            }
             if p.protocol == rtrust_profile::Protocol::Hysteria2 {
                 return Ok(Self(
                     Transport::Hysteria(hysteria::HysteriaSession::connect(p, None, None).await?),
@@ -131,6 +133,15 @@ impl Session {
     #[cfg(target_os = "linux")]
     pub async fn connect_marked(p: &Profile, mark: u32) -> Result<Self> {
         check_capabilities(p)?;
+        if p.protocol == rtrust_profile::Protocol::AmneziaWg && mark != 0 {
+            return tokio::time::timeout(
+                Duration::from_secs(20),
+                amnezia::AmneziaSession::connect(p, Some(mark), None),
+            )
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map(|s| Self(Transport::Amnezia(s), p.endpoint.has_ipv6));
+        }
         if p.protocol == rtrust_profile::Protocol::Hysteria2 && mark != 0 {
             return tokio::time::timeout(
                 Duration::from_secs(20),
@@ -154,6 +165,15 @@ impl Session {
     #[cfg(unix)]
     pub async fn connect_protected(p: &Profile, protector: &SocketProtector) -> Result<Self> {
         check_capabilities(p)?;
+        if p.protocol == rtrust_profile::Protocol::AmneziaWg {
+            return tokio::time::timeout(
+                Duration::from_secs(20),
+                amnezia::AmneziaSession::connect(p, None, Some(protector)),
+            )
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map(|s| Self(Transport::Amnezia(s), p.endpoint.has_ipv6));
+        }
         if p.protocol == rtrust_profile::Protocol::Hysteria2 {
             return tokio::time::timeout(
                 Duration::from_secs(20),
@@ -192,6 +212,7 @@ impl Session {
             Transport::H2(s) => s.health().await,
             Transport::H3(s) => s.health().await,
             Transport::Hysteria(s) => s.health().await,
+            Transport::Amnezia(s) => s.health().await,
         }
     }
     pub async fn open_tcp(&self, target: &str) -> Result<Tunnel> {
@@ -200,6 +221,7 @@ impl Session {
             Transport::H2(s) => s.open_tcp(target).await,
             Transport::H3(s) => s.open(target).await,
             Transport::Hysteria(s) => s.open_tcp(target).await,
+            Transport::Amnezia(s) => s.open_tcp(target).await,
         }
     }
     pub async fn open_icmp(&self) -> Result<Tunnel> {
@@ -207,6 +229,7 @@ impl Session {
             Transport::H2(s) => s.open("_icmp").await,
             Transport::H3(s) => s.open("_icmp").await,
             Transport::Hysteria(_) => Err(Error::Unsupported("Hysteria does not relay ICMP")),
+            Transport::Amnezia(_) => Err(Error::Unsupported("ICMP relay over AmneziaWG")),
         }
     }
     pub async fn open_udp(&self) -> Result<Tunnel> {
@@ -214,6 +237,7 @@ impl Session {
             Transport::H2(s) => s.open_udp().await,
             Transport::H3(s) => s.open("_udp2").await,
             Transport::Hysteria(s) => s.open_udp().await,
+            Transport::Amnezia(s) => s.open_udp().await,
         }
     }
 }
@@ -463,7 +487,7 @@ pub async fn probe_http(p: &Profile, destination: &str) -> Result<String> {
             .ok_or(Error::Protocol)?;
         Ok(format!(
             "HTTP {status}: response received through authenticated {} tunnel",
-            p.endpoint.upstream_protocol
+            p.transport_name()
         ))
     })
     .await
@@ -474,6 +498,17 @@ fn tls_config(p: &Profile) -> Result<rustls::ClientConfig> {
     tls_config_with_ca(&p.endpoint.certificate)
 }
 fn tls_config_with_ca(certificate: &str) -> Result<rustls::ClientConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|_| Error::Tls)?
+        .with_root_certificates(trust_roots(certificate)?)
+        .with_no_client_auth();
+
+    Ok(config)
+}
+/// The profile's custom CA, or the platform roots when none is embedded.
+fn trust_roots(certificate: &str) -> Result<rustls::RootCertStore> {
     let mut roots = rustls::RootCertStore::empty();
     if certificate.is_empty() {
         #[cfg(target_os = "android")]
@@ -494,14 +529,7 @@ fn tls_config_with_ca(certificate: &str) -> Result<rustls::ClientConfig> {
     if roots.is_empty() {
         return Err(Error::Trust);
     }
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|_| Error::Tls)?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-
-    Ok(config)
+    Ok(roots)
 }
 
 async fn connect_tcp(

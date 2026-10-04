@@ -1,7 +1,7 @@
 # Profile exchange v2 — integration work in progress
 
-`upstream/` contains the existing portal source with updated dependency pins. It contains no
-production database, environment file, private key or endpoint binary.
+The portal source itself lives in the private [onixus/tunnel](https://github.com/onixus/tunnel)
+repository (`server/upstream`); this repository keeps only the extension.
 `overlay/app/` adds profile import/export and per-device access. Deployed on
 2026-09-30 with UI route `/profiles` and API `/portal/v2`; the deployment hostname is omitted.
 The native client now has a Server panel page: enter the HTTPS origin, bind using
@@ -29,7 +29,10 @@ The existing database initialization remains responsible for legacy tables.
 Link `/profiles` from the client navigation. Validate the upgrade in an isolated
 copy before changing the live image. The live deployment followed these steps; details are in `deploy/README.md`.
 
-Local integration checks (synthetic users, temporary SQLite, real Rust codec):
+Local integration checks (synthetic users, temporary SQLite, real Rust codec). They need
+the portal source: a `tunnel` checkout next to this one, or `RTRUST_PORTAL_SRC` pointing
+at its `server/upstream`. GitHub checks cannot reach that private repository, so these
+tests run in Jenkins and locally only.
 
 ```
 cargo build -p rtrust-codec --locked
@@ -47,11 +50,3 @@ idempotency and download roundtrip. It passed against the deployed server using 
 temporary synthetic account, then removed that account and its data. Automated
 browser E2E remains outstanding. Migration was tested on a database copy and the
 old image read that migrated copy; an actual production rollback was not exercised.
-
-## Unified administration console
-
-The additive `console/` sidecar provides a shared admin UI for the existing
-TrustTunnel portal, H UI, R-TrustTunnel updates, routing, email and Telegram.
-Production entry: `https://onixus-rf.duckdns.org/console/` with the existing portal
-admin login. See [acceptance and scope](../docs/unified-console.md) and
-[operations/security](console/README.md). It does not replace the VPN endpoints.

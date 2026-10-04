@@ -145,6 +145,11 @@ Hysteria 2 uses its own QUIC transport.
    The guard remained fail-closed. A shorter focused restart passed, and the
    last full run eventually recovered and passed the physical handoff. This is
    evidence of an intermittent recovery delay, not proof that it is fixed.
+   *Update, 3 October:* the cause was reproduced with both TrustTunnel and
+   AmneziaWG (Stop or recovery after the tunnel had been down for tens of
+   seconds). Windows keeps the closed adapter's interface row until
+   `MSFT_NetAdapter` is enumerated; the service now does that itself. See
+   `docs/windows-service.md`.
 2. **IPv4-only profile compatibility.** The production TrustTunnel profile
    explicitly declares `has_ipv6=false`, but full-tunnel setup still installs
    IPv6 addressing/routes. Normal-family HTTPS failed twice; forcing only the

@@ -93,7 +93,7 @@ impl Drop for Routes {
 
 pub fn preflight(networks: &[Ipv4Net]) -> Result<(), String> {
     rtrust_control::validate_networks(networks)?;
-    unused_adapter()?;
+    settled_adapter()?;
     // Reject overlaps with existing non-default routes, including LAN and VPNs.
     let mut table = std::ptr::null_mut();
     if unsafe { GetIpForwardTable2(AF_INET, &mut table) } != 0 {
@@ -192,11 +192,117 @@ pub fn unused_adapter() -> Result<(), String> {
     }
 }
 
+/// Enumerates `MSFT_NetAdapter`, as `Get-NetAdapter` does. Windows can keep
+/// the row of an adapter that is already closed and gone from PnP in the
+/// interface table for minutes, until its adapter list is enumerated this
+/// way; lighter queries (`GetIfTable2Ex`, `GetAdaptersAddresses`,
+/// `Win32_NetworkAdapter`, `MSNdis_EnumerateAdapter`, a PnP enumeration) leave
+/// it there. Read-only: it changes no adapter and the caller still verifies
+/// absence afterwards.
+fn refresh_adapters() -> Result<(), String> {
+    use windows::{
+        Win32::System::{Com::*, Wmi::*},
+        core::BSTR,
+    };
+    // Own thread: the COM apartment must not leak into a runtime worker.
+    std::thread::spawn(|| unsafe {
+        CoInitializeEx(None, COINIT_MULTITHREADED)
+            .ok()
+            .map_err(|_| "Cannot initialise COM")?;
+        let result = (|| -> windows::core::Result<()> {
+            let locator: IWbemLocator = CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER)?;
+            let services = locator.ConnectServer(
+                &BSTR::from("ROOT\\StandardCimv2"),
+                &BSTR::new(),
+                &BSTR::new(),
+                &BSTR::new(),
+                0,
+                &BSTR::new(),
+                None,
+            )?;
+            // The process default is identification only, which a provider
+            // refuses with WBEM_E_ACCESS_DENIED. Impersonation is set on the two
+            // proxies used here, not for the whole service. A blanket belongs
+            // to one interface proxy: pass the interface in use, not an
+            // IUnknown queried from it.
+            fn impersonate<T: windows::core::Param<windows::core::IUnknown>>(
+                proxy: T,
+            ) -> windows::core::Result<()> {
+                unsafe {
+                    CoSetProxyBlanket(
+                        proxy,
+                        10, // RPC_C_AUTHN_WINNT
+                        0,  // RPC_C_AUTHZ_NONE
+                        windows::core::PCWSTR::null(),
+                        RPC_C_AUTHN_LEVEL_CALL,
+                        RPC_C_IMP_LEVEL_IMPERSONATE,
+                        None,
+                        EOAC_NONE,
+                    )
+                }
+            }
+            impersonate(&services)?;
+            let rows = services.CreateInstanceEnum(
+                &BSTR::from("MSFT_NetAdapter"),
+                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                None,
+            )?;
+            impersonate(&rows)?;
+            // The provider refreshes its list while the rows are produced.
+            for _ in 0..4096 {
+                let mut row = [None];
+                let mut returned = 0;
+                let code = rows.Next(10_000, &mut row, &mut returned);
+                if code.is_err() || returned == 0 {
+                    // WBEM_S_FALSE ends the enumeration; anything else is a failure.
+                    return code.ok();
+                }
+            }
+            Ok(())
+        })();
+        CoUninitialize();
+        result.map_err(|_| "Cannot enumerate network adapters".to_string())
+    })
+    .join()
+    .map_err(|_| "Adapter enumeration failed")?
+}
+
+/// `unused_adapter` with one adapter-list refresh if the name is still listed.
+/// For the checks before a new adapter is created.
+pub fn settled_adapter() -> Result<(), String> {
+    if unused_adapter().is_ok() {
+        return Ok(());
+    }
+    let _ = refresh_adapters();
+    unused_adapter()
+}
+
+/// `unused_adapter` for a polling loop: once the row has lingered for two
+/// seconds, refresh the adapter list, then at most every five seconds.
+fn settling() -> impl FnMut() -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let mut refreshed: Option<std::time::Instant> = None;
+    move || {
+        let result = unused_adapter();
+        let due = match refreshed {
+            None => started.elapsed() >= std::time::Duration::from_secs(2),
+            Some(at) => at.elapsed() >= std::time::Duration::from_secs(5),
+        };
+        if result.is_ok() || !due {
+            return result;
+        }
+        refreshed = Some(std::time::Instant::now());
+        let _ = refresh_adapters();
+        unused_adapter()
+    }
+}
+
 /// Wintun closes synchronously, but Windows may finish removing its interface
 /// asynchronously. Never reuse or delete an adapter whose ownership is unknown.
 pub fn wait_removed() -> Result<(), String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while let Err(reason) = unused_adapter() {
+    let mut absent = settling();
+    while let Err(reason) = absent() {
         if std::time::Instant::now() >= deadline {
             return Err(format!("Wintun adapter removal is still pending: {reason}"));
         }
@@ -211,7 +317,7 @@ pub fn wait_removed() -> Result<(), String> {
 pub fn recover_owned_adapter(guid: &str) -> Result<(), String> {
     crate::adapter_cleanup::remove_until_absent(
         || remove_owned_adapter(guid),
-        unused_adapter,
+        settling(),
         std::time::Duration::from_secs(30),
         std::time::Duration::from_millis(500),
     )

@@ -81,7 +81,7 @@ fn unpack(data: &[u8]) -> Result<Message<'_>> {
         payload: &data[offset..],
     })
 }
-async fn outgoing(reader: &mut (impl AsyncRead + Unpin)) -> Result<Datagram> {
+pub(crate) async fn outgoing(reader: &mut (impl AsyncRead + Unpin)) -> Result<Datagram> {
     let len = reader.read_u32().await? as usize;
     if !(37..=37 + 255 + udp::MAX_DATAGRAM).contains(&len) {
         return Err(Error::Protocol);

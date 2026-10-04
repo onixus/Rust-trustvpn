@@ -26,6 +26,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "endpoint_toml" => Format::EndpointToml,
         "cli_toml" => Format::CliToml,
         "tt" => Format::Link,
+        "awg_conf" => Format::Conf,
         _ => return Err("Unknown export format".into()),
     };
     let export = profile.export(format)?;

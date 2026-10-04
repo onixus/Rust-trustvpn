@@ -1123,6 +1123,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "curve25519-dalek"
+version = "4.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97fb8b7c4503de7d6ae7b42ab72a5a59857b4c937ec27a3d4539dba95b5ab2be"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "curve25519-dalek-derive",
+ "fiat-crypto",
+ "rustc_version",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek-derive"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "darling"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1568,6 +1594,12 @@ checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
 ]
+
+[[package]]
+name = "fiat-crypto"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "field-offset"
@@ -4833,7 +4865,7 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rtrust-android"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "ipnet",
  "jni 0.22.4",
@@ -4850,7 +4882,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-codec"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "rtrust-profile",
  "serde",
@@ -4860,7 +4892,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-control"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "ipnet",
  "rtrust-profile",
@@ -4875,7 +4907,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-desktop"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "rtrust-control",
  "rtrust-engine",
@@ -4890,11 +4922,13 @@ dependencies = [
 
 [[package]]
 name = "rtrust-engine"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "blake2",
  "bytes",
+ "chacha20 0.9.1",
+ "chacha20poly1305",
  "h2",
  "h3",
  "h3-quinn",
@@ -4906,6 +4940,7 @@ dependencies = [
  "ipnet",
  "libc",
  "quinn",
+ "quinn-proto",
  "rand 0.9.5",
  "rcgen",
  "rtrust-profile",
@@ -4914,17 +4949,19 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "sha2 0.10.9",
+ "smoltcp",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
  "url",
  "webpki-roots",
+ "x25519-dalek",
  "zeroize",
 ]
 
 [[package]]
 name = "rtrust-inspect"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "rtrust-control",
  "rtrust-engine",
@@ -4935,7 +4972,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-native"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "directories",
  "futures-util",
@@ -4963,7 +5000,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-portal"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "keyring",
  "reqwest 0.12.28",
@@ -4976,7 +5013,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-profile"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "http",
@@ -4995,7 +5032,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-store"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chacha20poly1305",
  "directories",
@@ -5012,7 +5049,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-tun"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chacha20poly1305",
  "core-foundation 0.10.1",
@@ -5031,6 +5068,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tun-rs",
+ "windows 0.61.3",
  "windows-service",
  "windows-sys 0.61.2",
  "zbus",
@@ -5039,7 +5077,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-update"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "directories",
@@ -5057,7 +5095,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-webview"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "rfd",
  "rtrust-control",
@@ -7846,6 +7884,18 @@ dependencies = [
  "libc",
  "once_cell",
  "pkg-config",
+]
+
+[[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core 0.6.4",
+ "serde",
+ "zeroize",
 ]
 
 [[package]]

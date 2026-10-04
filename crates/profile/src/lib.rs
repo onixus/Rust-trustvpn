@@ -1,6 +1,8 @@
 //! Bounded, secret-redacting TrustTunnel profile codec. No network or filesystem I/O.
+pub mod amnezia;
 pub mod hysteria;
 mod link;
+pub use amnezia::AmneziaWg;
 pub use hysteria::{Hysteria2, Protocol};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -36,6 +38,9 @@ impl Secret {
     }
     pub fn expose(&self) -> &str {
         &self.0
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 impl fmt::Debug for Secret {
@@ -95,6 +100,8 @@ pub struct Profile {
     pub protocol: Protocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hysteria2: Option<Hysteria2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amneziawg: Option<AmneziaWg>,
     pub name: String,
     pub endpoint: Endpoint,
     #[serde(default)]
@@ -120,6 +127,8 @@ pub enum Format {
     CliToml,
     Link,
     Json,
+    /// `awg-quick` configuration of an AmneziaWG profile.
+    Conf,
 }
 impl Format {
     pub const ALL: [Self; 4] = [Self::EndpointToml, Self::CliToml, Self::Link, Self::Json];
@@ -127,6 +136,7 @@ impl Format {
         match self {
             Self::Link => "txt",
             Self::Json => "json",
+            Self::Conf => "conf",
             _ => "toml",
         }
     }
@@ -138,6 +148,7 @@ impl fmt::Display for Format {
             Self::CliToml => "CLI TOML",
             Self::Link => "VPN link",
             Self::Json => "R-TrustTunnel JSON",
+            Self::Conf => "AmneziaWG config",
         })
     }
 }
@@ -153,17 +164,26 @@ impl Drop for Export {
 
 impl Profile {
     pub fn transport_name(&self) -> &str {
-        if self.protocol == Protocol::Hysteria2 {
-            "Hysteria 2"
-        } else {
-            &self.endpoint.upstream_protocol
+        match self.protocol {
+            Protocol::Hysteria2 => "Hysteria 2",
+            Protocol::AmneziaWg => "AmneziaWG",
+            Protocol::TrustTunnel => &self.endpoint.upstream_protocol,
         }
     }
+    /// Server UDP port ranges a firewall must allow for Hysteria port hopping;
+    /// empty when only the endpoint address ports are used.
+    pub fn hop_port_ranges(&self) -> Vec<(u16, u16)> {
+        self.hysteria2
+            .as_ref()
+            .filter(|h| !h.hop_ports.is_empty())
+            .and_then(|h| hysteria::port_ranges(&h.hop_ports).ok())
+            .unwrap_or_default()
+    }
     pub fn formats(&self) -> &'static [Format] {
-        if self.protocol == Protocol::Hysteria2 {
-            &[Format::Json, Format::Link]
-        } else {
-            &Format::ALL
+        match self.protocol {
+            Protocol::Hysteria2 => &[Format::Json, Format::Link],
+            Protocol::AmneziaWg => &[Format::Json, Format::Conf],
+            Protocol::TrustTunnel => &Format::ALL,
         }
     }
     pub fn from_endpoint(endpoint: Endpoint, name: String) -> Self {
@@ -171,6 +191,7 @@ impl Profile {
             schema_version: 1,
             protocol: Protocol::TrustTunnel,
             hysteria2: None,
+            amneziawg: None,
             name,
             endpoint,
             policy: Value::Null,
@@ -189,6 +210,9 @@ impl Profile {
         }
         if input.starts_with("tt://") {
             return link::decode(input);
+        }
+        if !input.starts_with('{') && amnezia::detect(input) {
+            return amnezia::conf(input);
         }
         let mut p = if input.starts_with('{') {
             let mut value: Value = serde_json::from_str(input).map_err(|_| Error::Syntax)?;
@@ -328,10 +352,18 @@ impl Profile {
         if self.schema_version != 1 {
             return Err(Error::Version);
         }
-        match (&self.protocol, &self.hysteria2) {
-            (Protocol::TrustTunnel, None) => {}
-            (Protocol::Hysteria2, Some(options)) => {
+        match (&self.protocol, &self.hysteria2, &self.amneziawg) {
+            (Protocol::TrustTunnel, None, None) => {}
+            (Protocol::Hysteria2, Some(options), None) => {
                 options.validate()?;
+                if self.endpoint.upstream_protocol != "http3" || self.original_cli.is_some() {
+                    return Err(Error::Field("protocol"));
+                }
+            }
+            (Protocol::AmneziaWg, None, Some(options)) => {
+                options.validate()?;
+                amnezia::key(self.endpoint.password.expose(), "private key")?;
+                // Several addresses are the resolved addresses of the one peer.
                 if self.endpoint.upstream_protocol != "http3" || self.original_cli.is_some() {
                     return Err(Error::Field("protocol"));
                 }
@@ -405,6 +437,36 @@ impl Profile {
     }
     pub fn export(&self, format: Format) -> Result<Export> {
         self.validate()?;
+        if format == Format::Conf && self.protocol != Protocol::AmneziaWg {
+            return Err(Error::Field("only AmneziaWG profiles export a config"));
+        }
+        if self.protocol == Protocol::AmneziaWg {
+            return match format {
+                Format::Json => Ok(Export {
+                    content: serde_json::to_string_pretty(self).map_err(|_| Error::Syntax)?,
+                    losses: vec![],
+                }),
+                Format::Conf => {
+                    let mut losses = vec![];
+                    if !self.policy.is_null() {
+                        losses.push("Routing policy is only preserved in JSON");
+                    }
+                    if !self.extensions.is_empty()
+                        || !self.endpoint.extra.is_empty()
+                        || !self.endpoint.dns_upstreams.is_empty()
+                    {
+                        losses.push("Additional profile fields are only preserved in JSON");
+                    }
+                    Ok(Export {
+                        content: amnezia::encode(self)?,
+                        losses,
+                    })
+                }
+                _ => Err(Error::Field(
+                    "AmneziaWG exports require JSON or an AmneziaWG config",
+                )),
+            };
+        }
         if self.protocol == Protocol::Hysteria2 {
             return match format {
                 Format::Json => Ok(Export {
@@ -424,6 +486,24 @@ impl Profile {
                     }
                     if !self.endpoint.has_ipv6 {
                         losses.push("IPv6 restriction is only preserved in JSON");
+                    }
+                    if let Some(h) = &self.hysteria2 {
+                        if h.hop_interval_min_ms != 0 {
+                            losses.push("Port hopping interval is only preserved in JSON");
+                        }
+                        if h.up_bps != 0
+                            || h.down_bps != 0
+                            || !h.congestion.is_empty()
+                            || h.quic != Default::default()
+                        {
+                            losses.push("Bandwidth, congestion and QUIC settings are only preserved in JSON");
+                        }
+                        if !h.client_certificate.is_empty() {
+                            losses.push("Client certificate is only preserved in JSON");
+                        }
+                        if h.gecko.as_ref().is_some_and(|g| *g != Default::default()) {
+                            losses.push("Gecko packet sizes are only preserved in JSON");
+                        }
                     }
                     if !self.extensions.is_empty()
                         || !self.endpoint.extra.is_empty()
@@ -466,6 +546,7 @@ impl Profile {
                 }
                 link::encode(self)?
             }
+            Format::Conf => unreachable!("rejected above"),
             Format::EndpointToml | Format::CliToml => {
                 let mut e = toml::Value::try_from(&self.endpoint).map_err(|_| Error::Syntax)?;
                 if format == Format::EndpointToml {

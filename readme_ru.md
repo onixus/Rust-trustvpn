@@ -2,189 +2,220 @@
 
 [English](Readme.md) · [Русский](readme_ru.md)
 
-Нативный VPN-клиент на Rust, совместимый с TrustTunnel и Hysteria 2, и расширение серверной панели для импорта, экспорта и синхронизации профилей подключения. Клиент реализует собственный транспорт и не является оболочкой над официальным CLI.
+R-TrustTunnel — нативный VPN-клиент на Rust с поддержкой **TrustTunnel** и **Hysteria 2**. В репозитории находятся desktop-клиенты, Android-приложение на VpnService, общее Rust-ядро транспорта/профилей/хранилища, привилегированные службы системного туннеля и расширение TrustTunnel-портала для обмена профилями.
 
-**Статус: development preview, 1 октября 2026 года.** Системный туннель реализован для Windows, Linux и macOS. Релиз UI refresh опубликован; границы платформенной приёмки перечислены ниже. Для Android реализован нативный VpnService preview с общим Rust-ядром; добавлен дополнительный desktop-интерфейс Tauri WebView в статусе preview.
+Клиент реализует транспорт самостоятельно и **не является оболочкой** над официальными CLI TrustTunnel или Hysteria.
 
-## Скачать и установить
+> **Статус проекта: development preview, 3 октября 2026 года.**
+>
+> Последний опубликованный набор пакетов — **v0.4.0** от 3 октября. В него вошли транспорт AmneziaWG 3 и изменения Hysteria 2, Windows, ссылок профилей и Android, сделанные после v0.3.2-ui.2. Что проверено для этих пакетов, а что нет, перечислено в [описании релиза](docs/releases/v0.4.0.md).
 
-Текущий выпуск: **[v0.3.2-ui.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.2)** — preview от 1 октября 2026 года.
+## Скачать
 
-| Платформа | Пакет | Установка |
+Последний опубликованный preview: **[v0.4.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.4.0)**.
+
+| Платформа | Пакет | Примечание |
 | --- | --- | --- |
-| macOS Apple Silicon | [DMG: выбор Native / WebView / Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-macOS-arm64-UI-Choices.dmg) | Откройте DMG и выберите один PKG. Нужны права администратора; Developer ID и notarization отсутствуют. |
-| Linux x86_64, Wayland | [Native](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64.flatpak) · [WebView](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64-webview.flatpak) · [Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Linux-x86_64-both.flatpak) | Выберите один Flatpak. Для системного VPN отдельно установите host-службу; [инструкция Linux](docs/linux-service.md). |
-| Android 10+, arm64 / x86_64 | [Подписанный APK](https://github.com/onixus/Rust-trustvpn/releases/download/v0.3.2-ui.2/R-TrustTunnel-Android.apk) | Устанавливается поверх предыдущего подписанного preview. Версия сборки **30209**; отображаемая версия `0.3.2-preview.7`. |
-| Windows x64 | Новый пакет в этот выпуск не входит | Сборка и приёмка обновлённого UI отложены до доступности Windows-ноды. |
+| macOS Apple Silicon | [DMG с Native / WebView / Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-macOS-arm64-UI-Choices.dmg) | В DMG нужно выбрать один PKG. Требуются права администратора. Developer ID и notarization пока нет. |
+| Linux x86_64, Wayland | [Native](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64.flatpak) · [WebView](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64-webview.flatpak) · [Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64-both.flatpak) | Flatpak содержит непривилегированный UI. Для системного VPN отдельно нужна host-служба. |
+| Android 10+, arm64 / x86_64 | [Подписанный APK](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Android.apk) | versionCode 40001, versionName 0.4.0-preview.1. |
+| Windows x64 | [Установщик](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Windows-x64-Setup.exe) | Без подписи Authenticode. Этот билд установщика перед публикацией не ставился на физический компьютер. |
 
-На [странице релиза](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.2) также доступны подписанный Arch host-пакет `rtrust-host-0.3.2-23`, `SHA256SUMS`, подписи и сведения о проверках. Native Flatpak использует Freedesktop 25.08; WebView/Both — GNOME 50. При обновлении сохраняйте прежний ключ подписи и не удаляйте данные приложения.
+В релизе также опубликованы SHA256SUMS, подписи, сведения о происхождении/проверках и подписанный Linux host-пакет. См. [состав релиза](docs/releases/v0.4.0.md).
 
-Выбран значок **№6 «Поток»**: приложения, трей, установщики и Android adaptive launcher. Пакеты прошли macOS Jenkins №73, Linux №23 и Android №30. Windows-значки подготовлены в исходниках; новая Windows-сборка отложена. [Состав выпуска](docs/releases/v0.3.2-ui.2.md).
+## Что нового в v0.4.0
+
+По сравнению с v0.3.2-ui.2 в опубликованных пакетах появились:
+
+- транспорт **AmneziaWG 3**: импорт конфигурации awg-quick и набор обфускации 3.1, см. [AmneziaWG](docs/amneziawg.md);
+- существенно расширена совместимость с **Hysteria 2**: port hopping, Brutal, BBR/Reno, QUIC windows/timeouts, Salamander и Gecko, проверка pinSHA256 и встроенные mTLS credentials;
+- на Windows выполнены production full-tunnel проверки и для TrustTunnel, и для Hysteria 2;
+- на Windows пройден реальный S3 sleep/wake, включая Always-on сценарий с блокировкой трафика до автоматического восстановления;
+- на физическом POCO X3 пройден 30-минутный forced deep Doze без выхода трафика из VPN;
+- обновлён главный экран Android: status card, карточки профилей и компактные action tiles;
+- на Windows, macOS и Flatpak зарегистрировано открытие ссылок tt:// и hy2://;
+- бывшая unified server console удалена из этого репозитория и перенесена в отдельный проект [onixus/tunnel](https://github.com/onixus/tunnel). Здесь осталась только интеграция TrustTunnel-портала для обмена профилями.
+
+## Возможности
+
+### Клиент и профили
+
+- Нативный desktop-интерфейс на Rust/iced и дополнительный Tauri WebView.
+- Нативное Android-приложение на VpnService с общим Rust-ядром.
+- Импорт endpoint TOML, полного client TOML, R-TrustTunnel JSON, tt://, hy2:// и hysteria2://.
+- Предпросмотр и проверка перед заменой профиля.
+- Автоматическое зашифрованное хранение профилей. На desktop ключ хранится в системном credential store, на Android — в Android Keystore. Plaintext fallback отсутствует.
+- Системный трей, запуск при входе, опциональный autoconnect, диагностика и явные сценарии восстановления.
+- Регистрация устройства и синхронизация разрешённых профилей через TrustTunnel portal extension.
+
+### TrustTunnel
+
+- Собственный Rust HTTP/2 transport для системного VPN.
+- SOCKS5 поверх HTTP/2 или HTTP/3.
+- IPv4/IPv6 TCP и UDP, DNS, ICMP там, где это реализовано платформенным dataplane, ограниченная обработка фрагментации, reconnect и fail-closed защита.
+- Импортированные TrustTunnel HTTP/3 профили сохраняются, но **TrustTunnel HTTP/3 для системного VPN пока отложен**. Системный туннель сейчас использует HTTP/2.
+
+### Hysteria 2
+
+Общее ядро автоматически выбирает Hysteria 2 для hy2://, hysteria2:// и поддерживаемых Hysteria YAML/JSON профилей.
+
+В текущем main реализованы:
+
+- QUIC + HTTP/3 authentication;
+- multiplexed TCP и UDP datagrams;
+- Salamander и Gecko obfuscation;
+- port hopping и интервалы переключения портов;
+- bandwidth negotiation и Brutal для upload;
+- BBR/Reno и стандартный congestion controller;
+- QUIC receive windows, idle timeout, keepalive и фиксированное MTU-поведение;
+- TLS SNI и pinSHA256 вместе с обычной проверкой CA/hostname;
+- встроенные custom CA и mutual-TLS certificate/key в R-TrustTunnel JSON.
+
+Намеренно не поддерживаются или отклоняются: insecure TLS, ECH, Hysteria Realms, Chrome QUIC fingerprint parroting, mimic, fastOpen/lazy и нестандартные BBR-профили. В Hysteria 2 нет ICMP relay.
+
+Подробности: [Hysteria 2 — поддержка и ограничения](docs/hysteria2.md).
+
+Конфиги `awg-quick` AmneziaWG 3 выбирают встроенный транспорт WireGuard со слоем обфускации AmneziaWG (junk- и signature-пакеты, префиксы, диапазоны типов, защита заголовков, паддинг). Проверено только против официального `amneziawg-go` 3.1 на loopback: [поддерживаемые параметры и ограничения](docs/amneziawg.md).
+
+## Статус платформ
+
+| Платформа | Текущее состояние | Что ещё не закрыто |
+| --- | --- | --- |
+| Windows x64 | Native UI, Wintun/SCM-служба и WFP guard. Production full-tunnel проверки прошли для TrustTunnel и Hysteria 2. Реальный 30-минутный S3 sleep/wake с Hysteria прошёл reconnect и traffic checks; Always-on также оставался заблокированным до автоматического восстановления. | Cold boot, более широкий набор sleep/network сценариев, выпуск свежего публичного установщика и подпись. |
+| Linux x86_64 / ARM64 | Wayland-only desktop, TUN host service, nftables и systemd-resolved. Есть Native/WebView/Both packaging, физический KDE/Wayland smoke, подписанный Flatpak flow, TrustTunnel/Hysteria full-tunnel и network handoff. | Больше физических reboot/sleep проверок и финальная полировка установки на разных дистрибутивах. |
+| macOS Apple Silicon | Native/WebView/Both preview, root LaunchDaemon и системный туннель через utun. Для TrustTunnel пройдены live IPv4/IPv6 TCP/UDP/ICMP, DNS, reconnect и восстановление после падения службы. | Boot Always-on, sleep/network handoff, clean install на другом Mac, подписанное auto update/rollback, Developer ID/notarization. Installed macOS Hysteria full-tunnel всё ещё не закрыт полноценной приёмкой. |
+| Android arm64 / x86_64 | Native VpnService, encrypted vault, file/text/QR import, выбор приложений, portal sync, Always-on/lockdown и TrustTunnel/Hysteria. Физические POCO и Huawei проверены на реальном трафике и восстановлении; POCO прошёл 30 минут forced deep Doze. | Дополнительные OEM, прежде всего Pixel/Samsung, reboot-before-first-unlock и overnight/long soak. На MIUI force-stop может оставить lockdown активным без автоматического рестарта VPN-службы. |
+
+Про Native/WebView/Both: [варианты UI](docs/ui-choices.md). Linux поддерживает только Wayland.
 
 ## Скриншоты
 
-Реальные окна Native и WebView из релиза `v0.3.2-ui.1` на macOS. Показано пустое хранилище, VPN отключён. [Галерея и настройки](docs/screenshots/README.md).
+В галерее лежат реальные desktop-скриншоты Native и WebView из UI refresh:
 
 | Native | WebView |
 | --- | --- |
 | ![Главный экран Native](docs/screenshots/native-home-0.3.2-ui.1.jpg) | ![Главный экран WebView](docs/screenshots/webview-home-0.3.2-ui.1.jpg) |
 
-## Возможности
+См. [галерею и настройки подключения](docs/screenshots/README.md).
 
-- Нативный интерфейс Rust/iced: кнопка подключения профиля по умолчанию, системный трей, управление профилями и диагностика подключения.
-- Импорт и экспорт endpoint TOML, полного клиентского TOML, JSON и ссылок `tt://`: предпросмотр, проверка и явная замена существующего профиля.
-- Автоматическое сохранение профилей в зашифрованное хранилище; ключ находится в системном хранилище учётных данных. Перехода к хранению открытым текстом нет.
-- Системный VPN через HTTP/2: IPv4/IPv6 TCP и UDP, ICMP echo, ограниченная обработка фрагментации, переподключение и защита от обхода туннеля.
-- Локальный SOCKS5 через HTTP/2 или HTTP/3 для приложений с поддержкой прокси.
-- Обмен профилями через клиент и серверную панель: регистрация устройства, ограниченные права доступа, предпросмотр и подтверждение импорта, синхронизация и обнаружение конфликтов.
-- Подписанные манифесты обновлений и проверенный путь обновления/отката Windows. Подпись манифеста не заменяет подпись установщика средствами ОС: Developer ID/notarization отсутствуют. Android APK и Linux-артефакты подписаны.
+Обновлённый главный экран Android входит в APK v0.4.0.
 
-TrustTunnel HTTP/3 для **системного VPN** отложен до [третьей волны](docs/technical-debt.md). Импортированный профиль TrustTunnel HTTP/3 сохраняется, а системное подключение использует HTTP/2.
+## Сборка
 
-Конфиги и ссылки `hy2://` / `hysteria2://` автоматически выбирают Hysteria 2. Общее Rust-ядро поддерживает TCP, UDP и Salamander. Подробнее: [поддерживаемые настройки и ограничения](docs/hysteria2.md).
+Workspace требует **Rust 1.89+**. Текущий CI использует Rust 1.98.1.
 
-## Состояние платформ
+Клонирование и запуск Native UI:
 
-| Платформа | Реализация и проверки | Что остаётся |
-| --- | --- | --- |
-| Windows x64 | Нативный `.exe`, Setup, служба Wintun/SCM и защита WFP. Пройдены реальные проверки системного туннеля, аварии службы, переподключения, обновления и отката. | Приёмка холодной загрузки и сна; доставка последнего общего исправления восстановления UDP в установленную версию. |
-| Linux ARM64 / x86_64 | Нативный Wayland UI, TUN-служба, nftables и systemd-resolved. Пройдены нативный x86_64 CI и физическая Plasma/Wayland, трей, KWallet и порталы. Проверены lifecycle Arch host-пакета и подписанное обновление/откат Flatpak. Для ARM64 сохраняется прежнее контейнерное покрытие. | Физические reboot/sleep и окончательная приёмка GUI-установщика. Подписанный HTTPS candidate-репозиторий прошёл анонимную установку. |
-| macOS Apple Silicon | Нативное приложение и root LaunchDaemon с `utun`. Установленный системный кандидат прошёл реальные IPv4/IPv6, DNS, reconnect, аварии GUI/службы и восстановление сети. PKG внутри неподписанного DMG. | Boot always-on, сон/смена сети, чистая установка на другом Mac и автообновление/откат. Developer ID и notarization отсутствуют. |
-| Android arm64 / x86_64 | Нативный APK, Rust/JNI VpnService, Keystore, импорт файлов/tt/QR, выбор приложений, русский UI, регистрация, ручная и фоновая синхронизация с сервером, системный Always-on/lockdown. | Дополнительные OEM, перезагрузка до первого unlock и длительные прогоны. [Подробности](docs/android.md). |
+    git clone https://github.com/onixus/Rust-trustvpn.git
+    cd Rust-trustvpn
+    cargo run -p rtrust-native --locked
 
-Подготовлены варианты поставки Native/WebView/Both. Native остаётся вариантом по умолчанию; WebView использует общий Rust controller и зашифрованное хранилище. Проверка Windows-установщика отложена до включения ноды. Подробнее: [выбор UI](docs/ui-choices.md). Linux работает только через Wayland.
+Основные desktop/service бинарники:
 
-## Сборка и запуск
+    cargo build --release -p rtrust-native -p rtrust-tun -p rtrust-inspect --locked
 
-Нужны Rust и Cargo: workspace требует Rust 1.89 или новее, CI сейчас использует 1.98.1. Для нативной сборки также нужны компилятор и библиотеки целевой ОС. В Linux требуются Wayland, Fontconfig, D-Bus, системный файловый портал и доступный Secret Service для хранилища профилей. Проверенные окружения описаны в [документации CI](docs/jenkins.md).
+Стандартные проверки:
 
-```sh
-git clone https://github.com/onixus/Rust-trustvpn.git
-cd Rust-trustvpn
-cargo run -p rtrust-native --locked
+    cargo fmt --all --check
+    cargo test --workspace --locked
+    cargo clippy --workspace --all-targets --locked -- -D warnings
 
-# Открыть синтетический пример для предпросмотра, без реального подключения.
-cargo run -p rtrust-native --locked -- examples/demo.endpoint.toml
-```
+Точки входа упаковки:
 
-Запускайте GUI от обычного пользователя. Для системного VPN нужна отдельно установленная привилегированная служба; запуск GUI сам по себе её не устанавливает.
+- **Windows:** python ci/package_windows.py
+- **macOS:** python3 scripts/package-macos-system.py
+- **Android:** python3 scripts/build-android.py
+- **Linux:** python3 scripts/package-flatpak.py
 
-```sh
-cargo build --release -p rtrust-native -p rtrust-tun -p rtrust-inspect --locked
-```
+Платформенные зависимости и ограничения:
 
-Команды упаковки:
+- [Windows service](docs/windows-service.md)
+- [Linux service](docs/linux-service.md)
+- [macOS system VPN](docs/macos-system.md)
+- [Android](docs/android.md)
+- [Jenkins / CI](docs/jenkins.md)
 
-- **Windows:** `python ci/package_windows.py`; результат — `dist/R-TrustTunnel-Windows-x64-Setup.exe`. Подготовка окружения, включая Wintun с фиксированным хешем, описана в [документации Windows-службы](docs/windows-service.md). Нужна Windows 10 2004+ x64.
-- **macOS:** `python3 scripts/package-macos-system.py`; создаёт PKG системной службы и `dist/R-TrustTunnel-macOS-arm64-system-candidate.dmg`. Установка требует прав администратора. Подробнее: [macOS system VPN](docs/macos-system.md).
-- **Android:** `python3 scripts/build-android.py`; сборка нативных APK с SDK 36 / NDK 28.2. Release-подпись выполняется отдельно. [Сборка и ограничения](docs/android.md).
-- **Linux:** `python3 scripts/package-flatpak.py` на Linux с Flatpak builder 1.4.4+ и Freedesktop SDK/runtime 25.08. Для cross-сборки можно указать `--arch x86_64 --binary-dir PATH`. Подробнее: [Linux-служба и Flatpak](docs/linux-service.md).
-
-Установщики, Flatpak-пакеты и локальные отчёты исключены из Git. Готовые пакеты опубликованы в GitHub Releases по ссылкам выше; бинарные файлы не хранятся в истории Git. Flatpak содержит непривилегированный GUI: он не устанавливает VPN-службу на хост и не получает произвольного выполнения команд хоста.
+Desktop GUI следует запускать от обычного пользователя. Для системного VPN нужна отдельно установленная привилегированная служба. Flatpak намеренно остаётся непривилегированным.
 
 ## Использование
 
-### Windows, Linux и macOS
+### Desktop
 
-1. Импортируйте файл конфигурации или ссылку `tt://`, `hy2://`, `hysteria2://`, проверьте содержимое и добавьте профиль.
-2. Назначьте профиль по умолчанию и выберите режим в «Настройках». Для системного VPN предварительно установите соответствующую службу.
-3. Подключайтесь верхней кнопкой. Закрытие окна скрывает приложение в трей; для завершения используйте **«Выход»**.
-4. Изменения профилей сохраняются автоматически в зашифрованное хранилище. Обмен с сервером доступен через [интерфейс портала](docs/portal.md).
+1. Импортируйте файл профиля либо откройте/вставьте ссылку tt://, hy2:// или hysteria2://.
+2. Проверьте результат разбора и добавьте либо замените профиль.
+3. Выберите профиль по умолчанию и режим подключения.
+4. Для системного VPN предварительно установите соответствующую платформенную службу.
+5. Подключайтесь с главного экрана. Закрытие Native-окна обычно оставляет приложение в трее.
+6. Изменения профилей автоматически сохраняются в encrypted vault.
 
-В режиме SOCKS5 укажите в приложении `127.0.0.1:1080` либо выбранный в клиенте порт. Пример проверки:
+SOCKS5 по умолчанию слушает 127.0.0.1:1080:
 
-```sh
-curl --socks5-hostname 127.0.0.1:1080 https://example.com
-```
+    curl --socks5-hostname 127.0.0.1:1080 https://example.com
 
-SOCKS5 не меняет системные маршруты, DNS или настройки прокси. Другие локальные процессы тоже могут использовать loopback-прокси. Доменные адреса SOCKS UDP, фрагментация SOCKS UDP и BIND не поддерживаются.
+SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS UDP domain addressing и SOCKS UDP fragmentation не поддерживаются.
 
-Запуск при входе, автоподключение GUI и boot always-on — разные функции. Ограничения платформ и восстановление описаны в [lifecycle клиента](docs/desktop-lifecycle.md) и [always-on](docs/always-on.md).
+См. [desktop lifecycle](docs/desktop-lifecycle.md) и [Always-on](docs/always-on.md).
 
 ### Android
 
-Подписанный APK в **v0.3.2-ui.2**: versionCode **30209**, versionName **0.3.2-preview.7**.
+1. Установите APK и импортируйте файл, текст/ссылку или QR.
+2. Выберите профиль по умолчанию и нажмите Connect.
+3. Подтвердите системное разрешение Android VPN.
+4. При необходимости настройте allowlist приложений в VPN apps.
+5. Для fail-closed поведения после гибели процесса включите в Android **Always-on VPN** и **Block connections without VPN**.
+6. Server profiles можно регистрировать и синхронизировать через portal integration.
 
-1. Установите APK. Через «+ Добавить профиль» откройте файл, вставьте конфигурацию/ссылку `tt://` или `hy2://`, либо импортируйте QR камерой/из изображения.
-2. Выберите профиль по умолчанию и нажмите нижнюю кнопку подключения. Подтвердите системное разрешение VPN; отдельная host-служба не нужна.
-3. В «Приложения VPN» выберите все приложения или только нужные. Изменение списка требует отключения VPN. Русский или английский интерфейс выбирается по системному языку.
-4. Для защиты после принудительной остановки откройте «Настройки → Always-on / запрет обхода VPN» и включите в Android **оба** переключателя: «Постоянная VPN» и «Блокировать соединения без VPN». При блокировке приложения вне списка VPN не имеют доступа к интернету. Для ручного отключения сначала измените системную настройку.
-5. В «Настройки → Профили сервера» зарегистрируйте устройство одноразовым кодом, выдайте права в серверном UI и запустите ручную синхронизацию при отключённом VPN или включите фоновую синхронизацию раз в час. Изменения применяются при следующем подключении. Отправка профиля требует подтверждения передачи учётных данных.
+В текущих исходниках заданы Android minSdk 29, targetSdk 36, versionCode 40001 и versionName 0.4.0-preview.1.
 
-На POCO X3 NFC / Android 12 проверены камера и QR из файла, системный выбор файлов,
-все четыре формата экспорта, обмен с сервером и блокировка трафика отдельного
-приложения после force-stop. Подключение затем восстановлено. Jenkins Android
-**№16 — SUCCESS**; проверенный исходный код — `2809bea`. Перезагрузка до первого
-разблокирования, другие OEM и ночной прогон остаются непроверенными.
-На Huawei DEL-LX9 / Android 12 также проверены боевое подключение, переход
-Wi-Fi/мобильная сеть, камера и файлы, четыре формата экспорта, выбор приложений,
-переустановка той же версии и системная блокировка с восстановлением VPN
-(1 октября 2026).
-[Инструкция Android](docs/android.md) · [Обмен профилями](docs/portal.md).
+См. [Android](docs/android.md) и [обмен профилями](docs/portal.md).
 
-Транспорт Hysteria 2 ранее проверен Android Jenkins **№26**, Linux **№18**, macOS **№66** — SUCCESS. Системные Linux-тесты проверили TrustTunnel и Hysteria 2, маршруты/firewall, аварии и Always-on. Huawei прошёл боевой Hysteria 2, DNS/Google HTTPS/UDP, DoH/DoT и реальный фоновый Worker синхронизации. Собраны Native/WebView/Both Flatpak; оба интерфейса прошли smoke на физическом Wayland. Проверка дополнения на Windows отложена.
+## Проверки
 
-## Разработка и проверки
+Актуальные проверки включают:
 
-```sh
-cargo fmt --all --check
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-```
+- interop с официальным Hysteria 2.12.3: TCP, UDP, auth/TLS rejection, Salamander, Gecko + mTLS, port hopping и Brutal;
+- Windows production full-tunnel для TrustTunnel и Hysteria 2 с WFP fail-closed и точным восстановлением маршрутов;
+- 30-минутный Windows S3 sleep/wake, включая Always-on восстановление;
+- физические Android-проверки TrustTunnel/Hysteria на POCO X3 и Huawei;
+- 30 минут forced deep Doze на POCO с сохранением VPN egress;
+- macOS live TrustTunnel IPv4/IPv6, DNS, reconnect и crash recovery;
+- Linux system-service, Wayland, Flatpak и network-handoff проверки.
 
-Предыдущий релиз v0.3.2-ui.1 прошёл **macOS Jenkins №69** и **Linux Jenkins №20**: Gitleaks/Trivy, unit, сборку, smoke и сетевые E2E. После обновления установленного macOS проверены GUI и доступ к службе, хеш зашифрованного хранилища не изменился. На физическом KDE Wayland проверены Native, WebView, Both, трей и IPC новой host-службы. На Huawei проверено обновление APK до 30208 с сохранением профиля, подключения и Always-on/lockdown; для UI выполнены сборка и Android lint. Это не новый полный Android CI-прогон: последний полный прогон ядра — №26.
-
-Windows в этот прогон не входила; предыдущая системная приёмка относится к №53 и выпуску sequence 6. Boot/sleep/длительные проверки из таблицы выше не считаются закрытыми. [Состав релиза и проверки](docs/releases/v0.3.2-ui.1.md).
-
-Сетевые и установочные стенды могут менять маршруты и firewall. Соблюдайте их требования к одноразовому окружению. Имена нод и пути локального Jenkins нужно адаптировать для другой установки.
-
-## Единая панель управления VPN
-
-[Панель управления](https://vpn.example.com/console/) использует существующий
-вход администратора TrustTunnel. В одном интерфейсе доступны пользователи Hysteria
-и TrustTunnel, ключи и устройства, правила выхода Hysteria, подписанные обновления
-R-TrustTunnel, черновики e-mail/Telegram-рассылок, очередь операций и журнал.
-Существующие VPN-службы и учётные записи сохраняются.
-
-Редактор маршрутов сейчас управляет **только Hysteria**; TrustTunnel и трафик
-самого сервера выходят напрямую. Для обновлений серверов нужны подготовленные
-оператором пакеты, для TrustTunnel — протокольная проверка. Рассылки требуют
-согласия адресатов и отдельного подтверждения отправки. Автоматическое объединение
-пользователей разных протоколов, общая маршрутизация и failover не реализованы.
-
-[Развёртывание и приёмка](docs/unified-console.md),
-[архитектура и эксплуатация](server/console/README.md),
-[точка входа в развёртывание](deploy/README.md#unified-console).
+Успешный тест конкретной платформы или протокола не означает, что все опубликованные пакеты уже пересобраны с последним main. Точная граница доказательств и открытых задач находится в платформенных документах.
 
 ## Структура репозитория
 
 | Путь | Назначение |
 | --- | --- |
-| `apps/native`, `apps/webview` | Нативное desktop-приложение и дополнительный Tauri UI |
-| `apps/tun` | Обработка трафика TUN/Wintun/utun и системные службы |
-| `apps/inspect`, `apps/codec` | Диагностика и инструменты конфигураций |
-| `crates/` | Общие профили, транспорт, хранилище, IPC, портал и обновления |
-| `server/`, `deploy/` | Обмен профилями, единая VPN-панель, изолированные тесты и развёртывание |
-| `packaging/`, `scripts/` | Упаковка и стенды совместимости |
-| `ci/`, `Jenkinsfile` | Сборка, проверки безопасности и runtime |
-| `vendor/h2` | Исправленная зависимость HTTP/2 со своей лицензией |
-| `docs/` | Архитектура, состояние реализации и границы приёмки; многие документы на русском |
+| apps/native | Нативный desktop-клиент |
+| apps/webview | Дополнительный Tauri WebView frontend |
+| apps/tun | Desktop TUN/Wintun/utun dataplane и службы |
+| apps/android | Android-приложение и JNI/Rust интеграция |
+| apps/inspect, apps/codec | Диагностика и инструменты профилей |
+| crates | Общая логика профилей, транспорта, хранилища, IPC, desktop, portal и updates |
+| server | TrustTunnel portal extension для обмена профилями и его тесты |
+| deploy | Инструменты развёртывания portal extension |
+| packaging, scripts | Упаковка и interop helpers |
+| ci, Jenkinsfile* | Build, security и runtime проверки |
+| vendor/h2 | Патченная HTTP/2 зависимость |
+| docs | Архитектура, статусы платформ, релизы и acceptance evidence |
 
-Серверное расширение рассчитано на существующую панель TrustTunnel и не заменяет установщик endpoint. Начните с [серверной интеграции](server/README.md) и [развёртывания](deploy/README.md).
+Бывшая unified administration console перенесена в [onixus/tunnel](https://github.com/onixus/tunnel). Серверную интеграцию в этом репозитории начинайте с [server/README.md](server/README.md) и [deploy/README.md](deploy/README.md).
 
 ## Документация
 
-- [Текущее состояние реализации](docs/implementation.md)
-- [Порядок работ и критерии приёмки](docs/delivery.md)
+- [Состояние реализации](docs/implementation.md)
 - [Архитектура](docs/architecture.md)
-- [Windows-служба](docs/windows-service.md), [Linux-служба](docs/linux-service.md), [macOS system VPN](docs/macos-system.md)
-- [Безопасные обновления](docs/secure-updates.md)
-- [API обмена профилями](docs/profile-api.md)
-- [Единая VPN-панель](docs/unified-console.md)
-- [Технический долг](docs/technical-debt.md)
+- [Delivery и критерии приёмки](docs/delivery.md)
+- [Hysteria 2](docs/hysteria2.md)
+- [Android](docs/android.md)
+- [Desktop lifecycle](docs/desktop-lifecycle.md)
+- [Secure updates](docs/secure-updates.md)
+- [Profile exchange API](docs/profile-api.md)
+- [Technical debt](docs/technical-debt.md)
 
-Исторические документы могут ссылаться на локальные отчёты и артефакты, которые не входят в репозиторий. Актуальное состояние платформ имеет приоритет над записями прежних этапов.
+Часть исторических документов описывает старые этапы. При расхождении следует ориентироваться на актуальный платформенный документ и наиболее свежие release evidence.
 
 ## Лицензия
 
-[Apache License 2.0](LICENSE). Сторонние зависимости сохраняют собственные лицензии.
+[Apache License 2.0](LICENSE). Vendored dependencies сохраняют собственные лицензии.

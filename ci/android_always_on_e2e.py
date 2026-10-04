@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Verify Always-on recovery after the VPN process dies on an isolated emulator.
+"""A kill_switch = "always_on" profile under real system Always-on, on an isolated emulator.
 
-Android does not restart a VpnService whose process died (see docs/android.md).
-This drives the AOSP Settings screen to enable system Always-on and lockdown,
-kills the process by Java crash, native abort and SIGKILL, and checks that
-lockdown keeps blocking, that opening the app reconnects, and that it does not
-reconnect once this app is no longer the Always-on VPN. Requires a debuggable
-APK (run-as) and an English AOSP Settings UI.
+Drives AOSP Settings (English UI) to switch Always-on VPN and "Block connections
+without VPN". The profile must be refused without lockdown and connect with it,
+both for the system's own Always-on start and for an app start. Requires
+ci/android_fixture.py; Always-on is switched off again on every exit path.
 """
 import argparse
 from pathlib import Path
@@ -17,7 +15,7 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = 'org.rtrusttunnel.android'
-PROBE = 'toybox nc -w 3 1.1.1.1 443 </dev/null >/dev/null 2>&1 && echo open || echo blocked'
+LABEL = 'R-TrustTunnel'
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -26,86 +24,97 @@ def main():
     args = p.parse_args()
     if not args.serial.startswith('emulator-'):
         p.error('Always-on acceptance is restricted to an isolated emulator')
+    source = ROOT / '.ci-android/client.json'
+    if not source.is_file():
+        p.error('Start ci/android_fixture.py first')
     adb = [args.adb, '-s', args.serial]
-    def sh(command, check=True):
-        result = subprocess.run([*adb, 'shell', command], capture_output=True, text=True, timeout=180)
-        if check and result.returncode: raise RuntimeError(f'adb shell failed: {command}\n{result.stderr}')
-        return result.stdout.strip()
-    def wait(condition, timeout, message):
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            if condition(): return
-            time.sleep(1)
-        raise SystemExit('FAIL: ' + message)
-    def pid(): return sh('pidof ' + PACKAGE, check=False)
-    def vpn_up(): return f'VPN CONNECTED extra: VPN:{PACKAGE}' in sh('dumpsys connectivity')
-    def instrument(phase):
-        output = sh(f'am instrument -w -r -e recovery {phase} {PACKAGE}.test/{PACKAGE}.SmokeInstrumentation')
-        if f'PASS: recovery {phase}' not in output or 'INSTRUMENTATION_CODE: -1' not in output: raise SystemExit(output)
-    def nodes():
-        root = ET.fromstring(sh('uiautomator dump /sdcard/rtrust-ui.xml >/dev/null && cat /sdcard/rtrust-ui.xml'))
-        return list(root.iter('node'))
-    def tap(node):
-        x1, y1, x2, y2 = map(int, re.findall(r'\d+', node.get('bounds')))
-        sh(f'input tap {(x1 + x2) // 2} {(y1 + y2) // 2}'); time.sleep(2)
-    def setting(name): return sh('settings get secure ' + name)
-    def always_on(enable):
-        sh('am force-stop com.android.settings')  # Open the VPN list, not a resumed sub-page.
-        sh('am start -W -a android.settings.VPN_SETTINGS'); time.sleep(2)
-        title = next(n for n in nodes() if n.get('text') == 'R-TrustTunnel')
-        row = int(re.findall(r'\d+', title.get('bounds'))[1])
-        gear = next(n for n in nodes() if n.get('resource-id', '').endswith('settings_button')
-                    and int(re.findall(r'\d+', n.get('bounds'))[1]) <= row <= int(re.findall(r'\d+', n.get('bounds'))[3]))
-        tap(gear)
-        for index in ((0, 1) if enable else (0,)):
-            switch = [n for n in nodes() if n.get('checkable') == 'true'][index]
-            if (switch.get('checked') == 'true') != enable:
-                tap(switch)
-                confirm = [n for n in nodes() if n.get('text') == 'Turn on']
-                if confirm: tap(confirm[0])
-        sh('input keyevent HOME')
-        state = (setting('always_on_vpn_app'), setting('always_on_vpn_lockdown'))
-        if enable and state != (PACKAGE, '1'): raise SystemExit(f'FAIL: Always-on/lockdown not enabled: {state}')
-        if not enable and state[0] == PACKAGE: raise SystemExit('FAIL: Always-on not disabled')
 
-    sh('pm grant ' + PACKAGE + ' android.permission.POST_NOTIFICATIONS')
-    sh('appops set ' + PACKAGE + ' ACTIVATE_VPN allow')
-    sh('am force-stop ' + PACKAGE)
-    if setting('always_on_vpn_app') == PACKAGE: always_on(False)
-    direct = sh(PROBE)
-    print('Direct baseline before lockdown:', direct)
-    instrument('seed')
+    def run(*cmd, **kwargs):
+        return subprocess.run([*adb, *cmd], check=True, timeout=180, **kwargs)
+    def shell(command):
+        return run('shell', command, capture_output=True, text=True).stdout.strip()
+    def instrument(phase, fixture=False):
+        if fixture:
+            run('shell', f"run-as {PACKAGE} sh -c 'cat > cache/vpn-fixture.json'", input=source.read_bytes(), stdout=subprocess.DEVNULL)
+        out = run('shell', 'am', 'instrument', '-w', '-r', '-e', 'always_on', phase, f'{PACKAGE}.test/{PACKAGE}.SmokeInstrumentation', capture_output=True, text=True).stdout
+        print(out, flush=True)
+        if f'PASS: always-on {phase}' not in out or 'INSTRUMENTATION_CODE: -1' not in out or 'FAIL:' in out:
+            raise SystemExit(f'Android Always-on acceptance failed: {phase}')
+    def nodes():
+        root = ET.fromstring(run('exec-out', 'uiautomator', 'dump', '/dev/tty', capture_output=True, text=True).stdout.split('UI hierchary dumped')[0].strip())
+        return list(root.iter('node'))
+    def center(node):
+        x1, y1, x2, y2 = map(int, re.findall(r'\d+', node.get('bounds')))
+        return str((x1 + x2) // 2), str((y1 + y2) // 2)
+    def tap(node):
+        run('shell', 'input', 'tap', *center(node)); time.sleep(1.5)
+    def find(predicate, what):
+        for _ in range(10):
+            match = next((n for n in nodes() if predicate(n)), None)
+            if match is not None: return match
+            time.sleep(.5)
+        raise SystemExit(f'Settings UI element not found: {what}')
+    def vpn_settings():
+        run('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'); run('shell', 'wm', 'dismiss-keyguard')
+        run('shell', 'am', 'start', '-S', '-W', '-a', 'android.settings.VPN_SETTINGS', stdout=subprocess.DEVNULL)
+        time.sleep(1.5)
+        # The app row is a parent holding both the label and its gear button.
+        for row in nodes():
+            kids = list(row.iter('node'))
+            if any(k.get('text') == LABEL for k in kids):
+                gear = next((k for k in kids if k.get('resource-id', '').endswith('/settings_button')), None)
+                if gear is not None and not any(k.get('resource-id', '').endswith('/recycler_view') for k in kids):
+                    tap(gear); return
+        raise SystemExit('VPN settings row not found')
+    def setting(name):
+        return shell(f'settings get secure {name}')
+    def set_mode(always_on, lockdown):
+        vpn_settings()
+        for title, wanted in (('Always-on VPN', always_on), ('Block connections without VPN', lockdown)):
+            if title != 'Always-on VPN' and not always_on: break  # lockdown depends on Always-on
+            label = find(lambda n: n.get('text') == title, title)
+            switch = None
+            for row in nodes():
+                kids = list(row.iter('node'))
+                if any(k.get('text') == title for k in kids) and sum(k.get('resource-id', '').endswith('id/title') for k in kids) == 1:
+                    switch = next((k for k in kids if k.get('checkable') == 'true'), switch)
+            if switch is None: raise SystemExit(f'Switch not found: {title}')
+            if (switch.get('checked') == 'true') != wanted:
+                tap(label)
+                confirm = next((n for n in nodes() if n.get('resource-id') == 'android:id/button1'), None)
+                if confirm is not None: tap(confirm)
+        app, locked = setting('always_on_vpn_app'), setting('always_on_vpn_lockdown')
+        if (app == PACKAGE) != always_on or (locked == '1') != (always_on and lockdown):
+            raise SystemExit(f'Always-on settings not applied: app={app} lockdown={locked}')
+        run('shell', 'input', 'keyevent', 'KEYCODE_HOME')
+    def vpn_up():
+        # A VPN agent lists its underlying transports too, e.g. "Transports: CELLULAR|VPN".
+        return re.search(r'Transports: [A-Z_|]*\bVPN\b', shell('dumpsys connectivity | grep NetworkAgentInfo')) is not None
+
+    if setting('always_on_vpn_app') not in ('', 'null'):
+        raise SystemExit('Emulator already has an Always-on VPN; refusing to change it')
+    run('shell', 'pm', 'grant', PACKAGE, 'android.permission.POST_NOTIFICATIONS')
+    run('shell', 'appops', 'set', PACKAGE, 'ACTIVATE_VPN', 'allow')
+    instrument('seed', fixture=True)
     try:
-        always_on(True)
-        wait(vpn_up, 30, 'system Always-on did not start the VPN')
-        for method in ('am crash', 'SIGKILL', 'SIGABRT'):
-            victim = pid()
-            if not victim: raise SystemExit('FAIL: VPN process missing before ' + method)
-            if method == 'am crash': sh('am crash ' + PACKAGE)
-            else: sh(f'run-as {PACKAGE} kill -{method[3:]} {victim}')
-            wait(lambda: pid() != victim and not vpn_up(), 20, f'VPN still up after {method}')
-            time.sleep(10)
-            # Observation only: the platform behaviour is documented, not asserted.
-            print(f'{method}: platform restart within 10 s:', 'yes' if pid() or vpn_up() else 'no')
-            if not vpn_up():
-                if setting('always_on_vpn_lockdown') != '1': raise SystemExit('FAIL: lockdown setting lost after ' + method)
-                if direct == 'open' and sh(PROBE) != 'blocked': raise SystemExit('FAIL: direct traffic leaked after ' + method)
-            sh(f'am start -W -n {PACKAGE}/.MainActivity')
-            wait(vpn_up, 30, 'opening the app did not restore the Always-on VPN after ' + method)
-            sh('input keyevent HOME'); time.sleep(2)
-            print(f'PASS: {method} kept lockdown and the app restored the VPN')
-        victim = pid()
-        sh(f'run-as {PACKAGE} kill -KILL {victim}')
-        wait(lambda: pid() != victim and not vpn_up(), 20, 'VPN still up after SIGKILL')
-        always_on(False)
-        sh(f'am start -W -n {PACKAGE}/.MainActivity'); time.sleep(8)
-        if vpn_up(): raise SystemExit('FAIL: app reconnected although Always-on was disabled')
-        sh('input keyevent HOME')
-        print('PASS: no reconnect after Always-on was disabled')
+        instrument('refused')
+        set_mode(True, False)
+        # Enabling Always-on makes the system start the service; it must refuse.
+        time.sleep(5)
+        if vpn_up(): raise SystemExit('System Always-on start without lockdown left a VPN up')
+        instrument('refused')
+        set_mode(True, True)
+        for _ in range(60):
+            if vpn_up(): break
+            time.sleep(.5)
+        else: raise SystemExit('System Always-on start with lockdown did not establish')
+        # The TUN is established before the lockdown check; a refusal closes it at once.
+        time.sleep(5)
+        if not vpn_up(): raise SystemExit('System Always-on start with lockdown was refused')
+        instrument('connected', fixture=True)
+        print('PASS: require_lockdown refused without Always-on/lockdown, connected under system Always-on with lockdown', flush=True)
     finally:
-        if setting('always_on_vpn_app') == PACKAGE: always_on(False)
-        sh('am force-stop ' + PACKAGE)
+        set_mode(False, False)
         instrument('finish')
-    print('PASS: Always-on lockdown and app recovery after Java crash, native abort and SIGKILL')
 
 if __name__ == '__main__': main()

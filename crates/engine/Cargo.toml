@@ -12,12 +12,18 @@ base64.workspace = true
 zeroize.workspace = true
 bytes = "1"
 blake2 = "0.10"
+chacha20 = "0.9"
+chacha20poly1305 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp"] }
 rand = "0.9"
 sha2 = "0.10"
 h2 = "0.4"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+# Only for the RttEstimator type in the congestion-controller trait.
+quinn-proto = { version = "0.11", default-features = false }
 http = "1"
 url = "2"
 hyper = { version = "1", features = ["client", "http1"] }

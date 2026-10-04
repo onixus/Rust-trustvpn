@@ -67,12 +67,16 @@ cp target/aarch64-linux-android/release/librtrust_android.so /out/arm64-v8a/
         run(['docker', 'run', '--rm', '--network', 'none', '-v', f'{libs}:/out:z', IMAGE, 'chown', '-hR', f'{os.getuid()}:{os.getgid()}', '/out'], timeout=60)
     run([args.gradle, '-p', str(ROOT / 'apps/android'), '--no-daemon', 'assembleDebug', 'assembleRelease', 'assembleDebugAndroidTest', 'lintDebug'], env=env, timeout=1200)
     run(['python3', 'ci/android_smoke.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
-    for protocol in ('trusttunnel','hysteria2'):
+    for protocol in ('trusttunnel','hysteria2','amneziawg'):
         print('Android network protocol:',protocol,flush=True)
         if protocol == 'hysteria2':
             # Download and verify the pinned tool before timing server readiness.
             # A cold release download is not an endpoint startup failure.
             from hysteria_interop import binary
+            binary()
+        if protocol == 'amneziawg':
+            # Likewise a cold image pull and module download for the fixture peer.
+            from amneziawg_server import binary
             binary()
         fixture = subprocess.Popen(['python3', 'ci/android_fixture.py','--protocol',protocol], cwd=ROOT)
         try:
@@ -82,11 +86,13 @@ cp target/aarch64-linux-android/release/librtrust_android.so /out/arm64-v8a/
                 time.sleep(.5)
             else: raise RuntimeError('Android fixture readiness timeout')
             run(['python3', 'ci/android_network_e2e.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
+            if protocol == 'trusttunnel':
+                run(['python3', 'ci/android_always_on_e2e.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
         finally:
             fixture.terminate()
             try: fixture.wait(timeout=40)
             except subprocess.TimeoutExpired: fixture.kill(); fixture.wait()
-    run(['python3', 'ci/android_always_on_e2e.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
+    run(['python3', 'ci/android_process_death_e2e.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
     run(['python3', 'ci/android_upgrade_e2e.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial, '--gradle', args.gradle], cwd=ROOT, env=env)
     dist = ROOT / 'dist/android'
     dist.mkdir(parents=True, exist_ok=True)

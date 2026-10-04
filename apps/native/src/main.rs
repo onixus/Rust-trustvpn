@@ -903,7 +903,10 @@ impl App {
                 return Task::perform(
                     async {
                         let Some(file) = rfd::AsyncFileDialog::new()
-                            .add_filter("TrustTunnel profile", &["toml", "json", "txt"])
+                            .add_filter(
+                                "TrustTunnel profile",
+                                &["toml", "json", "txt", "conf", "yaml", "yml"],
+                            )
                             .pick_file()
                             .await
                         else {
@@ -1503,7 +1506,7 @@ impl App {
             Page::Import => {
                 let mut content = column![
                     text("Добавить профиль").size(22),
-                    text("TrustTunnel TOML/tt://, Hysteria 2 YAML/hy2://, JSON. Импорт не подключает VPN."),
+                    text("TrustTunnel TOML/tt://, Hysteria 2 YAML/hy2://, AmneziaWG .conf, JSON. Импорт не подключает VPN."),
                     button("Выбрать файл…")
                         .on_press_maybe((!self.busy).then_some(Message::PickFile)),
                     text_editor(&self.input)

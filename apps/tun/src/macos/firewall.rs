@@ -60,23 +60,41 @@ pub(super) fn policy(
     networks: &[rtrust_control::Ipv4Net],
     endpoints: &[SocketAddrV4],
     protocol: rtrust_profile::Protocol,
+    ports: &[(u16, u16)],
 ) -> String {
     let mut rules = vec![
         "pass out quick on lo0 all no state".into(),
         format!("pass out quick on {DEVICE} all no state"),
     ];
     if full {
-        let transport = if protocol == rtrust_profile::Protocol::Hysteria2 {
-            "udp"
-        } else {
+        // Hysteria 2 and AmneziaWG are UDP transports.
+        let transport = if protocol == rtrust_profile::Protocol::TrustTunnel {
             "tcp"
+        } else {
+            "udp"
         };
         let flags = if transport == "tcp" { " flags any" } else { "" };
+        // Hysteria port hopping sends to any port of the server's set.
+        let hop = ports
+            .iter()
+            .map(|(a, b)| {
+                if a == b {
+                    a.to_string()
+                } else {
+                    format!("{a}:{b}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         for endpoint in endpoints {
+            let port = if hop.is_empty() {
+                endpoint.port().to_string()
+            } else {
+                format!("{{ {hop} }}")
+            };
             rules.push(format!(
-                "pass out quick inet proto {transport} to {} port {} user root{flags} no state",
+                "pass out quick inet proto {transport} to {} port {port} user root{flags} no state",
                 endpoint.ip(),
-                endpoint.port()
             ));
         }
         rules.push(
@@ -150,6 +168,26 @@ pub(super) fn remove(uid: u32, token: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hysteria_hop_ports_open_only_the_server_port_set() {
+        let endpoint: SocketAddrV4 = "192.0.2.10:443".parse().unwrap();
+        let hysteria = rtrust_profile::Protocol::Hysteria2;
+        let plain = policy(501, true, &[], &[endpoint], hysteria, &[]);
+        assert!(plain.contains("proto udp to 192.0.2.10 port 443 user root no state"));
+        let hop = policy(
+            501,
+            true,
+            &[],
+            &[endpoint],
+            hysteria,
+            &[(443, 443), (20000, 20010)],
+        );
+        assert!(
+            hop.contains("proto udp to 192.0.2.10 port { 443, 20000:20010 } user root no state")
+        );
+        assert!(!hop.contains("port 443 user"));
+        assert!(hop.contains("block drop out quick all"));
+    }
     #[test]
     fn accepts_stock_scrub_anchor_but_not_foreign_filter_rules() {
         assert!(standard_root(&[

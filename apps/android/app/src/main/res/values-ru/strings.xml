@@ -33,8 +33,6 @@
     <string name="connecting">"Подключение…"</string>
     <string name="reconnecting">"Переподключение · трафик заблокирован"</string>
     <string name="connection_failed">"Ошибка подключения. Проверьте профиль и сеть."</string>
-    <string name="apps_summary">"Приложения VPN · выбрано: %1$d"</string>
-    <string name="apps_all_summary">"Приложения VPN · все приложения"</string>
     <string name="selected_count">"Выбрано: %1$d"</string>
     <string name="starting_vpn">"Запуск VPN…"</string>
     <string name="disconnected">"Отключено"</string>
@@ -45,10 +43,9 @@
     <string name="paste_config_or_tt_link">"Вставить конфиг или ссылку tt:// / hy2://"</string>
     <string name="vpn_apps">"Приложения VPN"</string>
     <string name="app_selection_could_not_be_opened">"Не удалось открыть список приложений. Настройки сохранены."</string>
-    <string name="vpn_uses_http_for_protection_after">"Протокол определяется профилем: TrustTunnel HTTP/2 или Hysteria 2. Для защиты после остановки приложения включите системную блокировку без VPN."</string>
+    <string name="vpn_uses_http_for_protection_after">"Протокол определяется профилем: TrustTunnel HTTP/2, Hysteria 2 или AmneziaWG. Для защиты после остановки приложения включите системную блокировку без VPN."</string>
     <string name="import_a_profile_to_get_started">"Импортируйте профиль для начала работы."</string>
     <string name="encrypted_profiles_could_not_be_opened">"Не удалось открыть зашифрованные профили. Данные сохранены."</string>
-    <string name="use_as_default">"Использовать по умолчанию"</string>
     <string name="export">"Экспорт…"</string>
     <string name="delete">"Удалить…"</string>
     <string name="delete_this_saved_profile">"Удалить сохранённый профиль?"</string>
@@ -99,7 +96,11 @@
     <string name="portal_background_disable">"Выключить"</string>
     <string name="portal_last_sync">"Последняя успешная синхронизация: %1$s"</string>
     <string name="home_subtitle">Ваше подключение — всё под рукой</string>
-    <string name="add_profile">+ Добавить профиль</string>
+    <string name="add_profile">Добавить профиль</string>
     <string name="home_settings">Настройки</string>
-    <string name="default_profile_label">ПРОФИЛЬ ПО УМОЛЧАНИЮ</string>
+    <string name="default_profile_label">Профиль по умолчанию</string>
+    <string name="no_default_profile">Профиль по умолчанию не выбран</string>
+    <string name="profiles_header">Профили · %1$d</string>
+    <string name="empty_hint">Импортируйте файл, вставьте конфиг или отсканируйте QR-код.</string>
+    <string name="profile_menu">Действия с профилем</string>
 </resources>

@@ -248,7 +248,7 @@ async fn serve(
                 )
                 .await;
             }
-            routes::unused_adapter()?;
+            routes::settled_adapter()?;
             reply(pipe, State::Idle, "Служба зарезервирована для обновления").await?;
             tokio::select! { _=stop.changed()=>{}, _=read::<Request>(pipe)=>{} }
             return Ok(());
@@ -272,7 +272,7 @@ async fn serve(
         )
         .await;
     }
-    routes::unused_adapter()?;
+    routes::settled_adapter()?;
     if dns.is_none()
         && let Err(error) = routes::preflight(&networks)
     {
@@ -329,7 +329,13 @@ async fn serve(
         let index = device
             .if_index()
             .map_err(|_| "Wintun interface index unavailable")?;
-        full::install(index, &full::endpoints(&profile)?, dns, profile.protocol)?;
+        full::install(
+            index,
+            &full::endpoints(&profile)?,
+            dns,
+            profile.protocol,
+            &profile.hop_port_ranges(),
+        )?;
         vec!["0.0.0.0/1".parse().unwrap(), "128.0.0.0/1".parse().unwrap()]
     } else {
         networks
@@ -478,6 +484,9 @@ pub(crate) fn boot_guard(policy: Option<&crate::boot_policy::Policy>) -> Result<
         0,
         &endpoints,
         policy.map(|p| p.profile.protocol).unwrap_or_default(),
+        &policy
+            .map(|p| p.profile.hop_port_ranges())
+            .unwrap_or_default(),
     )
 }
 pub(crate) fn boot_unguard() -> Result<(), String> {

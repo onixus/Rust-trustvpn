@@ -19,9 +19,30 @@ final class NetworkAcceptance {
         while (SystemClock.elapsedRealtime() < end) { if (state() == expected) return; Thread.sleep(100); }
         throw new AssertionError("VPN state timeout, expected " + expected + ", got " + NativeCore.INSTANCE.status());
     }
-    private static byte[] request(String address, int port, String request) throws Exception {
+    private static android.net.Network lastVpn;
+    /** The service reports "connected" before Android makes the new VPN the active
+     *  network of this UID. A socket opened in between leaves through the underlying
+     *  network, and link properties read in between describe that network. */
+    static void awaitVpn(Context context) throws Exception {
+        android.net.ConnectivityManager cm = context.getSystemService(android.net.ConnectivityManager.class);
+        long end = SystemClock.elapsedRealtime() + 10000;
+        while (SystemClock.elapsedRealtime() < end) {
+            android.net.Network network = cm.getActiveNetwork();
+            android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+            // A new network: the previous VPN can stay active for a moment after Stop.
+            if (network != null && !network.equals(lastVpn) && caps != null && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) { lastVpn = network; return; }
+            Thread.sleep(50);
+        }
+        throw new AssertionError("VPN did not become the active network");
+    }
+    private static void connect(Context context) throws Exception {
+        context.startForegroundService(new Intent(context, TunnelService.class));
+        await(2, 45000); awaitVpn(context);
+    }
+    private static byte[] request(String address, int port, String request) throws Exception { return request(address, port, request, 5000); }
+    private static byte[] request(String address, int port, String request, int connectTimeout) throws Exception {
         try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress(address, port), 5000); socket.setSoTimeout(5000);
+            socket.connect(new InetSocketAddress(address, port), connectTimeout); socket.setSoTimeout(5000);
             socket.getOutputStream().write(request.getBytes(StandardCharsets.US_ASCII));
             return ProfileVault.readBounded(socket.getInputStream(), 1024 * 1024);
         }
@@ -50,6 +71,7 @@ final class NetworkAcceptance {
         }
     }
     static void verifyTraffic(JSONObject fixture) throws Exception {
+        largeUdpDigest = fixture.optBoolean("large_udp_digest");
         tcp(fixture.getString("target")); tcp(fixture.getString("target6"));
         udp(fixture.getString("target")); udp(fixture.getString("target6"));
     }
@@ -78,7 +100,7 @@ final class NetworkAcceptance {
             candidate.put("policy",new JSONObject().put("mode",kind.equals("selective")?"selective":"general").put("exclusions",exclusions));
             vault.edit(data -> { data.put("app_routing",new AppRouting(false,java.util.Collections.emptyList()).json());
                 data.put("default","flow").put("profiles",new JSONArray().put(new JSONObject().put("id","flow").put("profile",candidate))); });
-            context.startForegroundService(new Intent(context,TunnelService.class));await(2,45000);
+            connect(context);
             try {
                 if(kind.equals("domain")) check(InetAddress.getByName("rtrust-"+System.nanoTime()+".split.example").getHostAddress().equals(target),"Domain rule learned through VPN DNS");
                 boolean bypass=kind.equals("ip")||kind.equals("port")||kind.equals("domain");
@@ -100,24 +122,43 @@ final class NetworkAcceptance {
         JSONObject profile = new JSONObject(NativeCore.INSTANCE.parse(fixture.getJSONObject("base").toString())).getJSONObject("profile");
         Activity activity = null;
         try {
+            // Without the VPN the echo service sees this device's own address.
+            String direct = sourceTcp(fixture.getString("target"));
             vault.write(new JSONObject().put("default", "acceptance").put("profiles", new JSONArray().put(new JSONObject().put("id", "acceptance").put("profile", profile))));
             check(android.net.VpnService.prepare(context) == null, "Emulator VPN consent prerequisite");
             activity = test.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-            context.startForegroundService(new Intent(context, TunnelService.class));
-            await(2, 45000);
+            connect(context);
             check(vault.selected().getJSONObject("endpoint").getString("upstream_protocol").equals("http3"), "Stored HTTP/3 retained");
             String v4 = fixture.getString("target"), v6 = fixture.getString("target6");
             tcp(v4); tcp(v6); udp(v4); udp(v6);
             check(Arrays.stream(InetAddress.getAllByName("rtrust-" + System.nanoTime() + ".example")).anyMatch(ip -> ip.getHostAddress().equals(v4)), "System DNS through tunnel");
             byte[] control = request(v4, 8082, "POST /cycle HTTP/1.0\r\nHost: fixture\r\nAuthorization: Bearer " + fixture.getString("control_token") + "\r\nContent-Length: 0\r\n\r\n");
             check(new String(control, StandardCharsets.US_ASCII).contains("204"), "Endpoint outage scheduled");
-            await(3, largeUdpDigest ? 40000 : 10000);
+            // Hysteria notices a silent server only by QUIC idle timeout: about 37 s after
+            // the last reply (keep-alive restart + 30 s) plus the 5 s health poll, measured
+            // against the official server. The fixture restores it 60 s after scheduling,
+            // so detection has a margin on both sides.
+            // WireGuard has no connection to lose: a silent AmneziaWG peer is noticed
+            // only when traffic goes unanswered, so keep some flowing while waiting.
+            long detected = SystemClock.elapsedRealtime() + fixture.optInt("outage_detection_ms", largeUdpDigest ? 55000 : 10000);
+            while (state() != 3) {
+                if (SystemClock.elapsedRealtime() > detected) throw new AssertionError("VPN state timeout, expected 3, got " + NativeCore.INSTANCE.status());
+                try (Socket probe = new Socket()) { probe.connect(new InetSocketAddress(v4, 8080), 1000); }
+                catch (IOException expected) { }
+                Thread.sleep(500);
+            }
             check(TunnelService.active, "TUN retained during reconnect");
-            boolean blocked = false;
-            try (Socket socket = new Socket()) { socket.connect(new InetSocketAddress(v4, 8080), 2000); }
-            catch (IOException expected) { blocked = true; }
-            check(blocked, "No direct fallback during outage");
-            await(2, 45000); tcp(v4); tcp(v6);
+            // The endpoint may return between the state check and this connection. A
+            // connection that succeeds must then arrive through the tunnel, never
+            // from this device's own address.
+            String during = null;
+            try {
+                String response = new String(request(v4, 8083, "GET / HTTP/1.0\r\nHost: fixture\r\n\r\n", 2000), StandardCharsets.US_ASCII);
+                int body = response.indexOf("\r\n\r\n");
+                if (body >= 0) during = response.substring(body + 4).trim();
+            } catch (IOException expected) { }
+            check(during == null || during.isEmpty() || !during.equals(direct), "No direct fallback during outage");
+            await(2, fixture.optInt("recovery_ms", 45000)); tcp(v4); tcp(v6);
             Activity finished = activity; test.runOnMainSync(finished::finish); activity = null;
             Thread.sleep(1500); check(TunnelService.active && state() == 2, "Activity close retains VPN"); tcp(v4);
             context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP));
@@ -133,8 +174,7 @@ final class NetworkAcceptance {
             JSONObject ipv4Only = vault.read();
             ipv4Only.getJSONArray("profiles").getJSONObject(0).getJSONObject("profile").getJSONObject("endpoint").put("has_ipv6", false);
             vault.write(ipv4Only);
-            context.startForegroundService(new Intent(context, TunnelService.class));
-            await(2, 45000);
+            connect(context);
             android.net.ConnectivityManager cm = context.getSystemService(android.net.ConnectivityManager.class);
             android.net.LinkProperties links = cm.getLinkProperties(cm.getActiveNetwork());
             check(links != null && links.getLinkAddresses().stream().noneMatch(a -> a.getAddress() instanceof Inet6Address), "IPv4-only endpoint must not advertise IPv6 on Android");

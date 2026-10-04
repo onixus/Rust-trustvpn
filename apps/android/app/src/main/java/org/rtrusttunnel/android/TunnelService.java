@@ -99,7 +99,6 @@ public final class TunnelService extends VpnService {
         if (!prepared.getBoolean("ok")) throw new IllegalArgumentException("Unsupported mobile policy");
         profile = prepared.getJSONObject("profile");
         JSONObject plan = prepared.getJSONObject("plan");
-        if (plan.getBoolean("require_lockdown") && (!isAlwaysOn() || !isLockdownEnabled())) throw new IllegalArgumentException("System lockdown required");
         underlying = availableNetwork();
         JSONObject endpoint = profile.getJSONObject("endpoint");
         boolean ipv6 = endpoint.optBoolean("has_ipv6", true);
@@ -130,11 +129,14 @@ public final class TunnelService extends VpnService {
         if (tun == null) throw new IllegalStateException("VPN permission revoked");
         // Android answers isAlwaysOn/isLockdownEnabled only for an established VPN, so the
         // values read in onStartCommand are false even for a system Always-on start.
+        // The TUN carries no traffic yet, so the checks below open no bypass.
         alwaysOn = isAlwaysOn(); lockdown = isLockdownEnabled();
         rememberAlwaysOn(this, alwaysOn);
         getSystemService(NotificationManager.class).notify(1, notification());
-        // Recovery is only for the system Always-on VPN; the blocking TUN never opened a bypass.
+        // Recovery is only for the system Always-on VPN.
         if (recovering && !alwaysOn) { disconnect(); return; }
+        // A refusal closes the TUN through cleanup() and reports "cannot start".
+        if (plan.getBoolean("require_lockdown") && (!alwaysOn || !lockdown)) throw new IllegalArgumentException("System lockdown required");
         callback = new ConnectivityManager.NetworkCallback() {
             @Override public void onAvailable(Network network) { updateUnderlying(); }
             @Override public void onLost(Network network) { updateUnderlying(); }

@@ -164,6 +164,7 @@ impl Guard {
         resolver: Option<Ipv4Addr>,
         endpoints: Vec<SocketAddrV4>,
         protocol: rtrust_profile::Protocol,
+        ports: &[(u16, u16)],
     ) -> Result<Self, String> {
         let mut planned = vec![];
         if resolver.is_some() {
@@ -208,7 +209,14 @@ impl Guard {
             pf_token: None,
         };
         save(&j, true)?;
-        let script = firewall::policy(uid, resolver.is_some(), &j.networks, &j.endpoints, protocol);
+        let script = firewall::policy(
+            uid,
+            resolver.is_some(),
+            &j.networks,
+            &j.endpoints,
+            protocol,
+            ports,
+        );
         j.pf_token = Some(firewall::install(Path::new(DIRECTORY), &script)?);
         save(&j, false)?;
         for route in &j.routes {

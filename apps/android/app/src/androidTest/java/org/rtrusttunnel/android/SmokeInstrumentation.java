@@ -40,7 +40,7 @@ public final class SmokeInstrumentation extends Instrumentation {
             }
             String recovery = arguments.getString("recovery");
             if (recovery != null) {
-                // Host-driven by ci/android_always_on_e2e.py: the process under test is killed,
+                // Host-driven by ci/android_process_death_e2e.py: the process under test is killed,
                 // so only seeding and restoring the vault run in-process.
                 ProfileVault vault = new ProfileVault(getTargetContext()); JSONObject data = vault.read();
                 if (recovery.equals("seed")) {
@@ -55,6 +55,11 @@ public final class SmokeInstrumentation extends Instrumentation {
                     data.put("profiles", kept).put("default", data.getString("test_previous_default")); data.remove("test_previous_default"); vault.write(data);
                 }
                 result.putString("stream", "PASS: recovery " + recovery + "\n"); finish(-1, result); return;
+            }
+            String alwaysOn = arguments.getString("always_on");
+            if (alwaysOn != null) {
+                AlwaysOnAcceptance.run(this, alwaysOn);
+                result.putString("stream", "PASS: always-on " + alwaysOn + "\n"); finish(-1, result); return;
             }
             if ("true".equals(arguments.getString("network"))) {
                 NetworkAcceptance.run(this);
@@ -93,7 +98,14 @@ public final class SmokeInstrumentation extends Instrumentation {
             result.putString("stream", "PASS: JNI codec, four formats, redaction, Keystore persistence, encrypted file, tamper rejection, invalid FD, portal sync, QR camera/image, Russian resources, export recreation, Always-on declaration\n");
             finish(-1, result);
         } catch (Throwable error) {
-            result.putString("stream", "FAIL: " + error.getClass().getSimpleName() + (error instanceof AssertionError ? ": " + error.getMessage() : "") + "\n"); finish(1, result);
+            // Exception messages may carry addresses or profile data; the failing test
+            // lines are safe and tell which step failed.
+            StringBuilder where = new StringBuilder(); int frames = 0;
+            for (StackTraceElement frame : error.getStackTrace()) {
+                if (!frame.getClassName().startsWith("org.rtrusttunnel.android.") || frames == 3) continue;
+                where.append(frames++ == 0 ? " at " : " < ").append(frame.getFileName()).append(':').append(frame.getLineNumber());
+            }
+            result.putString("stream", "FAIL: " + error.getClass().getSimpleName() + (error instanceof AssertionError ? ": " + error.getMessage() : "") + where + "\n"); finish(1, result);
         }
     }
 }
