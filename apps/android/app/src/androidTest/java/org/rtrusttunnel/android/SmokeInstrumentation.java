@@ -38,6 +38,11 @@ public final class SmokeInstrumentation extends Instrumentation {
                 }
                 result.putString("stream", "PASS: upgrade " + upgrade + "\n"); finish(-1, result); return;
             }
+            String alwaysOn = arguments.getString("always_on");
+            if (alwaysOn != null) {
+                AlwaysOnAcceptance.run(this, alwaysOn);
+                result.putString("stream", "PASS: always-on " + alwaysOn + "\n"); finish(-1, result); return;
+            }
             if ("true".equals(arguments.getString("network"))) {
                 NetworkAcceptance.run(this);
                 result.putString("stream", "PASS: VPN IPv4/IPv6 TCP512KiB, UDP1/1472/5000/60000, system DNS, outage guard, reconnect, Activity close, Stop, unavailable startup DNS guard\n");

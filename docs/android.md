@@ -101,6 +101,11 @@ The emulator tests intentionally replace this app's test installation. They cove
 - real IPv4/IPv6 TCP 512 KiB, UDP 1/1472/5000/60000 bytes and system DNS;
 - endpoint outage, blocked traffic during reconnect, recovery, Activity close
   and explicit Stop;
+- `ci/android_always_on_e2e.py` drives AOSP Settings (English UI) to switch
+  Always-on and lockdown. A `kill_switch = "always_on"` profile is refused without
+  Always-on and with Always-on but no lockdown, for both system and app starts. With
+  lockdown, the system's own Always-on start stays up and an app start passes TCP/UDP
+  traffic. Always-on is switched off again afterward;
 - process restart, reinstall and increasing-version APK upgrade, including
   preservation of the default profile and Keystore-protected credentials.
 
@@ -178,6 +183,12 @@ first. Excluded apps have no Internet under lockdown. Credentials remain in
 credential-encrypted storage; no plaintext direct-boot copy is created. Before
 first unlock the system policy, rather than an established tunnel, must provide
 blocking. Android may exempt some system traffic from VPN policy.
+
+A profile whose policy sets `kill_switch = "always_on"` connects only under system
+Always-on with Block connections without VPN; otherwise it reports that the VPN
+cannot start. Android reports Always-on/lockdown to the app only once its VPN is
+established, so the check runs right after the blocking TUN is created. The TUN
+carries no traffic before the check and is closed if the check fails.
 
 QR camera permission is requested only when scanning; camera/image decoding is
 local and always leads to the normal profile confirmation. File export is explicit

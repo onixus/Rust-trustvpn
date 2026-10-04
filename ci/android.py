@@ -86,6 +86,8 @@ cp target/aarch64-linux-android/release/librtrust_android.so /out/arm64-v8a/
                 time.sleep(.5)
             else: raise RuntimeError('Android fixture readiness timeout')
             run(['python3', 'ci/android_network_e2e.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
+            if protocol == 'trusttunnel':
+                run(['python3', 'ci/android_always_on_e2e.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
         finally:
             fixture.terminate()
             try: fixture.wait(timeout=40)

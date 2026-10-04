@@ -71,6 +71,7 @@ final class NetworkAcceptance {
         }
     }
     static void verifyTraffic(JSONObject fixture) throws Exception {
+        largeUdpDigest = fixture.optBoolean("large_udp_digest");
         tcp(fixture.getString("target")); tcp(fixture.getString("target6"));
         udp(fixture.getString("target")); udp(fixture.getString("target6"));
     }
