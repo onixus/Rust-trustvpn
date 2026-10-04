@@ -84,8 +84,13 @@ check (every 5 s, 10 s timeout) detects a dead endpoint.
   physical network handoff, early boot guard and an endpoint without IPv6.
 - Windows: `ci/windows_fixture.py --protocol http3` (Jenkins parameter
   `WINDOWS_TRANSPORT=http3`) runs the Wintun service and full-tunnel E2E against
-  a QUIC-listening endpoint.
+  a QUIC-listening endpoint. On 4 October 2026 the authorized run
+  (`ci/windows_authorized_full.py`, timed rollback to the installed service)
+  passed: Wintun TCP/UDP/ICMP, endpoint outage and reconnect, GUI and service
+  crashes, always-on with a crash cycle, and a physical network loss.
+- Android: `ci/android.py` runs the network acceptance for TrustTunnel over
+  HTTP/2 and HTTP/3 (`ci/android_fixture.py --protocol http3`). On the emulator
+  HTTP/3 passed 10 of 10 interleaved runs after the lost-response fix.
 
-Not yet verified for HTTP/3: Android VpnService on the emulator, the macOS system
-service, Windows sleep/wake, a production server and networks that throttle or
-block UDP.
+Not yet verified for HTTP/3: the macOS system service, a physical Android device,
+Windows sleep/wake, a production server and networks that throttle or block UDP.

@@ -64,7 +64,7 @@ do not disable that protection or publish real profiles to create documentation.
   Stop/revoke closes both. Temporary handshake EOF/reset remains retryable;
   invalid certificates remain fatal, with traffic blocked until Disconnect.
 - TrustTunnel HTTP/3 profiles connect over HTTP/3: the QUIC socket is protected like the
-  Hysteria one. Not yet accepted on the emulator; see [HTTP/3](http3.md).
+  Hysteria one. The emulator acceptance runs over HTTP/2 and HTTP/3; see [HTTP/3](http3.md).
 
 ## Build
 

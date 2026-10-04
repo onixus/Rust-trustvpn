@@ -15,10 +15,14 @@ Android больше не подменяют HTTP/3 на HTTP/2; автомат�
 - Linux TUN и full tunnel E2E против endpoint 1.1.0 для HTTP/3, включая потерю
   endpoint, reconnect, аварии GUI/службы, always-on, смену сети и boot guard.
 
-Остаётся проверить HTTP/3: Android VpnService на эмуляторе, системную службу
-macOS, сон Windows, боевой сервер и сети с блокировкой/ограничением UDP.
-Windows Wintun/full-tunnel E2E запускается параметром Jenkins
-`WINDOWS_TRANSPORT=http3`.
+- endpoint 1.1.0 теряет ответ заблокированного потока (`_check`, отказ CONNECT);
+  вендорный h3 ограничивает ошибку этим запросом, а не всем соединением;
+- Windows: авторизованный full-tunnel прогон на установленной службе; Android:
+  приёмка на эмуляторе по HTTP/2 и HTTP/3 (HTTP/3 — 10 из 10).
+
+Остаётся проверить HTTP/3: системную службу macOS, физическое Android-устройство,
+сон Windows, боевой сервер и сети с блокировкой/ограничением UDP. Windows
+Wintun/full-tunnel E2E в Jenkins запускается параметром `WINDOWS_TRANSPORT=http3`.
 
 
 ## AmneziaWG 3: границы preview
