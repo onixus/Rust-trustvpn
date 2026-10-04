@@ -20,7 +20,9 @@ WORK=pathlib.Path(os.environ['ProgramData'])/('RTrustTunnel-E2E-'+uuid.uuid4().h
 TASK=WORK.name
 # Each additional crash gets the same bounded SCM/reconnect allowance.
 # An AmneziaWG outage is noticed after about 35 s instead of at once.
-worker_minutes=5+3*(a.crash_cycles-1)+((a.sleep_minutes or 0)+10 if a.sleep_minutes else 0)+(5 if json.loads(a.fixture.read_text()).get('protocol')=='amneziawg' else 0)
+# A frozen HTTP/3 endpoint is noticed by the health check, not by a reset.
+_fixture=json.loads(a.fixture.read_text())
+worker_minutes=5+3*(a.crash_cycles-1)+((a.sleep_minutes or 0)+10 if a.sleep_minutes else 0)+(5 if _fixture.get('protocol')=='amneziawg' else 0)+(2 if _fixture.get('base',{}).get('upstream_protocol')=='http3' else 0)
 rollback_minutes=worker_minutes+1
 
 def ps(code):
