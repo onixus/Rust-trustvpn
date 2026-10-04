@@ -106,14 +106,10 @@ fn start<'a>(
     let Ok(profile) = Profile::import(&raw) else {
         return Ok(false);
     };
-    let Ok((mut profile, _plan)) = super::prepare(profile) else {
+    let Ok((profile, _plan)) = super::prepare(profile) else {
         state(4, "Unsupported mobile routing or DNS policy");
         return Ok(false);
     };
-    // Preserve the stored protocol; only this runtime copy uses system HTTP/2.
-    if profile.protocol == rtrust_profile::Protocol::TrustTunnel {
-        profile.endpoint.upstream_protocol = "http2".into();
-    }
     if profile
         .endpoint
         .addresses

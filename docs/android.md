@@ -63,8 +63,8 @@ do not disable that protection or publish real profiles to create documentation.
   and retains TUN while reconnecting. The Java service owns the original FD.
   Stop/revoke closes both. Temporary handshake EOF/reset remains retryable;
   invalid certificates remain fatal, with traffic blocked until Disconnect.
-- Stored TrustTunnel HTTP/3 remains unchanged; the system session uses HTTP/2. HTTP/3 system
-  VPN belongs to [wave 3](technical-debt.md).
+- TrustTunnel HTTP/3 profiles connect over HTTP/3: the QUIC socket is protected like the
+  Hysteria one. Not yet accepted on the emulator; see [HTTP/3](http3.md).
 
 ## Build
 

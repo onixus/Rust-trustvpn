@@ -10,7 +10,9 @@ def run(*args,**kwargs):
     kwargs.setdefault('timeout',90)
     return subprocess.check_output(args,**kwargs).decode().strip()
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--protocol',choices=['trusttunnel','amneziawg'],default='trusttunnel');amnezia=parser.parse_args().protocol=='amneziawg'
+    # "http3" is TrustTunnel over QUIC; "trusttunnel" keeps HTTP/2.
+    parser=argparse.ArgumentParser();parser.add_argument('--protocol',choices=['trusttunnel','http3','amneziawg'],default='trusttunnel')
+    protocol=parser.parse_args().protocol;amnezia=protocol=='amneziawg';http3=protocol=='http3'
     ROOT.mkdir(mode=0o700,exist_ok=True)
     for name in ['amneziawg.uapi','amneziawg-client.json','outage-seconds']:(ROOT/name).unlink(missing_ok=True)
     token=secrets.token_urlsafe(32)
@@ -30,7 +32,7 @@ def main():
     issued=datetime.now(timezone.utc)
     subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-not_before',(issued-timedelta(days=1)).strftime('%Y%m%d%H%M%SZ'),'-not_after',(issued+timedelta(days=1)).strftime('%Y%m%d%H%M%SZ'),'-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost','-addext','basicConstraints=critical,CA:FALSE','-keyout','key.pem','-out','cert.pem'],cwd=ROOT,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     password=secrets.token_urlsafe(32)
-    (ROOT/'vpn.toml').write_text('listen_address="0.0.0.0:4433"\nallow_private_network_connections=true\ncredentials_file="credentials.toml"\n[listen_protocols.http2]\n[icmp]\ninterface_name="eth0"\n')
+    (ROOT/'vpn.toml').write_text('listen_address="0.0.0.0:4433"\nallow_private_network_connections=true\ncredentials_file="credentials.toml"\n[listen_protocols.http2]\n'+('[listen_protocols.quic]\n' if http3 else '')+'[icmp]\ninterface_name="eth0"\n')
     (ROOT/'hosts.toml').write_text('[[main_hosts]]\nhostname="localhost"\ncert_chain_path="cert.pem"\nprivate_key_path="key.pem"\n')
     (ROOT/'credentials.toml').write_text(f'[[client]]\nusername="interop"\npassword="{password}"\n')
     if amnezia:
@@ -45,17 +47,24 @@ def main():
         # The service notices a silent WireGuard peer through unanswered traffic,
         # about 35 s into an outage.
         (ROOT/'outage-seconds').write_text('60')
+    if http3:
+        # QUIC has no reset to signal a dead endpoint: the service notices it
+        # through its 5 s health check (10 s timeout) instead of at once.
+        (ROOT/'outage-seconds').write_text('45')
     transport='udp' if amnezia else 'tcp'
+    # HTTP/3 also publishes the TCP port: the drivers probe endpoint readiness
+    # with an h2 TLS handshake.
+    published=['-p',f'{host}:{port}:4433/{transport}']+(['-p',f'{host}:{port}:4433/udp'] if http3 else [])
     network=False;container=False
     try:
         run('docker','network','create','--subnet','10.231.244.0/29','--ipv6','--subnet','fd00:5254:244::/64',NAME);network=True
-        run('docker','run','-d','--rm','--name',NAME,'--network',NAME,'--ip',IP,'--ip6',IP6,'-e','RTRUST_FIXTURE_IP='+IP,'-e','RTRUST_FIXTURE_IP6='+IP6,'-e','RTRUST_FIXTURE_VERBOSE='+os.environ.get('RTRUST_FIXTURE_VERBOSE',''),'-e','RTRUST_FIXTURE_FREEZE='+('1' if amnezia else ''),'--cap-drop=ALL','--cap-add=NET_RAW','--security-opt=no-new-privileges','--read-only','--tmpfs','/tmp','-p',f'{host}:{port}:4433/{transport}','-v',f'{ROOT}:/fixture:ro','-p',f'{host}:{control_port}:8082/tcp','-v',f'{pathlib.Path("ci/windows_fixture_server.py").resolve()}:/server.py:ro','python:3.11-slim','python','/server.py');container=True
+        run('docker','run','-d','--rm','--name',NAME,'--network',NAME,'--ip',IP,'--ip6',IP6,'-e','RTRUST_FIXTURE_IP='+IP,'-e','RTRUST_FIXTURE_IP6='+IP6,'-e','RTRUST_FIXTURE_VERBOSE='+os.environ.get('RTRUST_FIXTURE_VERBOSE',''),'-e','RTRUST_FIXTURE_FREEZE='+('1' if amnezia or http3 else ''),'--cap-drop=ALL','--cap-add=NET_RAW','--security-opt=no-new-privileges','--read-only','--tmpfs','/tmp',*published,'-v',f'{ROOT}:/fixture:ro','-p',f'{host}:{control_port}:8082/tcp','-v',f'{pathlib.Path("ci/windows_fixture_server.py").resolve()}:/server.py:ro','python:3.11-slim','python','/server.py');container=True
         for _ in range(150):
             try:
                 with socket.create_connection((host,control_port if amnezia else port),timeout=.2):break
             except OSError:time.sleep(.2)
         else:raise RuntimeError('Windows endpoint fixture unavailable')
-        data={'base':dict(hostname='localhost',addresses=[f'{host}:{port}'],username='interop',password=password,certificate=(ROOT/'cert.pem').read_text(),upstream_protocol='http2'),'target':IP,'target6':IP6,'control':f'http://{host}:{control_port}','control_token':token,'created_at':issued.isoformat()}
+        data={'base':dict(hostname='localhost',addresses=[f'{host}:{port}'],username='interop',password=password,certificate=(ROOT/'cert.pem').read_text(),upstream_protocol='http3' if http3 else 'http2'),'target':IP,'target6':IP6,'control':f'http://{host}:{control_port}','control_token':token,'created_at':issued.isoformat()}
         if amnezia:
             profile=json.loads((ROOT/'amneziawg-client.json').read_text())
             profile['endpoint'].update(hostname=host,addresses=[f'{host}:{port}'])

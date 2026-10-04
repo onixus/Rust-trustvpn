@@ -116,7 +116,7 @@ impl Session {
             }
             if p.endpoint.upstream_protocol == "http3" {
                 Ok(Self(
-                    Transport::H3(h3transport::H3Session::connect(p).await?),
+                    Transport::H3(h3transport::H3Session::connect(p, None, None).await?),
                     p.endpoint.has_ipv6,
                 ))
             } else {
@@ -151,8 +151,17 @@ impl Session {
             .map_err(|_| Error::Timeout)?
             .map(|s| Self(Transport::Hysteria(s), p.endpoint.has_ipv6));
         }
-        if p.endpoint.upstream_protocol != "http2" || mark == 0 {
-            return Err(Error::Unsupported("marked transport requires HTTP/2"));
+        if mark == 0 {
+            return Err(Error::Unsupported("marked transport requires a mark"));
+        }
+        if p.endpoint.upstream_protocol == "http3" {
+            return tokio::time::timeout(
+                Duration::from_secs(20),
+                h3transport::H3Session::connect(p, Some(mark), None),
+            )
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map(|s| Self(Transport::H3(s), p.endpoint.has_ipv6));
         }
         let session = tokio::time::timeout(
             Duration::from_secs(20),
@@ -183,8 +192,14 @@ impl Session {
             .map_err(|_| Error::Timeout)?
             .map(|s| Self(Transport::Hysteria(s), p.endpoint.has_ipv6));
         }
-        if p.endpoint.upstream_protocol != "http2" {
-            return Err(Error::Unsupported("protected transport requires HTTP/2"));
+        if p.endpoint.upstream_protocol == "http3" {
+            return tokio::time::timeout(
+                Duration::from_secs(20),
+                h3transport::H3Session::connect(p, None, Some(protector)),
+            )
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map(|s| Self(Transport::H3(s), p.endpoint.has_ipv6));
         }
         if p.endpoint
             .addresses

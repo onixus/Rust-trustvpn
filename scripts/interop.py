@@ -11,6 +11,7 @@ import http.server
 import json
 import pathlib
 import socket
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -114,6 +115,35 @@ def check_socks(proxy, udp_address):
                 pass
 
 
+def check_half_close(proxy, echo_port):
+    # A FIN sent after the data needs its own QUIC frame; endpoint 1.1.0 must
+    # still deliver EOF to the target (empty and short bodies included).
+    host, port = proxy.rsplit(":", 1)
+    for body in (b"", b"x", b"short request", bytes(range(256)) * 2048):
+        with socket.create_connection((host, int(port)), timeout=15) as client:
+            client.sendall(bytes([5, 1, 0]))
+            assert read_exact(client, 2) == bytes([5, 0])
+            client.sendall(bytes([5, 1, 0, 1]) + socket.inet_aton("127.0.0.1") + struct.pack("!H", echo_port))
+            assert read_exact(client, 10)[:2] == bytes([5, 0])
+            client.sendall(body)
+            time.sleep(0.05)
+            client.shutdown(socket.SHUT_WR)
+            assert read_exact(client, len(body)) == body
+            assert client.recv(1) == b"", "target did not see EOF after half-close"
+
+
+class Echo(socketserver.BaseRequestHandler):
+    def handle(self):
+        self.request.settimeout(10)
+        body = bytearray()
+        try:
+            while data := self.request.recv(16384):
+                body.extend(data)
+        except TimeoutError:
+            return
+        self.request.sendall(body)
+
+
 class HTTP(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -139,6 +169,8 @@ def main():
         (d / "credentials.toml").write_text('[[client]]\nusername="interop"\npassword="synthetic-interop-password"\n')
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), HTTP)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        echo_server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Echo)
+        threading.Thread(target=echo_server.serve_forever, daemon=True).start()
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp.bind(("127.0.0.1", 0))
         udp.settimeout(0.2)
@@ -178,7 +210,8 @@ def main():
                     output = run(["curl", "--silent", "--show-error", "--max-time", "10", "--noproxy", "", "--socks5-hostname", proxy, f"http://localhost:{server.server_port}/"], d)
                     assert output == "OK", "SOCKS TCP body mismatch"
                     check_socks(proxy, udp.getsockname())
-                    print(protocol + ": curl through SOCKS5 + UDP echo/8KiB + fragment/source rejection passed")
+                    check_half_close(proxy, echo_server.server_address[1])
+                    print(protocol + ": curl through SOCKS5 + UDP echo/8KiB + fragment/source rejection + TCP half-close passed")
                 config["password"] = "wrong-password"
                 profile.write_text(json.dumps(config))
                 run([inspect, str(profile), "--probe-http", f"127.0.0.1:{server.server_port}"], d, success=False)

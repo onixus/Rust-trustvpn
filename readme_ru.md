@@ -51,9 +51,9 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 ### TrustTunnel
 
 - Собственный Rust HTTP/2 transport для системного VPN.
-- SOCKS5 поверх HTTP/2 или HTTP/3.
+- Нативные Rust-транспорты HTTP/2 и HTTP/3 для системного VPN и SOCKS5; транспорт задаёт профиль, без скрытой смены, см. [HTTP/3](docs/http3.md).
 - IPv4/IPv6 TCP и UDP, DNS, ICMP там, где это реализовано платформенным dataplane, ограниченная обработка фрагментации, reconnect и fail-closed защита.
-- Импортированные TrustTunnel HTTP/3 профили сохраняются, но **TrustTunnel HTTP/3 для системного VPN пока отложен**. Системный туннель сейчас использует HTTP/2.
+- HTTP/3 для системного VPN есть в текущем main, но не в пакетах v0.4.0: там системный туннель всё ещё идёт по HTTP/2.
 
 ### Hysteria 2
 

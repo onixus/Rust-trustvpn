@@ -22,11 +22,6 @@ impl Prepared {
         address: Ipv4Addr,
         full: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        if profile.protocol == rtrust_profile::Protocol::TrustTunnel
-            && profile.endpoint.upstream_protocol != "http2"
-        {
-            return Err("Experimental TUN requires HTTP/2: HTTP/3 half-close interoperability with endpoint 1.1.0 is unresolved".into());
-        }
         let session = if full {
             Session::connect_marked(profile, 0x5254).await?
         } else {

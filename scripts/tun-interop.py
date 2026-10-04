@@ -163,30 +163,36 @@ def main():
             (d / "hosts.toml").write_text('[[main_hosts]]\nhostname="localhost"\ncert_chain_path="cert.pem"\nprivate_key_path="key.pem"\n')
             (d / "credentials.toml").write_text('[[client]]\nusername="interop"\npassword="synthetic-tun-test"\n')
             with (d / "endpoint.log").open("wb") as log:
-                server = subprocess.Popen([str(endpoint), "vpn.toml", "hosts.toml", "--jobs", "2", "--loglvl", "debug"], cwd=d, stdout=log, stderr=log)
-                processes.append(server)
-                for _ in range(100):
-                    try:
-                        with socket.create_connection(("10.99.0.1", 8443), timeout=0.1):
-                            break
-                    except OSError:
-                        time.sleep(0.05)
-                else:
+                def start_endpoint():
+                    server = subprocess.Popen([str(endpoint), "vpn.toml", "hosts.toml", "--jobs", "2", "--loglvl", "debug"], cwd=d, stdout=log, stderr=log)
+                    processes.append(server)
+                    for _ in range(100):
+                        try:
+                            with socket.create_connection(("10.99.0.1", 8443), timeout=0.1):
+                                return server
+                        except OSError:
+                            time.sleep(0.05)
                     raise RuntimeError("Endpoint startup failed: " + (d / "endpoint.log").read_text()[:1000])
+                server = start_endpoint()
                 profile = d / "profile.json"
-                for protocol in ("http2",):
+                for protocol in ("http2", "http3"):
                     profile.write_text(json.dumps(dict(hostname="localhost", addresses=["10.99.0.1:8443"], username="interop", password="synthetic-tun-test", certificate=(d / "cert.pem").read_text(), upstream_protocol=protocol)))
                     from interop import socks_proxy, read_exact
                     with socks_proxy(str(ROOT / "target/debug/rtrust-inspect"), profile, d) as proxy:
                         host, port = proxy.rsplit(":", 1)
-                        with socket.create_connection((host, int(port)), timeout=15) as client:
-                            client.sendall(bytes([5, 1, 0]))
-                            assert read_exact(client, 2) == bytes([5, 0])
-                            client.sendall(bytes([5, 1, 0, 1]) + socket.inet_aton("198.18.0.1") + struct.pack("!H", echo.server_address[1]))
-                            assert read_exact(client, 10)[:2] == bytes([5, 0])
-                            client.sendall(BODY)
-                            client.shutdown(socket.SHUT_WR)
-                            assert read_exact(client, len(BODY)) == BODY
+                        # Small bodies leave FIN in its own QUIC frame: endpoint
+                        # 1.1.0 needs the client's empty DATA frame to see EOF.
+                        for body in (BODY, b"x", b""):
+                            with socket.create_connection((host, int(port)), timeout=15) as client:
+                                client.sendall(bytes([5, 1, 0]))
+                                assert read_exact(client, 2) == bytes([5, 0])
+                                client.sendall(bytes([5, 1, 0, 1]) + socket.inet_aton("198.18.0.1") + struct.pack("!H", echo.server_address[1]))
+                                assert read_exact(client, 10)[:2] == bytes([5, 0])
+                                client.sendall(body)
+                                time.sleep(0.05)
+                                client.shutdown(socket.SHUT_WR)
+                                assert read_exact(client, len(body)) == body
+                                assert client.recv(1) == b"", "echo did not close after half-close"
                     print(protocol + ": SOCKS control half-close passed", flush=True)
                     # The namespace has no direct route to the destination.
                     ns("curl", "--noproxy", "*", "--max-time", "2", f"http://198.18.0.1:{http_server.server_port}/", success=False)
@@ -216,13 +222,15 @@ def fetch(_):
         assert response.read() == bytes(range(256)) * 2048
 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
     list(pool.map(fetch, range(12)))
-data = bytes(range(256)) * 2048
-with socket.create_connection(("198.18.0.1", {echo.server_address[1]}), timeout=15) as s:
-    s.sendall(data)
-    s.shutdown(socket.SHUT_WR)
-    response = bytearray()
-    while chunk := s.recv(16384): response.extend(chunk)
-    assert response == data, "half-close lost response"
+import time
+for data in (bytes(range(256)) * 2048, b"short request"):
+    with socket.create_connection(("198.18.0.1", {echo.server_address[1]}), timeout=15) as s:
+        s.sendall(data)
+        time.sleep(0.05)
+        s.shutdown(socket.SHUT_WR)
+        response = bytearray()
+        while chunk := s.recv(16384): response.extend(chunk)
+        assert response == data, "half-close lost response"
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
     s.settimeout(5)
     s.setsockopt(socket.IPPROTO_IP, 10, 0)  # IP_MTU_DISCOVER=IP_PMTUDISC_DONT
@@ -266,21 +274,18 @@ with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as udp:
     else:raise AssertionError("UDP channel did not recover")
 ''')
                         print("PASS refused UDP destination preserves established TCP and UDP channel recovers",flush=True)
-                    print(f"PASS {protocol}: real TUN TCP 512KiB, 12 concurrent downloads/4 workers, half-close 512KiB, DNS getaddrinfo, UDP 1/512/1472/5000/60000 bytes + empty with follow-up, SIGTERM cleanup", flush=True)
+                    print(f"PASS {protocol}: real TUN TCP 512KiB, 12 concurrent downloads/4 workers, half-close 512KiB and 13 bytes, DNS getaddrinfo, UDP 1/512/1472/5000/60000 bytes + empty with follow-up, SIGTERM cleanup", flush=True)
                 config = json.loads(profile.read_text())
-                config["upstream_protocol"] = "http3"
-                profile.write_text(json.dumps(config))
-                rejected = subprocess.run(["ip", "netns", "exec", NS, str(ROOT / "target/debug/rtrust-tun"), str(profile), "rtrust0", "10.77.0.2"], capture_output=True, timeout=10)
-                assert rejected.returncode != 0 and b"TUN requires HTTP/2" in rejected.stderr
-                ns("ip", "link", "show", "rtrust0", success=False)
-                config["upstream_protocol"] = "http2"
-                profile.write_text(json.dumps(config))
-                print("PASS unsupported TUN transport rejected before interface creation", flush=True)
-                with adapter(profile) as client:
-                    stop(server)
-                    assert client.wait(timeout=25) != 0, "endpoint failure did not stop TUN"
-                ns("curl", "--noproxy", "*", "--max-time", "2", f"http://198.18.0.1:{http_server.server_port}/", success=False)
-                print("PASS endpoint failure removes TUN; no direct route fallback in isolated namespace", flush=True)
+                for protocol in ("http2", "http3"):
+                    config["upstream_protocol"] = protocol
+                    profile.write_text(json.dumps(config))
+                    if server.poll() is not None:
+                        server = start_endpoint()
+                    with adapter(profile) as client:
+                        stop(server)
+                        assert client.wait(timeout=25) != 0, "endpoint failure did not stop TUN"
+                    ns("curl", "--noproxy", "*", "--max-time", "2", f"http://198.18.0.1:{http_server.server_port}/", success=False)
+                    print(f"PASS {protocol}: endpoint failure removes TUN; no direct route fallback in isolated namespace", flush=True)
     finally:
         for p in processes:
             stop(p)

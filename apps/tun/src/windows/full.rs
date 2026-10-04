@@ -73,7 +73,7 @@ pub fn install(
     index: u32,
     endpoints: &[SocketAddrV4],
     dns: Ipv4Addr,
-    protocol: rtrust_profile::Protocol,
+    udp: bool,
     ports: &[(u16, u16)],
 ) -> Result<(), String> {
     rtrust_control::validate_dns(dns)?;
@@ -144,9 +144,9 @@ pub fn install(
     file.sync_all()
         .map_err(|_| "Cannot sync recovery journal")?;
     // No Drop cleanup: once this commits, crashes must retain the blocking policy.
-    firewall::install(unsafe { luid.Value }, endpoints, protocol, ports)?;
+    firewall::install(unsafe { luid.Value }, endpoints, udp, ports)?;
     if firewall::boot_active()? {
-        firewall::install_boot(unsafe { luid.Value }, endpoints, protocol, ports)?;
+        firewall::install_boot(unsafe { luid.Value }, endpoints, udp, ports)?;
     }
     for item in &journal.routes {
         check(unsafe { CreateIpForwardEntry2(&route(item)) })?;

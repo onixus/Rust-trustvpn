@@ -131,25 +131,25 @@ fn add_in(
 pub fn install(
     luid: u64,
     endpoints: &[SocketAddrV4],
-    protocol: rtrust_profile::Protocol,
+    udp: bool,
     ports: &[(u16, u16)],
 ) -> Result<(), String> {
-    install_in(luid, endpoints, FULL, false, protocol, ports)
+    install_in(luid, endpoints, FULL, false, udp, ports)
 }
 pub fn install_boot(
     luid: u64,
     endpoints: &[SocketAddrV4],
-    protocol: rtrust_profile::Protocol,
+    udp: bool,
     ports: &[(u16, u16)],
 ) -> Result<(), String> {
-    install_in(luid, endpoints, BOOT, true, protocol, ports)
+    install_in(luid, endpoints, BOOT, true, udp, ports)
 }
 fn install_in(
     mut luid: u64,
     endpoints: &[SocketAddrV4],
     space: Space,
     boot: bool,
-    protocol: rtrust_profile::Protocol,
+    udp: bool,
     ports: &[(u16, u16)],
 ) -> Result<(), String> {
     if ports.len() > 64 {
@@ -252,12 +252,8 @@ fn install_in(
                             FWPM_CONDITION_IP_PROTOCOL,
                             FWP_UINT8,
                             FWP_CONDITION_VALUE0_0 {
-                                // Hysteria 2 and AmneziaWG are UDP transports.
-                                uint8: if protocol == rtrust_profile::Protocol::TrustTunnel {
-                                    6
-                                } else {
-                                    17
-                                },
+                                // QUIC (HTTP/3, Hysteria 2) and AmneziaWG use UDP.
+                                uint8: if udp { 17 } else { 6 },
                             },
                         ));
                         if !ports.is_empty() {

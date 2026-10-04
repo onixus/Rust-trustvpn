@@ -830,7 +830,7 @@ impl App {
                     self.status = if mode == Mode::Socks {
                         "Подключение к серверу…"
                     } else {
-                        "Системный VPN: подключение через HTTP/2…"
+                        "Системный VPN: подключение…"
                     }
                     .into();
                     let (task, handle) = Task::perform(
@@ -1292,7 +1292,7 @@ impl App {
             row![text("SOCKS5 · 127.0.0.1:"), port]
                 .spacing(6)
                 .align_y(iced::Alignment::Center),
-            text("SOCKS5 использует транспорт профиля. Системный VPN использует HTTP/2 (TLS); исходный профиль не меняется.")
+            text("SOCKS5 и системный VPN используют транспорт профиля (HTTP/2 или HTTP/3) без автоматической смены.")
                 .size(12)
         ]
         .spacing(6);

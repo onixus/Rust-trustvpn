@@ -66,6 +66,8 @@ def main():
     # The forwarding peer of ci/amneziawg_fixture: the official amneziawg-go
     # device relaying tunnel flows to the targets of this script.
     amnezia = "--amneziawg" in sys.argv[2:]
+    # TrustTunnel over QUIC: the marked transport socket is UDP.
+    http3 = "--http3" in sys.argv[2:]
     processes, servers = [], []
     original_resolv = pathlib.Path("/etc/resolv.conf").read_bytes()
     # Docker masks sysctls read-only; this mount change stays in this disposable
@@ -149,11 +151,11 @@ def main():
             s.ns("nft", "add", "table", "inet", "foreign_test")
             baseline_nft = s.ns("nft", "-j", "list", "tables")
             s.command("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost", "-addext", "basicConstraints=critical,CA:FALSE", "-keyout", str(d/"key.pem"), "-out", str(d/"cert.pem"))
-            (d/"vpn.toml").write_text('listen_address="10.99.0.1:8443"\nallow_private_network_connections=true\ncredentials_file="credentials.toml"\n[listen_protocols.http2]\n')
+            (d/"vpn.toml").write_text('listen_address="10.99.0.1:8443"\nallow_private_network_connections=true\ncredentials_file="credentials.toml"\n[listen_protocols.http2]\n[listen_protocols.quic]\n')
             (d/"hosts.toml").write_text('[[main_hosts]]\nhostname="localhost"\ncert_chain_path="cert.pem"\nprivate_key_path="key.pem"\n')
             (d/"credentials.toml").write_text('[[client]]\nusername="interop"\npassword="synthetic-full-test"\n')
             profile=d/"profile.json"
-            profile.write_text(json.dumps(dict(schema_version=1, name="Full test", endpoint=dict(hostname="localhost", addresses=["10.99.0.1:8443"],username="interop",password="synthetic-full-test",certificate=(d/"cert.pem").read_text(),upstream_protocol="http2"))))
+            profile.write_text(json.dumps(dict(schema_version=1, name="Full test", endpoint=dict(hostname="localhost", addresses=["10.99.0.1:8443"],username="interop",password="synthetic-full-test",certificate=(d/"cert.pem").read_text(),upstream_protocol="http3" if http3 else "http2"))))
             if hysteria:
                 value=json.loads(profile.read_text());value.update(protocol="hysteria2",hysteria2={"salamander":"synthetic-obfs"})
                 value['endpoint']['upstream_protocol']='http3';profile.write_text(json.dumps(value))
@@ -299,7 +301,7 @@ print(exact(n).decode())
             s.ns("ip","link","set","rtrust-client","down")
             s.ns("ip","addr","del","10.99.0.2/30","dev","rtrust-client")
             assert b'dev rtrust-alt' in s.ns("ip","route","get","10.99.0.1","mark","0x5254")
-            if not (hysteria or amnezia):
+            if not (hysteria or amnezia or http3):
                 s.ns("python3","-c","import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,36,0x5254); s.settimeout(3); s.connect(('10.99.0.1',8443)); print('PASS marked endpoint TCP after physical handoff')")
             def traffic_returns():
                 # AmneziaWG first has to notice the dead path through unanswered traffic.

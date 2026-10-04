@@ -22,7 +22,7 @@ target/debug/rtrust-tun profile.json rtrust0 10.77.0.2
 
 Для HTTP/2 используется [bounded compatibility patch h2](../vendor/h2/RTRUST-PATCH.md): пустые DATA-кадры при backpressure не расходуют невосстановимый лимит всей сессии; полезный трафик восстанавливает ограниченный budget. Защита от пустого flood сохраняется.
 
-Поддержан **только HTTP/2**. При проверке официального endpoint 1.1.0 HTTP/3 передал 512 KiB, но half-close не дошёл до TCP-сервера. Контрольный SOCKS-сценарий воспроизвёл проблему без нового IP-стека. До устранения этой несовместимости helper отклоняет HTTP/3 до создания интерфейса, без автоматической смены транспорта профиля.
+Поддержаны HTTP/2 и HTTP/3. Прежняя проблема HTTP/3 half-close (endpoint 1.1.0 не передавал EOF, если FIN приходил без DATA) обходится на клиенте пустым DATA-кадром перед FIN; подробности в [HTTP/3](http3.md).
 
 Ещё одно ограничение endpoint 1.1.0: одиночная пустая UDP-датаграмма может ждать следующего кадра. Пустой payload сохраняется адаптером; interop проверяет его вместе со следующей датаграммой. Это не гарантия своевременной доставки одиночного пустого пакета.
 
@@ -46,6 +46,6 @@ docker run --rm --cap-add NET_ADMIN --cap-add SYS_ADMIN --device /dev/net/tun \
 
 `scripts/tun-interop.py` отказывается работать вне root Docker-контейнера. Он создаёт namespace, veth, синтетический TLS-сертификат и профиль, отдельный официальный endpoint, HTTP/TCP/UDP/DNS-серверы. У клиента нет прямого маршрута к тестовым сервисам; маршрут появляется только через TUN. Namespace получает отдельный `resolv.conf` для проверки обычного `getaddrinfo`; это настройка стенда, не реализация DNS manager в клиенте.
 
-Проверки: HTTP body 512 KiB, 12 загрузок в 4 параллельных потоках, 512 KiB upload + half-close + полный ответ, DNS A lookup, UDP payload 1/512/1472 и пустой с follow-up, удаление интерфейса по SIGTERM, отказ HTTP/3 до создания интерфейса, аварийная остановка endpoint и отсутствие прямого fallback в namespace. Unit tests дополнительно проверяют повторные SYN, лимиты, истечение flows и malformed packets.
+Проверки: HTTP body 512 KiB, 12 загрузок в 4 параллельных потоках, 512 KiB upload + half-close + полный ответ, DNS A lookup, UDP payload 1/512/1472 и пустой с follow-up, удаление интерфейса по SIGTERM, аварийная остановка endpoint и отсутствие прямого fallback в namespace. Unit tests дополнительно проверяют повторные SYN, лимиты, истечение flows и malformed packets.
 
 Следующий этап: служба с ограниченным IPC, управление маршрутами/DNS/IPv6 и firewall, затем включение системного режима из GUI. Windows Wintun, Android VpnService и macOS Network Extension ещё не подключены.
