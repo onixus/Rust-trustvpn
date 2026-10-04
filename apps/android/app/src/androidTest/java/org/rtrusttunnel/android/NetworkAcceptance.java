@@ -127,7 +127,7 @@ final class NetworkAcceptance {
             check(android.net.VpnService.prepare(context) == null, "Emulator VPN consent prerequisite");
             activity = test.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             connect(context);
-            check(vault.selected().getJSONObject("endpoint").getString("upstream_protocol").equals("http3"), "Stored HTTP/3 retained");
+            check(vault.selected().getJSONObject("endpoint").getString("upstream_protocol").equals(profile.getJSONObject("endpoint").getString("upstream_protocol")), "Stored transport retained");
             String v4 = fixture.getString("target"), v6 = fixture.getString("target6");
             tcp(v4); tcp(v6); udp(v4); udp(v6);
             check(Arrays.stream(InetAddress.getAllByName("rtrust-" + System.nanoTime() + ".example")).anyMatch(ip -> ip.getHostAddress().equals(v4)), "System DNS through tunnel");
