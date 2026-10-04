@@ -27,8 +27,9 @@ def run(*args, **kwargs):
     return subprocess.check_output(args, timeout=90, **kwargs).decode().strip()
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--protocol',choices=['trusttunnel','hysteria2','amneziawg'],default='trusttunnel');args=parser.parse_args()
-    hysteria=args.protocol=='hysteria2';amnezia=args.protocol=='amneziawg'
+    # "trusttunnel" is TrustTunnel over HTTP/2; "http3" the same endpoint over QUIC.
+    parser=argparse.ArgumentParser();parser.add_argument('--protocol',choices=['trusttunnel','http3','hysteria2','amneziawg'],default='trusttunnel');args=parser.parse_args()
+    hysteria=args.protocol=='hysteria2';amnezia=args.protocol=='amneziawg';http3=args.protocol=='http3'
     ROOT.mkdir(mode=0o700, exist_ok=True)
     if (ROOT / 'ready').exists():
         raise SystemExit('An Android fixture is already active')
@@ -48,7 +49,7 @@ def main():
     subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost', '-addext', 'basicConstraints=critical,CA:FALSE', '-keyout', 'key.pem', '-out', 'cert.pem'], cwd=ROOT, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     token, password = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
     (ROOT / 'control-token').write_text(token)
-    (ROOT / 'vpn.toml').write_text('listen_address="0.0.0.0:4433"\nallow_private_network_connections=true\ncredentials_file="credentials.toml"\n[listen_protocols.http2]\n')
+    (ROOT / 'vpn.toml').write_text('listen_address="0.0.0.0:4433"\nallow_private_network_connections=true\ncredentials_file="credentials.toml"\n[listen_protocols.http2]\n'+('[listen_protocols.quic]\n' if http3 else ''))
     (ROOT / 'hosts.toml').write_text('[[main_hosts]]\nhostname="localhost"\ncert_chain_path="cert.pem"\nprivate_key_path="key.pem"\n')
     (ROOT / 'credentials.toml').write_text(f'[[client]]\nusername="interop"\npassword="{password}"\n')
     for name in ['key.pem', 'control-token', 'credentials.toml']: (ROOT / name).chmod(0o600)
@@ -73,10 +74,19 @@ def main():
         # WireGuard has no connection to lose: the app notices a silent peer
         # after four unanswered handshakes, about 35 s into the outage.
         (ROOT/'outage-seconds').write_text('60')
+    if http3:
+        # QUIC has no reset to signal a dead endpoint: the app notices it through
+        # its health check (every 5 s, 10 s timeout).
+        (ROOT/'outage-seconds').write_text('60')
     transport='tcp' if not (hysteria or amnezia) else 'udp'
     # The emulator reaches the fixture at 10.0.2.2. When it runs on another host
     # (e.g. Windows hosting the agent VM), that host forwards one fixed port here.
     publish=os.environ.get('RTRUST_ANDROID_FIXTURE_PUBLISH','127.0.0.1:')
+    if http3 and publish.endswith(':'):
+        # HTTP/3 needs the TCP readiness probe and QUIC on one port number.
+        with socket.socket() as reserve:
+            reserve.bind((publish[:-1], 0)); publish += str(reserve.getsockname()[1])
+    published = ['-p', f'{publish}:4433/{transport}'] + (['-p', f'{publish}:4433/udp'] if http3 else [])
     network = container = False
     try:
         # Bypass checks reach the target directly. If the emulator runs on another
@@ -86,7 +96,7 @@ def main():
         trusted = os.environ.get('RTRUST_ANDROID_FIXTURE_TRUSTED_IFACE')
         options = ['--opt', 'com.docker.network.bridge.trusted_host_interfaces=' + trusted] if trusted else []
         run('docker', 'network', 'create', '--subnet', '10.231.243.0/29', '--ipv6', '--subnet', 'fd00:5254:243::/64', *options, NAME); network = True
-        run('docker', 'run', '-d', '--name', NAME, '--network', NAME, '--ip', IP, '--ip6', 'fd00:5254:243::2', '--user', f'{os.getuid()}:{os.getgid()}', '--cap-drop=ALL', '--sysctl', 'net.ipv4.ip_unprivileged_port_start=0', '--security-opt=no-new-privileges', '--read-only', '--tmpfs', '/tmp', '-p', f'{publish}:4433/{transport}', '-v', f'{ROOT}:/fixture:ro,z', '-v', f'{Path("ci/windows_fixture_server.py").resolve()}:/server.py:ro,z', 'python:3.11-slim', 'python', '/server.py'); container = True
+        run('docker', 'run', '-d', '--name', NAME, '--network', NAME, '--ip', IP, '--ip6', 'fd00:5254:243::2', '--user', f'{os.getuid()}:{os.getgid()}', '--cap-drop=ALL', '--sysctl', 'net.ipv4.ip_unprivileged_port_start=0', '--security-opt=no-new-privileges', '--read-only', '--tmpfs', '/tmp', *published, '-v', f'{ROOT}:/fixture:ro,z', '-v', f'{Path("ci/windows_fixture_server.py").resolve()}:/server.py:ro,z', 'python:3.11-slim', 'python', '/server.py'); container = True
         port = int(run('docker', 'port', NAME, f'4433/{transport}').rsplit(':', 1)[1])
         if not (hysteria or amnezia):
             tls = ssl.create_default_context(cafile=str(ROOT / 'cert.pem'))
@@ -97,10 +107,12 @@ def main():
                         with tls.wrap_socket(tcp, server_hostname='localhost'): break
                 except OSError: time.sleep(.2)
             else: raise RuntimeError('Android fixture endpoint did not start')
-        data = {'base': dict(hostname='localhost', addresses=[f'10.0.2.2:{port}'], username='interop', password=password, certificate=(ROOT / 'cert.pem').read_text(), upstream_protocol='http3', dns_upstreams=[IP]), 'target': IP, 'target6': 'fd00:5254:243::2', 'control': f'http://{IP}:8082', 'control_token': token}
+        data = {'base': dict(hostname='localhost', addresses=[f'10.0.2.2:{port}'], username='interop', password=password, certificate=(ROOT / 'cert.pem').read_text(), upstream_protocol='http3' if http3 else 'http2', dns_upstreams=[IP]), 'target': IP, 'target6': 'fd00:5254:243::2', 'control': f'http://{IP}:8082', 'control_token': token}
         if hysteria:
             data['large_udp_digest']=True
             data['base']={'schema_version':1,'protocol':'hysteria2','hysteria2':{'salamander':obfs},'name':'Hysteria fixture','endpoint':dict(hostname='localhost',addresses=[f'10.0.2.2:{port}'],username='hysteria2',password=password,certificate=(ROOT/'cert.pem').read_text(),upstream_protocol='http3',dns_upstreams=[IP])}
+        if http3:
+            data.update(outage_detection_ms=40000,recovery_ms=75000)
         if amnezia:
             base=json.loads((ROOT/'amneziawg-client.json').read_text())
             base['endpoint'].update(hostname='10.0.2.2',addresses=[f'10.0.2.2:{port}'],dns_upstreams=[IP])
