@@ -11,6 +11,9 @@ import org.json.*;
 
 public final class TunnelService extends VpnService {
     static final String STOP = "org.rtrusttunnel.android.STOP";
+    /** Reconnect only while this app is still the system Always-on VPN; see alwaysOnSessionLost. */
+    static final String RECOVER = "org.rtrusttunnel.android.RECOVER";
+    private static final String STATE = "tunnel", ALWAYS_ON_SESSION = "always_on_session";
     static volatile String problem = "";
     static volatile boolean active;
     static volatile boolean alwaysOn, lockdown;
@@ -19,7 +22,7 @@ public final class TunnelService extends VpnService {
     private ParcelFileDescriptor tun;
     private ConnectivityManager connectivity;
     private ConnectivityManager.NetworkCallback callback;
-    private volatile boolean stopping;
+    private volatile boolean stopping, recovering;
     private boolean cleaned;
     private static volatile TunnelService running;
     static void refreshPolicy() {
@@ -27,7 +30,24 @@ public final class TunnelService extends VpnService {
         if (service == null) return;
         boolean previous = alwaysOn;
         alwaysOn = service.isAlwaysOn(); lockdown = service.isLockdownEnabled();
-        if (previous != alwaysOn && active) service.getSystemService(NotificationManager.class).notify(1, service.notification());
+        if (previous == alwaysOn || !active) return;
+        rememberAlwaysOn(service, alwaysOn);
+        service.getSystemService(NotificationManager.class).notify(1, service.notification());
+    }
+
+    /**
+     * Android does not restart this service after its process dies: the dead TUN makes the
+     * system Vpn unbind first, which detaches the service record before process cleanup could
+     * schedule a sticky restart, and crashes are additionally cleaned up without restart.
+     * Always-on is only re-applied on boot/unlock, setting changes and package updates.
+     * Lockdown keeps blocking meanwhile; this marker lets the app reconnect when it next runs.
+     * It cannot tell whether Always-on was turned off since: RECOVER re-checks after establish.
+     */
+    static boolean alwaysOnSessionLost(Context context) {
+        return !active && context.getSharedPreferences(STATE, MODE_PRIVATE).getBoolean(ALWAYS_ON_SESSION, false);
+    }
+    private static void rememberAlwaysOn(Context context, boolean value) {
+        context.getSharedPreferences(STATE, MODE_PRIVATE).edit().putBoolean(ALWAYS_ON_SESSION, value).apply();
     }
 
     @Override public void onCreate() {
@@ -45,9 +65,10 @@ public final class TunnelService extends VpnService {
     }
     @Override public int onStartCommand(Intent intent, int flags, int id) {
         alwaysOn = isAlwaysOn(); lockdown = isLockdownEnabled();
-        if (intent != null && STOP.equals(intent.getAction()) && !alwaysOn) { disconnect(); return START_NOT_STICKY; }
+        if (intent != null && STOP.equals(intent.getAction()) && !alwaysOn) { rememberAlwaysOn(this, false); disconnect(); return START_NOT_STICKY; }
         if (active || stopping) return START_STICKY;
-        if (VpnService.prepare(this) != null) { problem = getString(R.string.vpn_permission_is_required); stopSelf(); return START_NOT_STICKY; }
+        if (VpnService.prepare(this) != null) { rememberAlwaysOn(this, false); problem = getString(R.string.vpn_permission_is_required); stopSelf(); return START_NOT_STICKY; }
+        recovering = intent != null && RECOVER.equals(intent.getAction());
         if (Build.VERSION.SDK_INT >= 34) startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED);
         else startForeground(1, notification());
         active = true; problem = "";
@@ -106,11 +127,16 @@ public final class TunnelService extends VpnService {
         if (stopping) return;
         tun = builder.establish();
         if (tun == null) throw new IllegalStateException("VPN permission revoked");
-        // isAlwaysOn()/isLockdownEnabled() report false until this VPN is established, even
-        // for a system Always-on start. The TUN carries no traffic yet, so checking here opens
-        // no bypass; a refusal closes it through cleanup() and reports "cannot start".
-        refreshPolicy();
-        if (plan.getBoolean("require_lockdown") && (!isAlwaysOn() || !isLockdownEnabled())) throw new IllegalArgumentException("System lockdown required");
+        // Android answers isAlwaysOn/isLockdownEnabled only for an established VPN, so the
+        // values read in onStartCommand are false even for a system Always-on start.
+        // The TUN carries no traffic yet, so the checks below open no bypass.
+        alwaysOn = isAlwaysOn(); lockdown = isLockdownEnabled();
+        rememberAlwaysOn(this, alwaysOn);
+        getSystemService(NotificationManager.class).notify(1, notification());
+        // Recovery is only for the system Always-on VPN.
+        if (recovering && !alwaysOn) { disconnect(); return; }
+        // A refusal closes the TUN through cleanup() and reports "cannot start".
+        if (plan.getBoolean("require_lockdown") && (!alwaysOn || !lockdown)) throw new IllegalArgumentException("System lockdown required");
         callback = new ConnectivityManager.NetworkCallback() {
             @Override public void onAvailable(Network network) { updateUnderlying(); }
             @Override public void onLost(Network network) { updateUnderlying(); }

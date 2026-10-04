@@ -156,7 +156,13 @@ public final class MainActivity extends Activity {
         connect.setBackground(ripple(card(color, dp(14))));
         ((GradientDrawable) statusDot.getBackground()).setColor(lit ? color : color(R.color.text_muted));
     }
-    @Override public void onResume() { super.onResume(); reload(); handler.post(poll); }
+    @Override public void onResume() {
+        super.onResume(); reload();
+        // The service re-checks that this app is still the system Always-on VPN before connecting.
+        if (TunnelService.alwaysOnSessionLost(this))
+            try { startService(new Intent(this, TunnelService.class).setAction(TunnelService.RECOVER)); } catch (Exception ignored) { /* Retry on next resume. */ }
+        handler.post(poll);
+    }
     @Override public void onPause() { handler.removeCallbacks(poll); super.onPause(); }
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); setIntent(intent); incoming(intent); }
     private void incoming(Intent intent) {

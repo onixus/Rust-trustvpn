@@ -107,7 +107,11 @@ The emulator tests intentionally replace this app's test installation. They cove
   lockdown, the system's own Always-on start stays up and an app start passes TCP/UDP
   traffic. Always-on is switched off again afterward;
 - process restart, reinstall and increasing-version APK upgrade, including
-  preservation of the default profile and Keystore-protected credentials.
+  preservation of the default profile and Keystore-protected credentials;
+- `ci/android_process_death_e2e.py`: system Always-on and lockdown enabled through the
+  AOSP Settings screen, then the VPN process killed by `am crash`, SIGKILL and a
+  native SIGABRT. Each time the direct probe stays blocked, opening the app
+  restores the VPN, and the app does not reconnect once Always-on is disabled.
 
 VPN consent is shell-granted in automated network tests; those tests do not
 establish human acceptance of the system permission dialog. Device-specific
@@ -175,9 +179,9 @@ in the server UI to invalidate its token. HTTPS redirects are never followed.
 
 **Always-on / block bypass** opens Android VPN settings. Enable both Always-on VPN
 and Block connections without VPN for system protection after process death or
-force-stop. The service supports sticky restart and offline startup. Android
-controls restart scheduling; reopening the app and pressing Connect may be
-necessary after force-stop. Blocking while stopped does not mean the tunnel is connected.
+force-stop. The service supports offline startup. After the VPN process dies,
+Android usually does not restart it (see below); opening the app reconnects while
+it is still the system Always-on VPN. Blocking while stopped does not mean the tunnel is connected.
 App Disconnect is disabled while Always-on is active; change that system setting
 first. Excluded apps have no Internet under lockdown. Credentials remain in
 credential-encrypted storage; no plaintext direct-boot copy is created. Before
@@ -189,6 +193,52 @@ Always-on with Block connections without VPN; otherwise it reports that the VPN
 cannot start. Android reports Always-on/lockdown to the app only once its VPN is
 established, so the check runs right after the blocking TUN is created. The TUN
 carries no traffic before the check and is closed if the check fails.
+
+### Process death and Always-on
+
+After the VPN process dies, Android usually does not restart it, despite
+`START_STICKY` and Always-on. This was observed on the POCO X3 NFC (Android 12,
+MIUI, autostart allowed) and reproduced on the API 36 emulator after `am crash`,
+a native SIGABRT and SIGKILL. In those runs `dumpsys activity services` kept a
+`TunnelService` record with `app=null` and no `nextRestartTime`. Android
+sometimes handled the process death first instead. Then it logged "Scheduling
+restart of crashed service" and the VPN returned after about 1 s by itself. On
+the emulator this happened in 4 of 14 `am crash` runs, all on the 0.4.0 base,
+and never after SIGKILL or SIGABRT. The AOSP sources (Android 12 and 15) explain
+this:
+
+- When the process dies, the kernel closes the TUN. The system `Vpn` sees the
+  interface removed and unbinds `TunnelService` before ActivityManager handles
+  the process death. Unbinding a dead process makes `ActiveServices` detach the
+  service record from that process. The later process cleanup no longer sees the
+  service, so it neither schedules a restart nor stops it. The two events race.
+  The interface event came first in almost every emulator run, including SIGKILL,
+  and a low-memory kill is expected to behave the same way.
+- A Java or native crash is also cleaned up through `AppErrors` as a force quit,
+  which disallows service restarts. This cleanup can also lose the race to the
+  process death notification.
+- The system starts the Always-on VPN only at boot or user unlock, when the
+  Always-on setting changes, and when the app package is replaced. It does not
+  start it when the process dies. MIUI autostart does not change this.
+
+Lockdown keeps blocking all traffic meanwhile, and nothing falls back to a
+direct path. The app records that its last session was the system Always-on VPN.
+When the app is opened while no tunnel is running, it starts the service in
+recovery mode. Android reports `isAlwaysOn()` only for an established VPN.
+Recovery therefore establishes the blocking TUN first and then checks. If this
+app is no longer the Always-on VPN, it closes the TUN immediately and stays
+disconnected. Recovery needs the app to be opened. A reboot, toggling Always-on
+or an app update also restarts the VPN through the system. A background
+watchdog is not implemented.
+
+On October 3, 2026 the recovery was also checked on the POCO X3 NFC (Android 12,
+MIUI), using a Hysteria 2 profile with system Always-on and lockdown enabled.
+After `am crash` and after a native SIGABRT, there was no restart within 30 s.
+A direct TCP probe from the shell UID was blocked during that time. Opening the
+app restored the VPN within 1 s, and the probe then passed through the tunnel.
+SIGKILL could not be sent there without root, because MIUI `run-as` refuses it.
+The case of Always-on being disabled while the process is dead was checked only
+on the emulator.
 
 QR camera permission is requested only when scanning; camera/image decoding is
 local and always leads to the normal profile confirmation. File export is explicit

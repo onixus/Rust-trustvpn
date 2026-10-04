@@ -92,6 +92,7 @@ cp target/aarch64-linux-android/release/librtrust_android.so /out/arm64-v8a/
             fixture.terminate()
             try: fixture.wait(timeout=40)
             except subprocess.TimeoutExpired: fixture.kill(); fixture.wait()
+    run(['python3', 'ci/android_process_death_e2e.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
     run(['python3', 'ci/android_upgrade_e2e.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial, '--gradle', args.gradle], cwd=ROOT, env=env)
     dist = ROOT / 'dist/android'
     dist.mkdir(parents=True, exist_ok=True)
