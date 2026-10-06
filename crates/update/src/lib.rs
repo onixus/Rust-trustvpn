@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 pub const ORIGIN: &str = "https://onixus-rf.duckdns.org";
-pub const CURRENT_SEQUENCE: u64 = 7;
+pub const CURRENT_SEQUENCE: u64 = 9;
 pub const CURRENT_IPC: u32 = 1;
 const ROOT: &[u8] = include_bytes!("root.pub");
 const MAX_PACKAGE: u64 = 256 * 1024 * 1024;
@@ -342,6 +342,23 @@ mod tests {
             signature: STANDARD.encode(pair.sign(&bytes).as_ref()),
         })
         .unwrap()
+    }
+    #[tokio::test]
+    async fn installed_release_is_not_staged_as_an_update() {
+        let (pair, mut manifest) = fixture();
+        manifest.sequence = CURRENT_SEQUENCE;
+        let release = verify_key(
+            &signed(&pair, &manifest),
+            pair.public_key().as_ref(),
+            &manifest.target,
+            1500,
+            CURRENT_SEQUENCE,
+        )
+        .unwrap();
+        assert_eq!(
+            stage(&release).await.unwrap_err(),
+            "Новая версия не найдена"
+        );
     }
     #[test]
     fn verified_signature_binds_platform_sequence_and_expiry() {
