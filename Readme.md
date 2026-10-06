@@ -199,7 +199,7 @@ Passing one platform or protocol test does not imply every release package has b
 | vendor/h2 | Patched HTTP/2 dependency |
 | docs | Architecture, platform status, releases and acceptance evidence |
 
-The former unified administration console has moved to [onixus/tunnel](https://github.com/onixus/tunnel). Start server-side integration here with [server/README.md](server/README.md) and [deploy/README.md](deploy/README.md).
+The former unified administration console has moved to [onixus/tunnel](https://github.com/onixus/tunnel). Server implementation and deployment belong in that repository. This repository contains the VPN clients and their [portal API contract](docs/profile-api.md).
 
 ## Documentation
 

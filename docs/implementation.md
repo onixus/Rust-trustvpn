@@ -176,7 +176,11 @@ Native Linux собирается **только с Wayland**; X11 backend от�
 
 Добавлен `scripts/package-macos-dmg.py`: unsigned DMG Apple Silicon, ссылка Applications, проверка hdiutil, сравнение SHA-256 вложенного бинарника и GUI smoke из read-only mount. Сертификат Apple Developer не требуется для упаковки; системный VPN macOS это не реализует.
 
-В `server/overlay` реализованы страница `/profiles` и API v2: общий Rust-кодек `rtrust-codec`, preview/commit, зашифрованное хранение импортов, экспорт JSON/TOML/tt, одноразовая привязка устройств, явные grants, отзыв токенов, CSRF и контроль revision. Семь интеграционных тестов используют временную SQLite и настоящий Rust-кодек. В браузере вручную проверен синтетический TOML → preview → сохранение → экспорт; снимок — `dist/portal-ui-smoke.png`.
+Клиентский обмен профилями использует API v2: preview/commit, экспорт JSON/TOML/tt,
+одноразовую привязку устройств, grants, отзыв токенов и контроль revision.
+Серверная реализация и её проверки относятся к отдельному проекту
+[onixus/tunnel](https://github.com/onixus/tunnel); клиентский контракт описан в
+[profile-api.md](profile-api.md).
 
 Обновление 2026-09-30: серверное расширение развёрнуто по HTTPS и подключено к native UI (страница «Серверная панель»). Импорт не создаёт VPN credentials на endpoint; отзыв доступа к API не отзывает уже скачанные VPN-пароли. Системный VPN macOS, Android и installer с выбором UI остаются незавершёнными. Windows full-tunnel/WFP и Native Setup добавлены следующей итерацией. Существующая Windows-нода проверена после разрешения пользователя: активного VPN-адаптера нет, default route идёт через Ethernet. Это проверка пригодности стенда, а не Windows full-tunnel E2E.
 

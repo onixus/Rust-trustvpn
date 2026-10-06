@@ -200,7 +200,7 @@ SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS
 | vendor/h2 | Патченная HTTP/2 зависимость |
 | docs | Архитектура, статусы платформ, релизы и acceptance evidence |
 
-Бывшая unified administration console перенесена в [onixus/tunnel](https://github.com/onixus/tunnel). Серверную интеграцию в этом репозитории начинайте с [server/README.md](server/README.md) и [deploy/README.md](deploy/README.md).
+Бывшая unified administration console перенесена в [onixus/tunnel](https://github.com/onixus/tunnel). Серверная реализация и развёртывание относятся к тому репозиторию. Здесь находятся VPN-клиенты и [контракт API панели](docs/profile-api.md).
 
 ## Документация
 
