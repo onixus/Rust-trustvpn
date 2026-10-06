@@ -16,7 +16,7 @@ import java.util.UUID;
 import org.json.*;
 
 /** Native Android widgets; no WebView and no remote UI code. */
-public final class MainActivity extends Activity {
+public class MainActivity extends Activity {
     private static final int PICK = 10, SAVE = 11, CONSENT = 12, QR_IMAGE = 13;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private LinearLayout rows;
@@ -295,7 +295,7 @@ public final class MainActivity extends Activity {
                 catch (ActivityNotFoundException e) { startActivity(new Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS)); }
             }).show();
     }
-    private void toggle() {
+    protected final void toggle() {
         if (TunnelService.active && TunnelService.alwaysOn) { vpnSettings(); return; }
         if (TunnelService.active) { startService(new Intent(this, TunnelService.class).setAction(TunnelService.STOP)); return; }
         try {

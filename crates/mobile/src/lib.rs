@@ -30,7 +30,7 @@ fn strings(v: Option<&Value>) -> Result<Vec<String>, String> {
 }
 fn networks(values: &[String]) -> Result<Vec<IpNet>, String> {
     values.iter().map(|s| {
-        let net = s.parse::<IpNet>().or_else(|_| s.parse::<std::net::IpAddr>().map(IpNet::from)).map_err(|_| "Domain/port exclusions require a flow-routing policy and cannot be mapped to Android IP routes".to_owned())?;
+        let net = s.parse::<IpNet>().or_else(|_| s.parse::<std::net::IpAddr>().map(IpNet::from)).map_err(|_| "Domain/port exclusions require a flow-routing policy and cannot be mapped to mobile IP routes".to_owned())?;
         if net != net.trunc() { return Err(bad()); }
         Ok(net)
     }).collect()

@@ -526,11 +526,11 @@ fn tls_config_with_ca(certificate: &str) -> Result<rustls::ClientConfig> {
 fn trust_roots(certificate: &str) -> Result<rustls::RootCertStore> {
     let mut roots = rustls::RootCertStore::empty();
     if certificate.is_empty() {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let native = rustls_native_certs::load_native_certs();
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         for cert in native.certs {
             let _ = roots.add(cert);
         }

@@ -24,6 +24,10 @@ public final class TunnelService extends VpnService {
     private ConnectivityManager.NetworkCallback callback;
     private volatile boolean stopping, recovering;
     private boolean cleaned;
+    private final Handler widgetHandler = new Handler(Looper.getMainLooper());
+    private final Runnable widgetPoll = new Runnable() {
+        public void run() { VpnWidget.refresh(TunnelService.this, false); widgetHandler.postDelayed(this, 1000); }
+    };
     private static volatile TunnelService running;
     static void refreshPolicy() {
         TunnelService service = running;
@@ -51,7 +55,7 @@ public final class TunnelService extends VpnService {
     }
 
     @Override public void onCreate() {
-        super.onCreate(); running = this; connectivity = getSystemService(ConnectivityManager.class);
+        super.onCreate(); widgetHandler.post(widgetPoll); running = this; connectivity = getSystemService(ConnectivityManager.class);
         getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel("vpn", getString(R.string.vpn_connection), NotificationManager.IMPORTANCE_LOW));
     }
     private Notification notification() {
@@ -191,7 +195,7 @@ public final class TunnelService extends VpnService {
         NativeCore.INSTANCE.stop();
         if (callback != null) { connectivity.unregisterNetworkCallback(callback); callback = null; }
         if (tun != null) { try { tun.close(); } catch (Exception ignored) {} tun = null; }
-        underlying = null; active = false;
+        underlying = null; active = false; VpnWidget.refresh(this, true);
     }
     private void disconnect() {
         if (stopping) return;
@@ -199,5 +203,5 @@ public final class TunnelService extends VpnService {
         worker.execute(() -> { cleanup(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); });
     }
     @Override public void onRevoke() { disconnect(); }
-    @Override public void onDestroy() { running = null; stopping = true; worker.execute(this::cleanup); worker.shutdown(); super.onDestroy(); }
+    @Override public void onDestroy() { widgetHandler.removeCallbacks(widgetPoll); running = null; stopping = true; worker.execute(this::cleanup); worker.shutdown(); super.onDestroy(); }
 }
