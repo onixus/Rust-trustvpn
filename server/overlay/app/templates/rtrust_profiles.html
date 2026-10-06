@@ -9,4 +9,11 @@
 <label for="content">Или вставьте конфиг / tt-ссылку</label><textarea id="content" rows="3" autocomplete="off" spellcheck="false"></textarea>
 <button id="preview">Проверить</button><div id="preview-result" hidden><pre id="summary"></pre><button id="commit">Сохранить конфиг с паролем</button><button id="cancel">Отмена</button></div></section>
 <section><h2>Ваши профили</h2><label for="format">Формат экспорта</label><select id="format"><option value="profile_json">JSON</option><option value="endpoint_toml">Endpoint TOML</option><option value="cli_toml">CLI TOML</option><option value="tt">tt-ссылка</option></select><div id="profiles"></div></section>
-<section><h2>Устройства</h2><p>Код привязки действует 3 минуты и используется один раз. После привязки предоставьте устройству доступ к нужным профилям.</p><button id="enroll">Создать код</button><output id="code"></output><div id="devices"></div><p>Отзыв доступа запрещает дальнейшее получение конфигов. Уже скачанные VPN-пароли нужно отозвать отдельно в кабинете сервера.</p></section></main></body></html>
+<section><h2>Устройства</h2><p>Код привязки действует 3 минуты и используется один раз. После привязки предоставьте устройству доступ к нужным профилям.</p><button id="enroll">Создать код</button><output id="code"></output><div id="devices"></div><p>Отзыв доступа запрещает дальнейшее получение конфигов. Уже скачанные VPN-пароли нужно отозвать отдельно в кабинете сервера.</p></section>
+<section><h2>Маршруты TUN для групп устройств</h2><p>Политика группы применяется к режиму TUN настольного клиента при его следующем подключении: через VPN идут указанные сети IPv4, кроме исключений. Сети указываются в формате CIDR (10.0.0.0/8) через запятую или с новой строки; устройство состоит не более чем в одной группе.</p>
+<div id="route-groups"></div>
+<h3>Новая группа</h3><label for="route-name">Название</label><input id="route-name" maxlength="80" autocomplete="off">
+<label for="route-include">Сети через VPN (до 16)</label><textarea id="route-include" rows="2" autocomplete="off" spellcheck="false" placeholder="10.0.0.0/8, 192.168.10.0/24"></textarea>
+<label for="route-exclude">Исключения (до 64)</label><textarea id="route-exclude" rows="2" autocomplete="off" spellcheck="false"></textarea>
+<label class="check"><input id="route-lan" type="checkbox" checked> Исключить локальные сети</label>
+<button id="route-create">Создать группу</button></section></main></body></html>

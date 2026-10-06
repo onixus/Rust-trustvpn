@@ -35,6 +35,30 @@ pub struct ConnectionSettings {
     pub networks: Vec<rtrust_control::Ipv4Net>,
     #[serde(default = "default_dns")]
     pub dns: std::net::Ipv4Addr,
+    // Written only when used, so older releases can still read the vault.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<rtrust_control::Ipv4Net>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exclude_lan: bool,
+    /// Route policy of this device's group on the server; overrides the local
+    /// TUN selection while present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_routes: Option<ManagedRoutes>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedRoutes {
+    pub group: String,
+    pub revision: String,
+    pub selection: rtrust_control::Selection,
+}
+impl ManagedRoutes {
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=80).contains(&self.group.len()) || !(1..=64).contains(&self.revision.len()) {
+            return Err(Error::Invalid);
+        }
+        self.selection.validate().map_err(|_| Error::Invalid)
+    }
 }
 fn default_dns() -> std::net::Ipv4Addr {
     std::net::Ipv4Addr::new(1, 1, 1, 1)
@@ -48,6 +72,9 @@ impl Default for ConnectionSettings {
             socks_port: 1080,
             networks: vec![],
             dns: default_dns(),
+            exclude: vec![],
+            exclude_lan: false,
+            managed_routes: None,
         }
     }
 }
@@ -58,10 +85,30 @@ impl ConnectionSettings {
         if self.socks_port == 0 {
             return Err(Error::Invalid);
         }
-        if self.mode == Mode::Tun || !self.networks.is_empty() {
-            rtrust_control::validate_networks(&self.networks).map_err(|_| Error::Invalid)?;
+        if (self.mode == Mode::Tun && self.managed_routes.is_none())
+            || !self.networks.is_empty()
+            || !self.exclude.is_empty()
+        {
+            self.selection().validate().map_err(|_| Error::Invalid)?;
+        }
+        if let Some(managed) = &self.managed_routes {
+            managed.validate()?;
         }
         Ok(())
+    }
+    /// The local TUN selection, ignoring any server policy.
+    pub fn selection(&self) -> rtrust_control::Selection {
+        rtrust_control::Selection {
+            include: self.networks.clone(),
+            exclude: self.exclude.clone(),
+            exclude_lan: self.exclude_lan,
+        }
+    }
+    /// What TUN mode applies: the server policy when assigned, else local.
+    pub fn effective_selection(&self) -> rtrust_control::Selection {
+        self.managed_routes
+            .as_ref()
+            .map_or_else(|| self.selection(), |m| m.selection.clone())
     }
 }
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -358,6 +405,36 @@ mod tests {
 
     use super::*;
     #[test]
+    fn split_selection_and_server_policy_roundtrip_and_stay_optional() {
+        let plain = ConnectionSettings::default();
+        let json = serde_json::to_value(&plain).unwrap();
+        for key in ["exclude", "exclude_lan", "managed_routes"] {
+            assert!(json.get(key).is_none(), "{key}");
+        }
+        let managed = ManagedRoutes {
+            group: "office".into(),
+            revision: "3:7".into(),
+            selection: rtrust_control::Selection::parse("10.0.0.0/8", "", false).unwrap(),
+        };
+        let split = ConnectionSettings {
+            mode: Mode::Tun,
+            networks: rtrust_control::networks("0.0.0.0/0").unwrap(),
+            exclude: rtrust_control::networks("192.168.0.0/16").unwrap(),
+            exclude_lan: true,
+            managed_routes: Some(managed.clone()),
+            ..plain
+        };
+        split.validate().unwrap();
+        let restored: ConnectionSettings =
+            serde_json::from_slice(&serde_json::to_vec(&split).unwrap()).unwrap();
+        assert!(restored == split);
+        assert_eq!(restored.effective_selection(), managed.selection);
+        assert!(restored.selection().exclude_lan);
+        let mut bad = split;
+        bad.managed_routes.as_mut().unwrap().group.clear();
+        assert!(bad.validate().is_err());
+    }
+    #[test]
     fn encrypted_roundtrip_and_tamper_detection() {
         let p=Profile::import("hostname='vpn.example'\naddresses=['127.0.0.1:443']\nusername='test'\npassword='CANARY_SECRET'\n").unwrap();
         let key = [7; 32];
@@ -407,6 +484,9 @@ mod tests {
             dns: default_dns(),
             auto_connect: true,
             sync: Default::default(),
+            exclude: vec![],
+            exclude_lan: false,
+            managed_routes: None,
         };
         let new = save_in(dir.path(), &vault, Some(old.clone()), |create| {
             assert!(!create);
@@ -454,7 +534,8 @@ mod tests {
         assert!(decrypt(&renamed, &key).is_err());
         for json in [
             r#"{"profiles":[],"connection":{"mode":"Socks","socks_port":0,"networks":[]}}"#,
-            r#"{"profiles":[],"connection":{"mode":"Tun","socks_port":1080,"networks":["0.0.0.0/0"]}}"#,
+            r#"{"profiles":[],"connection":{"mode":"Tun","socks_port":1080,"networks":["127.0.0.0/8"]}}"#,
+            r#"{"profiles":[],"connection":{"mode":"Tun","socks_port":1080,"networks":["0.0.0.0/0"],"exclude":["0.0.0.0/0"]}}"#,
             r#"{"profiles":[],"connection":{"mode":"Future","socks_port":1080,"networks":[]}}"#,
             r#"{"profiles":[],"connection":{"mode":"Socks","socks_port":1080,"networks":[],"autoconnect":true}}"#,
         ] {

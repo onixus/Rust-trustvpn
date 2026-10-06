@@ -1,10 +1,11 @@
 use super::{
-    device,
+    device, routes,
     state::{self, Guard},
 };
 use rtrust_control::{Command, Request, Response, State, VERSION, read, write};
 use std::{
     fs,
+    net::Ipv4Addr,
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     sync::Arc,
     time::{Duration, Instant},
@@ -169,7 +170,7 @@ async fn serve(
         )
         .await;
     };
-    let (profile, networks, dns) = match request.command {
+    let (profile, selection, dns) = match request.command {
         Command::PrepareUpdate => {
             if state::pending() {
                 return reply(
@@ -194,57 +195,93 @@ async fn serve(
                 Err(e) => reply(&mut stream, State::Blocked, &e).await,
             };
         }
-        Command::Start { profile, networks } => (profile, networks, None),
-        Command::StartFull { profile, dns } => (profile, vec![], Some(dns)),
+        Command::Start {
+            profile,
+            networks,
+            exclude,
+            exclude_lan,
+        } => {
+            let selection = rtrust_control::Selection {
+                include: networks,
+                exclude,
+                exclude_lan,
+            };
+            if let Err(error) = selection.validate() {
+                return reply(&mut stream, State::Error, &error).await;
+            }
+            (profile, selection, None)
+        }
+        Command::StartFull { profile, dns } => (profile, Default::default(), Some(dns)),
         _ => return reply(&mut stream, State::Error, "Start or Recover required").await,
     };
-    if let Err(error) = Guard::preflight(&networks, dns) {
-        return reply(&mut stream, State::Error, &error).await;
-    }
     let full = dns.is_some();
-    let profile = if full {
-        let result = tokio::time::timeout(Duration::from_secs(10), async {
-            let mut profile = profile;
-            let mut addresses = Vec::new();
-            for address in &profile.endpoint.addresses {
-                for address in tokio::net::lookup_host(address)
-                    .await
-                    .map_err(|_| "Cannot resolve endpoint")?
-                {
-                    if !address.is_ipv4() {
-                        continue;
-                    }
-                    if addresses.len() >= 64 {
-                        return Err("Too many endpoint addresses");
-                    }
-                    addresses.push(address.to_string());
-                }
-            }
-            if addresses.is_empty() {
-                return Err("Endpoint has no addresses");
-            }
-            profile.endpoint.addresses = addresses;
-            Ok(profile)
-        })
+    if state::pending() {
+        // A retained guard blocks DNS; report it before resolving the endpoint.
+        return reply(
+            &mut stream,
+            State::Error,
+            "Recovery is required before connecting",
+        )
         .await;
-        match result {
-            Ok(Ok(profile)) => profile,
-            _ => {
-                return reply(
-                    &mut stream,
-                    State::Error,
-                    "Не удалось разрешить адрес VPN-сервера",
-                )
-                .await;
+    }
+    // Both modes pin IPv4 endpoint addresses: PF blocks selected networks
+    // outside the tunnel, so the endpoint must be known and left out of them.
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut profile = profile;
+        let mut addresses = Vec::new();
+        for address in &profile.endpoint.addresses {
+            for address in tokio::net::lookup_host(address)
+                .await
+                .map_err(|_| "Cannot resolve endpoint")?
+            {
+                if !address.is_ipv4() {
+                    continue;
+                }
+                if addresses.len() >= 64 {
+                    return Err("Too many endpoint addresses");
+                }
+                addresses.push(address.to_string());
             }
         }
-    } else {
-        profile
+        if addresses.is_empty() {
+            return Err("Endpoint has no addresses");
+        }
+        profile.endpoint.addresses = addresses;
+        Ok(profile)
+    })
+    .await;
+    let profile = match result {
+        Ok(Ok(profile)) => profile,
+        _ => {
+            return reply(
+                &mut stream,
+                State::Error,
+                "Не удалось разрешить адрес VPN-сервера",
+            )
+            .await;
+        }
     };
     let endpoints = match state::endpoints(&profile) {
         Ok(e) => e,
         Err(e) => return reply(&mut stream, State::Error, &e).await,
     };
+    let networks = if full {
+        vec![]
+    } else {
+        let ips: Vec<Ipv4Addr> = endpoints.iter().map(|e| *e.ip()).collect();
+        let local = if selection.exclude_lan {
+            routes::local()
+        } else {
+            Ok(vec![])
+        };
+        match local.and_then(|local| selection.routes(&ips, &local)) {
+            Ok(networks) => networks,
+            Err(e) => return reply(&mut stream, State::Error, &e).await,
+        }
+    };
+    if let Err(error) = Guard::preflight(&networks, dns) {
+        return reply(&mut stream, State::Error, &error).await;
+    }
     let prepared = {
         let mut unexpected = [0];
         tokio::select! {

@@ -108,6 +108,16 @@ impl Route {
         Ok(())
     }
 }
+/// Non-default IPv4 routes before the VPN interface exists (LAN, host and
+/// other VPN routes), used to keep local networks off the tunnel.
+pub(super) fn local() -> Result<Vec<rtrust_control::Ipv4Net>, String> {
+    Ok(route_table::read(false)?
+        .into_iter()
+        .filter(|r| r.destination != "default")
+        .filter_map(|r| route_table::prefix(&r.destination, false)?.parse().ok())
+        .map(|n: rtrust_control::Ipv4Net| n.trunc())
+        .collect())
+}
 pub(super) fn physical_interface() -> Result<String, String> {
     let defaults: Vec<_> = route_table::read(false)?
         .into_iter()

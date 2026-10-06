@@ -158,15 +158,10 @@ impl Controller {
             rtrust_store::Mode::Tun => connection::Mode::Tun,
             rtrust_store::Mode::Full => connection::Mode::Full,
         };
-        let networks = c
-            .networks
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
+        let selection = c.effective_selection();
         let ipv4_only = mode == connection::Mode::Full && !p.endpoint.has_ipv6;
         self.session = Some(
-            connection::Session::start(p, mode, c.socks_port, networks, c.dns.to_string()).await?,
+            connection::Session::start(p, mode, c.socks_port, selection, c.dns.to_string()).await?,
         );
         self.connected_note = if ipv4_only {
             "Connected · IPv4 and DNS. The server has no IPv6, so IPv6 is blocked and apps use IPv4."

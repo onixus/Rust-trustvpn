@@ -144,10 +144,7 @@ async fn reply(
     .await
     .map_err(|_| "IPC write timed out")?
 }
-async fn pinned(
-    profile: &rtrust_profile::Profile,
-    networks: &[rtrust_control::Ipv4Net],
-) -> Result<rtrust_profile::Profile, String> {
+async fn pinned(profile: &rtrust_profile::Profile) -> Result<rtrust_profile::Profile, String> {
     let mut result = profile.clone();
     let mut addresses = Vec::new();
     for address in &profile.endpoint.addresses {
@@ -155,11 +152,6 @@ async fn pinned(
             .await
             .map_err(|_| "Cannot resolve endpoint")?
         {
-            if let IpAddr::V4(ip) = addr.ip()
-                && networks.iter().any(|n| n.contains(&ip))
-            {
-                return Err("VPN endpoint overlaps selected networks".into());
-            }
             if addresses.len() >= 64 {
                 return Err("Too many endpoint addresses".into());
             }
@@ -172,6 +164,25 @@ async fn pinned(
     // Freeze DNS answers for this lease so reconnect cannot route into itself.
     result.endpoint.addresses = addresses;
     Ok(result)
+}
+/// Selected routes minus the pinned endpoint (and LAN on request), checked
+/// against the current table.
+fn selected_routes(
+    profile: &rtrust_profile::Profile,
+    selection: &rtrust_control::Selection,
+) -> Result<Vec<rtrust_control::Ipv4Net>, String> {
+    let endpoints: Vec<Ipv4Addr> = profile
+        .endpoint
+        .addresses
+        .iter()
+        .filter_map(|a| match a.parse() {
+            Ok(std::net::SocketAddr::V4(a)) => Some(*a.ip()),
+            _ => None,
+        })
+        .collect();
+    let networks = selection.routes(&endpoints, &routes::local()?)?;
+    routes::preflight(&networks)?;
+    Ok(networks)
 }
 async fn transport(
     profile: &rtrust_profile::Profile,
@@ -233,7 +244,7 @@ async fn serve(
     let Ok(_lease) = lease.try_lock_owned() else {
         return reply(pipe, State::Error, "Служба уже обслуживает подключение").await;
     };
-    let (profile, networks, dns) = match request.command {
+    let (profile, selection, dns) = match request.command {
         Command::PrepareUpdate => {
             if full::pending()? {
                 return reply(
@@ -248,10 +259,25 @@ async fn serve(
             tokio::select! { _=stop.changed()=>{}, _=read::<Request>(pipe)=>{} }
             return Ok(());
         }
-        Command::Start { profile, networks } => (profile, networks, None),
+        Command::Start {
+            profile,
+            networks,
+            exclude,
+            exclude_lan,
+        } => {
+            let selection = rtrust_control::Selection {
+                include: networks,
+                exclude,
+                exclude_lan,
+            };
+            if let Err(error) = selection.validate() {
+                return reply(pipe, State::Error, &error).await;
+            }
+            (profile, selection, None)
+        }
         Command::StartFull { profile, dns } => {
             rtrust_control::validate_dns(dns)?;
-            (profile, vec![], Some(dns))
+            (profile, Default::default(), Some(dns))
         }
         Command::Recover => {
             full::recover()?;
@@ -268,17 +294,17 @@ async fn serve(
         .await;
     }
     routes::settled_adapter()?;
-    if dns.is_none()
-        && let Err(error) = routes::preflight(&networks)
-    {
-        return reply(pipe, State::Error, &error).await;
-    }
     let setup = async {
-        let profile = pinned(&profile, &networks).await?;
+        let profile = pinned(&profile).await?;
+        let networks = if dns.is_none() {
+            selected_routes(&profile, &selection)?
+        } else {
+            vec![]
+        };
         let (session, udp) = transport(&profile).await?;
-        Ok::<_, String>((profile, session, udp))
+        Ok::<_, String>((profile, networks, session, udp))
     };
-    let (profile, session, udp) = {
+    let (profile, networks, session, udp) = {
         use tokio::io::AsyncReadExt;
         let mut unexpected = [0];
         tokio::select! {

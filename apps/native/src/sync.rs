@@ -22,6 +22,28 @@ pub(super) struct Batch {
     client: Client,
     changed: Vec<(RemoteProfile, Profile)>,
     available: Vec<String>,
+    routing: Option<rtrust_store::ManagedRoutes>,
+}
+/// The device group's TUN route policy, checked before it can replace the
+/// local selection.
+fn managed(policy: rtrust_portal::RoutingPolicy) -> Result<rtrust_store::ManagedRoutes, String> {
+    let routes = rtrust_store::ManagedRoutes {
+        group: policy.group,
+        revision: policy.revision,
+        selection: rtrust_control::Selection {
+            include: policy.include,
+            exclude: policy.exclude,
+            exclude_lan: policy.exclude_lan,
+        },
+    };
+    routes
+        .selection
+        .validate()
+        .map_err(|e| format!("Сервер прислал недопустимые маршруты TUN: {e}"))?;
+    routes
+        .validate()
+        .map_err(|_| "Сервер прислал недопустимую группу маршрутов".to_owned())?;
+    Ok(routes)
 }
 fn track(tracked: &mut Vec<TrackedProfile>, meta: &RemoteProfile, profile: Profile) {
     let item = TrackedProfile {
@@ -62,6 +84,10 @@ impl App {
                     }
                 }
                 self.saved_connection.sync.enabled = enabled;
+                if !enabled {
+                    // Without sync nothing would update or revoke a server policy.
+                    self.saved_connection.managed_routes = None;
+                }
                 self.sync_state = State::default();
                 self.dirty = true;
                 return self.update(Message::Save);
@@ -112,11 +138,13 @@ impl App {
                             changed.push((remote, profile));
                         }
                     }
+                    let routing = client.routing().await?.map(managed).transpose()?;
                     Ok(Batch {
                         origin: settings.origin,
                         client,
                         changed,
                         available,
+                        routing,
                     })
                 };
                 return Task::perform(
@@ -139,6 +167,9 @@ impl App {
                         self.portal.client = Some(batch.client);
                         let previous_profiles = self.profiles.clone();
                         let previous_sync = self.saved_connection.sync.clone();
+                        let previous_routes = self.saved_connection.managed_routes.clone();
+                        let routes_changed = batch.routing != previous_routes;
+                        self.saved_connection.managed_routes = batch.routing;
                         let mut updated = 0;
                         for (meta, incoming) in batch.changed {
                             let old = self
@@ -175,6 +206,7 @@ impl App {
                         if candidate.validate().is_err() {
                             self.profiles = previous_profiles;
                             self.saved_connection.sync = previous_sync;
+                            self.saved_connection.managed_routes = previous_routes;
                             self.sync_state.pending.clear();
                             self.sync_state.status="Обновление превышает лимит хранилища. Локальные данные не изменены.".into();
                             return Task::none();
@@ -186,12 +218,18 @@ impl App {
                             .iter()
                             .filter(|p| !batch.available.contains(&p.id))
                             .count();
+                        let routes = match &self.saved_connection.managed_routes {
+                            Some(m) => format!("группа «{}»", m.group),
+                            None => "локальные настройки".into(),
+                        };
                         self.sync_state.status = format!(
-                            "Обновлено: {updated}. Конфликтов: {}. Недоступно на сервере: {missing} (локальные копии сохранены).",
+                            "Обновлено: {updated}. Конфликтов: {}. Недоступно на сервере: {missing} (локальные копии сохранены). Маршруты TUN: {routes}.",
                             self.sync_state.pending.len()
                         );
                         if updated > 0 {
                             self.reset_editor();
+                        }
+                        if updated > 0 || routes_changed {
                             self.dirty = true;
                             return self.update(Message::Save);
                         }
@@ -276,6 +314,7 @@ mod tests {
             client: Client::new("https://example.test").unwrap(),
             changed: vec![(meta(), profile)],
             available: vec!["remote-1".into()],
+            routing: None,
         }
     }
     #[test]
@@ -317,6 +356,41 @@ mod tests {
         let _ = app.sync_update(Action::Received(Ok(result)));
         assert_eq!(app.profiles, before);
         assert!(!app.dirty);
+    }
+    #[test]
+    fn group_route_policy_is_applied_replaced_and_cleared() {
+        let mut app = configured();
+        let policy = |include: &str, exclude: &str| rtrust_portal::RoutingPolicy {
+            group: "office".into(),
+            revision: format!("1:{include}"),
+            include: rtrust_control::networks(include).unwrap(),
+            exclude: if exclude.is_empty() {
+                vec![]
+            } else {
+                rtrust_control::networks(exclude).unwrap()
+            },
+            exclude_lan: true,
+        };
+        let mut result = batch(app.profiles[0].clone());
+        result.changed.clear();
+        result.routing = Some(managed(policy("0.0.0.0/0", "10.0.0.0/8")).unwrap());
+        let _ = app.sync_update(Action::Received(Ok(result)));
+        let applied = app.saved_connection.managed_routes.clone().unwrap();
+        assert_eq!(applied.group, "office");
+        assert!(applied.selection.exclude_lan && app.dirty);
+        assert_eq!(app.tun_selection().unwrap(), applied.selection);
+        assert!(app.sync_state.status.contains("группа «office»"));
+        // A policy that leaves nothing to route is refused before it is stored.
+        assert!(managed(policy("10.0.0.0/8", "10.0.0.0/8")).is_err());
+        let mut result = batch(app.profiles[0].clone());
+        result.changed.clear();
+        let _ = app.sync_update(Action::Received(Ok(result)));
+        assert!(app.saved_connection.managed_routes.is_none());
+        app.saved_connection.managed_routes = Some(applied);
+        app.dirty = false;
+        app.busy = false; // the save started by the previous batch has finished
+        let _ = app.sync_update(Action::Enable(false));
+        assert!(app.saved_connection.managed_routes.is_none());
     }
     #[test]
     fn sync_does_not_start_during_connection_or_unsaved_edits() {

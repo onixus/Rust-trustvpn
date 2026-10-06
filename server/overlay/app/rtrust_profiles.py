@@ -1,6 +1,7 @@
 """Additive v2 profile exchange. Shared Rust codec; no endpoint mutation on import."""
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -28,6 +29,10 @@ CREATE TABLE IF NOT EXISTS rtrust_grants(profile TEXT NOT NULL,device INTEGER NO
 CREATE TABLE IF NOT EXISTS rtrust_tokens(hash TEXT PRIMARY KEY,device INTEGER NOT NULL REFERENCES app_devices(id) ON DELETE CASCADE,expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS rtrust_rates(bucket TEXT PRIMARY KEY,count INTEGER NOT NULL,expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS rtrust_audit(id INTEGER PRIMARY KEY,actor TEXT NOT NULL,action TEXT NOT NULL,object TEXT NOT NULL,created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS rtrust_route_groups(id INTEGER PRIMARY KEY,owner INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,name TEXT NOT NULL,policy TEXT NOT NULL,revision INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS rtrust_route_members(device INTEGER PRIMARY KEY REFERENCES app_devices(id) ON DELETE CASCADE,grp INTEGER NOT NULL REFERENCES rtrust_route_groups(id) ON DELETE CASCADE);
+CREATE INDEX IF NOT EXISTS rtrust_route_groups_owner ON rtrust_route_groups(owner);
+CREATE INDEX IF NOT EXISTS rtrust_route_members_grp ON rtrust_route_members(grp);
 '''
 
 def init():
@@ -158,7 +163,7 @@ def accessible(c, owner, device, identifier):
     return {'id':identifier,'revision':str(row['revision']),'summary':json.loads(row['summary']),'origin':'external_stored'},unseal(owner,row['payload'])
 
 @router.get('/portal/v2/capabilities')
-def capabilities():return JSONResponse({'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code'],'max_profile_bytes':LIMIT},headers=HEADERS)
+def capabilities():return JSONResponse({'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code'],'max_profile_bytes':LIMIT,'routing':1},headers=HEADERS)
 
 @router.get('/profiles',response_class=HTMLResponse)
 def page(request:Request):
@@ -207,6 +212,7 @@ def revoke_device(identifier:int,request:Request):
     with db.connect() as c:
         if not c.execute('SELECT 1 FROM app_devices WHERE id=? AND user_id=?',(identifier,owner)).fetchone():raise HTTPException(404,'Device not found')
         c.execute('DELETE FROM rtrust_tokens WHERE device=?',(identifier,));c.execute('DELETE FROM rtrust_grants WHERE device=?',(identifier,))
+        c.execute('DELETE FROM rtrust_route_members WHERE device=?',(identifier,))
         c.execute("UPDATE app_devices SET revoked_at=datetime('now') WHERE id=?",(identifier,))
         audit(c,identity,'revoke_device',str(identifier))
     return JSONResponse({'revoked':True},headers=HEADERS)
@@ -311,3 +317,101 @@ def delete(identifier:str,request:Request):
         c.execute('DELETE FROM rtrust_grants WHERE profile=?',(identifier,))
         audit(c,identity,'delete',identifier)
     return JSONResponse({'revoked':True},headers=HEADERS)
+
+# Split-tunnel routing for the desktop TUN mode, assigned to devices through owner-scoped groups.
+def networks(value, low, high):
+    if not isinstance(value,list) or not low<=len(value)<=high:raise HTTPException(422,f'Expected {low}..{high} IPv4 networks')
+    result=[]
+    for item in value:
+        if not isinstance(item,str) or len(item)>32 or '/' not in item:raise HTTPException(422,'Invalid IPv4 network')
+        try:network=str(ipaddress.IPv4Network(item.strip(),strict=True))
+        except ValueError:raise HTTPException(422,'Invalid IPv4 network (host bits set or malformed): '+item[:32])
+        if network not in result:result.append(network)
+    return result
+
+def route_policy(data):
+    name=data.get('name')
+    if not isinstance(name,str) or not 1<=len(name.strip())<=80 or any(ord(ch)<32 or ord(ch)==127 for ch in name):raise HTTPException(422,'Group name must be 1..80 characters')
+    if type(data.get('exclude_lan')) is not bool:raise HTTPException(422,'exclude_lan must be a boolean')
+    return name.strip(),{'include':networks(data.get('include'),1,16),'exclude':networks(data.get('exclude'),0,64),'exclude_lan':data['exclude_lan']}
+
+def browser(request, mutate=False):
+    owner,identity,device=actor(request,mutate)
+    if device is not None:raise HTTPException(403,'Browser login required')
+    return owner,identity
+
+def route_group(c, owner, identifier):
+    row=c.execute('SELECT * FROM rtrust_route_groups WHERE id=? AND owner=?',(identifier,owner)).fetchone()
+    if row is None:raise HTTPException(404,'Route group not found')
+    return row
+
+def route_groups(c, owner, identifier=None):
+    rows=c.execute('SELECT * FROM rtrust_route_groups WHERE owner=? AND (? IS NULL OR id=?) ORDER BY id',(owner,identifier,identifier)).fetchall()
+    members={}
+    for r in c.execute('SELECT m.grp,m.device FROM rtrust_route_members m JOIN rtrust_route_groups g ON g.id=m.grp JOIN app_devices d ON d.id=m.device WHERE g.owner=? AND d.user_id=? AND d.revoked_at IS NULL ORDER BY m.device',(owner,owner)):
+        members.setdefault(r['grp'],[]).append(r['device'])
+    return [{'id':r['id'],'name':r['name'],**json.loads(r['policy']),'revision':r['revision'],'devices':members.get(r['id'],[])} for r in rows]
+
+@router.get('/portal/v2/route-groups')
+def list_route_groups(request:Request):
+    owner,_=browser(request)
+    with db.connect() as c:return JSONResponse({'groups':route_groups(c,owner)},headers=HEADERS)
+
+@router.post('/portal/v2/route-groups')
+async def create_route_group(request:Request):
+    owner,identity=browser(request,True);rate('routes:'+identity,60)
+    name,policy=route_policy(await body(request,['name','include','exclude','exclude_lan']))
+    with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if c.execute('SELECT count(*) FROM rtrust_route_groups WHERE owner=?',(owner,)).fetchone()[0]>=50:raise HTTPException(409,'Route group limit reached')
+        identifier=c.execute('INSERT INTO rtrust_route_groups(owner,name,policy,revision) VALUES(?,?,?,1)',(owner,name,json.dumps(policy))).lastrowid
+        audit(c,identity,'route_group_create',str(identifier))
+        return JSONResponse(route_groups(c,owner,identifier)[0],headers=HEADERS)
+
+@router.put('/portal/v2/route-groups/{identifier}')
+async def update_route_group(identifier:int,request:Request):
+    owner,identity=browser(request,True);rate('routes:'+identity,60)
+    data=await body(request,['name','include','exclude','exclude_lan','revision'])
+    name,policy=route_policy(data)
+    if type(data.get('revision')) is not int:raise HTTPException(422,'Revision required')
+    with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=route_group(c,owner,identifier)
+        if row['revision']!=data['revision']:raise HTTPException(409,'Route group revision changed')
+        c.execute('UPDATE rtrust_route_groups SET name=?,policy=?,revision=? WHERE id=?',(name,json.dumps(policy),row['revision']+1,identifier))
+        audit(c,identity,'route_group_update',str(identifier))
+        return JSONResponse(route_groups(c,owner,identifier)[0],headers=HEADERS)
+
+@router.delete('/portal/v2/route-groups/{identifier}')
+def delete_route_group(identifier:int,request:Request):
+    owner,identity=browser(request,True)
+    with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=route_group(c,owner,identifier)
+        if request.headers.get('if-match')!=str(row['revision']):raise HTTPException(409,'Route group revision changed')
+        c.execute('DELETE FROM rtrust_route_members WHERE grp=?',(identifier,))
+        c.execute('DELETE FROM rtrust_route_groups WHERE id=?',(identifier,))
+        audit(c,identity,'route_group_delete',str(identifier))
+    return JSONResponse({'deleted':True},headers=HEADERS)
+
+@router.post('/portal/v2/route-groups/{identifier}/members')
+async def route_group_member(identifier:int,request:Request):
+    owner,identity=browser(request,True);rate('routes:'+identity,60)
+    data=await body(request,['device_id','member'])
+    if type(data.get('device_id')) is not int or type(data.get('member')) is not bool:raise HTTPException(422,'Invalid membership')
+    with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        route_group(c,owner,identifier)
+        if not c.execute('SELECT 1 FROM app_devices WHERE id=? AND user_id=? AND revoked_at IS NULL',(data['device_id'],owner)).fetchone():raise HTTPException(404,'Device not found')
+        if data['member']:c.execute('INSERT INTO rtrust_route_members(device,grp) VALUES(?,?) ON CONFLICT(device) DO UPDATE SET grp=excluded.grp',(data['device_id'],identifier))
+        else:c.execute('DELETE FROM rtrust_route_members WHERE device=? AND grp=?',(data['device_id'],identifier))
+        audit(c,identity,'route_member_add' if data['member'] else 'route_member_remove',f'{identifier}:{data["device_id"]}')
+        return JSONResponse(route_groups(c,owner,identifier)[0],headers=HEADERS)
+
+@router.get('/portal/v2/routing')
+def routing(request:Request):
+    owner,_,device=actor(request)
+    if device is None:raise HTTPException(403,'Device token required')
+    with db.connect() as c:row=c.execute('SELECT g.* FROM rtrust_route_members m JOIN rtrust_route_groups g ON g.id=m.grp WHERE m.device=? AND g.owner=?',(device,owner)).fetchone()
+    if row is None:return JSONResponse({'policy':None},headers=HEADERS)
+    return JSONResponse({'policy':{'group':row['name'],'revision':f'{row["id"]}:{row["revision"]}',**json.loads(row['policy'])}},headers=HEADERS)

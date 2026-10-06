@@ -15,9 +15,9 @@ impl Mode {
 impl std::fmt::Display for Mode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Socks => "SOCKS5 для приложений",
+            Self::Socks => "SOCKS5/HTTP-прокси для приложений",
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Self::Tun => "TUN · выбранные IPv4-сети",
+            Self::Tun => "TUN · IPv4-сети и исключения",
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             Self::Full => "Весь компьютер · IPv4/IPv6 + DNS",
         })
@@ -34,7 +34,7 @@ impl Session {
         profile: rtrust_profile::Profile,
         mode: Mode,
         port: u16,
-        networks: String,
+        selection: rtrust_control::Selection,
         dns: String,
     ) -> Result<Self, String> {
         let _ = &dns;
@@ -47,18 +47,16 @@ impl Session {
             .await
             .map(Self::Tun),
             Mode::Socks => {
-                let _ = networks;
+                let _ = selection;
                 rtrust_engine::proxy::Proxy::start(&profile, port)
                     .await
                     .map(Self::Socks)
                     .map_err(|e| e.to_string())
             }
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Mode::Tun => {
-                rtrust_control::Client::start(profile, rtrust_control::networks(&networks)?)
-                    .await
-                    .map(Self::Tun)
-            }
+            Mode::Tun => rtrust_control::Client::start(profile, selection)
+                .await
+                .map(Self::Tun),
         }
     }
     pub fn proxy(&self) -> Option<&rtrust_engine::proxy::Proxy> {

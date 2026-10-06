@@ -33,6 +33,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .is_err()
     );
     assert!(client.list().await?.is_empty());
+    assert_eq!(client.routing().await?, None, "No route group assigned");
     let profile = Profile::import(data["profile"].as_str().ok_or("Missing profile")?)?;
     let preview = client.preview_upload(&profile).await?;
     assert!(client.list().await?.is_empty(), "Preview must not commit");
@@ -63,7 +64,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     list[0].id = "../enroll".into();
     assert!(client.download(&list[0]).await.is_err());
     println!(
-        "PASS Rust portal: verified TLS, one-time enrollment, grants, preview/commit, idempotency, download/replace roundtrip, idempotency, stale write/read rejection"
+        "PASS Rust portal: verified TLS, one-time enrollment, grants, preview/commit, idempotency, download/replace roundtrip, idempotency, stale write/read rejection, routing without group"
     );
     Ok(())
 }
