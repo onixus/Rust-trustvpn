@@ -80,3 +80,15 @@ failure as well as success. Hiddify connection and on-demand were restored.
 Pending: sleep/network handoff, boot always-on, clean install on another Mac,
 and automatic signed update/rollback. The tested artifact remains a candidate
 with these explicit limits, without Developer ID signing or notarization.
+
+## Native window glass
+
+The iced Native frontend uses a transparent Metal/wgpu surface on macOS and places
+public AppKit `NSGlassEffectView` behind its content on macOS 26+.
+Older macOS versions use `NSVisualEffectView` under-window material. The window
+keeps its existing input handlers and delegate. “Reduce transparency” makes the
+foreground background opaque; AppKit handles the material's accessibility behavior.
+Other platforms retain their existing software renderer. This changes the Native
+frontend only; the optional WebView frontend retains its current appearance.
+
+The Native Settings screen includes “Стекло — прозрачный фон окна”. It updates the window immediately and persists in NSUserDefaults, separately from VPN profiles. `--appearance-preview` opens this screen without accessing the vault or connecting VPN.

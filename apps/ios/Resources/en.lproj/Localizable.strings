@@ -1,0 +1,9 @@
+"Toggle VPN" = "Toggle VPN";
+"Connected" = "Connected";
+"Connecting" = "Connecting";
+"Disconnecting" = "Disconnecting";
+"Disconnected" = "Disconnected";
+"Open to check" = "Open to check";
+"Last status" = "Last status";
+"VPN control" = "VPN control";
+"Open R-TrustTunnel to securely toggle VPN. Authorize VPN in the app first." = "Open R-TrustTunnel to securely toggle VPN. Authorize VPN in the app first.";
