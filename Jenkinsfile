@@ -1,4 +1,4 @@
-// Native macOS/Windows CI. Both platforms consume one frozen source snapshot.
+// Linux server tests and native macOS/Windows CI consume one frozen source snapshot.
 pipeline {
   agent none
   options { disableConcurrentBuilds(); timestamps(); timeout(time: 120, unit: 'MINUTES'); buildDiscarder(logRotator(numToKeepStr: '15')) }
@@ -10,6 +10,9 @@ pipeline {
         deleteDir()
         sh 'python3 /Users/onixus/Git/R-Trusttunnel/ci/snapshot.py .'
         stash name: 'source', includes: '**', useDefaultExcludes: false
+        sh 'python3 ci/portal_snapshot.py'
+        stash name: 'portal-source', includes: '.ci-portal-upstream/**', useDefaultExcludes: false
+        archiveArtifacts artifacts: 'portal-source-manifest.json', fingerprint: true
         archiveArtifacts artifacts: 'source-manifest.json,Jenkinsfile', fingerprint: true
       }
     }
@@ -18,8 +21,19 @@ pipeline {
       steps { sh 'RTRUST_TOOL_CACHE="$JENKINS_HOME/caches/rtrust-native-tools" python3 ci/run.py security python3 ci/security.py' }
       post { always { junit 'reports/security.xml'; archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true } }
     }
-    stage('Native platforms') {
+    stage('Server and native platforms') {
       parallel {
+        stage('Linux server / route publication') {
+          // The controller launches an isolated Linux container; no macOS test runtime.
+          agent { label 'built-in' }
+          steps {
+            deleteDir()
+            unstash 'source'
+            unstash 'portal-source'
+            sh 'python3 ci/run.py linux-portal python3 ci/portal_linux.py'
+          }
+          post { always { junit allowEmptyResults: true, testResults: 'reports/linux-portal.xml'; archiveArtifacts artifacts: 'reports/linux-portal.*', allowEmptyArchive: true } }
+        }
         stage('macOS unit / build / smoke') {
           agent { label 'macos-arm64' }
           steps {
@@ -32,15 +46,6 @@ pipeline {
               python3 ci/run.py macos-unit cargo test --workspace --locked --quiet
               python3 ci/run.py macos-keyring cargo test -p rtrust-store --locked os_keyring_restart_roundtrip -- --ignored --exact tests::os_keyring_restart_roundtrip
               python3 ci/run.py macos-h2 cargo test --manifest-path vendor/h2/Cargo.toml --lib --locked --quiet -- --skip hpack::test::fixture
-              python3 -m venv .ci-server
-              .ci-server/bin/pip install -r server/test-environment/requirements.txt
-              cargo build -p rtrust-codec --locked
-              export RTRUST_PORTAL_SRC="${RTRUST_PORTAL_SRC:-$HOME/Git/tunnel/server/upstream}"
-              python3 ci/run.py macos-portal .ci-server/bin/python server/tests/test_exchange.py
-              python3 ci/run.py macos-portal-publication .ci-server/bin/python server/tests/test_publication.py
-              cargo build -p rtrust-portal --examples --locked
-              python3 ci/run.py macos-portal-native .ci-server/bin/python server/tests/native_exchange.py
-              python3 ci/run.py macos-portal-routing .ci-server/bin/python server/tests/routing_exchange.py
               python3 ci/run.py macos-clippy cargo clippy --workspace --all-targets --locked -- -D warnings
               python3 ci/run.py macos-build cargo build --release -p rtrust-webview -p rtrust-native -p rtrust-inspect -p rtrust-tun --locked
               python3 ci/run.py macos-smoke python3 ci/smoke.py

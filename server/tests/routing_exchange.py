@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 
-from test_exchange import ExchangeTests, ROOT, SANDBOX
+from test_exchange import ExchangeTests, ROOT, SANDBOX, TARGET
 import uvicorn
 
 case = ExchangeTests()
@@ -37,7 +37,7 @@ with case.client:
         fixture.write_text(json.dumps({'url': f'https://localhost:{port}', 'ca': cert.read_text(),
                             'code': case.post('enrollment-codes', {}).json()['code']}))
         fixture.chmod(0o600)
-        process = subprocess.Popen([str(ROOT / 'target/debug/examples/routing_e2e'), str(fixture)],
+        process = subprocess.Popen([str(TARGET / 'debug/examples/routing_e2e'), str(fixture)],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
 
         def wait(expected):

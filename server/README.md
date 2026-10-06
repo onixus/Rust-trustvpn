@@ -70,3 +70,26 @@ browser E2E remains outstanding. Migration was tested on a database copy and the
 old image read that migrated copy; an actual production rollback was not exercised.
 
 Server publication: see [the additive image upgrade](../deploy/README.md#publishing-device-route-groups-api-v2-routing1). The group API and `/profiles` editor must be deployed to the portal image; rebuilding only the console does not publish them. `server/tests/routing_exchange.py` verifies assignment and updates using a real Rust client over TLS.
+
+### Linux CI
+
+Server tests run separately from desktop builds. GitHub runs the six dependency-free
+publication tests once on Ubuntu (including the explicit CP1252 regression), rather
+than on every desktop OS. Full server API and HTTPS Rust-client tests run in a
+Linux container in Jenkins, parallel to the macOS/Windows builds. The controller
+passes a committed snapshot of the private portal source to that stage; its
+revision is archived as `portal-source-manifest.json`. `RTRUST_PORTAL_REPO` can
+select a different private checkout on the controller.
+
+Run the same Linux suite locally:
+
+```sh
+python3 ci/portal_linux.py --upstream /path/to/tunnel/server/upstream
+```
+
+Docker builds the codec and portal examples, then runs publication, server API,
+profile-exchange and route-publication tests without external networking. Sources
+are read-only; Rust output and registry caches live on named Linux volumes and
+run as UID 1000. The Python dependency image is cached. Existing native platform
+checks remain in place because their conditional Windows/macOS code needs those
+platforms. This change does not alter production containers or Jenkins job settings.
