@@ -90,13 +90,10 @@ final class VPNModel: ObservableObject {
                 // Credentials remain in Keychain. Provider reads the selected snapshot.
                 current.protocolConfiguration = configuration
                 current.localizedDescription = "R-TrustTunnel"
-                current.isEnabled = true
                 let rule = NEOnDemandRuleConnect(); rule.interfaceTypeMatch = .any
                 current.onDemandRules = [rule]; current.isOnDemandEnabled = onDemand
-                try await current.saveToPreferences()
-                try await current.loadFromPreferences()
+                try await VPNController.start(current)
                 manager = current
-                try current.connection.startVPNTunnel()
             }
             error = nil; await refresh()
         } catch { report(error) }

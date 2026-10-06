@@ -4,7 +4,31 @@ import WidgetKit
 import AppIntents
 
 @MainActor
+protocol VPNStartConfiguration: AnyObject {
+    var isEnabled: Bool { get set }
+    func saveToPreferences() async throws
+    func loadFromPreferences() async throws
+    func startTunnel() throws
+}
+
+extension NETunnelProviderManager: VPNStartConfiguration {
+    func startTunnel() throws { try connection.startVPNTunnel() }
+}
+
+@MainActor
 enum VPNController {
+    static func canToggle(active: Bool, hasProfile: Bool, busy: Bool, supported: Bool) -> Bool {
+        supported && !busy && (active || hasProfile)
+    }
+
+    static func start(_ manager: any VPNStartConfiguration) async throws {
+        // Selecting another VPN disables this configuration. Persist and reload before starting.
+        manager.isEnabled = true
+        try await manager.saveToPreferences()
+        try await manager.loadFromPreferences()
+        try manager.startTunnel()
+    }
+
     static var supportsVPN: Bool {
         #if targetEnvironment(simulator)
         return false
@@ -33,7 +57,7 @@ enum VPNController {
             manager.isOnDemandEnabled = false
             try await manager.saveToPreferences()
             manager.connection.stopVPNTunnel()
-        } else { try manager.connection.startVPNTunnel() }
+        } else { try await start(manager) }
         WidgetState.update(manager.connection.status)
     }
 }

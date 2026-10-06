@@ -82,7 +82,7 @@ struct RootView: View {
                         Button { Task { await model.toggle() } } label: {
                             Label(model.active ? tr("Disconnect", "Отключить") : tr("Connect", "Подключить"), systemImage: "power").frame(maxWidth: .infinity).padding(8)
                         }.buttonStyle(.borderedProminent).tint(model.color)
-                            .disabled(model.busy || model.vault.active == nil || !VPNController.supportsVPN)
+                            .disabled(!VPNController.canToggle(active: model.active, hasProfile: model.vault.active != nil, busy: model.busy, supported: VPNController.supportsVPN))
                     }.padding().background(.ultraThinMaterial)
                 }
             }.tabItem { Label(tr("Profiles", "Профили"), systemImage: "shield") }

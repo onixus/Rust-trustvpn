@@ -56,15 +56,15 @@ fn open_window() -> Task<Message> {
             #[cfg(target_os = "macos")]
             {
                 use iced::window::raw_window_handle::RawWindowHandle;
-                if let Ok(handle) = window.window_handle() {
-                    if let RawWindowHandle::AppKit(handle) = handle.as_raw() {
-                        unsafe {
-                            let view = handle.ns_view.as_ptr() as *mut objc2::runtime::AnyObject;
-                            let window = objc2::msg_send![view, window];
-                            let installed = glass::install(window);
-                            if std::env::args().any(|arg| arg == "--ci-glass-smoke") {
-                                assert!(installed, "AppKit material was not installed");
-                            }
+                if let Ok(handle) = window.window_handle()
+                    && let RawWindowHandle::AppKit(handle) = handle.as_raw()
+                {
+                    unsafe {
+                        let view = handle.ns_view.as_ptr() as *mut objc2::runtime::AnyObject;
+                        let window = objc2::msg_send![view, window];
+                        let installed = glass::install(window);
+                        if std::env::args().any(|arg| arg == "--ci-glass-smoke") {
+                            assert!(installed, "AppKit material was not installed");
                         }
                     }
                 }
@@ -138,11 +138,15 @@ fn main() -> iced::Result {
         },
     ))
     .style(|_app: &App, theme: &Theme| {
-        let mut background = theme.palette().background;
+        let background = theme.palette().background;
         #[cfg(target_os = "macos")]
-        if _app.glass_enabled && glass::transparency_allowed() {
-            background.a = 0.68;
-        }
+        let background = {
+            let mut background = background;
+            if _app.glass_enabled && glass::transparency_allowed() {
+                background.a = 0.68;
+            }
+            background
+        };
         iced::theme::Style {
             background_color: background,
             text_color: theme.palette().text,
@@ -1619,10 +1623,10 @@ impl App {
                 if self.can_change_profiles() {
                     connect = connect.on_toggle(Message::AutoConnect);
                 }
-                let mut appearance = column![text("Настройки").size(22)].spacing(12);
+                let appearance = column![text("Настройки").size(22)].spacing(12);
                 #[cfg(target_os = "macos")]
-                {
-                    appearance = appearance.push(
+                let appearance = {
+                    let mut appearance = appearance.push(
                         checkbox(self.glass_enabled)
                             .label("Стекло — прозрачный фон окна")
                             .on_toggle(Message::Glass),
@@ -1630,7 +1634,8 @@ impl App {
                     if !glass::transparency_allowed() {
                         appearance = appearance.push(text("Прозрачность отключена в системных настройках универсального доступа.").size(13));
                     }
-                }
+                    appearance
+                };
                 let mut panel = column![
                     appearance,
                     self.proxy_settings(),

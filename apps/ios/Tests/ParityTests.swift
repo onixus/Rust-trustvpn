@@ -1,6 +1,7 @@
 import XCTest
 import CoreImage
 import UIKit
+import NetworkExtension
 @testable import RTrustTunnel
 
 final class FixtureProtocol: URLProtocol {
@@ -85,5 +86,61 @@ final class ParityTests: XCTestCase {
         FixtureProtocol.handler = { _ in (302, Data()) }
         do { _ = try await client.download(); XCTFail("redirect accepted") } catch { XCTAssertEqual((error as NSError).code, 302) }
         FixtureProtocol.handler = nil
+    }
+}
+
+@MainActor
+private final class StartConfigurationFixture: VPNStartConfiguration {
+    var isEnabled = false
+    var events: [String] = []
+    var failure: String?
+    func step(_ event: String) throws {
+        events.append(event)
+        if failure == event { throw NSError(domain: "Fixture", code: 1) }
+    }
+    func saveToPreferences() async throws {
+        XCTAssertTrue(isEnabled, "Re-enable the VPN before saving")
+        try step("save")
+    }
+    func loadFromPreferences() async throws { try step("load") }
+    func startTunnel() throws { try step("start") }
+}
+
+extension ParityTests {
+    @MainActor
+    func testDisconnectRemainsAvailableAfterProfilesDisappear() throws {
+        let profile = SavedProfile.imported(try ProfilePlan.parse(Data(raw.utf8)), id: "remote")
+        var vault = VaultData(profiles: [profile], selected: "remote")
+        vault.profiles = []
+        vault.repairSelection()
+        for status: NEVPNStatus in [.connected, .connecting, .reasserting, .disconnecting] {
+            XCTAssertTrue(VPNController.canToggle(active: VPNController.isActive(status), hasProfile: vault.active != nil, busy: false, supported: true))
+        }
+        XCTAssertFalse(VPNController.canToggle(active: false, hasProfile: false, busy: false, supported: true))
+        XCTAssertTrue(VPNController.canToggle(active: false, hasProfile: true, busy: false, supported: true))
+        XCTAssertFalse(VPNController.canToggle(active: true, hasProfile: false, busy: true, supported: true))
+        XCTAssertFalse(VPNController.canToggle(active: true, hasProfile: true, busy: false, supported: false))
+    }
+
+    @MainActor
+    func testStartReenablesDisabledConfigurationBeforeStarting() async throws {
+        let configuration = StartConfigurationFixture()
+        try await VPNController.start(configuration)
+        XCTAssertTrue(configuration.isEnabled)
+        XCTAssertEqual(configuration.events, ["save", "load", "start"])
+    }
+
+    @MainActor
+    func testStartDoesNotContinueAfterPreferenceFailure() async {
+        for failure in ["save", "load"] {
+            let configuration = StartConfigurationFixture()
+            configuration.failure = failure
+            do {
+                try await VPNController.start(configuration)
+                XCTFail("Preference failure must prevent starting")
+            } catch {
+                XCTAssertEqual(configuration.events, failure == "save" ? ["save"] : ["save", "load"])
+            }
+        }
     }
 }
