@@ -4,12 +4,7 @@ mod full;
 mod routes;
 use rtrust_control::{Command, Request, Response, State, VERSION, read, write};
 use rtrust_engine::Session;
-use std::{
-    ffi::OsString,
-    net::Ipv4Addr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{ffi::OsString, net::Ipv4Addr, sync::Arc, time::Duration};
 use tokio::{
     net::windows::named_pipe::NamedPipeServer,
     sync::{Mutex, watch},
