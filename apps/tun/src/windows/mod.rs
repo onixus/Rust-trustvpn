@@ -6,7 +6,7 @@ use rtrust_control::{Command, Request, Response, State, VERSION, read, write};
 use rtrust_engine::Session;
 use std::{
     ffi::OsString,
-    net::{IpAddr, Ipv4Addr},
+    net::Ipv4Addr,
     sync::Arc,
     time::Duration,
 };
