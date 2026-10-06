@@ -37,8 +37,10 @@ pipeline {
               cargo build -p rtrust-codec --locked
               export RTRUST_PORTAL_SRC="${RTRUST_PORTAL_SRC:-$HOME/Git/tunnel/server/upstream}"
               python3 ci/run.py macos-portal .ci-server/bin/python server/tests/test_exchange.py
-              cargo build -p rtrust-portal --example portal_e2e --locked
+              python3 ci/run.py macos-portal-publication .ci-server/bin/python server/tests/test_publication.py
+              cargo build -p rtrust-portal --examples --locked
               python3 ci/run.py macos-portal-native .ci-server/bin/python server/tests/native_exchange.py
+              python3 ci/run.py macos-portal-routing .ci-server/bin/python server/tests/routing_exchange.py
               python3 ci/run.py macos-clippy cargo clippy --workspace --all-targets --locked -- -D warnings
               python3 ci/run.py macos-build cargo build --release -p rtrust-webview -p rtrust-native -p rtrust-inspect -p rtrust-tun --locked
               python3 ci/run.py macos-smoke python3 ci/smoke.py

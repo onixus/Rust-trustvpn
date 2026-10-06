@@ -68,3 +68,5 @@ idempotency and download roundtrip. It passed against the deployed server using 
 temporary synthetic account, then removed that account and its data. Automated
 browser E2E remains outstanding. Migration was tested on a database copy and the
 old image read that migrated copy; an actual production rollback was not exercised.
+
+Server publication: see [the additive image upgrade](../deploy/README.md#publishing-device-route-groups-api-v2-routing1). The group API and `/profiles` editor must be deployed to the portal image; rebuilding only the console does not publish them. `server/tests/routing_exchange.py` verifies assignment and updates using a real Rust client over TLS.

@@ -114,6 +114,13 @@ class ExchangeTests(unittest.TestCase):
         self.assertEqual(self.client.get('/portal/v2/profiles',headers=auth).status_code,401)
         self.assertEqual(self.client.get('/portal/v2/profiles',headers={'Authorization':'Bearer invalid'}).status_code,401)
 
+    def test_ios_enrollment_is_accepted(self):
+        code = self.post('enrollment-codes', {}).json()['code']
+        response = self.post('enroll', {'code': code, 'name': 'iPhone fixture', 'platform': 'ios'})
+        self.assertEqual(response.status_code, 200, response.text)
+        devices = self.client.get('/portal/v2/devices').json()['devices']
+        self.assertEqual(devices[0]['platform'], 'ios')
+
     def test_replace_revision_and_expired_preview(self):
         item=self.imported(); first=self.preview(); stale=self.preview()
         data={'action':'replace','target_id':item['id'],'base_revision':'1','consent':True}

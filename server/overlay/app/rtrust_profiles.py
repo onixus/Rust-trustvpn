@@ -185,7 +185,7 @@ async def enroll(request:Request):
     rate('enroll:'+str(request.client.host if request.client else 'unknown'),10)
     data=await body(request,['code','name','platform'])
     code=data.get('code');name=data.get('name');platform=data.get('platform')
-    if not isinstance(code,str) or not 20<=len(code)<=128 or not isinstance(name,str) or not 1<=len(name)<=80 or platform not in ('windows','linux','macos','android'):
+    if not isinstance(code,str) or not 20<=len(code)<=128 or not isinstance(name,str) or not 1<=len(name)<=80 or platform not in ('windows','linux','macos','android','ios'):
         raise HTTPException(422,'Invalid enrollment')
     raw=secrets.token_urlsafe(32);now=int(time.time());hashed=security.hash_api_token(code)
     with db.connect() as c:
