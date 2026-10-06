@@ -56,8 +56,10 @@ python3 deploy/prepare-portal-update.py --base-image "$console_base" --tag vpn-c
 ```
 
 Replace `RELEASE` with a unique release/commit identifier. These commands build
-new images and check them with a disposable SQLite database, no network and no
-live mounts. They **do not deploy or restart anything**. The inherited endpoint,
+untagged candidate images and check them with a disposable SQLite database, no
+network and no live mounts. Existing output tags are rejected, including when
+the base is specified by image ID. The release tag is assigned only after the
+candidate passes; a failed candidate remains untagged for diagnosis. They **do not deploy or restart anything**. The inherited endpoint,
 console, dependencies, entrypoint and codec are preserved; only the overlay and
 its idempotent registration are updated. Keep both output manifests with the
 release. Never use a historical portal image as the base of an upgrade: that
