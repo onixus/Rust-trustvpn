@@ -1,0 +1,9 @@
+"Toggle VPN" = "Переключить VPN";
+"Connected" = "Подключено";
+"Connecting" = "Подключение";
+"Disconnecting" = "Отключение";
+"Disconnected" = "Отключено";
+"Open to check" = "Открыть и проверить";
+"Last status" = "Последний статус";
+"VPN control" = "Управление VPN";
+"Open R-TrustTunnel to securely toggle VPN. Authorize VPN in the app first." = "Откройте R-TrustTunnel для переключения VPN. Сначала разрешите VPN в приложении.";

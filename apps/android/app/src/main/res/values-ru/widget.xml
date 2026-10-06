@@ -1,0 +1,5 @@
+<resources>
+    <string name="widget_toggle">Включить или отключить VPN</string>
+    <string name="widget_last_status">Последний статус</string>
+    <string name="widget_description">Переключение VPN основного профиля. Открывает приложение для разрешения VPN и настроек Always-on.</string>
+</resources>

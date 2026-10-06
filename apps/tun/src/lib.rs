@@ -20,7 +20,8 @@ pub mod service;
     target_os = "linux",
     target_os = "windows",
     target_os = "macos",
-    target_os = "android"
+    target_os = "android",
+    target_os = "ios"
 ))]
 mod dataplane;
 #[cfg(target_os = "android")]
@@ -30,3 +31,5 @@ pub mod windows;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
+
+pub use dataplane::{PacketDevice, run_with_dns as run_packet_flow};

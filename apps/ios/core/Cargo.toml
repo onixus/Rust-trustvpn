@@ -1,24 +1,17 @@
 [package]
-name = "rtrust-android"
+name = "rtrust-ios"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 rtrust-mobile = { path = "../../../crates/mobile" }
 rtrust-profile.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-zeroize.workspace = true
 rtrust-engine.workspace = true
-ipnet = "2"
-
-[target.'cfg(target_os = "android")'.dependencies]
 rtrust-tun = { path = "../../tun" }
+serde_json.workspace = true
 tokio.workspace = true
-jni = "0.22.4"
-libc = "0.2"
-tun-rs = { version = "2.8", features = ["async_tokio"] }
+zeroize.workspace = true
