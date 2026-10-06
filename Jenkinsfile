@@ -1,4 +1,4 @@
-// Linux server tests and native macOS/Windows CI consume one frozen source snapshot.
+// Native macOS/Windows CI consumes one frozen client source snapshot.
 pipeline {
   agent none
   options { disableConcurrentBuilds(); timestamps(); timeout(time: 120, unit: 'MINUTES'); buildDiscarder(logRotator(numToKeepStr: '15')) }
@@ -10,9 +10,6 @@ pipeline {
         deleteDir()
         sh 'python3 /Users/onixus/Git/R-Trusttunnel/ci/snapshot.py .'
         stash name: 'source', includes: '**', useDefaultExcludes: false
-        sh 'python3 ci/portal_snapshot.py'
-        stash name: 'portal-source', includes: '.ci-portal-upstream/**', useDefaultExcludes: false
-        archiveArtifacts artifacts: 'portal-source-manifest.json', fingerprint: true
         archiveArtifacts artifacts: 'source-manifest.json,Jenkinsfile', fingerprint: true
       }
     }
@@ -21,19 +18,8 @@ pipeline {
       steps { sh 'RTRUST_TOOL_CACHE="$JENKINS_HOME/caches/rtrust-native-tools" python3 ci/run.py security python3 ci/security.py' }
       post { always { junit 'reports/security.xml'; archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true } }
     }
-    stage('Server and native platforms') {
+    stage('Native platforms') {
       parallel {
-        stage('Linux server / route publication') {
-          // The controller launches an isolated Linux container; no macOS test runtime.
-          agent { label 'built-in' }
-          steps {
-            deleteDir()
-            unstash 'source'
-            unstash 'portal-source'
-            sh 'python3 ci/run.py linux-portal python3 ci/portal_linux.py'
-          }
-          post { always { junit allowEmptyResults: true, testResults: 'reports/linux-portal.xml'; archiveArtifacts artifacts: 'reports/linux-portal.*', allowEmptyArchive: true } }
-        }
         stage('macOS unit / build / smoke') {
           agent { label 'macos-arm64' }
           steps {
