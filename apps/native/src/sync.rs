@@ -12,7 +12,7 @@ pub(super) struct State {
 pub(super) enum Action {
     Enable(bool),
     Poll,
-    Received(Result<Batch, String>),
+    Received(Result<Box<Batch>, String>),
     KeepLocal,
     KeepBoth,
 }
@@ -143,13 +143,13 @@ impl App {
                         .routing()
                         .await
                         .and_then(|policy| policy.map(managed).transpose());
-                    Ok(Batch {
+                    Ok(Box::new(Batch {
                         origin: settings.origin,
                         client,
                         changed,
                         available,
                         routing,
-                    })
+                    }))
                 };
                 return Task::perform(
                     async move {
@@ -331,7 +331,7 @@ mod tests {
         let mut app = configured();
         let mut remote = app.profiles[0].clone();
         remote.name = "server revision two".into();
-        let _ = app.sync_update(Action::Received(Ok(batch(remote.clone()))));
+        let _ = app.sync_update(Action::Received(Ok(Box::new(batch(remote.clone())))));
         assert_eq!(app.profiles[0], remote);
         assert_eq!(app.profiles.len(), 2);
         assert!(!app.connecting && app.dirty);
@@ -343,7 +343,7 @@ mod tests {
         let remote = app.profiles[0].clone();
         app.profiles[0].name = "local edit".into();
         let local = app.profiles[0].clone();
-        let _ = app.sync_update(Action::Received(Ok(batch(remote.clone()))));
+        let _ = app.sync_update(Action::Received(Ok(Box::new(batch(remote.clone())))));
         assert_eq!(app.profiles[0], local);
         assert_eq!(app.sync_state.pending.len(), 1);
         let _ = app.sync_update(Action::KeepBoth);
@@ -357,12 +357,12 @@ mod tests {
         let mut result = batch(before[0].clone());
         result.changed.clear();
         result.available.clear();
-        let _ = app.sync_update(Action::Received(Ok(result)));
+        let _ = app.sync_update(Action::Received(Ok(Box::new(result))));
         assert_eq!(app.profiles, before);
         assert!(app.sync_state.status.contains("Недоступно на сервере: 1"));
         let mut result = batch(before[0].clone());
         result.origin = "https://different.test/".into();
-        let _ = app.sync_update(Action::Received(Ok(result)));
+        let _ = app.sync_update(Action::Received(Ok(Box::new(result))));
         assert_eq!(app.profiles, before);
         assert!(!app.dirty);
     }
@@ -383,7 +383,7 @@ mod tests {
         let mut result = batch(app.profiles[0].clone());
         result.changed.clear();
         result.routing = Ok(Some(managed(policy("0.0.0.0/0", "10.0.0.0/8")).unwrap()));
-        let _ = app.sync_update(Action::Received(Ok(result)));
+        let _ = app.sync_update(Action::Received(Ok(Box::new(result))));
         let applied = app.saved_connection.managed_routes.clone().unwrap();
         assert_eq!(applied.group, "office");
         assert!(applied.selection.exclude_lan && app.dirty);
@@ -398,13 +398,13 @@ mod tests {
         let mut result = batch(remote.clone());
         result.routing = refused.map(Some);
         app.busy = false;
-        let _ = app.sync_update(Action::Received(Ok(result)));
+        let _ = app.sync_update(Action::Received(Ok(Box::new(result))));
         assert_eq!(app.saved_connection.managed_routes.as_ref(), Some(&applied));
         assert_eq!(app.profiles[0], remote);
         assert!(app.sync_state.status.contains("не обновлены"));
         let mut result = batch(app.profiles[0].clone());
         result.changed.clear();
-        let _ = app.sync_update(Action::Received(Ok(result)));
+        let _ = app.sync_update(Action::Received(Ok(Box::new(result))));
         assert!(app.saved_connection.managed_routes.is_none());
         app.saved_connection.managed_routes = Some(applied);
         app.dirty = false;
