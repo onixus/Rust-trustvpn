@@ -401,10 +401,8 @@ impl App {
             .ok_or("Порт SOCKS5 должен быть числом от 1 до 65535.")?;
         let local_needed = self.saved_connection.mode == rtrust_store::Mode::Tun
             && self.saved_connection.managed_routes.is_none();
-        let (networks, exclude) = if !local_needed
-            && self.networks.trim().is_empty()
-            && self.exclude.trim().is_empty()
-        {
+        // Leftover exclusions alone do not block saving outside TUN mode.
+        let (networks, exclude) = if !local_needed && self.networks.trim().is_empty() {
             (vec![], vec![])
         } else {
             let selection =

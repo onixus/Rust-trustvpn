@@ -54,7 +54,9 @@ pub struct ManagedRoutes {
 }
 impl ManagedRoutes {
     pub fn validate(&self) -> Result<()> {
-        if !(1..=80).contains(&self.group.len()) || !(1..=64).contains(&self.revision.len()) {
+        if !(1..=80).contains(&self.group.chars().count())
+            || !(1..=64).contains(&self.revision.len())
+        {
             return Err(Error::Invalid);
         }
         self.selection.validate().map_err(|_| Error::Invalid)

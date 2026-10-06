@@ -22,7 +22,8 @@ pub(super) struct Batch {
     client: Client,
     changed: Vec<(RemoteProfile, Profile)>,
     available: Vec<String>,
-    routing: Option<rtrust_store::ManagedRoutes>,
+    /// Err keeps the previous policy; profile updates still apply.
+    routing: Result<Option<rtrust_store::ManagedRoutes>, String>,
 }
 /// The device group's TUN route policy, checked before it can replace the
 /// local selection.
@@ -138,7 +139,10 @@ impl App {
                             changed.push((remote, profile));
                         }
                     }
-                    let routing = client.routing().await?.map(managed).transpose()?;
+                    let routing = client
+                        .routing()
+                        .await
+                        .and_then(|policy| policy.map(managed).transpose());
                     Ok(Batch {
                         origin: settings.origin,
                         client,
@@ -168,8 +172,12 @@ impl App {
                         let previous_profiles = self.profiles.clone();
                         let previous_sync = self.saved_connection.sync.clone();
                         let previous_routes = self.saved_connection.managed_routes.clone();
-                        let routes_changed = batch.routing != previous_routes;
-                        self.saved_connection.managed_routes = batch.routing;
+                        let routing_error = batch.routing.as_ref().err().cloned();
+                        if let Ok(routing) = batch.routing {
+                            self.saved_connection.managed_routes = routing;
+                        }
+                        let routes_changed =
+                            self.saved_connection.managed_routes != previous_routes;
                         let mut updated = 0;
                         for (meta, incoming) in batch.changed {
                             let old = self
@@ -218,9 +226,10 @@ impl App {
                             .iter()
                             .filter(|p| !batch.available.contains(&p.id))
                             .count();
-                        let routes = match &self.saved_connection.managed_routes {
-                            Some(m) => format!("группа «{}»", m.group),
-                            None => "локальные настройки".into(),
+                        let routes = match (&routing_error, &self.saved_connection.managed_routes) {
+                            (Some(e), _) => format!("не обновлены ({e})"),
+                            (None, Some(m)) => format!("группа «{}»", m.group),
+                            (None, None) => "локальные настройки".into(),
                         };
                         self.sync_state.status = format!(
                             "Обновлено: {updated}. Конфликтов: {}. Недоступно на сервере: {missing} (локальные копии сохранены). Маршруты TUN: {routes}.",
@@ -314,7 +323,7 @@ mod tests {
             client: Client::new("https://example.test").unwrap(),
             changed: vec![(meta(), profile)],
             available: vec!["remote-1".into()],
-            routing: None,
+            routing: Ok(None),
         }
     }
     #[test]
@@ -373,15 +382,26 @@ mod tests {
         };
         let mut result = batch(app.profiles[0].clone());
         result.changed.clear();
-        result.routing = Some(managed(policy("0.0.0.0/0", "10.0.0.0/8")).unwrap());
+        result.routing = Ok(Some(managed(policy("0.0.0.0/0", "10.0.0.0/8")).unwrap()));
         let _ = app.sync_update(Action::Received(Ok(result)));
         let applied = app.saved_connection.managed_routes.clone().unwrap();
         assert_eq!(applied.group, "office");
         assert!(applied.selection.exclude_lan && app.dirty);
         assert_eq!(app.tun_selection().unwrap(), applied.selection);
         assert!(app.sync_state.status.contains("группа «office»"));
-        // A policy that leaves nothing to route is refused before it is stored.
-        assert!(managed(policy("10.0.0.0/8", "10.0.0.0/8")).is_err());
+        // A policy that leaves nothing to route is refused, keeps the previous
+        // policy and does not stop profile updates.
+        let refused = managed(policy("10.0.0.0/8", "10.0.0.0/8"));
+        assert!(refused.is_err());
+        let mut remote = app.profiles[0].clone();
+        remote.name = "server revision two".into();
+        let mut result = batch(remote.clone());
+        result.routing = refused.map(Some);
+        app.busy = false;
+        let _ = app.sync_update(Action::Received(Ok(result)));
+        assert_eq!(app.saved_connection.managed_routes.as_ref(), Some(&applied));
+        assert_eq!(app.profiles[0], remote);
+        assert!(app.sync_state.status.contains("не обновлены"));
         let mut result = batch(app.profiles[0].clone());
         result.changed.clear();
         let _ = app.sync_update(Action::Received(Ok(result)));
