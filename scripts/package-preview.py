@@ -20,7 +20,7 @@ if system == "Darwin":
     (app / "MacOS").mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, app / "MacOS" / "rtrust-native")
     with (app / "Info.plist").open("wb") as f:
-        plistlib.dump(dict(CFBundleExecutable="rtrust-native", CFBundleIdentifier="org.rtrusttunnel.preview", CFBundleName="R-TrustTunnel Preview", CFBundlePackageType="APPL", CFBundleIconFile="rtrust.icns", CFBundleShortVersionString="0.4.0", CFBundleVersion="7", NSHighResolutionCapable=True), f)
+        plistlib.dump(dict(CFBundleExecutable="rtrust-native", CFBundleIdentifier="org.rtrusttunnel.preview", CFBundleName="R-TrustTunnel Preview", CFBundlePackageType="APPL", CFBundleIconFile="rtrust.icns", CFBundleShortVersionString="0.5.0", CFBundleVersion="8", NSHighResolutionCapable=True), f)
     (app / "Resources").mkdir(exist_ok=True)
     shutil.copy2(root / "packaging/branding/icon.icns", app / "Resources/rtrust.icns")
 elif system == "Linux":
