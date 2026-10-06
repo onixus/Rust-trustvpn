@@ -1,6 +1,6 @@
 """Real Rust portal client against the real FastAPI overlay over verified TLS."""
 import json,os,pathlib,socket,subprocess,threading,time
-from test_exchange import ExchangeTests,ROOT,SANDBOX
+from test_exchange import ExchangeTests,ROOT,SANDBOX,TARGET
 import uvicorn
 case=ExchangeTests();case.setUp()
 with case.client:
@@ -18,7 +18,7 @@ with case.client:
             time.sleep(.05)
         assert server.started
         manifest=work/'fixture.json';manifest.write_text(json.dumps({'private_ca':True,'url':f'https://localhost:{port}','code':response.json()['code'],'ca':cert.read_text(),'profile':case.content}));manifest.chmod(0o600)
-        binary=ROOT/'target/debug/examples'/('portal_e2e.exe' if os.name=='nt' else 'portal_e2e')
+        binary=TARGET/'debug/examples'/('portal_e2e.exe' if os.name=='nt' else 'portal_e2e')
         subprocess.run([str(binary),str(manifest)],check=True,timeout=60)
     finally:
         server.should_exit=True;thread.join(10)

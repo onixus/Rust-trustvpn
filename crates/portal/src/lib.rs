@@ -1,5 +1,6 @@
 //! Origin-bound profile exchange. Secrets never appear in errors or Debug output.
-use reqwest::{Client as Http, Method, Url};
+use ipnet::Ipv4Net;
+use reqwest::{Client as Http, Method, StatusCode, Url};
 use rtrust_profile::{Format, MAX_INPUT, Profile};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -21,6 +22,44 @@ pub struct RemoteProfile {
 pub struct Preview {
     pub preview_id: String,
     pub summary: Summary,
+}
+/// Server-assigned split-tunnel policy for the desktop TUN mode.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingPolicy {
+    pub group: String,
+    /// Opaque; changes whenever the group policy or the device's group changes.
+    pub revision: String,
+    pub include: Vec<Ipv4Net>,
+    pub exclude: Vec<Ipv4Net>,
+    pub exclude_lan: bool,
+}
+#[derive(Deserialize)]
+struct Routing {
+    // Explicit deserializer: a missing `policy` key is an error, `null` is "no group".
+    #[serde(deserialize_with = "Option::deserialize")]
+    policy: Option<RoutingPolicy>,
+}
+fn routing_policy(routing: Routing) -> Result<Option<RoutingPolicy>, String> {
+    let Some(policy) = routing.policy else {
+        return Ok(None);
+    };
+    let invalid = || "Некорректная политика маршрутов панели".to_string();
+    if !(1..=80).contains(&policy.group.chars().count())
+        || policy.group.chars().any(char::is_control)
+        || !(1..=64).contains(&policy.revision.len())
+        || !policy.revision.bytes().all(|b| b.is_ascii_graphic())
+        || !(1..=16).contains(&policy.include.len())
+        || policy.exclude.len() > 64
+        || policy
+            .include
+            .iter()
+            .chain(&policy.exclude)
+            .any(|net| net.trunc() != *net)
+    {
+        return Err(invalid());
+    }
+    Ok(Some(policy))
 }
 #[derive(Clone)]
 pub struct Client {
@@ -130,6 +169,18 @@ impl Client {
         path: &str,
         body: Option<Value>,
     ) -> Result<T, String> {
+        self.exchange(method, path, body, false)
+            .await?
+            .ok_or_else(|| "Панель отклонила запрос.".into())
+    }
+    /// `missing_ok` maps 404 to `None` for endpoints older servers do not have.
+    async fn exchange<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        missing_ok: bool,
+    ) -> Result<Option<T>, String> {
         let url = self
             .origin
             .join(&format!("portal/v2/{path}"))
@@ -145,6 +196,9 @@ impl Client {
             .send()
             .await
             .map_err(|_| "Панель недоступна или сертификат не прошёл проверку")?;
+        if missing_ok && response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         if !response.status().is_success() {
             return Err(match response.status().as_u16() {
                 401 => "Код истёк или доступ устройства отозван. Привяжите устройство заново.",
@@ -168,7 +222,9 @@ impl Client {
             }
             bytes.extend_from_slice(&chunk);
         }
-        serde_json::from_slice(&bytes).map_err(|_| "Некорректный ответ панели".into())
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| "Некорректный ответ панели".into())
     }
     pub async fn enroll(mut self, code: &str, name: &str) -> Result<Self, String> {
         if !(20..=128).contains(&code.len()) || name.trim().is_empty() || name.len() > 80 {
@@ -253,6 +309,13 @@ impl Client {
             Some(json!({"action":"replace","target_id":identifier(&target.id)?,"base_revision":target.revision,"consent":true}))).await?;
         Ok(())
     }
+    /// Routing policy of this device's group; `None` without a group or on servers without the endpoint.
+    pub async fn routing(&self) -> Result<Option<RoutingPolicy>, String> {
+        match self.exchange(Method::GET, "routing", None, true).await? {
+            Some(routing) => routing_policy(routing),
+            None => Ok(None),
+        }
+    }
     pub async fn commit(&self, preview: &Preview) -> Result<(), String> {
         let _: Value = self
             .request(
@@ -289,5 +352,64 @@ mod tests {
             assert!(identifier(id).is_err());
         }
         assert!(identifier("managed-1").is_ok());
+    }
+    fn parse(value: Value) -> Result<Option<RoutingPolicy>, String> {
+        routing_policy(serde_json::from_value(value).map_err(|e| e.to_string())?)
+    }
+    fn policy() -> Value {
+        json!({"group":"Офис","revision":"3:7","include":["10.0.0.0/8","0.0.0.0/0"],"exclude":["10.1.0.0/16"],"exclude_lan":true})
+    }
+    #[test]
+    fn routing_policy_roundtrip() {
+        assert_eq!(parse(json!({"policy":null})), Ok(None));
+        assert_eq!(parse(json!({"policy":null,"future":1})), Ok(None));
+        let parsed = parse(json!({ "policy": policy() })).unwrap().unwrap();
+        assert_eq!(
+            parsed,
+            RoutingPolicy {
+                group: "Офис".into(),
+                revision: "3:7".into(),
+                include: vec!["10.0.0.0/8".parse().unwrap(), "0.0.0.0/0".parse().unwrap()],
+                exclude: vec!["10.1.0.0/16".parse().unwrap()],
+                exclude_lan: true,
+            }
+        );
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), policy());
+    }
+    #[test]
+    fn routing_policy_rejects_garbage_and_bounds() {
+        assert!(parse(json!({})).is_err());
+        assert!(parse(json!({"policy":"x"})).is_err());
+        let many = |n: usize| (0..n).map(|i| format!("10.{i}.0.0/16")).collect::<Vec<_>>();
+        for (key, bad) in [
+            ("group", json!("")),
+            ("group", json!("я".repeat(81))),
+            ("group", json!("a\nb")),
+            ("revision", json!("")),
+            ("revision", json!("x".repeat(65))),
+            ("revision", json!("a b")),
+            ("include", json!([])),
+            ("include", json!(many(17))),
+            ("include", json!(["10.0.0.1/8"])),
+            ("include", json!(["10.0.0.0"])),
+            ("include", json!(["fd00::/8"])),
+            ("exclude", json!(many(65))),
+            ("exclude", json!(["10.0.0.0/33"])),
+            ("exclude_lan", json!("true")),
+            ("unexpected", json!(1)),
+        ] {
+            let mut value = policy();
+            value[key] = bad;
+            assert!(parse(json!({ "policy": value })).is_err(), "{key}");
+        }
+        let mut value = policy();
+        value["group"] = json!("я".repeat(80));
+        value["revision"] = json!("x".repeat(64));
+        value["include"] = json!(many(16));
+        value["exclude"] = json!(many(64));
+        assert!(parse(json!({ "policy": value })).unwrap().is_some());
+        let mut value = policy();
+        value.as_object_mut().unwrap().remove("exclude");
+        assert!(parse(json!({ "policy": value })).is_err());
     }
 }

@@ -95,7 +95,7 @@ fn load(uid: u32) -> Result<Journal, String> {
     let j: Journal = serde_json::from_slice(&bytes).map_err(|_| "Invalid recovery journal")?;
     if j.version != 1
         || j.uid != uid
-        || j.routes.len() > 132
+        || j.routes.len() > rtrust_control::MAX_ROUTES + 68
         || j.endpoints.len() > 64
         || j.boot.len() != 36
     {
@@ -107,7 +107,7 @@ fn load(uid: u32) -> Result<Journal, String> {
     if let Some(dns) = j.dns {
         rtrust_control::validate_dns(dns)?;
     } else {
-        rtrust_control::validate_networks(&j.networks)?;
+        rtrust_control::validate_routes(&j.networks)?;
     }
     Ok(j)
 }
@@ -149,7 +149,7 @@ impl Guard {
             dns::preflight()?;
             routes::physical_interface()?;
         } else {
-            rtrust_control::validate_networks(networks)?;
+            rtrust_control::validate_routes(networks)?;
         }
         for key in ["net.inet.ip.forwarding", "net.inet6.ip6.forwarding"] {
             if command::run("/usr/sbin/sysctl", &["-n", key])?.trim() != "0" {

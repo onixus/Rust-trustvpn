@@ -5359,6 +5359,7 @@ dependencies = [
 name = "rtrust-portal"
 version = "0.4.0"
 dependencies = [
+ "ipnet",
  "keyring",
  "reqwest 0.12.28",
  "rtrust-profile",

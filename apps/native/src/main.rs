@@ -210,6 +210,8 @@ struct App {
     proxy_port: String,
     mode: Mode,
     networks: String,
+    exclude: String,
+    exclude_lan: bool,
     dns: String,
     saved_connection: rtrust_store::ConnectionSettings,
     disconnecting: bool,
@@ -269,6 +271,12 @@ enum Message {
     Mode(Mode),
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     Networks(String),
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    Exclude(String),
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    ExcludeLan(bool),
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    WholeIpv4,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     Dns(String),
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -339,6 +347,8 @@ impl App {
             proxy_port: "1080".into(),
             mode: Mode::Socks,
             networks: String::new(),
+            exclude: String::new(),
+            exclude_lan: false,
             dns: "1.1.1.1".into(),
             saved_connection: rtrust_store::ConnectionSettings::default(),
             disconnecting: false,
@@ -455,10 +465,15 @@ impl App {
             .ok()
             .filter(|p| *p > 0)
             .ok_or("Порт SOCKS5 должен быть числом от 1 до 65535.")?;
-        let networks = if self.networks.trim().is_empty() {
-            vec![]
+        let local_needed = self.saved_connection.mode == rtrust_store::Mode::Tun
+            && self.saved_connection.managed_routes.is_none();
+        // Leftover exclusions alone do not block saving outside TUN mode.
+        let (networks, exclude) = if !local_needed && self.networks.trim().is_empty() {
+            (vec![], vec![])
         } else {
-            rtrust_control::networks(&self.networks)?
+            let selection =
+                rtrust_control::Selection::parse(&self.networks, &self.exclude, self.exclude_lan)?;
+            (selection.include, selection.exclude)
         };
         let settings = rtrust_store::ConnectionSettings {
             sync: self.saved_connection.sync.clone(),
@@ -467,11 +482,24 @@ impl App {
             socks_port,
             networks,
             dns: self.dns.parse().map_err(|_| "Некорректный IPv4 DNS")?,
+            exclude,
+            exclude_lan: self.exclude_lan,
+            managed_routes: self.saved_connection.managed_routes.clone(),
         };
         settings
             .validate()
             .map_err(|_| "Для TUN укажите допустимые IPv4-сети.".to_owned())?;
         Ok(settings)
+    }
+    /// The TUN selection for the next connection: the server group policy
+    /// when assigned, otherwise the local fields.
+    fn tun_selection(&self) -> Result<rtrust_control::Selection, String> {
+        match &self.saved_connection.managed_routes {
+            Some(managed) => Ok(managed.selection.clone()),
+            None => {
+                rtrust_control::Selection::parse(&self.networks, &self.exclude, self.exclude_lan)
+            }
+        }
     }
     fn current(&self) -> Option<&Profile> {
         self.profiles.get(self.selected)
@@ -502,7 +530,15 @@ impl App {
                 | Message::Mode(_)
         );
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-        let edited = edited || matches!(&m, Message::Networks(_) | Message::Dns(_));
+        let edited = edited
+            || matches!(
+                &m,
+                Message::Networks(_)
+                    | Message::Exclude(_)
+                    | Message::ExcludeLan(_)
+                    | Message::WholeIpv4
+                    | Message::Dns(_)
+            );
         match m {
             #[cfg(target_os = "windows")]
             Message::Update(action) => return self.updates_update(action),
@@ -751,6 +787,22 @@ impl App {
                 self.dirty = true;
             }
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            Message::Exclude(value) if self.can_change_profiles() => {
+                self.exclude = value;
+                self.dirty = true;
+            }
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            Message::ExcludeLan(value) if self.can_change_profiles() => {
+                self.exclude_lan = value;
+                self.dirty = true;
+            }
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            Message::WholeIpv4 if self.can_change_profiles() => {
+                self.networks = "0.0.0.0/0".into();
+                self.exclude_lan = true;
+                self.dirty = true;
+            }
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             Message::RecoverService if self.can_change_profiles() => {
                 self.busy = true;
                 return Task::perform(
@@ -884,14 +936,18 @@ impl App {
                     } else {
                         0
                     };
-                    if self.saved_connection.mode == rtrust_store::Mode::Tun
-                        && let Err(error) = rtrust_control::networks(&self.networks)
-                    {
-                        self.status = error;
-                        return Task::none();
-                    }
+                    let selection = if self.saved_connection.mode == rtrust_store::Mode::Tun {
+                        match self.tun_selection() {
+                            Ok(selection) => selection,
+                            Err(error) => {
+                                self.status = error;
+                                return Task::none();
+                            }
+                        }
+                    } else {
+                        Default::default()
+                    };
                     let mode = self.mode;
-                    let networks = self.networks.clone();
                     let dns = self.dns.clone();
                     self.connection_epoch += 1;
                     let epoch = self.connection_epoch;
@@ -906,7 +962,7 @@ impl App {
                     .into();
                     let (task, handle) = Task::perform(
                         async move {
-                            Session::start(profile, mode, port, networks, dns)
+                            Session::start(profile, mode, port, selection, dns)
                                 .await
                                 .map_err(|e| e.to_string())
                         },
@@ -925,7 +981,7 @@ impl App {
                 match result {
                     Ok(session) => {
                         self.session = Some(session);
-                        self.status = if self.mode == Mode::Socks { "SOCKS5 включён. Для DNS выберите разрешение имён через прокси." } else if self.saved_connection.mode == rtrust_store::Mode::Full && self.connection_ipv6 { "IPv4, IPv6 и DNS всего компьютера через VPN. Пересылка между интерфейсами заблокирована." } else if self.saved_connection.mode == rtrust_store::Mode::Full { "IPv4 и DNS всего компьютера через VPN. Сервер без IPv6: IPv6 заблокирован, приложения переходят на IPv4. Пересылка между интерфейсами заблокирована." } else { "Выбранные IPv4-сети подключены через службу. Остальной трафик и системный DNS не изменены." }.into();
+                        self.status = if self.mode == Mode::Socks { "Прокси SOCKS5/HTTP включён. Его можно указать и как системный прокси Windows. Для DNS выберите разрешение имён через прокси." } else if self.saved_connection.mode == rtrust_store::Mode::Full && self.connection_ipv6 { "IPv4, IPv6 и DNS всего компьютера через VPN. Пересылка между интерфейсами заблокирована." } else if self.saved_connection.mode == rtrust_store::Mode::Full { "IPv4 и DNS всего компьютера через VPN. Сервер без IPv6: IPv6 заблокирован, приложения переходят на IPv4. Пересылка между интерфейсами заблокирована." } else { "Выбранные IPv4-сети подключены через службу. Исключения, остальной трафик и системный DNS идут напрямую." }.into();
                         return self.monitor_connection();
                     }
                     Err(error) => {
@@ -1107,6 +1163,14 @@ impl App {
                             .map(ToString::to_string)
                             .collect::<Vec<_>>()
                             .join(", ");
+                        self.exclude = vault
+                            .connection
+                            .exclude
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        self.exclude_lan = vault.connection.exclude_lan;
                         self.saved_connection = vault.connection;
                         #[cfg(any(
                             target_os = "linux",
@@ -1387,24 +1451,65 @@ impl App {
         }
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         if self.mode == Mode::Tun {
-            let mut networks = text_input("198.18.0.0/24, 10.20.0.0/16", &self.networks);
-            if self.can_change_profiles() {
-                networks = networks.on_input(Message::Networks);
-            }
+            let editable = self.can_change_profiles();
             let mut mode = pick_list(Mode::ALL, Some(self.mode), Message::Mode);
-            if !self.can_change_profiles() {
+            if !editable {
                 mode = pick_list(Mode::ALL, Some(self.mode), |_| Message::Tick);
             }
+            let list = |nets: &[rtrust_control::Ipv4Net]| {
+                if nets.is_empty() {
+                    "нет".to_owned()
+                } else {
+                    nets.iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            };
+            let routes: Element<'_, Message> = match &self.saved_connection.managed_routes {
+                Some(managed) => text(format!(
+                    "Маршруты задаёт сервер, группа «{}».\nЧерез VPN: {}\nИсключения: {}\nЛокальные сети: {}",
+                    managed.group,
+                    list(&managed.selection.include),
+                    list(&managed.selection.exclude),
+                    if managed.selection.exclude_lan { "напрямую" } else { "не исключаются" },
+                ))
+                .size(13)
+                .into(),
+                None => {
+                    let mut networks =
+                        text_input("Через VPN: 0.0.0.0/0 или 198.18.0.0/24, 10.20.0.0/16", &self.networks);
+                    let mut exclude =
+                        text_input("Исключения: например 192.168.0.0/16, 203.0.113.0/24", &self.exclude);
+                    let mut lan = checkbox(self.exclude_lan)
+                        .label("Не направлять локальные сети (LAN) в VPN");
+                    if editable {
+                        networks = networks.on_input(Message::Networks);
+                        exclude = exclude.on_input(Message::Exclude);
+                        lan = lan.on_toggle(Message::ExcludeLan);
+                    }
+                    column![
+                        row![
+                            networks,
+                            button("Весь IPv4").on_press_maybe(editable.then_some(Message::WholeIpv4))
+                        ]
+                        .spacing(6),
+                        exclude,
+                        lan
+                    ]
+                    .spacing(6)
+                    .into()
+                }
+            };
             panel = column![
                 mode,
-                networks,
+                routes,
                 text(
-                    if cfg!(target_os = "macos") { "Выбранные IPv4-сети всего компьютера. DNS/IPv6 остаются системными. После аварии используйте сброс блокировки." } else if cfg!(target_os = "windows") { "Выбранные IPv4-сети всего компьютера. DNS/IPv6 системные. При аварии службы блокировка не гарантируется." } else { "Только выбранные IPv4-сети этого пользователя. IPv6 и DNS остаются системными." }
+                    if cfg!(target_os = "macos") { "IPv4-сети всего компьютера, кроме исключений. DNS/IPv6 остаются системными. После аварии используйте сброс блокировки." } else if cfg!(target_os = "windows") { "IPv4-сети всего компьютера, кроме исключений. DNS/IPv6 системные. При аварии службы блокировка не гарантируется." } else { "IPv4-сети этого пользователя, кроме исключений. IPv6 и DNS остаются системными." }
                 )
                 .size(12),
                 button(if cfg!(target_os = "windows") { "Проверить службу" } else { "Сбросить блокировку после аварии" }).on_press_maybe(
-                    self.can_change_profiles()
-                        .then_some(Message::RecoverService)
+                    editable.then_some(Message::RecoverService)
                 )
             ]
             .spacing(6);
@@ -2112,7 +2217,7 @@ mod tests {
     fn tun_rejects_invalid_routes_and_locks_mode_during_connect() {
         let mut app = app();
         let _ = app.update(Message::Mode(Mode::Tun));
-        for network in ["", "0.0.0.0/0", "127.0.0.1/32", "bad"] {
+        for network in ["", "0.0.0.0/8", "127.0.0.1/32", "bad"] {
             let _ = app.update(Message::Networks(network.into()));
             let _ = app.update(Message::ToggleConnection);
             assert!(!app.connecting);
@@ -2128,6 +2233,36 @@ mod tests {
         assert_eq!(app.networks, "198.18.0.1/32");
         let _ = app.update(Message::ToggleConnection);
         drop(task);
+    }
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn whole_ipv4_with_exclusions_and_server_policy_override() {
+        let mut app = app();
+        let _ = app.update(Message::Mode(Mode::Tun));
+        let _ = app.update(Message::WholeIpv4);
+        let _ = app.update(Message::Exclude("10.0.0.0/8; 203.0.113.0/24".into()));
+        let local = app.tun_selection().unwrap();
+        assert_eq!(
+            local.include,
+            rtrust_control::networks("0.0.0.0/0").unwrap()
+        );
+        assert_eq!(local.exclude.len(), 2);
+        assert!(local.exclude_lan);
+        let settings = app.connection_settings().unwrap();
+        assert_eq!(settings.selection(), local);
+        let _ = app.update(Message::Exclude("0.0.0.0/0".into()));
+        assert!(app.tun_selection().is_err());
+        assert!(app.connection_settings().is_err());
+        let managed = rtrust_store::ManagedRoutes {
+            group: "office".into(),
+            revision: "1:1".into(),
+            selection: rtrust_control::Selection::parse("10.0.0.0/8", "", false).unwrap(),
+        };
+        app.saved_connection.managed_routes = Some(managed.clone());
+        assert_eq!(app.tun_selection().unwrap(), managed.selection);
+        let _ = app.update(Message::Networks(String::new()));
+        let _ = app.update(Message::Exclude(String::new()));
+        assert!(app.connection_settings().unwrap().managed_routes == Some(managed));
     }
     #[test]
     fn disconnect_waits_for_current_ack_and_preserves_failure() {
@@ -2195,6 +2330,9 @@ mod tests {
             dns: "9.9.9.9".parse().unwrap(),
             auto_connect: false,
             sync: Default::default(),
+            exclude: rtrust_control::networks("198.18.0.128/25").unwrap(),
+            exclude_lan: true,
+            managed_routes: None,
         };
         let vault = rtrust_store::Vault {
             profiles: app.profiles.clone(),
@@ -2203,6 +2341,8 @@ mod tests {
         let _ = app.update(Message::Loaded(Ok((vault, Some(vec![42])))));
         assert_eq!(app.proxy_port, "2080");
         assert_eq!(app.networks, "198.18.0.0/24");
+        assert_eq!(app.exclude, "198.18.0.128/25");
+        assert!(app.exclude_lan);
         assert!(app.connection_settings().unwrap() == settings);
         assert!(!app.connecting && !app.dirty);
         assert!(app.session.is_none() && app.connection_task.is_none());

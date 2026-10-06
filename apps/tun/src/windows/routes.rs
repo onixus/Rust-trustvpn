@@ -91,36 +91,44 @@ impl Drop for Routes {
     }
 }
 
-pub fn preflight(networks: &[Ipv4Net]) -> Result<(), String> {
-    rtrust_control::validate_networks(networks)?;
-    settled_adapter()?;
-    // Reject overlaps with existing non-default routes, including LAN and VPNs.
+/// IPv4 routes other than the default route, before Wintun exists: LAN,
+/// host-only, on-link, persistent and other VPN routes.
+pub fn local() -> Result<Vec<Ipv4Net>, String> {
     let mut table = std::ptr::null_mut();
     if unsafe { GetIpForwardTable2(AF_INET, &mut table) } != 0 {
         return Err("Cannot inspect Windows routes".into());
     }
-    let conflict = unsafe {
+    let local = unsafe {
         let rows =
             std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
-        let conflict = rows.iter().any(|r| {
-            let p = &r.DestinationPrefix;
-            if p.PrefixLength == 0 {
-                return false;
-            }
-            let addr = Ipv4Addr::from(p.Prefix.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes());
-            Ipv4Net::new(addr, p.PrefixLength).is_ok_and(|other| {
-                networks
-                    .iter()
-                    .any(|n| n.contains(&other.network()) || other.contains(&n.network()))
+        let local = rows
+            .iter()
+            .filter(|r| r.DestinationPrefix.PrefixLength != 0)
+            .filter_map(|r| {
+                let p = &r.DestinationPrefix;
+                let addr = Ipv4Addr::from(p.Prefix.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes());
+                Ipv4Net::new(addr, p.PrefixLength).ok().map(|n| n.trunc())
             })
-        });
+            .collect();
         FreeMibTable(table.cast());
-        conflict
+        local
     };
-    if conflict {
-        Err("Выбранные сети пересекаются с существующими LAN/VPN маршрутами".into())
-    } else {
-        Ok(())
+    Ok(local)
+}
+pub fn preflight(networks: &[Ipv4Net]) -> Result<(), String> {
+    rtrust_control::validate_routes(networks)?;
+    settled_adapter()?;
+    // Reject overlaps with existing non-default routes, including LAN and VPNs.
+    let conflict = local()?.into_iter().find(|other| {
+        networks
+            .iter()
+            .any(|n| n.contains(&other.network()) || other.contains(&n.network()))
+    });
+    match conflict {
+        Some(other) => Err(format!(
+            "Выбранные сети пересекаются с существующим маршрутом {other} (LAN/VPN). Добавьте его в исключения или включите «Исключить локальные сети»"
+        )),
+        None => Ok(()),
     }
 }
 /// CreateUnicastIpAddressEntry returns before Windows completes DAD. Do not

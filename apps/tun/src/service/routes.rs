@@ -1,4 +1,4 @@
-use rtrust_control::{Ipv4Net, validate_networks};
+use rtrust_control::{Ipv4Net, validate_routes};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -79,8 +79,44 @@ impl Routes {
         std::path::Path::new(JOURNAL).exists()
     }
     pub fn preflight(networks: &[Ipv4Net]) -> Result<(), String> {
-        validate_networks(networks)?;
+        validate_routes(networks)?;
         Self::preflight_common(networks)
+    }
+    /// Main-table routes and interface subnets: what the user reaches without
+    /// the VPN. Policy rules win over the main table, so these must be
+    /// subtracted explicitly rather than relying on longest-prefix match.
+    pub fn local() -> Result<Vec<Ipv4Net>, String> {
+        let routes: Vec<serde_json::Value> =
+            serde_json::from_slice(&ip(&["-j", "-4", "route", "show", "table", "main"])?)
+                .map_err(|_| "Invalid routing table")?;
+        let devices: Vec<serde_json::Value> =
+            serde_json::from_slice(&ip(&["-j", "-4", "address", "show"])?)
+                .map_err(|_| "Invalid interface listing")?;
+        let mut local: Vec<Ipv4Net> = routes
+            .iter()
+            .filter_map(|r| r["dst"].as_str())
+            .filter(|dst| *dst != "default")
+            .filter_map(|dst| {
+                dst.parse::<Ipv4Net>()
+                    .or_else(|_| dst.parse::<std::net::Ipv4Addr>().map(Ipv4Net::from))
+                    .ok()
+            })
+            .collect();
+        for device in devices
+            .iter()
+            .filter(|d| d["ifname"].as_str() != Some(DEVICE))
+        {
+            for addr in device["addr_info"].as_array().into_iter().flatten() {
+                if let (Some(ip), Some(len)) = (
+                    addr["local"].as_str().and_then(|s| s.parse().ok()),
+                    addr["prefixlen"].as_u64(),
+                ) && let Ok(net) = Ipv4Net::new(ip, len as u8)
+                {
+                    local.push(net.trunc());
+                }
+            }
+        }
+        Ok(local)
     }
     pub(super) fn preflight_common(networks: &[Ipv4Net]) -> Result<(), String> {
         if Self::pending() || super::full::FullRoutes::pending() {
@@ -108,7 +144,9 @@ impl Routes {
                     .and_then(|s| s.parse::<std::net::Ipv4Addr>().ok())
                     && (networks.iter().any(|net| net.contains(&ip)) || ip.to_string() == ADDRESS)
                 {
-                    return Err("Selected networks overlap local interface addresses".into());
+                    return Err(format!(
+                        "Выбранные сети содержат локальный адрес {ip}. Добавьте его сеть в исключения или включите «Исключить локальные сети»"
+                    ));
                 }
             }
         }
@@ -200,7 +238,7 @@ impl Routes {
             .map_err(|_| "Cannot read journal")?;
         let journal: Journal =
             serde_json::from_slice(&bytes).map_err(|_| "Invalid recovery journal")?;
-        validate_networks(&journal.networks)?;
+        validate_routes(&journal.networks)?;
         if journal.version != 1 || journal.uid != uid {
             return Err("Recovery journal owner mismatch".into());
         }

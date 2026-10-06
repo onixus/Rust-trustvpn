@@ -90,12 +90,14 @@ impl Client {
 
     pub async fn start(
         profile: rtrust_profile::Profile,
-        networks: Vec<Ipv4Net>,
+        selection: Selection,
     ) -> Result<Self, String> {
-        validate_networks(&networks)?;
+        selection.validate()?;
         Self::start_command(Command::Start {
             profile: Box::new(profile),
-            networks,
+            networks: selection.include,
+            exclude: selection.exclude,
+            exclude_lan: selection.exclude_lan,
         })
         .await
     }

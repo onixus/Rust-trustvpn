@@ -39,10 +39,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let client = if args[1] == "--serve-full" {
             rtrust_control::Client::start_full(p, argument.parse()?).await?
         } else {
-            rtrust_control::Client::start(p, rtrust_control::networks(argument)?).await?
+            rtrust_control::Client::start(
+                p,
+                rtrust_control::Selection {
+                    include: rtrust_control::networks(argument)?,
+                    ..Default::default()
+                },
+            )
+            .await?
         };
         #[cfg(target_os = "windows")]
-        let client = rtrust_control::Client::start(p, rtrust_control::networks(argument)?).await?;
+        let client = rtrust_control::Client::start(
+            p,
+            rtrust_control::Selection {
+                include: rtrust_control::networks(argument)?,
+                ..Default::default()
+            },
+        )
+        .await?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;

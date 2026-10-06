@@ -231,7 +231,33 @@ async fn serve(
                 Err(e) => reply(&mut stream, State::Blocked, &e).await,
             };
         }
-        Command::Start { profile, networks } => (profile, networks, None),
+        Command::Start {
+            profile,
+            networks,
+            exclude,
+            exclude_lan,
+        } => {
+            // Only this user's traffic is policy-routed; the service's own
+            // endpoint connection never matches, so no endpoint exception.
+            let selection = rtrust_control::Selection {
+                include: networks,
+                exclude,
+                exclude_lan,
+            };
+            match selection.validate().and_then(|()| {
+                selection.routes(
+                    &[],
+                    &if exclude_lan {
+                        Routes::local()?
+                    } else {
+                        vec![]
+                    },
+                )
+            }) {
+                Ok(routes) => (profile, routes, None),
+                Err(error) => return reply(&mut stream, State::Error, &error).await,
+            }
+        }
         Command::StartFull { profile, dns } => (profile, vec![], Some(dns)),
         _ => return reply(&mut stream, State::Error, "Start or Recover required").await,
     };

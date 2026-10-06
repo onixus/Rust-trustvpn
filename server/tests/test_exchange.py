@@ -9,8 +9,9 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+TARGET = Path(os.environ.get('CARGO_TARGET_DIR', str(ROOT/'target')))
 SANDBOX = tempfile.TemporaryDirectory(prefix='rtrust-portal-tests-')
-os.environ.update(DATA_DIR=SANDBOX.name, SECRET_KEY=secrets.token_urlsafe(48), ADMIN_PASSWORD=secrets.token_urlsafe(32), RTRUST_CODEC=str(ROOT/'target/debug/rtrust-codec'))
+os.environ.update(DATA_DIR=SANDBOX.name, SECRET_KEY=secrets.token_urlsafe(48), ADMIN_PASSWORD=secrets.token_urlsafe(32), RTRUST_CODEC=str(TARGET/'debug/rtrust-codec'))
 PORTAL = Path(os.environ.get('RTRUST_PORTAL_SRC', str(ROOT.parent/'tunnel/server/upstream')))
 if not (PORTAL/'app').is_dir():
     raise SystemExit('Set RTRUST_PORTAL_SRC to server/upstream of a tunnel checkout (the portal source)')
@@ -114,6 +115,13 @@ class ExchangeTests(unittest.TestCase):
         self.assertEqual(self.client.get('/portal/v2/profiles',headers=auth).status_code,401)
         self.assertEqual(self.client.get('/portal/v2/profiles',headers={'Authorization':'Bearer invalid'}).status_code,401)
 
+    def test_ios_enrollment_is_accepted(self):
+        code = self.post('enrollment-codes', {}).json()['code']
+        response = self.post('enroll', {'code': code, 'name': 'iPhone fixture', 'platform': 'ios'})
+        self.assertEqual(response.status_code, 200, response.text)
+        devices = self.client.get('/portal/v2/devices').json()['devices']
+        self.assertEqual(devices[0]['platform'], 'ios')
+
     def test_replace_revision_and_expired_preview(self):
         item=self.imported(); first=self.preview(); stale=self.preview()
         data={'action':'replace','target_id':item['id'],'base_revision':'1','consent':True}
@@ -146,5 +154,121 @@ class ExchangeTests(unittest.TestCase):
         self.assertEqual(self.post('profile-imports/preview', {'content':'x'*(exchange.LIMIT+1),'intent':'external_stored'}).status_code,413)
         self.assertEqual(self.post('profile-imports/preview', {'content':self.content,'intent':'provision'}).status_code,422)
         with db.connect() as c:self.assertEqual(c.execute('SELECT count(*) FROM rtrust_profiles').fetchone()[0],0)
+
+    def enrolled(self, name='Route device'):
+        code=self.post('enrollment-codes',{}).json()['code']
+        response=self.post('enroll',{'code':code,'name':name,'platform':'linux'})
+        self.assertEqual(response.status_code,200,response.text)
+        return response.json()['device_id'],{'Authorization':'Bearer '+response.json()['token']}
+
+    def group(self, **extra):
+        data={'name':'Офис','include':['10.0.0.0/8','192.168.10.0/24'],'exclude':['10.1.0.0/16'],'exclude_lan':True,**extra}
+        response=self.post('route-groups',data)
+        self.assertEqual(response.status_code,200,response.text)
+        return response.json()
+
+    def test_route_group_crud_and_validation(self):
+        self.assertEqual(self.client.get('/portal/v2/capabilities').json()['routing'],1)
+        self.assertEqual(self.client.get('/portal/v2/route-groups').json(),{'groups':[]})
+        created=self.group(include=['10.0.0.0/8',' 10.0.0.0/255.0.0.0 ','0.0.0.0/0'])
+        self.assertEqual(created,{'id':created['id'],'name':'Офис','include':['10.0.0.0/8','0.0.0.0/0'],'exclude':['10.1.0.0/16'],'exclude_lan':True,'revision':1,'devices':[]})
+        self.assertEqual(self.client.get('/portal/v2/route-groups').json()['groups'],[created])
+        base={'name':'x','include':['10.0.0.0/8'],'exclude':[],'exclude_lan':False}
+        for bad in [{'include':['10.0.0.1/8']},{'include':['10.0.0.0/33']},{'include':['fd00::/8']},{'include':['10.0.0.0']},{'include':[]},{'include':'10.0.0.0/8'},
+                    {'include':[f'10.{i}.0.0/16' for i in range(17)]},{'exclude':[f'10.{i}.0.0/16' for i in range(65)]},{'exclude':[167772160]},
+                    {'exclude_lan':1},{'name':''},{'name':'x'*81},{'name':'a\nb'},{'unknown':True}]:
+            self.assertEqual(self.post('route-groups',{**base,**bad}).status_code,422,bad)
+        self.assertEqual(self.post('route-groups',{k:v for k,v in base.items() if k!='exclude'}).status_code,422)
+        self.assertEqual(self.post('route-groups',{**base,'include':[f'10.{i}.0.0/16' for i in range(16)],'exclude':[f'11.{i}.0.0/16' for i in range(64)]}).status_code,200)
+        path='/portal/v2/route-groups/'+str(created['id'])
+        updated=self.client.put(path,json={**base,'name':'Склад','revision':1},headers=self.headers)
+        self.assertEqual(updated.status_code,200,updated.text)
+        self.assertEqual((updated.json()['name'],updated.json()['revision'],updated.json()['include']),('Склад',2,['10.0.0.0/8']))
+        self.assertEqual(self.client.put(path,json={**base,'revision':1},headers=self.headers).status_code,409)
+        self.assertEqual(self.client.put(path,json={**base,'revision':'2'},headers=self.headers).status_code,422)
+        self.assertEqual(self.client.put(path,json={**base,'revision':2,'extra':1},headers=self.headers).status_code,422)
+        self.assertEqual(self.client.put('/portal/v2/route-groups/999999',json={**base,'revision':1},headers=self.headers).status_code,404)
+        self.assertEqual(self.client.delete(path,headers=self.headers).status_code,409)
+        self.assertEqual(self.client.delete(path,headers={**self.headers,'If-Match':'1'}).status_code,409)
+        self.assertEqual(self.client.delete(path,headers={**self.headers,'If-Match':'2'}).status_code,200)
+        self.assertEqual(len(self.client.get('/portal/v2/route-groups').json()['groups']),1)
+        with db.connect() as c:
+            actions=[r[0] for r in c.execute("SELECT action FROM rtrust_audit WHERE action LIKE 'route_%' ORDER BY id")]
+        self.assertEqual(actions,['route_group_create','route_group_create','route_group_update','route_group_delete'])
+
+    def test_route_group_limit_and_csrf(self):
+        data={'name':'g','include':['10.0.0.0/8'],'exclude':[],'exclude_lan':False}
+        self.assertEqual(self.client.post('/portal/v2/route-groups',json=data).status_code,403)
+        self.assertEqual(self.client.post('/portal/v2/route-groups',json=data,headers={'x-csrf-token':'0'*64}).status_code,403)
+        created=self.group()
+        path='/portal/v2/route-groups/'+str(created['id'])
+        self.assertEqual(self.client.put(path,json={**data,'revision':1}).status_code,403)
+        self.assertEqual(self.client.delete(path,headers={'If-Match':'1'}).status_code,403)
+        self.assertEqual(self.client.post(path+'/members',json={'device_id':1,'member':True}).status_code,403)
+        with db.connect() as c:
+            for i in range(49):c.execute('INSERT INTO rtrust_route_groups(owner,name,policy,revision) VALUES(?,?,?,1)',(self.owner,'g'+str(i),'{"include":["10.0.0.0/8"],"exclude":[],"exclude_lan":false}'))
+        self.assertEqual(self.post('route-groups',data).status_code,409)
+        self.login(self.other)
+        self.assertEqual(self.post('route-groups',data).status_code,200)
+
+    def test_route_group_owner_isolation(self):
+        created=self.group();device,_=self.enrolled()
+        path='/portal/v2/route-groups/'+str(created['id'])
+        self.login(self.other)
+        own=self.group(name='Чужая');other_device,_=self.enrolled('Other device')
+        self.assertEqual([g['id'] for g in self.client.get('/portal/v2/route-groups').json()['groups']],[own['id']])
+        data={'name':'x','include':['10.0.0.0/8'],'exclude':[],'exclude_lan':False,'revision':1}
+        self.assertEqual(self.client.put(path,json=data,headers=self.headers).status_code,404)
+        self.assertEqual(self.client.delete(path,headers={**self.headers,'If-Match':'1'}).status_code,404)
+        self.assertEqual(self.post('route-groups/'+str(created['id'])+'/members',{'device_id':other_device,'member':True}).status_code,404)
+        self.assertEqual(self.post('route-groups/'+str(own['id'])+'/members',{'device_id':device,'member':True}).status_code,404)
+        self.login(self.owner)
+        self.assertEqual(self.post('route-groups/'+str(created['id'])+'/members',{'device_id':other_device,'member':True}).status_code,404)
+        self.assertEqual(self.client.get('/portal/v2/route-groups').json()['groups'],[created])
+
+    def test_device_routing_policy_membership(self):
+        first=self.group();second=self.group(name='Дом',include=['0.0.0.0/0'],exclude=[],exclude_lan=False)
+        device,auth=self.enrolled()
+        self.assertEqual(self.client.get('/portal/v2/routing').status_code,403)
+        self.assertEqual(self.client.get('/portal/v2/routing',headers={'Authorization':'Bearer invalid'}).status_code,401)
+        response=self.client.get('/portal/v2/routing',headers=auth)
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json(),{'policy':None})
+        self.assertEqual(response.headers['cache-control'],'no-store')
+        for method,path in [('GET','route-groups'),('POST','route-groups'),('PUT','route-groups/'+str(first['id'])),('DELETE','route-groups/'+str(first['id'])),('POST','route-groups/'+str(first['id'])+'/members')]:
+            self.assertEqual(self.client.request(method,'/portal/v2/'+path,json={'device_id':device,'member':True},headers={**auth,'If-Match':'1'}).status_code,403,path)
+        members='route-groups/'+str(first['id'])+'/members'
+        for bad in [{'device_id':str(device),'member':True},{'device_id':device,'member':1},{'device_id':device},{'device_id':device,'member':True,'x':1}]:
+            self.assertEqual(self.post(members,bad).status_code,422,bad)
+        self.assertEqual(self.post(members,{'device_id':999999,'member':True}).status_code,404)
+        added=self.post(members,{'device_id':device,'member':True})
+        self.assertEqual(added.status_code,200,added.text)
+        self.assertEqual(added.json()['devices'],[device])
+        self.assertEqual(self.client.get('/portal/v2/routing',headers=auth).json(),{'policy':{'group':'Офис','revision':str(first['id'])+':1','include':['10.0.0.0/8','192.168.10.0/24'],'exclude':['10.1.0.0/16'],'exclude_lan':True}})
+        self.client.put('/portal/v2/route-groups/'+str(first['id']),json={'name':'Офис','include':['10.0.0.0/8'],'exclude':[],'exclude_lan':True,'revision':1},headers=self.headers)
+        self.assertEqual(self.client.get('/portal/v2/routing',headers=auth).json()['policy']['revision'],str(first['id'])+':2')
+        moved=self.post('route-groups/'+str(second['id'])+'/members',{'device_id':device,'member':True})
+        self.assertEqual(moved.json()['devices'],[device])
+        groups={g['id']:g['devices'] for g in self.client.get('/portal/v2/route-groups').json()['groups']}
+        self.assertEqual(groups,{first['id']:[],second['id']:[device]})
+        self.assertEqual(self.client.get('/portal/v2/routing',headers=auth).json()['policy'],{'group':'Дом','revision':str(second['id'])+':1','include':['0.0.0.0/0'],'exclude':[],'exclude_lan':False})
+        self.assertEqual(self.post(members,{'device_id':device,'member':False}).status_code,200)
+        self.assertEqual(self.client.get('/portal/v2/routing',headers=auth).json()['policy']['group'],'Дом')
+        self.assertEqual(self.post('route-groups/'+str(second['id'])+'/members',{'device_id':device,'member':False}).json()['devices'],[])
+        self.assertEqual(self.client.get('/portal/v2/routing',headers=auth).json(),{'policy':None})
+        self.post(members,{'device_id':device,'member':True})
+        self.assertEqual(self.client.delete('/portal/v2/devices/'+str(device),headers=self.headers).status_code,200)
+        with db.connect() as c:self.assertEqual(c.execute('SELECT count(*) FROM rtrust_route_members').fetchone()[0],0)
+        self.assertEqual(self.client.get('/portal/v2/routing',headers=auth).status_code,401)
+        self.assertEqual(self.post(members,{'device_id':device,'member':True}).status_code,404)
+        latest=self.client.get('/portal/v2/route-groups').json()['groups'][0]
+        self.assertEqual(self.client.delete('/portal/v2/route-groups/'+str(first['id']),headers={**self.headers,'If-Match':str(latest['revision'])}).status_code,200)
+
+    def test_deleting_group_clears_device_policy(self):
+        created=self.group();device,auth=self.enrolled()
+        self.post('route-groups/'+str(created['id'])+'/members',{'device_id':device,'member':True})
+        self.assertEqual(self.client.delete('/portal/v2/route-groups/'+str(created['id']),headers={**self.headers,'If-Match':'1'}).status_code,200)
+        self.assertEqual(self.client.get('/portal/v2/routing',headers=auth).json(),{'policy':None})
+        with db.connect() as c:self.assertEqual(c.execute('SELECT count(*) FROM rtrust_route_members').fetchone()[0],0)
 
 if __name__=='__main__': unittest.main()

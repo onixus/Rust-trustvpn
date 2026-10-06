@@ -229,6 +229,96 @@ async fn socks_rejects_unsupported_auth_command_and_malformed_domain() {
     server.abort();
 }
 #[tokio::test]
+async fn http_connect_and_absolute_form_share_the_socks_port() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (p, server) = endpoint().await;
+        let proxy = rtrust_engine::proxy::Proxy::start(&p, 0).await.unwrap();
+        // CONNECT with a ClientHello-like prefix pipelined behind the head.
+        let mut socket = tokio::net::TcpStream::connect(proxy.address())
+            .await
+            .unwrap();
+        socket
+            .write_all(b"CONNECT remote-resolution.invalid:443 HTTP/1.1\r\nHost: remote-resolution.invalid:443\r\n\r\n\x16\x03\x01early")
+            .await
+            .unwrap();
+        let established = b"HTTP/1.1 200 Connection established\r\n\r\n";
+        let mut response = vec![0; established.len()];
+        socket.read_exact(&mut response).await.unwrap();
+        assert_eq!(response, established);
+        let mut echoed = [0; 8];
+        socket.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(&echoed, b"\x16\x03\x01early");
+        let (mut r, mut w) = socket.into_split();
+        let data = vec![9; 64 * 1024];
+        let expected = data.clone();
+        let upload = async move {
+            w.write_all(&data).await.unwrap();
+            w.shutdown().await.unwrap();
+        };
+        let download = async move {
+            let mut data = vec![];
+            r.read_to_end(&mut data).await.unwrap();
+            assert_eq!(data, expected);
+        };
+        tokio::join!(upload, download);
+        assert_eq!(proxy.stats().uploaded, 8 + 64 * 1024);
+        assert_eq!(proxy.stats().errors, 0);
+
+        // Absolute-form: the echo endpoint returns exactly what reached the origin.
+        let mut socket = tokio::net::TcpStream::connect(proxy.address())
+            .await
+            .unwrap();
+        socket
+            .write_all(b"POST http://plain.invalid/form?a=1 HTTP/1.1\r\nHost: plain.invalid\r\nProxy-Connection: keep-alive\r\nProxy-Authorization: Basic c2VjcmV0\r\nContent-Length: 4\r\n\r\nbody")
+            .await
+            .unwrap();
+        let origin = b"POST /form?a=1 HTTP/1.1\r\nHost: plain.invalid\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody";
+        let mut response = vec![0; origin.len()];
+        socket.read_exact(&mut response).await.unwrap();
+        assert_eq!(response, origin);
+        // A second request on the same connection never reaches that origin.
+        socket
+            .write_all(b"GET http://other.invalid/ HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut extra = [0; 1];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), socket.read(&mut extra))
+                .await
+                .is_err()
+        );
+        drop(socket);
+
+        // Malformed and https absolute-form requests get a status, not a tunnel.
+        for (request, status) in [
+            (&b"GET https://plain.invalid/ HTTP/1.1\r\n\r\n"[..], "400"),
+            (b"CONNECT bad_host:443 HTTP/1.1\r\n\r\n", "400"),
+            (b"TRACE http://plain.invalid/ HTTP/1.1\r\n\r\n", "501"),
+        ] {
+            let mut socket = tokio::net::TcpStream::connect(proxy.address())
+                .await
+                .unwrap();
+            socket.write_all(request).await.unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with(&format!("HTTP/1.1 {status} ")), "{response}");
+            assert!(!response.contains("plain.invalid") && !response.contains("bad_host"));
+        }
+        // Neither SOCKS5 nor HTTP: closed (EOF or reset) without a reply.
+        let mut socket = tokio::net::TcpStream::connect(proxy.address())
+            .await
+            .unwrap();
+        socket.write_all(b"\x04\x01\x00\x50").await.unwrap();
+        let mut response = vec![];
+        let _ = socket.read_to_end(&mut response).await;
+        assert!(response.is_empty());
+        proxy.stop();
+        server.abort();
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
 async fn socks_port_conflict_and_auth_failure_do_not_leave_listener() {
     let (mut p, server) = endpoint().await;
     let busy = TcpListener::bind("127.0.0.1:0").await.unwrap();
