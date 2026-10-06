@@ -8,6 +8,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+rtrust-mobile = { path = "../../../crates/mobile" }
 rtrust-profile.workspace = true
 serde.workspace = true
 serde_json.workspace = true

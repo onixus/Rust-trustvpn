@@ -276,3 +276,18 @@ python3 scripts/sign-android.py \
 The key and password files must be owner-only regular files. The script verifies
 the APK signature and writes a SHA256 sidecar. Keep an encrypted offline backup
 of the signing key and password; losing them prevents updates to that app identity.
+
+## Home Screen widget
+
+The APK includes a resizable 2×2 VPN widget (Home Screen → Widgets →
+R-TrustTunnel). Its button opens the app and toggles the selected default profile
+through the existing validation/consent flow. Always-on redirects to VPN settings;
+the widget does not disable Android lockdown. Without a profile, import/select
+one first. Rotation and restored activity state do not repeat the action.
+
+The launcher receives only a last-observed status and an immutable PendingIntent
+into a non-exported activity. No profile, endpoint or credential is put in widget
+storage. Status refreshes on service changes and periodically through Android;
+force-stop/process death can leave the last observation visible until refresh.
+The next tap always checks current service state. Local APK/lint build is verified;
+launcher interaction and device VPN toggling still require Android device testing.

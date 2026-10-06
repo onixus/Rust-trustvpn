@@ -7,6 +7,9 @@ use rtrust_desktop::connection;
 #[cfg(target_os = "linux")]
 mod flatpak_startup;
 #[cfg(target_os = "macos")]
+#[path = "../../macos/glass.rs"]
+mod glass;
+#[cfg(target_os = "macos")]
 mod open_url;
 mod portal;
 mod sync;
@@ -28,6 +31,7 @@ fn window_settings() -> iced::window::Settings {
     let window = iced::window::Settings {
         size: iced::Size::new(860.0, 620.0),
         exit_on_close_request: false,
+        transparent: cfg!(target_os = "macos"),
         icon: iced::window::icon::from_rgba(
             include_bytes!("../../../packaging/branding/icon-128.rgba").to_vec(),
             128,
@@ -47,9 +51,29 @@ fn window_settings() -> iced::window::Settings {
     window
 }
 fn open_window() -> Task<Message> {
-    iced::window::open(window_settings())
-        .1
-        .map(|_| Message::Tick)
+    iced::window::open(window_settings()).1.then(|id| {
+        iced::window::run(id, |window| {
+            #[cfg(target_os = "macos")]
+            {
+                use iced::window::raw_window_handle::RawWindowHandle;
+                if let Ok(handle) = window.window_handle()
+                    && let RawWindowHandle::AppKit(handle) = handle.as_raw()
+                {
+                    unsafe {
+                        let view = handle.ns_view.as_ptr() as *mut objc2::runtime::AnyObject;
+                        let window = objc2::msg_send![view, window];
+                        let installed = glass::install(window);
+                        if std::env::args().any(|arg| arg == "--ci-glass-smoke") {
+                            assert!(installed, "AppKit material was not installed");
+                        }
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = window;
+            Message::Tick
+        })
+    })
 }
 fn main() -> iced::Result {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -113,6 +137,21 @@ fn main() -> iced::Result {
             danger: Color::from_rgb8(226, 130, 143),
         },
     ))
+    .style(|_app: &App, theme: &Theme| {
+        let background = theme.palette().background;
+        #[cfg(target_os = "macos")]
+        let background = {
+            let mut background = background;
+            if _app.glass_enabled && glass::transparency_allowed() {
+                background.a = 0.68;
+            }
+            background
+        };
+        iced::theme::Style {
+            background_color: background,
+            text_color: theme.palette().text,
+        }
+    })
     .settings(iced::Settings {
         id: Some("org.rtrusttunnel.Native".into()),
         default_text_size: 14.0.into(),
@@ -129,6 +168,8 @@ enum Page {
     Settings,
 }
 struct App {
+    #[cfg(target_os = "macos")]
+    glass_enabled: bool,
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     always_on: always_on::State,
     #[cfg(target_os = "windows")]
@@ -182,6 +223,8 @@ struct App {
 }
 #[derive(Clone)]
 enum Message {
+    #[cfg(target_os = "macos")]
+    Glass(bool),
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     AlwaysOn(always_on::Action),
     Portal(portal::Action),
@@ -263,6 +306,8 @@ impl App {
     }
     fn boot() -> (Self, Task<Message>) {
         let mut app = Self {
+            #[cfg(target_os = "macos")]
+            glass_enabled: glass::preference(),
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             always_on: always_on::State::default(),
             #[cfg(target_os = "windows")]
@@ -314,8 +359,17 @@ impl App {
             dirty: false,
         };
         let args: Vec<_> = std::env::args_os().skip(1).collect();
+        if args
+            .first()
+            .is_some_and(|arg| arg == "--appearance-preview")
+        {
+            app.page = Page::Settings;
+            app.status = "Предпросмотр оформления — VPN не подключён".into();
+            return (app, Task::none());
+        }
         if args.first().is_some_and(|arg| {
             arg == "--ci-smoke"
+                || arg == "--ci-glass-smoke"
                 || arg == "--ci-portal-smoke"
                 || arg == "--ci-tray-smoke"
                 || arg == "--ci-settings-smoke"
@@ -340,14 +394,26 @@ impl App {
             return (
                 app,
                 Task::perform(
-                    async { tokio::time::sleep(std::time::Duration::from_secs(3)).await },
+                    async {
+                        tokio::time::sleep(std::time::Duration::from_secs(
+                            if std::env::args().any(|arg| arg == "--ci-glass-smoke") {
+                                45
+                            } else {
+                                3
+                            },
+                        ))
+                        .await
+                    },
                     |_| Message::SmokeExit,
                 ),
             );
         }
         app.boot_connect_pending = args.iter().all(|arg| arg == "--autostart");
         app.login_start = args.iter().any(|arg| arg == "--autostart");
-        if let Some(arg) = args.iter().find(|arg| *arg != "--autostart") {
+        if let Some(arg) = args
+            .iter()
+            .find(|arg| *arg != "--autostart" && *arg != "--no-auto-connect")
+        {
             let input = if ["tt://", "hy2://", "hysteria2://"]
                 .iter()
                 .any(|scheme| arg.to_string_lossy().starts_with(scheme))
@@ -775,6 +841,11 @@ impl App {
                     return iced::clipboard::write(proxy.address().to_string());
                 }
             }
+            #[cfg(target_os = "macos")]
+            Message::Glass(enabled) => {
+                self.glass_enabled = enabled;
+                glass::save_preference(enabled);
+            }
             Message::Tick => {
                 if !self.busy {
                     if let Some(exit) = self.pending_close.take() {
@@ -943,7 +1014,7 @@ impl App {
                     }
                 }
             }
-            Message::Navigate(page) if !self.busy => {
+            Message::Navigate(page) if !self.busy || page == Page::Settings => {
                 self.page = page;
                 self.confirm_delete = false;
                 self.confirm_replace = false;
@@ -1657,8 +1728,21 @@ impl App {
                 if self.can_change_profiles() {
                     connect = connect.on_toggle(Message::AutoConnect);
                 }
+                let appearance = column![text("Настройки").size(22)].spacing(12);
+                #[cfg(target_os = "macos")]
+                let appearance = {
+                    let mut appearance = appearance.push(
+                        checkbox(self.glass_enabled)
+                            .label("Стекло — прозрачный фон окна")
+                            .on_toggle(Message::Glass),
+                    );
+                    if !glass::transparency_allowed() {
+                        appearance = appearance.push(text("Прозрачность отключена в системных настройках универсального доступа.").size(13));
+                    }
+                    appearance
+                };
                 let mut panel = column![
-                    text("Настройки").size(22),
+                    appearance,
                     self.proxy_settings(),
                     toggle,
                     text("Приложение откроется в трее. При отсутствии трея окно будет свёрнуто.")

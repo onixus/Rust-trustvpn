@@ -13,7 +13,29 @@ use std::{
 };
 use tokio::{io::AsyncWriteExt, sync::mpsc, task::JoinSet};
 
-#[cfg(not(target_os = "android"))]
+/// Packet-oriented interface; recv must be cancellation safe. Implementations
+/// preserve packet boundaries and bound queued memory.
+pub trait PacketDevice: Send + Sync {
+    fn recv(
+        &self,
+        buffer: &mut [u8],
+    ) -> impl std::future::Future<Output = std::io::Result<usize>> + Send;
+    fn send(
+        &self,
+        packet: &[u8],
+    ) -> impl std::future::Future<Output = std::io::Result<usize>> + Send;
+}
+#[cfg(not(target_os = "ios"))]
+impl PacketDevice for tun_rs::AsyncDevice {
+    async fn recv(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        tun_rs::AsyncDevice::recv(self, buffer).await
+    }
+    async fn send(&self, packet: &[u8]) -> std::io::Result<usize> {
+        tun_rs::AsyncDevice::send(self, packet).await
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub async fn run(
     session: Session,
     tunnel: rtrust_engine::Tunnel,
@@ -23,10 +45,10 @@ pub async fn run(
     run_with_dns(session, tunnel, device, address, Vec::new(), None).await
 }
 
-pub async fn run_with_dns(
+pub async fn run_with_dns<D: PacketDevice>(
     session: Session,
     tunnel: rtrust_engine::Tunnel,
-    device: std::sync::Arc<tun_rs::AsyncDevice>,
+    device: std::sync::Arc<D>,
     address: Ipv4Addr,
     dns: Vec<rtrust_engine::dns::Resolver>,
     routing: Option<(

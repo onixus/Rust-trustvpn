@@ -541,21 +541,21 @@ mod tests {
         ))
         .unwrap();
         profile.endpoint.addresses = vec!["198.18.0.2:443".into()];
+        let p = pinned(&profile).await.unwrap();
+        let endpoint: Ipv4Addr = "198.18.0.2".parse().unwrap();
+        let selection = rtrust_control::Selection::parse("198.18.0.0/24", "", false).unwrap();
+        let routes = selection.routes(&[endpoint], &[]).unwrap();
+        assert!(!routes.iter().any(|net| net.contains(&endpoint)));
         assert!(
-            pinned(&profile, &["198.18.0.0/24".parse().unwrap()])
-                .await
-                .is_err()
+            routes
+                .iter()
+                .any(|net| net.contains(&"198.18.0.3".parse::<Ipv4Addr>().unwrap()))
         );
-        let p = pinned(&profile, &["10.231.243.2/32".parse().unwrap()])
-            .await
-            .unwrap();
         assert_eq!(p.endpoint.addresses, ["198.18.0.2:443"]);
         assert_eq!(p.endpoint.hostname, profile.endpoint.hostname);
         // HTTP/3 is pinned the same way; only the WFP permit switches to UDP.
         profile.endpoint.upstream_protocol = "http3".into();
-        let p = pinned(&profile, &["10.231.243.2/32".parse().unwrap()])
-            .await
-            .unwrap();
+        let p = pinned(&profile).await.unwrap();
         assert_eq!(p.endpoint.addresses, ["198.18.0.2:443"]);
         assert!(p.udp_transport());
     }

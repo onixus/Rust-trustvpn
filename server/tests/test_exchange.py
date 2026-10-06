@@ -9,8 +9,9 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+TARGET = Path(os.environ.get('CARGO_TARGET_DIR', str(ROOT/'target')))
 SANDBOX = tempfile.TemporaryDirectory(prefix='rtrust-portal-tests-')
-os.environ.update(DATA_DIR=SANDBOX.name, SECRET_KEY=secrets.token_urlsafe(48), ADMIN_PASSWORD=secrets.token_urlsafe(32), RTRUST_CODEC=str(ROOT/'target/debug/rtrust-codec'))
+os.environ.update(DATA_DIR=SANDBOX.name, SECRET_KEY=secrets.token_urlsafe(48), ADMIN_PASSWORD=secrets.token_urlsafe(32), RTRUST_CODEC=str(TARGET/'debug/rtrust-codec'))
 PORTAL = Path(os.environ.get('RTRUST_PORTAL_SRC', str(ROOT.parent/'tunnel/server/upstream')))
 if not (PORTAL/'app').is_dir():
     raise SystemExit('Set RTRUST_PORTAL_SRC to server/upstream of a tunnel checkout (the portal source)')
@@ -113,6 +114,13 @@ class ExchangeTests(unittest.TestCase):
         self.assertEqual(revoked.status_code,200,revoked.text)
         self.assertEqual(self.client.get('/portal/v2/profiles',headers=auth).status_code,401)
         self.assertEqual(self.client.get('/portal/v2/profiles',headers={'Authorization':'Bearer invalid'}).status_code,401)
+
+    def test_ios_enrollment_is_accepted(self):
+        code = self.post('enrollment-codes', {}).json()['code']
+        response = self.post('enroll', {'code': code, 'name': 'iPhone fixture', 'platform': 'ios'})
+        self.assertEqual(response.status_code, 200, response.text)
+        devices = self.client.get('/portal/v2/devices').json()['devices']
+        self.assertEqual(devices[0]['platform'], 'ios')
 
     def test_replace_revision_and_expired_preview(self):
         item=self.imported(); first=self.preview(); stale=self.preview()
