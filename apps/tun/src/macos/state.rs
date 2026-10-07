@@ -12,7 +12,7 @@ use std::{
 };
 pub(super) const DIRECTORY: &str = "/Library/Application Support/RTrustTunnel";
 const JOURNAL: &str = "/Library/Application Support/RTrustTunnel/route-state.json";
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {
     version: u32,
@@ -24,6 +24,7 @@ struct Journal {
     routes: Vec<Route>,
     pf_token: Option<String>,
 }
+#[derive(Clone)]
 pub(super) struct Guard(Journal);
 pub(super) fn directory() -> Result<(), String> {
     for parent in ["/Library", "/Library/Application Support"] {
@@ -230,6 +231,9 @@ impl Guard {
     pub fn refresh(&self) -> Result<(), String> {
         for route in &self.0.routes {
             route.ensure()?;
+        }
+        if let Some(resolver) = self.0.dns {
+            dns::ensure(self.0.uid, resolver)?;
         }
         Ok(())
     }

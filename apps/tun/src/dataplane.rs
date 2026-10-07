@@ -83,7 +83,9 @@ pub async fn run_with_dns<D: PacketDevice>(
     workers.spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            monitor.health().await?;
+            tokio::time::timeout(Duration::from_secs(10), monitor.health())
+                .await
+                .map_err(|_| rtrust_engine::Error::Timeout)??;
         }
     });
     loop {

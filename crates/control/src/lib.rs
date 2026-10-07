@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use zeroize::Zeroizing;
+#[cfg(target_os = "macos")]
+pub mod suspend;
 #[cfg(not(target_os = "macos"))]
 pub const SOCKET: &str = "/run/rtrust/control.sock";
 #[cfg(target_os = "macos")]

@@ -38,12 +38,17 @@ impl Workers {
         profile: &rtrust_profile::Profile,
         delay: &mut u64,
         device: Arc<tun_rs::AsyncDevice>,
+        guard: &Guard,
     ) {
         let profile = profile.clone();
+        let guard = guard.clone();
         let wait = *delay;
         *delay = (*delay * 2).min(30);
         self.reconnect = Some(tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(wait)).await;
+            // Darwin can discard endpoint host routes during sleep. Restore
+            // them before opening a socket, or split routes send it into utun.
+            guard.refresh()?;
             tokio::time::timeout(
                 Duration::from_secs(30),
                 device::Prepared::reconnect(&profile, device),
@@ -322,11 +327,23 @@ async fn serve(
     .await?;
     let mut state = State::Connected;
     let mut last_failure = String::new();
+    let mut suspend = rtrust_control::suspend::Watch::default();
+    let mut wake_check = tokio::time::interval(Duration::from_secs(2));
+    wake_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         let mut pending = Box::pin(read::<Request>(&mut stream));
         let request = loop {
             tokio::select! {
                 request = &mut pending => break request?,
+                _ = wake_check.tick() => {
+                    if suspend.resumed(Duration::from_secs(2)) {
+                        workers.stop().await;
+                        state = State::Blocked;
+                        last_failure = "Восстановление VPN после сна".into();
+                        retry_delay = 2;
+                        workers.retry(&profile, &mut retry_delay, device.clone(), &guard);
+                    }
+                }
                 result = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() => {
                     last_failure = match result {
                         Ok(Err(error)) => format!("VPN transport stopped: {error}"),
@@ -337,18 +354,31 @@ async fn serve(
                     state = State::Blocked;
                     // A flapping endpoint must not reset the backoff indefinitely.
                     if connected_since.elapsed() >= Duration::from_secs(30) { retry_delay = 2; }
-                    workers.retry(&profile, &mut retry_delay, device.clone());
+                    workers.retry(&profile, &mut retry_delay, device.clone(), &guard);
                 }
                 result = async { workers.reconnect.as_mut().unwrap().await }, if workers.reconnect.is_some() => {
                     workers.reconnect = None;
-                    if let Ok(Err(error))=&result { eprintln!("VPN reconnect failed: {error}"); }
-                    if let Ok(Ok(prepared)) = result && guard.refresh().is_ok() {
-                            workers.tunnel = Some(tokio::spawn(prepared.run()));
-                            connected_since = Instant::now();
-                            state = State::Connected;
-                            continue;
+                    match &result {
+                        Ok(Err(error)) => {
+                            last_failure = format!("VPN reconnect failed: {error}");
+                            eprintln!("{last_failure}");
+                        }
+                        Err(_) => last_failure = "VPN reconnect worker failed".into(),
+                        _ => {},
                     }
-                    workers.retry(&profile, &mut retry_delay, device.clone());
+                    if let Ok(Ok(prepared)) = result {
+                        if let Err(error) = guard.refresh() {
+                            last_failure = format!("VPN protection refresh failed: {error}");
+                            eprintln!("{last_failure}");
+                            workers.retry(&profile, &mut retry_delay, device.clone(), &guard);
+                            continue;
+                        }
+                        workers.tunnel = Some(tokio::spawn(prepared.run()));
+                        connected_since = Instant::now();
+                        state = State::Connected;
+                        continue;
+                    }
+                    workers.retry(&profile, &mut retry_delay, device.clone(), &guard);
                 }
             }
         };

@@ -1,5 +1,22 @@
 # macOS system VPN — development preview
 
+## Sleep recovery candidate
+
+The service detects resume using both wall and monotonic clocks (Darwin's
+monotonic clock excludes system sleep), cancels the old transport and retries
+with the existing utun and PF guard. Each retry restores owned endpoint/tunnel
+routes and DNS before connecting. Conflicting routes or DNS entries still
+retain protection rather than overwriting another owner's configuration.
+The dataplane health probe has an outer deadline, including HTTP/2 readiness.
+The desktop IPC client preserves its partially read response and extends a
+timeout caused by suspension, without resending the command or dropping the
+VPN lease. Ordinary unresponsive-service timeouts remain bounded.
+
+Clock and partial-IPC regressions are covered by local macOS tests. Actual
+sleep/wake acceptance and handoff to a changed physical gateway remain pending.
+To recover an existing blocked installation, use the app's reset/recovery
+control before reconnecting or installing an update.
+
 ## Published Flow branding: v0.3.2-ui.2
 
 macOS Jenkins **#73 completed SUCCESS**. The selected Flow icon is declared in

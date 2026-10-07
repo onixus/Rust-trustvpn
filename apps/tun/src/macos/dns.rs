@@ -80,6 +80,22 @@ pub fn install(uid: u32, dns: Ipv4Addr) -> Result<(), String> {
         Ok(())
     }
 }
+pub fn ensure(uid: u32, dns: Ipv4Addr) -> Result<(), String> {
+    let store = Store::open()?;
+    let key = CFString::new(KEY);
+    let existing = unsafe { SCDynamicStoreCopyValue(store.0, key.as_concrete_TypeRef()) };
+    if existing.is_null() {
+        return install(uid, dns);
+    }
+    let expected = value(uid, dns);
+    let ours = unsafe { CFEqual(existing, expected.as_CFTypeRef()) != 0 };
+    unsafe { CFRelease(existing) };
+    if ours {
+        Ok(())
+    } else {
+        Err("VPN DNS state changed externally; protection retained".into())
+    }
+}
 pub fn remove(uid: u32, dns: Ipv4Addr) -> Result<(), String> {
     let store = Store::open()?;
     let key = CFString::new(KEY);

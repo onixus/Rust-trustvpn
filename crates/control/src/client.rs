@@ -45,7 +45,27 @@ async fn socket() -> Result<UnixStream, String> {
     Ok(stream)
 }
 async fn exchange(stream: &mut Pipe, command: Command, seconds: u64) -> Result<Response, String> {
-    tokio::time::timeout(Duration::from_secs(seconds), async {
+    #[cfg(target_os = "macos")]
+    let mut suspend = super::suspend::Watch::default();
+    exchange_with_resume(stream, command, Duration::from_secs(seconds), || {
+        #[cfg(target_os = "macos")]
+        {
+            suspend.resumed(Duration::from_secs(seconds))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    })
+    .await
+}
+async fn exchange_with_resume(
+    stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
+    command: Command,
+    deadline: Duration,
+    mut resumed: impl FnMut() -> bool,
+) -> Result<Response, String> {
+    let operation = async {
         write(
             stream,
             &Request {
@@ -59,10 +79,19 @@ async fn exchange(stream: &mut Pipe, command: Command, seconds: u64) -> Result<R
             return Err("IPC version mismatch".into());
         }
         Ok(response)
-    })
-    .await
-    .map_err(|_| "Служба не отвечает")?
+    };
+    tokio::pin!(operation);
+    loop {
+        let result = tokio::time::timeout(deadline, &mut operation).await;
+        if result.is_err() && resumed() {
+            // Continue the same framed exchange: resending Status or losing a
+            // partial response would desynchronize IPC and abandon the guard.
+            continue;
+        }
+        return result.map_err(|_| "Служба не отвечает")?;
+    }
 }
+
 /// Holding this connection reserves an idle service for installer maintenance.
 pub struct MaintenancePermit {
     _pipe: Pipe,
@@ -166,5 +195,65 @@ impl Client {
         } else {
             Err(response.message)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn wake_timeout_keeps_partial_response_and_sends_request_once() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let (partial, ready) = oneshot::channel();
+        let (resume, resumed) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let request: Request = read(&mut server).await.unwrap();
+            assert!(matches!(request.command, Command::Status));
+            let response = Response::new(State::Connected, "restored");
+            let (mut encoder, mut bytes) = tokio::io::duplex(4096);
+            write(&mut encoder, &response).await.unwrap();
+            drop(encoder);
+            let mut frame = Vec::new();
+            bytes.read_to_end(&mut frame).await.unwrap();
+            server.write_all(&frame[..6]).await.unwrap();
+            partial.send(()).unwrap();
+            resumed.await.unwrap();
+            server.write_all(&frame[6..]).await.unwrap();
+            let mut duplicate = [0];
+            assert_eq!(server.read(&mut duplicate).await.unwrap(), 0);
+        });
+        let mut resume = Some(resume);
+        let result = exchange_with_resume(
+            &mut client,
+            Command::Status,
+            Duration::from_millis(50),
+            || {
+                resume.take().unwrap().send(()).unwrap();
+                true
+            },
+        )
+        .await
+        .unwrap();
+        ready.await.unwrap();
+        assert_eq!(result.state, State::Connected);
+        assert_eq!(result.message, "restored");
+        drop(client);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unresponsive_service_still_times_out_without_resume() {
+        let (mut client, _server) = tokio::io::duplex(4096);
+        let error = exchange_with_resume(
+            &mut client,
+            Command::Status,
+            Duration::from_millis(10),
+            || false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "Служба не отвечает");
     }
 }
