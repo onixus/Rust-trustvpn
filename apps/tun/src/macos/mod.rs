@@ -2,7 +2,9 @@
 mod command;
 pub mod device;
 pub mod dns;
+mod events;
 mod firewall;
+mod power;
 mod route_table;
 mod routes;
 mod service;
