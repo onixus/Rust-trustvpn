@@ -97,3 +97,21 @@ with TrustTunnel and once with AmneziaWG on the service binary of build #93.
 Setup SHA-256: `938a957a97e6a244162367a7d8759f7763f07432ec07f507f9d7eda5d2a65e28`.
 The `macos-aarch64` manifest of sequence 7 is published under its versioned path
 but not promoted; no macOS latest manifest exists yet.
+
+## Delivered sequence 9 — v0.5.0 desktop rebuild
+
+The October 6, 2026 desktop rebuild fixes the 0.5.0 update identity defect. The
+original desktop package identified itself as sequence 7, which could repeatedly
+offer 0.5.0 and select the 0.4.0 rollback package. Rebuild
+`v0.5.0-rebuild.9` identifies as sequence **9** and release signing refuses a
+manifest whose version or sequence differs from the archived compiled source.
+
+Real Windows maintenance passed the signed **7 → 9** update, an injected failed
+health check, verified rollback to 7 and a successful retry to 9. The encrypted
+profile vault remained unchanged and decryptable, installed GUI/service hashes
+matched the rebuilt artifacts, and the installed updater rejects sequence 9 as
+already current.
+
+Windows latest is sequence 9. macOS automatic-update promotion remains withheld.
+The rebuild release is:
+https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9
