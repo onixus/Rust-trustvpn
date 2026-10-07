@@ -2,40 +2,44 @@
 
 [English](Readme.md) · [Русский](readme_ru.md)
 
-R-TrustTunnel is a native VPN client written in Rust for **TrustTunnel** and **Hysteria 2**. It includes desktop clients, an Android VpnService implementation, shared Rust transport/profile/storage crates, privileged system-tunnel services, and the TrustTunnel profile-exchange portal extension.
+R-TrustTunnel is a native VPN client written in Rust for **TrustTunnel**, **Hysteria 2** and **AmneziaWG 3**. The repository contains Windows/Linux desktop clients, macOS desktop/system-VPN packaging, Android VpnService, an iOS Network Extension preview, shared Rust transport/profile/storage/mobile crates and privileged desktop tunnel services.
 
 The client implements its own transport and does **not** wrap the official TrustTunnel or Hysteria CLI.
 
-> **Project status: development preview, October 3, 2026.**
+> **Project status: development preview, October 7, 2026.**
 >
-> The latest published package set is **v0.4.0** from October 3. It adds the AmneziaWG 3 transport and includes the Hysteria 2, Windows, profile-link and Android changes made after v0.3.2-ui.2. What was and was not validated for these packages is listed in the [release scope](docs/releases/v0.4.0.md).
+> The workspace is **0.5.0**. The latest desktop rebuild is **v0.5.0-rebuild.9** from October 6; Android and iOS artifacts remain in the original **v0.5.0** release. The rebuild fixes desktop update identity/rollback sequencing and is built after the client/server repository split. See [v0.5.0 release scope](docs/releases/v0.5.0.md).
 
 ## Download
 
-Latest published preview: **[v0.4.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.4.0)**.
+Current preview releases:
 
-| Platform | Package | Notes |
+- **Desktop rebuild:** [v0.5.0-rebuild.9](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9)
+- **Mobile artifacts and original 0.5.0 package set:** [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0)
+
+| Platform | Current artifact | Notes |
 | --- | --- | --- |
-| macOS Apple Silicon | [Native / WebView / Both DMG](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-macOS-arm64-UI-Choices.dmg) | Choose one PKG from the DMG. Administrator authorization is required. No Developer ID signing or notarization yet. |
-| Linux x86_64, Wayland | [Native](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64.flatpak) · [WebView](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64-webview.flatpak) · [Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64-both.flatpak) | The Flatpak contains the unprivileged UI. System VPN also needs the separate host service. |
-| Android 10+, arm64 / x86_64 | [Signed APK](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Android.apk) | versionCode 40001, versionName 0.4.0-preview.1. |
-| Windows x64 | [Installer](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Windows-x64-Setup.exe) | Not Authenticode-signed. This build of the installer was not installed on a physical host before publication. |
+| Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` from v0.5.0-rebuild.9 | Signed update metadata sequence 9; package is not Authenticode signed. Real signed 7→9 update, forced unhealthy install, rollback to 7 and retry to 9 passed. |
+| Linux x86_64, Wayland | Native / WebView / Both Flatpaks from v0.5.0-rebuild.9 | Signed Flatpak install/update/rollback and unsigned-update rejection passed; system VPN still uses the separate host package. |
+| macOS Apple Silicon | UI Choices / system candidate packages from v0.5.0-rebuild.9 | Ad-hoc sealed, not Developer-ID notarized. Automatic-update promotion remains withheld; system-VPN acceptance is still incomplete. |
+| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` from v0.5.0 | versionCode 50001, versionName 0.5.0-preview.1. |
+| iOS arm64 / Simulator | Device and Simulator archives from v0.5.0 | Preview only. Device archive requires Apple signing and is not an installable IPA. |
 
-The release also contains SHA256SUMS, signatures, provenance/validation evidence and the signed Linux host package. See the [release scope](docs/releases/v0.4.0.md).
+SHA256SUMS, signatures and evidence files are published with the releases.
 
-## What is new in v0.4.0
+## What is new in v0.5.0 / rebuild.9
 
-Compared with v0.3.2-ui.2, the published packages now contain:
+Compared with v0.4.0:
 
-- an **AmneziaWG 3** transport: awg-quick configuration import and the 3.1 obfuscation set, see [AmneziaWG](docs/amneziawg.md);
-- substantially expanded **Hysteria 2** compatibility: port hopping, Brutal bandwidth mode, BBR/Reno selection, QUIC windows/timeouts, Salamander and Gecko obfuscation, leaf-certificate pinSHA256 checking, and embedded mutual-TLS client credentials;
-- production Windows full-tunnel checks for both TrustTunnel and Hysteria 2;
-- real Windows S3 sleep/wake validation, including an Always-on session that stayed fail-closed and reconnected after resume;
-- a 30-minute forced deep-Doze test on a physical POCO X3 with traffic remaining inside the tunnel;
-- a refreshed Android home screen with a status card, profile cards and compact action tiles;
-- desktop registration for tt:// and hy2:// profile links on Windows, macOS and Flatpak;
-- removal of the former unified server console from this repository. That console now lives in the separate [onixus/tunnel](https://github.com/onixus/tunnel) project; this repository keeps only the TrustTunnel profile-exchange portal extension.
+- iOS preview with profile import/export, QR import, portal sync, On Demand and a small VPN widget;
+- Android VPN widget and shared mobile routing-policy updates;
+- macOS glass appearance with a persistent Settings toggle and accessibility fallback;
+- desktop IPv4 TUN include/exclude rules, LAN bypass and server-assigned route groups;
+- HTTP requests on the mixed desktop proxy port;
+- update sequence **9** for rebuilt desktop clients, fixing the old sequence-7 identity/rollback mismatch;
+- repository boundary cleanup: the server implementation/deployment was removed from this repository and belongs to [onixus/tunnel](https://github.com/onixus/tunnel).
 
+Route groups are desktop-only. Android/iOS continue to use profile-embedded routing policy and do not consume the separate group API.
 ## Features
 
 ### Client and profile management
@@ -164,7 +168,7 @@ See [desktop lifecycle](docs/desktop-lifecycle.md) and [Always-on](docs/always-o
 5. For fail-closed behaviour after process death, enable Android **Always-on VPN** and **Block connections without VPN**.
 6. Server profiles can be enrolled and synchronized through the portal integration.
 
-The source tree currently declares Android minSdk 29, targetSdk 36, versionCode 40001 and versionName 0.4.0-preview.1.
+The source tree currently declares Android minSdk 29, targetSdk 36, versionCode 50001 and versionName 0.5.0-preview.1.
 
 See [Android documentation](docs/android.md) and [profile exchange](docs/portal.md).
 
@@ -189,17 +193,18 @@ Passing one platform or protocol test does not imply every release package has b
 | apps/native | Native desktop client |
 | apps/webview | Optional Tauri WebView desktop frontend |
 | apps/tun | Desktop TUN/Wintun/utun dataplane and services |
-| apps/android | Android application and shared JNI/Rust integration |
+| apps/android | Android VpnService application and JNI/Rust integration |
+| apps/ios | iOS Swift/Network Extension preview and shared Rust core |
+| apps/macos | macOS application/system integration |
 | apps/inspect, apps/codec | Diagnostics and profile tooling |
-| crates | Shared profile, transport, storage, IPC, desktop, portal and update logic |
-| server | TrustTunnel profile-exchange portal extension and tests |
-| deploy | Portal deployment tooling |
+| crates | Shared profile, transport, storage, control, desktop, mobile, portal-client and update logic |
+| deploy | Client-side service/update deployment assets |
 | packaging, scripts | Packaging and interoperability helpers |
 | ci, Jenkinsfile* | Build, security and runtime validation |
 | vendor/h2 | Patched HTTP/2 dependency |
 | docs | Architecture, platform status, releases and acceptance evidence |
 
-The former unified administration console has moved to [onixus/tunnel](https://github.com/onixus/tunnel). Server implementation and deployment belong in that repository. This repository contains the VPN clients and their [portal API contract](docs/profile-api.md).
+The server implementation, administration UI and server deployment belong to [onixus/tunnel](https://github.com/onixus/tunnel). This repository contains VPN clients, client-side portal integration and the [portal API contract](docs/profile-api.md).
 
 ## Documentation
 
