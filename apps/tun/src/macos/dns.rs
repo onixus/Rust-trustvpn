@@ -9,6 +9,32 @@ use core_foundation::{
 use std::{net::Ipv4Addr, ptr};
 use system_configuration_sys::dynamic_store::*;
 
+/// Darwin scopes system DNS to the physical interface. If the primary resolver
+/// is in the tunnel networks, mirror it without that scope instead of letting
+/// PF block the resulting physical bypass. Never select a per-domain resolver.
+pub fn routed_system_resolver(
+    networks: &[rtrust_control::Ipv4Net],
+) -> Result<Option<Ipv4Addr>, String> {
+    let config = super::command::run("/usr/sbin/scutil", &["--dns"])?;
+    Ok(selected_resolver(&config, networks))
+}
+fn selected_resolver(config: &str, networks: &[rtrust_control::Ipv4Net]) -> Option<Ipv4Addr> {
+    let resolver = config
+        .lines()
+        .take_while(|line| !line.trim().starts_with("resolver #2"))
+        .find_map(|line| {
+            let (key, address) = line.trim().split_once(':')?;
+            let key = key.trim();
+            if !key.starts_with("nameserver[") || !key.ends_with(']') {
+                return None;
+            }
+            address.trim().parse::<Ipv4Addr>().ok()
+        })?;
+    (rtrust_control::validate_dns(resolver).is_ok()
+        && networks.iter().any(|network| network.contains(&resolver)))
+    .then_some(resolver)
+}
+
 const KEY: &str = "State:/Network/Service/org.rtrusttunnel.VPN/DNS";
 struct Store(SCDynamicStoreRef);
 impl Store {
@@ -113,5 +139,37 @@ pub fn remove(uid: u32, dns: Ipv4Addr) -> Result<(), String> {
         Err("Cannot remove VPN DNS configuration".into())
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn mirrors_primary_system_dns_only_when_its_address_is_tunneled() {
+        let config = "resolver #1\n  nameserver[0] : 8.8.8.8\n  nameserver[1] : 1.1.1.1\n  if_index : 15 (en0)\nresolver #2\n  domain : internal\n  nameserver[0] : 203.0.113.53\n";
+        assert_eq!(
+            selected_resolver(config, &["8.0.0.0/5".parse().unwrap()]),
+            Some("8.8.8.8".parse().unwrap())
+        );
+        assert_eq!(
+            selected_resolver(config, &["1.0.0.0/8".parse().unwrap()]),
+            None
+        );
+        assert_eq!(
+            selected_resolver(config, &["203.0.113.0/24".parse().unwrap()]),
+            None
+        );
+        assert_eq!(
+            selected_resolver("nameserver[0] : 127.0.0.1", &["0.0.0.0/0".parse().unwrap()]),
+            None
+        );
+        assert_eq!(
+            selected_resolver(
+                "DNS configuration unavailable",
+                &["0.0.0.0/0".parse().unwrap()]
+            ),
+            None
+        );
     }
 }

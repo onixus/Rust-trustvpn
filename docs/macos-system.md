@@ -12,7 +12,19 @@ The desktop IPC client preserves its partially read response and extends a
 timeout caused by suspension, without resending the command or dropping the
 VPN lease. Ordinary unresponsive-service timeouts remain bounded.
 
-Clock and partial-IPC regressions are covered by local macOS tests. Actual
+Selected-network mode mirrors the primary configured IPv4 DNS server without
+physical-interface scoping when its address belongs to the tunnel networks.
+This prevents PF from blocking system DNS sent on Wi-Fi while the tunnel is
+healthy. Persistent network-service settings are unchanged; Stop and recovery
+remove the owned temporary DNS entry. Per-domain resolvers are not selected.
+
+Privileged refresh runs in the reconnect worker with `block_in_place`, so it
+keeps IPC responsive. The worker retains the service lease until it stops, and
+Stop drains in-flight mutations before releasing protection. macOS status polls
+allow 30 seconds for asymmetric service/desktop resume; errors include the
+actual IPC failure reason.
+
+Clock, DNS selection, slow-refresh cancellation and partial-IPC regressions are covered by local macOS tests. Actual
 sleep/wake acceptance and handoff to a changed physical gateway remain pending.
 To recover an existing blocked installation, use the app's reset/recovery
 control before reconnecting or installing an update.

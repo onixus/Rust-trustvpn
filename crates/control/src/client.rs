@@ -161,9 +161,12 @@ impl Client {
                         break;
                     }
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {
-                        match exchange(&mut stream, Command::Status, 5).await {
+                        // Darwin's root service can resume later than the GUI.
+                        // Keep the same framed exchange alive through that gap.
+                        let seconds = if cfg!(target_os = "macos") { 30 } else { 5 };
+                        match exchange(&mut stream, Command::Status, seconds).await {
                             Ok(response) => *shared.lock().unwrap() = response,
-                            Err(_) => { *shared.lock().unwrap() = Response::new(State::Blocked, "Связь со службой потеряна; проверьте блокировку сетей перед повторным подключением."); break; }
+                            Err(error) => { *shared.lock().unwrap() = Response::new(State::Blocked, &format!("Связь со службой потеряна ({error}); проверьте блокировку сетей перед повторным подключением.")); break; }
                         }
                     }
                 }

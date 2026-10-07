@@ -107,7 +107,8 @@ fn load(uid: u32) -> Result<Journal, String> {
     }
     if let Some(dns) = j.dns {
         rtrust_control::validate_dns(dns)?;
-    } else {
+    }
+    if j.dns.is_none() || !j.networks.is_empty() {
         rtrust_control::validate_routes(&j.networks)?;
     }
     Ok(j)
@@ -151,6 +152,9 @@ impl Guard {
             routes::physical_interface()?;
         } else {
             rtrust_control::validate_routes(networks)?;
+            if dns::routed_system_resolver(networks)?.is_some() {
+                dns::preflight()?;
+            }
         }
         for key in ["net.inet.ip.forwarding", "net.inet6.ip6.forwarding"] {
             if command::run("/usr/sbin/sysctl", &["-n", key])?.trim() != "0" {
@@ -167,6 +171,10 @@ impl Guard {
         udp: bool,
         ports: &[(u16, u16)],
     ) -> Result<Self, String> {
+        let tunnel_dns = match resolver {
+            Some(resolver) => Some(resolver),
+            None => dns::routed_system_resolver(&networks)?,
+        };
         let mut planned = vec![];
         if resolver.is_some() {
             let physical = routes::physical_interface()?;
@@ -203,7 +211,7 @@ impl Guard {
             version: 1,
             uid,
             boot: boot()?,
-            dns: resolver,
+            dns: tunnel_dns,
             networks,
             endpoints,
             routes: planned,
@@ -223,7 +231,7 @@ impl Guard {
         for route in &j.routes {
             route.add()?;
         }
-        if let Some(resolver) = resolver {
+        if let Some(resolver) = tunnel_dns {
             dns::install(uid, resolver)?;
         }
         Ok(Self(j))

@@ -18,6 +18,22 @@ use tokio::{
 };
 
 type RunResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+type Lease = Arc<tokio::sync::OwnedMutexGuard<()>>;
+
+async fn guarded_connect<T>(
+    lease: Lease,
+    refresh: impl Fn() -> Result<(), String>,
+    connect: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    // block_in_place lets IPC tasks run while fixed system tools execute. Unlike
+    // detached spawn_blocking work, abort + join drains this task before Stop
+    // releases the guard. Retain the lease even if the owning IPC task exits.
+    let _lease = lease;
+    tokio::task::block_in_place(&refresh)?;
+    let prepared = connect.await?;
+    tokio::task::block_in_place(refresh)?;
+    Ok(prepared)
+}
 struct Workers {
     tunnel: Option<tokio::task::JoinHandle<RunResult>>,
     reconnect: Option<tokio::task::JoinHandle<Result<device::Prepared, String>>>,
@@ -39,23 +55,27 @@ impl Workers {
         delay: &mut u64,
         device: Arc<tun_rs::AsyncDevice>,
         guard: &Guard,
+        lease: &Lease,
     ) {
         let profile = profile.clone();
         let guard = guard.clone();
+        let lease = lease.clone();
         let wait = *delay;
         *delay = (*delay * 2).min(30);
         self.reconnect = Some(tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(wait)).await;
             // Darwin can discard endpoint host routes during sleep. Restore
             // them before opening a socket, or split routes send it into utun.
-            guard.refresh()?;
-            tokio::time::timeout(
-                Duration::from_secs(30),
-                device::Prepared::reconnect(&profile, device),
-            )
+            guarded_connect(lease, || guard.refresh(), async {
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    device::Prepared::reconnect(&profile, device),
+                )
+                .await
+                .map_err(|_| "Reconnect timed out".to_owned())?
+                .map_err(|e| format!("Reconnect failed: {e}"))
+            })
             .await
-            .map_err(|_| "Reconnect timed out".to_owned())?
-            .map_err(|e| format!("Reconnect failed: {e}"))
         }));
     }
     async fn stop(&mut self) {
@@ -132,7 +152,16 @@ pub async fn run() -> Result<(), String> {
                 let (stream, _) = accepted.map_err(|_| "IPC accept failed")?;
                 if stream.peer_cred().map_err(|_| "IPC identity failed")?.uid() != uid || tasks.len() >= 16 { continue; }
                 let lease = lease.clone();
-                tasks.spawn(async move { let _ = serve(stream, uid, lease).await; });
+                tasks.spawn(async move {
+                    if let Err(error) = serve(stream, uid, lease).await
+                        && let Ok(error) = std::ffi::CString::new(error) {
+                        // launchd discards our stderr; retain redacted IPC
+                        // failures in the macOS system log for diagnosis.
+                        unsafe {
+                            libc::syslog(libc::LOG_ERR, c"R-TrustTunnel IPC session ended: %s".as_ptr(), error.as_ptr());
+                        }
+                    }
+                });
             }
             _ = tasks.join_next(), if !tasks.is_empty() => {},
             _ = terminate.recv() => break,
@@ -175,6 +204,7 @@ async fn serve(
         )
         .await;
     };
+    let held_lease = Arc::new(_lease);
     let (profile, selection, dns) = match request.command {
         Command::PrepareUpdate => {
             if state::pending() {
@@ -341,7 +371,7 @@ async fn serve(
                         state = State::Blocked;
                         last_failure = "Восстановление VPN после сна".into();
                         retry_delay = 2;
-                        workers.retry(&profile, &mut retry_delay, device.clone(), &guard);
+                        workers.retry(&profile, &mut retry_delay, device.clone(), &guard, &held_lease);
                     }
                 }
                 result = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() => {
@@ -354,7 +384,7 @@ async fn serve(
                     state = State::Blocked;
                     // A flapping endpoint must not reset the backoff indefinitely.
                     if connected_since.elapsed() >= Duration::from_secs(30) { retry_delay = 2; }
-                    workers.retry(&profile, &mut retry_delay, device.clone(), &guard);
+                    workers.retry(&profile, &mut retry_delay, device.clone(), &guard, &held_lease);
                 }
                 result = async { workers.reconnect.as_mut().unwrap().await }, if workers.reconnect.is_some() => {
                     workers.reconnect = None;
@@ -367,18 +397,12 @@ async fn serve(
                         _ => {},
                     }
                     if let Ok(Ok(prepared)) = result {
-                        if let Err(error) = guard.refresh() {
-                            last_failure = format!("VPN protection refresh failed: {error}");
-                            eprintln!("{last_failure}");
-                            workers.retry(&profile, &mut retry_delay, device.clone(), &guard);
-                            continue;
-                        }
                         workers.tunnel = Some(tokio::spawn(prepared.run()));
                         connected_since = Instant::now();
                         state = State::Connected;
                         continue;
                     }
-                    workers.retry(&profile, &mut retry_delay, device.clone(), &guard);
+                    workers.retry(&profile, &mut retry_delay, device.clone(), &guard, &held_lease);
                 }
             }
         };
@@ -418,6 +442,86 @@ async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn final_guard_refresh_keeps_status_replies_responsive() {
+        let lease = Arc::new(Mutex::new(()));
+        let held = Arc::new(lease.clone().lock_owned().await);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let signal = entered.clone();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let (release, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let worker = tokio::spawn(guarded_connect(
+            held,
+            move || {
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                    signal.notify_one();
+                    wait.lock().unwrap().recv().unwrap();
+                }
+                Ok(())
+            },
+            async { Ok::<_, String>(()) },
+        ));
+        entered.notified().await;
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let ipc = tokio::spawn(async move {
+            let request: Request = read(&mut server).await.unwrap();
+            assert!(matches!(request.command, Command::Status));
+            reply(&mut server, State::Blocked, "reconnecting")
+                .await
+                .unwrap();
+        });
+        write(
+            &mut client,
+            &Request {
+                version: VERSION,
+                command: Command::Status,
+            },
+        )
+        .await
+        .unwrap();
+        let response: Response =
+            tokio::time::timeout(Duration::from_millis(100), read(&mut client))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(response.state, State::Blocked);
+        release.send(()).unwrap();
+        worker.await.unwrap().unwrap();
+        ipc.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_refresh_retains_lease_and_stop_drains_mutations() {
+        let lease = Arc::new(Mutex::new(()));
+        let held = Arc::new(lease.clone().lock_owned().await);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let signal = entered.clone();
+        let (release, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let mut worker = tokio::spawn(guarded_connect(
+            held,
+            move || {
+                signal.notify_one();
+                wait.lock().unwrap().recv().unwrap();
+                Ok(())
+            },
+            std::future::pending::<Result<(), String>>(),
+        ));
+        entered.notified().await;
+        worker.abort();
+        assert!(lease.try_lock().is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut worker)
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        assert!(lease.try_lock().is_ok());
+    }
+
     #[tokio::test]
     async fn rejects_wrong_version_before_any_privileged_operation() {
         let (mut client, server) = tokio::io::duplex(4096);
