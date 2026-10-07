@@ -56,3 +56,25 @@ suspend-tolerant framed exchange is unchanged.
 6. Repeat a sleep while reconnecting; verify no IPC loss or foreign route cleanup.
 
 Do not label the incident resolved based only on unit tests or connected UI.
+
+## Installed observation and user confirmation
+
+The candidate was installed and its helper SHA-256 matched the extracted package:
+`15522d129ec266c5836239629df32898939d11031b35d2f78ed5dae803e1039c`.
+The native power monitor registered successfully. During the 2026-10-07
+16:28:54–16:31:32 (+03:00) clamshell sleep, the service PID remained 25518.
+It received sleep and powered-on events and reconnected automatically 15.281
+seconds after powered-on. DNS resolution and HTTPS to Apple and Cloudflare worked.
+
+This first recovery was not fully stable: 105.583 seconds later the transport
+reported `Tunnel protocol negotiation failed`, then recovered automatically again
+in 15.794 seconds. No manual reconnect, service restart, DNS change or firewall
+change was performed during that diagnostic interval. Ordinary DNS for example.com
+also differed from Google DoH; HTTPS succeeded with the DoH address. The cause of
+that DNS difference was not established and must not be attributed to macOS sleep.
+
+The user subsequently confirmed that networking worked and the blocking symptom
+was gone, then requested pushing this macOS update to Git. This is confirmation of
+the installed recovery behavior, not proof that the intermittent HTTP/3 failure or
+DNS discrepancy has been fixed. Repeated sleep-during-reconnect acceptance remains
+outstanding.
