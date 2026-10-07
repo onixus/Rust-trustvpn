@@ -2,40 +2,44 @@
 
 [English](Readme.md) · [Русский](readme_ru.md)
 
-R-TrustTunnel — нативный VPN-клиент на Rust с поддержкой **TrustTunnel** и **Hysteria 2**. В репозитории находятся desktop-клиенты, Android-приложение на VpnService, общее Rust-ядро транспорта/профилей/хранилища, привилегированные службы системного туннеля и расширение TrustTunnel-портала для обмена профилями.
+R-TrustTunnel — нативный VPN-клиент на Rust с поддержкой **TrustTunnel**, **Hysteria 2** и **AmneziaWG 3**. В репозитории находятся Windows/Linux desktop-клиенты, macOS desktop/system-VPN упаковка, Android VpnService, preview iOS Network Extension, общее Rust-ядро транспорта/профилей/хранилища/mobile и привилегированные desktop-службы туннеля.
 
 Клиент реализует транспорт самостоятельно и **не является оболочкой** над официальными CLI TrustTunnel или Hysteria.
 
-> **Статус проекта: development preview, 3 октября 2026 года.**
+> **Статус проекта: development preview, 7 октября 2026 года.**
 >
-> Последний опубликованный набор пакетов — **v0.4.0** от 3 октября. В него вошли транспорт AmneziaWG 3 и изменения Hysteria 2, Windows, ссылок профилей и Android, сделанные после v0.3.2-ui.2. Что проверено для этих пакетов, а что нет, перечислено в [описании релиза](docs/releases/v0.4.0.md).
+> Версия workspace — **0.5.0**. Последняя desktop-пересборка — **v0.5.0-rebuild.9** от 6 октября; Android и iOS артефакты остаются в исходном релизе **v0.5.0**. Rebuild исправляет идентичность desktop update/rollback sequence и собран уже после разделения клиентского и серверного репозиториев. См. [описание v0.5.0](docs/releases/v0.5.0.md).
 
 ## Скачать
 
-Последний опубликованный preview: **[v0.4.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.4.0)**.
+Актуальные preview-релизы:
 
-| Платформа | Пакет | Примечание |
+- **Desktop rebuild:** [v0.5.0-rebuild.9](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9)
+- **Mobile-артефакты и исходный набор 0.5.0:** [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0)
+
+| Платформа | Актуальный артефакт | Примечание |
 | --- | --- | --- |
-| macOS Apple Silicon | [DMG с Native / WebView / Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-macOS-arm64-UI-Choices.dmg) | В DMG нужно выбрать один PKG. Требуются права администратора. Developer ID и notarization пока нет. |
-| Linux x86_64, Wayland | [Native](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64.flatpak) · [WebView](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64-webview.flatpak) · [Both](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Linux-x86_64-both.flatpak) | Flatpak содержит непривилегированный UI. Для системного VPN отдельно нужна host-служба. |
-| Android 10+, arm64 / x86_64 | [Подписанный APK](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Android.apk) | versionCode 40001, versionName 0.4.0-preview.1. |
-| Windows x64 | [Установщик](https://github.com/onixus/Rust-trustvpn/releases/download/v0.4.0/R-TrustTunnel-Windows-x64-Setup.exe) | Без подписи Authenticode. Этот билд установщика перед публикацией не ставился на физический компьютер. |
+| Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` из v0.5.0-rebuild.9 | Signed update metadata sequence 9; Authenticode-подписи у пакета нет. Реальный signed update 7→9, принудительный unhealthy install, rollback на 7 и повторный update на 9 прошли. |
+| Linux x86_64, Wayland | Native / WebView / Both Flatpak из v0.5.0-rebuild.9 | Проверены подписанные install/update/rollback и отказ от unsigned update; системному VPN по-прежнему нужен отдельный host package. |
+| macOS Apple Silicon | UI Choices / system candidate из v0.5.0-rebuild.9 | Ad-hoc sealed, без Developer ID/notarization. Автоматическое обновление не промотировано; приёмка system VPN ещё не закрыта полностью. |
+| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` из v0.5.0 | versionCode 50001, versionName 0.5.0-preview.1. |
+| iOS arm64 / Simulator | Device и Simulator archives из v0.5.0 | Preview. Device archive требует Apple signing и не является готовым IPA. |
 
-В релизе также опубликованы SHA256SUMS, подписи, сведения о происхождении/проверках и подписанный Linux host-пакет. См. [состав релиза](docs/releases/v0.4.0.md).
+В релизах опубликованы SHA256SUMS, подписи и evidence-файлы.
 
-## Что нового в v0.4.0
+## Что нового в v0.5.0 / rebuild.9
 
-По сравнению с v0.3.2-ui.2 в опубликованных пакетах появились:
+По сравнению с v0.4.0:
 
-- транспорт **AmneziaWG 3**: импорт конфигурации awg-quick и набор обфускации 3.1, см. [AmneziaWG](docs/amneziawg.md);
-- существенно расширена совместимость с **Hysteria 2**: port hopping, Brutal, BBR/Reno, QUIC windows/timeouts, Salamander и Gecko, проверка pinSHA256 и встроенные mTLS credentials;
-- на Windows выполнены production full-tunnel проверки и для TrustTunnel, и для Hysteria 2;
-- на Windows пройден реальный S3 sleep/wake, включая Always-on сценарий с блокировкой трафика до автоматического восстановления;
-- на физическом POCO X3 пройден 30-минутный forced deep Doze без выхода трафика из VPN;
-- обновлён главный экран Android: status card, карточки профилей и компактные action tiles;
-- на Windows, macOS и Flatpak зарегистрировано открытие ссылок tt:// и hy2://;
-- бывшая unified server console удалена из этого репозитория и перенесена в отдельный проект [onixus/tunnel](https://github.com/onixus/tunnel). Здесь осталась только интеграция TrustTunnel-портала для обмена профилями.
+- preview iOS с import/export профилей, QR, portal sync, On Demand и VPN widget;
+- Android VPN widget и обновлённая общая mobile routing-policy логика;
+- macOS glass appearance с persistent toggle в Settings и accessibility fallback;
+- desktop IPv4 TUN include/exclude, LAN bypass и серверные route groups;
+- HTTP-запросы на смешанном desktop proxy port;
+- update sequence **9** для desktop rebuild, исправляющий старую ошибку sequence-7 identity/rollback;
+- серверная реализация и deployment удалены из этого репозитория и перенесены в [onixus/tunnel](https://github.com/onixus/tunnel).
 
+Route groups относятся только к desktop. Android/iOS продолжают использовать routing policy внутри профиля и отдельный group API не читают.
 ## Возможности
 
 ### Клиент и профили
@@ -165,7 +169,7 @@ SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS
 5. Для fail-closed поведения после гибели процесса включите в Android **Always-on VPN** и **Block connections without VPN**.
 6. Server profiles можно регистрировать и синхронизировать через portal integration.
 
-В текущих исходниках заданы Android minSdk 29, targetSdk 36, versionCode 40001 и versionName 0.4.0-preview.1.
+В текущих исходниках заданы Android minSdk 29, targetSdk 36, versionCode 50001 и versionName 0.5.0-preview.1.
 
 См. [Android](docs/android.md) и [обмен профилями](docs/portal.md).
 
@@ -190,17 +194,18 @@ SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS
 | apps/native | Нативный desktop-клиент |
 | apps/webview | Дополнительный Tauri WebView frontend |
 | apps/tun | Desktop TUN/Wintun/utun dataplane и службы |
-| apps/android | Android-приложение и JNI/Rust интеграция |
+| apps/android | Android VpnService и JNI/Rust интеграция |
+| apps/ios | iOS Swift/Network Extension preview и общее Rust-ядро |
+| apps/macos | macOS application/system integration |
 | apps/inspect, apps/codec | Диагностика и инструменты профилей |
-| crates | Общая логика профилей, транспорта, хранилища, IPC, desktop, portal и updates |
-| server | TrustTunnel portal extension для обмена профилями и его тесты |
-| deploy | Инструменты развёртывания portal extension |
+| crates | Общая логика профилей, транспорта, storage, control, desktop, mobile, portal client и updates |
+| deploy | Клиентские service/update deployment assets |
 | packaging, scripts | Упаковка и interop helpers |
 | ci, Jenkinsfile* | Build, security и runtime проверки |
 | vendor/h2 | Патченная HTTP/2 зависимость |
 | docs | Архитектура, статусы платформ, релизы и acceptance evidence |
 
-Бывшая unified administration console перенесена в [onixus/tunnel](https://github.com/onixus/tunnel). Серверная реализация и развёртывание относятся к тому репозиторию. Здесь находятся VPN-клиенты и [контракт API панели](docs/profile-api.md).
+Серверная реализация, administration UI и server deployment относятся к [onixus/tunnel](https://github.com/onixus/tunnel). Здесь находятся VPN-клиенты, клиентская portal integration и [контракт API панели](docs/profile-api.md).
 
 ## Документация
 
