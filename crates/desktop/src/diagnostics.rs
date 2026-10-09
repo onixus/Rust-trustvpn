@@ -272,7 +272,7 @@ fn https_builder(target: &Target, address: SocketAddr, device: &str) -> reqwest:
         .pool_max_idle_per_host(0)
         .http1_only()
 }
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn classify_http_error(error: reqwest::Error) -> Fact {
     fn tls_cause(error: &(dyn std::error::Error + 'static), remaining: u8) -> bool {
         if remaining == 0 {
@@ -737,5 +737,22 @@ mod tests {
         })
         .await
         .expect("cancelled child must not remain running");
+    }
+    #[test]
+    fn resolver_answers_are_deduplicated_capped_and_never_guessed() {
+        assert_eq!(
+            parse_answers(b"hostname: secret.example\n"),
+            Err(Fact::Failed)
+        );
+        #[cfg(target_os = "macos")]
+        let prefix = "ip_address: ";
+        #[cfg(not(target_os = "macos"))]
+        let prefix = "";
+        let duplicate = format!("{prefix}192.0.2.1\n{prefix}192.0.2.1\n");
+        assert_eq!(parse_answers(duplicate.as_bytes()).unwrap().len(), 1);
+        let too_many = (1..=9)
+            .map(|n| format!("{prefix}192.0.2.{n}\n"))
+            .collect::<String>();
+        assert_eq!(parse_answers(too_many.as_bytes()), Err(Fact::Failed));
     }
 }
