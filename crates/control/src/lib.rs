@@ -27,6 +27,10 @@ pub enum Command {
         exclude: Vec<Ipv4Net>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         exclude_lan: bool,
+        /// Resolver for the system; a service uses it only when the
+        /// selection routes it through the VPN.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dns: Option<std::net::Ipv4Addr>,
     },
     StartFull {
         profile: Box<rtrust_profile::Profile>,
@@ -414,20 +418,32 @@ mod tests {
             "hostname='vpn.example'\naddresses=['192.0.2.1:443']\nusername='u'\npassword='p'\n",
         )
         .unwrap();
-        let command = |exclude: Vec<Ipv4Net>, exclude_lan| {
+        let command = |exclude: Vec<Ipv4Net>, exclude_lan, dns| {
             serde_json::to_value(Command::Start {
                 profile: Box::new(profile.clone()),
                 networks: vec!["10.0.0.0/8".parse().unwrap()],
                 exclude,
                 exclude_lan,
+                dns,
             })
             .unwrap()
         };
-        let plain = command(vec![], false);
-        assert!(plain.get("exclude").is_none() && plain.get("exclude_lan").is_none());
-        let split = command(vec!["10.1.0.0/16".parse().unwrap()], true);
+        let plain = command(vec![], false, None);
+        assert!(
+            plain.get("exclude").is_none()
+                && plain.get("exclude_lan").is_none()
+                && plain.get("dns").is_none()
+        );
+        let split = command(
+            vec!["10.1.0.0/16".parse().unwrap()],
+            true,
+            Some("1.1.1.1".parse().unwrap()),
+        );
         assert_eq!(split["exclude"][0], "10.1.0.0/16");
         assert_eq!(split["exclude_lan"], true);
+        assert_eq!(split["dns"], "1.1.1.1");
+        let old: Command = serde_json::from_value(plain).unwrap();
+        assert!(matches!(old, Command::Start { dns: None, .. }));
     }
     #[tokio::test]
     async fn oversized_frame_rejected_before_body_and_secrets_redacted() {

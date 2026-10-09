@@ -170,7 +170,7 @@ async fn serve(
         )
         .await;
     };
-    let (profile, selection, dns) = match request.command {
+    let (profile, selection, dns, split_dns) = match request.command {
         Command::PrepareUpdate => {
             if state::pending() {
                 return reply(
@@ -200,6 +200,7 @@ async fn serve(
             networks,
             exclude,
             exclude_lan,
+            dns,
         } => {
             let selection = rtrust_control::Selection {
                 include: networks,
@@ -209,9 +210,9 @@ async fn serve(
             if let Err(error) = selection.validate() {
                 return reply(&mut stream, State::Error, &error).await;
             }
-            (profile, selection, None)
+            (profile, selection, None, dns)
         }
-        Command::StartFull { profile, dns } => (profile, Default::default(), Some(dns)),
+        Command::StartFull { profile, dns } => (profile, Default::default(), Some(dns), None),
         _ => return reply(&mut stream, State::Error, "Start or Recover required").await,
     };
     let full = dns.is_some();
@@ -279,7 +280,10 @@ async fn serve(
             Err(e) => return reply(&mut stream, State::Error, &e).await,
         }
     };
-    if let Err(error) = Guard::preflight(&networks, dns) {
+    // A split selection that carries the resolver (e.g. everything but the
+    // LAN) gets VPN DNS too; otherwise names would leak to the LAN resolver.
+    let resolver = dns.or(split_dns.filter(|ip| networks.iter().any(|n| n.contains(ip))));
+    if let Err(error) = Guard::preflight(&networks, full, resolver) {
         return reply(&mut stream, State::Error, &error).await;
     }
     let prepared = {
@@ -295,7 +299,8 @@ async fn serve(
     let guard = match Guard::install(
         uid,
         networks,
-        dns,
+        full,
+        resolver,
         endpoints,
         profile.udp_transport(),
         &profile.hop_port_ranges(),

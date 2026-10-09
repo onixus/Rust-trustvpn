@@ -259,6 +259,7 @@ async fn serve(
             networks,
             exclude,
             exclude_lan,
+            dns: _,
         } => {
             let selection = rtrust_control::Selection {
                 include: networks,

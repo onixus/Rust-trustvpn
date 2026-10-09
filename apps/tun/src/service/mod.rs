@@ -236,6 +236,7 @@ async fn serve(
             networks,
             exclude,
             exclude_lan,
+            dns: _,
         } => {
             // Only this user's traffic is policy-routed; the service's own
             // endpoint connection never matches, so no endpoint exception.

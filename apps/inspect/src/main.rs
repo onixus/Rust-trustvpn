@@ -45,6 +45,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     include: rtrust_control::networks(argument)?,
                     ..Default::default()
                 },
+                None,
             )
             .await?
         };
@@ -55,6 +56,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 include: rtrust_control::networks(argument)?,
                 ..Default::default()
             },
+            None,
         )
         .await?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]

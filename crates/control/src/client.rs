@@ -91,13 +91,18 @@ impl Client {
     pub async fn start(
         profile: rtrust_profile::Profile,
         selection: Selection,
+        dns: Option<std::net::Ipv4Addr>,
     ) -> Result<Self, String> {
         selection.validate()?;
+        if let Some(dns) = dns {
+            validate_dns(dns)?;
+        }
         Self::start_command(Command::Start {
             profile: Box::new(profile),
             networks: selection.include,
             exclude: selection.exclude,
             exclude_lan: selection.exclude_lan,
+            dns,
         })
         .await
     }
