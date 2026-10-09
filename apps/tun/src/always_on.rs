@@ -24,6 +24,9 @@ impl Supervisor {
     }
     pub fn state(&self) -> Response {
         let mut response = self.state.borrow().clone();
+        response
+            .observations
+            .expire(rtrust_control::observations::now_ms());
         response.always_on = Some(self.enabled());
         response
     }

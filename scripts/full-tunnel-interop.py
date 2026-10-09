@@ -256,7 +256,7 @@ def main():
             # Each command uses a short-lived authenticated GUI connection. The
             # supervisor must keep the VPN alive after that connection closes.
             def ipc(op, **values):
-                request=json.dumps(dict(version=1,command=dict(op=op,**values)))
+                request=json.dumps(dict(version=2,command=dict(op=op,**values)))
                 program="""import socket,struct,json,sys
 c=socket.socket(socket.AF_UNIX);c.settimeout(60);c.connect('/run/rtrust/control.sock')
 b=sys.argv[1].encode();c.sendall(struct.pack('!I',len(b))+b)

@@ -7,3 +7,5 @@
 "Last status" = "Last status";
 "VPN control" = "VPN control";
 "Open R-TrustTunnel to securely toggle VPN. Authorize VPN in the app first." = "Open R-TrustTunnel to securely toggle VPN. Authorize VPN in the app first.";
+
+"Transport running · availability unchecked" = "Transport running · availability unchecked";

@@ -6,7 +6,8 @@ pub const SOCKET: &str = "/run/rtrust/control.sock";
 #[cfg(target_os = "macos")]
 pub const SOCKET: &str = "/private/var/run/rtrust/control.sock";
 pub const LIMIT: usize = 2 * rtrust_profile::MAX_INPUT;
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
+pub mod observations;
 pub use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
 
@@ -32,6 +33,7 @@ pub enum Command {
         profile: Box<rtrust_profile::Profile>,
         dns: std::net::Ipv4Addr,
     },
+    Capabilities,
     Status,
     PrepareUpdate,
     EnableAlwaysOn {
@@ -58,6 +60,24 @@ pub struct Response {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_on: Option<bool>,
+    pub observations: observations::Snapshot,
+    pub capabilities: Capabilities,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Capabilities {
+    pub observations_schema: u32,
+    pub lifecycle_observations: bool,
+    pub system_probes: bool,
+}
+impl Capabilities {
+    pub fn current() -> Self {
+        Self {
+            observations_schema: observations::SCHEMA,
+            lifecycle_observations: true,
+            system_probes: false,
+        }
+    }
 }
 impl Response {
     pub fn new(state: State, message: &str) -> Self {
@@ -66,6 +86,8 @@ impl Response {
             state,
             message: message.into(),
             always_on: None,
+            observations: observations::Snapshot::unknown(observations::Mode::Unknown),
+            capabilities: Capabilities::current(),
         }
     }
 }

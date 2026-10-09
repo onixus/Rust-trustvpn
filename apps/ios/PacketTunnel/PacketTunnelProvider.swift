@@ -81,6 +81,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         }
     }
+    override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
+        guard messageData == Data("observations-v1".utf8) else { completionHandler?(nil); return }
+        queue.async {
+            guard let ptr = rtrust_ios_observations() else { completionHandler?(nil); return }
+            defer { rtrust_ios_free(ptr) }
+            completionHandler?(Data(String(cString: ptr).utf8))
+        }
+    }
     private func pump(_ token: UInt64) {
         guard token == generation else { return }
         let state = rtrust_ios_status()

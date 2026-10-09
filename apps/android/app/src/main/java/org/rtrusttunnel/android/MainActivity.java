@@ -32,6 +32,7 @@ public class MainActivity extends Activity {
                 TunnelService.refreshPolicy();
                 int nativeState = state.optInt("state", 0);
                 String message = !TunnelService.problem.isEmpty() ? TunnelService.problem : nativeState == 2 ? getString(R.string.connected) : nativeState == 1 ? getString(R.string.connecting) : nativeState == 3 ? getString(R.string.reconnecting) : nativeState == 4 ? getString(R.string.connection_failed) : "";
+                if (nativeState == 2 && TunnelService.problem.isEmpty()) message = ObservationStatus.summary(MainActivity.this, state.optJSONObject("observations"));
                 if (message.isEmpty()) message = TunnelService.active ? getString(R.string.starting_vpn) : getString(R.string.disconnected);
                 if (!status.getText().toString().equals(message)) status.setText(message);
                 String action = TunnelService.active ? getString(R.string.disconnect) : getString(R.string.connect_default_profile);
@@ -147,7 +148,7 @@ public class MainActivity extends Activity {
     static int connectionColor(boolean active, int state, boolean problem) {
         if (problem || state == 4 || state < 0 || state > 4) return Color.rgb(229, 72, 77);
         if (!active) return Color.rgb(77, 163, 255);
-        return state == 2 ? Color.rgb(47, 191, 113) : Color.rgb(224, 165, 38);
+        return Color.rgb(224, 165, 38); // Lifecycle is not verified network availability.
     }
     /** {@code lit} colors the status dot; an idle tunnel keeps it neutral. */
     private void paintConnection(int color, boolean lit) {

@@ -224,3 +224,29 @@ mod tests {
         }
     }
 }
+
+/// Common adapter for Android/iOS worker lifecycle. OS routes, DNS and lockdown
+/// remain unknown until a platform probe supplies evidence.
+pub struct Observations {
+    monitor: rtrust_control::observations::Monitor,
+}
+impl Default for Observations {
+    fn default() -> Self {
+        let mut monitor = rtrust_control::observations::Monitor::new(
+            rtrust_control::observations::Mode::Mobile,
+            rtrust_control::observations::Source::MobileLifecycle,
+            rtrust_control::observations::now_ms(),
+        );
+        monitor.transition(false, rtrust_control::observations::now_ms());
+        Self { monitor }
+    }
+}
+impl Observations {
+    pub fn transition(&mut self, state: u8) {
+        self.monitor
+            .transition(state == 2, rtrust_control::observations::now_ms());
+    }
+    pub fn snapshot(&mut self) -> rtrust_control::observations::Snapshot {
+        self.monitor.sample(rtrust_control::observations::now_ms())
+    }
+}

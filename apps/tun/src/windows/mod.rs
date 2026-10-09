@@ -216,6 +216,18 @@ impl Drop for Worker {
         }
     }
 }
+async fn reply_observed(
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
+    state: State,
+    message: &str,
+    monitor: &mut rtrust_control::observations::Monitor,
+) -> Result<(), String> {
+    let mut response = Response::new(state, message);
+    response.observations = monitor.sample(rtrust_control::observations::now_ms());
+    tokio::time::timeout(Duration::from_secs(5), write(stream, &response))
+        .await
+        .map_err(|_| "IPC write timed out")?
+}
 async fn serve(
     pipe: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
     lease: Arc<Mutex<()>>,
@@ -227,6 +239,9 @@ async fn serve(
         .map_err(|_| "IPC read timed out")??;
     if request.version != VERSION {
         return reply(pipe, State::Error, "IPC version mismatch").await;
+    }
+    if matches!(request.command, Command::Capabilities) {
+        return write(pipe, &Response::new(State::Idle, "Capabilities")).await;
     }
     if let Some(supervisor) = supervisor {
         match request.command {
@@ -388,16 +403,20 @@ async fn serve(
     let mut cleaned = routes.release();
     drop(routes);
     drop(device);
-    if dns.is_none() && cleaned.is_ok() && matches!(result, Ok(true)) {
+    if dns.is_none() && cleaned.is_ok() && matches!(result, Ok(Some(_))) {
         cleaned = routes::wait_removed();
     }
-    if dns.is_some() && (matches!(result, Ok(true)) || *stop.borrow()) {
+    if dns.is_some() && (matches!(result, Ok(Some(_))) || *stop.borrow()) {
         cleaned.clone()?;
         full::recover()?;
     }
-    if matches!(result, Ok(true)) {
+    if let Ok(Some(observations)) = result {
         match cleaned {
-            Ok(()) => reply(pipe, State::Idle, "Отключено").await,
+            Ok(()) => {
+                let mut response = Response::new(State::Idle, "Отключено");
+                response.observations = observations;
+                write(pipe, &response).await
+            }
             Err(e) => reply(pipe, State::Error, &e).await,
         }
     } else {
@@ -411,8 +430,17 @@ async fn lease_loop(
     worker: &mut Worker,
     stop: &mut watch::Receiver<bool>,
     full: bool,
-) -> Result<bool, String> {
-    reply(
+) -> Result<Option<rtrust_control::observations::Snapshot>, String> {
+    let mut monitor = rtrust_control::observations::Monitor::new(
+        if full {
+            rtrust_control::observations::Mode::Full
+        } else {
+            rtrust_control::observations::Mode::Split
+        },
+        rtrust_control::observations::Source::ServiceLifecycle,
+        rtrust_control::observations::now_ms(),
+    );
+    reply_observed(
         pipe,
         State::Connected,
         if full {
@@ -420,9 +448,11 @@ async fn lease_loop(
         } else {
             "Выбранные IPv4-сети подключены через Wintun"
         },
+        &mut monitor,
     )
     .await?;
     let mut state = State::Connected;
+    monitor.transition(true, rtrust_control::observations::now_ms());
     let mut retry = Box::pin(tokio::time::sleep(Duration::from_secs(2)));
     let mut delay = 2;
     let mut connected_since = std::time::Instant::now();
@@ -442,9 +472,9 @@ async fn lease_loop(
         let request = loop {
             tokio::select! {
                 r = &mut pending => break r?,
-                _ = stop.changed() => return Ok(false),
+                _ = stop.changed() => return Ok(None),
                 _ = worker.finished(), if state == State::Connected => {
-                    state = State::Blocked;
+                    state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
                     if connected_since.elapsed() >= Duration::from_secs(30) { delay=2; }
                     retry.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(delay));
                 },
@@ -461,7 +491,7 @@ async fn lease_loop(
                     match result {
                         Ok((session,udp)) => {
                             *worker=Worker::new(tokio::spawn(crate::dataplane::run(session,udp,device.clone(),ADDRESS)));
-                            state=State::Connected; connected_since=std::time::Instant::now();
+                            state=State::Connected; monitor.transition(true, rtrust_control::observations::now_ms()); connected_since=std::time::Instant::now();
                         },
                         Err(_) => { delay=(delay*2).min(30); retry.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(delay)); },
                     }
@@ -474,7 +504,7 @@ async fn lease_loop(
         }
         match request.command {
             Command::Status => {
-                reply(
+                reply_observed(
                     pipe,
                     state.clone(),
                     if state == State::Connected {
@@ -482,10 +512,14 @@ async fn lease_loop(
                     } else {
                         "Переподключение; выбранные IPv4-сети удерживаются на Wintun"
                     },
+                    &mut monitor,
                 )
                 .await?
             }
-            Command::Stop => return Ok(true),
+            Command::Stop => {
+                monitor.stop(rtrust_control::observations::now_ms());
+                return Ok(Some(monitor.sample(rtrust_control::observations::now_ms())));
+            }
             _ => return Err("Invalid operation during lease".into()),
         }
     }
