@@ -192,6 +192,47 @@ impl Controller {
     }
 }
 
+/// Localize stable machine outcomes at the UI boundary; never parse service messages.
+pub fn observation_summary(
+    snapshot: &rtrust_control::observations::Snapshot,
+    russian: bool,
+) -> String {
+    use rtrust_control::observations::Outcome;
+    fn label(outcome: Outcome, ru: bool) -> &'static str {
+        match (outcome, ru) {
+            (Outcome::Passed, true) => "проверено",
+            (Outcome::Passed, false) => "verified",
+            (Outcome::Failed, true) => "сбой",
+            (Outcome::Failed, false) => "failed",
+            (Outcome::Configured, true) => "запущен, доступность не проверена",
+            (Outcome::Configured, false) => "running, availability unchecked",
+            (Outcome::Stale, true) => "устарело",
+            (Outcome::Stale, false) => "stale",
+            (Outcome::Unsupported, true) => "проверка не поддерживается",
+            (Outcome::Unsupported, false) => "check unsupported",
+            (Outcome::Unknown, true) => "не проверено",
+            (Outcome::Unknown, false) => "unchecked",
+        }
+    }
+    let names = if russian {
+        ["Транспорт", "маршрут", "DNS", "защита", "доступность"]
+    } else {
+        ["Transport", "route", "DNS", "guard", "connectivity"]
+    };
+    names
+        .into_iter()
+        .zip([
+            &snapshot.transport,
+            &snapshot.route,
+            &snapshot.dns,
+            &snapshot.guard,
+            &snapshot.connectivity,
+        ])
+        .map(|(name, o)| format!("{name}: {}", label(o.outcome, russian)))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,45 +275,4 @@ mod tests {
         assert!(controller.check(6).is_err());
         assert!(controller.check(7).is_ok());
     }
-}
-
-/// Localize stable machine outcomes at the UI boundary; never parse service messages.
-pub fn observation_summary(
-    snapshot: &rtrust_control::observations::Snapshot,
-    russian: bool,
-) -> String {
-    use rtrust_control::observations::Outcome;
-    fn label(outcome: Outcome, ru: bool) -> &'static str {
-        match (outcome, ru) {
-            (Outcome::Passed, true) => "проверено",
-            (Outcome::Passed, false) => "verified",
-            (Outcome::Failed, true) => "сбой",
-            (Outcome::Failed, false) => "failed",
-            (Outcome::Configured, true) => "запущен, доступность не проверена",
-            (Outcome::Configured, false) => "running, availability unchecked",
-            (Outcome::Stale, true) => "устарело",
-            (Outcome::Stale, false) => "stale",
-            (Outcome::Unsupported, true) => "проверка не поддерживается",
-            (Outcome::Unsupported, false) => "check unsupported",
-            (Outcome::Unknown, true) => "не проверено",
-            (Outcome::Unknown, false) => "unchecked",
-        }
-    }
-    let names = if russian {
-        ["Транспорт", "маршрут", "DNS", "защита", "доступность"]
-    } else {
-        ["Transport", "route", "DNS", "guard", "connectivity"]
-    };
-    names
-        .into_iter()
-        .zip([
-            &snapshot.transport,
-            &snapshot.route,
-            &snapshot.dns,
-            &snapshot.guard,
-            &snapshot.connectivity,
-        ])
-        .map(|(name, o)| format!("{name}: {}", label(o.outcome, russian)))
-        .collect::<Vec<_>>()
-        .join(" · ")
 }
