@@ -232,21 +232,46 @@ pub struct Observations {
 }
 impl Default for Observations {
     fn default() -> Self {
-        let mut monitor = rtrust_control::observations::Monitor::new(
+        let monitor = rtrust_control::observations::Monitor::idle(
             rtrust_control::observations::Mode::Mobile,
             rtrust_control::observations::Source::MobileLifecycle,
             rtrust_control::observations::now_ms(),
         );
-        monitor.transition(false, rtrust_control::observations::now_ms());
         Self { monitor }
     }
 }
 impl Observations {
     pub fn transition(&mut self, state: u8) {
-        self.monitor
-            .transition(state == 2, rtrust_control::observations::now_ms());
+        let now = rtrust_control::observations::now_ms();
+        if state == 0 {
+            self.monitor.stop(now);
+        } else {
+            self.monitor.transition(state == 2, now);
+        }
     }
     pub fn snapshot(&mut self) -> rtrust_control::observations::Snapshot {
         self.monitor.sample(rtrust_control::observations::now_ms())
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use rtrust_control::observations::{EventKind, Outcome};
+    #[test]
+    fn idle_mobile_adapter_does_not_fabricate_start_or_failure_events() {
+        let mut observations = Observations::default();
+        let idle = observations.snapshot();
+        assert_eq!(idle.transport.outcome, Outcome::Unknown);
+        assert!(idle.events.is_empty());
+        observations.transition(2);
+        let started = observations.snapshot();
+        assert_eq!(started.events.last().unwrap().kind, EventKind::Started);
+        observations.transition(0);
+        let stopped = observations.snapshot();
+        assert_eq!(stopped.transport.outcome, Outcome::Unknown);
+        assert_eq!(stopped.events.last().unwrap().kind, EventKind::Stopped);
+        observations.transition(2);
+        assert!(observations.snapshot().generation > stopped.generation);
     }
 }

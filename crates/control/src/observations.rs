@@ -223,22 +223,34 @@ impl Monitor {
             stopped: false,
         }
     }
+    /// An idle adapter has no transport start/failure evidence to report.
+    pub fn idle(mode: Mode, source: Source, now: u64) -> Self {
+        let mut monitor = Self::new(mode, source, now);
+        monitor.snapshot = Snapshot::unknown(mode);
+        monitor.snapshot.transport.source = source;
+        monitor.running = false;
+        monitor.stopped = true;
+        monitor
+    }
     pub fn transition(&mut self, running: bool, now: u64) {
         if running != self.running {
-            self.snapshot.invalidate(
-                Reason::SessionChanged,
-                if running {
-                    EventKind::Recovered
-                } else {
-                    EventKind::Reconnecting
-                },
-                now,
-            );
+            let kind = if self.stopped && running {
+                EventKind::Started
+            } else if running {
+                EventKind::Recovered
+            } else {
+                EventKind::Reconnecting
+            };
+            self.stopped = false;
+            self.snapshot.invalidate(Reason::SessionChanged, kind, now);
             self.running = running;
             self.gap = false;
         }
     }
     pub fn stop(&mut self, now: u64) {
+        if self.stopped {
+            return;
+        }
         self.snapshot
             .invalidate(Reason::SessionStopped, EventKind::Stopped, now);
         self.stopped = true;
