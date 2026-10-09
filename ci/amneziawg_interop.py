@@ -4,7 +4,8 @@
 The fixture runs the reference device on a userspace network stack: it creates
 no TUN device and changes no routes or DNS. Go module versions are pinned by
 ci/amneziawg_fixture/go.sum."""
-import hashlib,json,os,pathlib,platform,socket,socketserver,struct,subprocess,tempfile,threading
+import hashlib,json,os,pathlib,platform,socket,socketserver,struct,subprocess,tempfile,threading,sys
+from amneziawg_server import TOOLCHAIN
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 MODES={'plain':'unmodified WireGuard wire format','awg2':'junk, signature packets, S1-S4 prefixes and H1-H4 ranges','awg3':'header protection, content padding, random trailers and configured timers'}
 class Digest(socketserver.StreamRequestHandler):
@@ -41,9 +42,10 @@ def forwarding(work,fixture):
     finally:
         process.terminate();process.wait(timeout=10);tcp.shutdown();udp.close()
 def main():
+    subprocess.run([sys.executable, str(ROOT / 'ci/test_amneziawg_cache.py')], check=True)
     with tempfile.TemporaryDirectory(prefix='rtrust-awg-') as tmp:
         work=pathlib.Path(tmp);fixture=work/'fixture'
-        subprocess.run(['go','build','-mod=readonly','-o',str(fixture),'.'],cwd=ROOT/'ci/amneziawg_fixture',check=True,timeout=600)
+        subprocess.run(['go','build','-mod=readonly','-o',str(fixture),'.'],cwd=ROOT/'ci/amneziawg_fixture',env={**os.environ,'GOTOOLCHAIN':TOOLCHAIN},check=True,timeout=600)
         subprocess.run(['cargo','test','--locked','-p','rtrust-engine','--test','amneziawg_fixture','--no-run'],cwd=ROOT,check=True,timeout=1800)
         for mode in MODES:
             client=work/f'{mode}.conf'
