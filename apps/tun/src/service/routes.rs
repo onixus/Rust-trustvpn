@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::Write,
+    net::Ipv4Addr,
     os::unix::fs::{MetadataExt, PermissionsExt},
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -69,6 +70,9 @@ struct Journal {
     version: u32,
     uid: u32,
     networks: Vec<Ipv4Net>,
+    /// Link-scoped resolver; set only when `networks` route it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dns: Option<Ipv4Addr>,
 }
 pub struct Routes {
     journal: Journal,
@@ -152,11 +156,25 @@ impl Routes {
         }
         Ok(())
     }
-    pub fn install(uid: u32, networks: Vec<Ipv4Net>) -> Result<Self, String> {
+    /// The tunneled resolver, if `dns` is routed by `networks` and
+    /// systemd-resolved can take link-scoped DNS; otherwise none.
+    pub fn resolver(networks: &[Ipv4Net], dns: Option<Ipv4Addr>) -> Option<Ipv4Addr> {
+        dns.filter(|ip| {
+            rtrust_control::validate_dns(*ip).is_ok()
+                && networks.iter().any(|n| n.contains(ip))
+                && command("/usr/bin/resolvectl", &["status"]).is_ok()
+        })
+    }
+    pub fn install(
+        uid: u32,
+        networks: Vec<Ipv4Net>,
+        dns: Option<Ipv4Addr>,
+    ) -> Result<Self, String> {
         let journal = Journal {
             version: 1,
             uid,
             networks,
+            dns,
         };
         let mut file = tempfile::NamedTempFile::new_in("/run/rtrust")
             .map_err(|_| "Cannot create recovery journal")?;
@@ -224,6 +242,13 @@ impl Routes {
                 TABLE,
             ])?;
         }
+        // resolved binds link DNS sockets to the device, so queries leave
+        // through the tunnel whatever the querying process's uid.
+        if let Some(dns) = self.journal.dns {
+            command("/usr/bin/resolvectl", &["dns", DEVICE, &dns.to_string()])?;
+            command("/usr/bin/resolvectl", &["domain", DEVICE, "~."])?;
+            command("/usr/bin/resolvectl", &["default-route", DEVICE, "yes"])?;
+        }
         Ok(())
     }
     pub fn recover(uid: u32) -> Result<(), String> {
@@ -239,6 +264,9 @@ impl Routes {
         let journal: Journal =
             serde_json::from_slice(&bytes).map_err(|_| "Invalid recovery journal")?;
         validate_routes(&journal.networks)?;
+        if let Some(dns) = journal.dns {
+            rtrust_control::validate_dns(dns)?;
+        }
         if journal.version != 1 || journal.uid != uid {
             return Err("Recovery journal owner mismatch".into());
         }
@@ -249,6 +277,11 @@ impl Routes {
         .release()
     }
     pub fn release(&mut self) -> Result<(), String> {
+        if self.journal.dns.is_some()
+            && std::path::Path::new("/sys/class/net").join(DEVICE).exists()
+        {
+            command("/usr/bin/resolvectl", &["revert", DEVICE])?;
+        }
         let uid = format!("{}-{}", self.journal.uid, self.journal.uid);
         for net in &self.journal.networks {
             let _ = ip(&[
