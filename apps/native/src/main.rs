@@ -264,6 +264,7 @@ enum Message {
     Saved(std::result::Result<Vec<u8>, String>),
     Target(String),
     Probe,
+    ExplainRoute,
     Probed(u64, std::result::Result<String, String>),
     Cancel,
     MakeDefault,
@@ -1285,6 +1286,102 @@ impl App {
                 }
             }
             Message::Target(s) if !self.busy => self.target = s,
+            Message::ExplainRoute if !self.busy => {
+                use rtrust_profile::routing::{Action, Context, Decision, Reason, Source};
+                let context = match &self.saved_connection.managed_routes {
+                    Some(managed) => Context {
+                        source: Source::ManagedUnknown,
+                        revision: Some(managed.revision.clone()),
+                    },
+                    None => Context {
+                        source: Source::Local,
+                        revision: None,
+                    },
+                };
+                let address = self
+                    .target
+                    .parse::<std::net::SocketAddr>()
+                    .map(|s| s.ip())
+                    .or_else(|_| self.target.parse::<std::net::IpAddr>());
+                let decision: Result<Decision, String> = match address {
+                    Err(_) => Ok(Decision::unknown(context, Reason::SystemPathUnobserved)),
+                    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+                    Ok(ip) if self.mode == Mode::Tun => {
+                        // Linux policy-routes only the desktop UID; the root
+                        // service endpoint never matches that rule.
+                        #[cfg(target_os = "linux")]
+                        let endpoints: Option<Vec<std::net::Ipv4Addr>> = Some(vec![]);
+                        #[cfg(not(target_os = "linux"))]
+                        let endpoints = self
+                            .current()
+                            .and_then(|p| {
+                                p.endpoint
+                                    .addresses
+                                    .iter()
+                                    .map(|a| a.parse::<std::net::SocketAddr>().ok().map(|a| a.ip()))
+                                    .collect::<Option<Vec<_>>>()
+                            })
+                            .map(|ips| {
+                                ips.into_iter()
+                                    .filter_map(|ip| {
+                                        if let std::net::IpAddr::V4(ip) = ip {
+                                            Some(ip)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                            });
+                        self.tun_selection().and_then(|selection| {
+                            selection.explain(ip, endpoints.as_deref(), None, context)
+                        })
+                    }
+                    Ok(_) => Ok(Decision::unknown(
+                        context,
+                        if self.mode == Mode::Socks {
+                            Reason::ProxyScope
+                        } else {
+                            Reason::SystemPathUnobserved
+                        },
+                    )),
+                };
+                self.status = match decision {
+                    Ok(d) => {
+                        let path = match d.action {
+                            Action::Tunnel => "через VPN",
+                            Action::Direct => "напрямую",
+                            Action::Block => "заблокировано",
+                            Action::Unknown => "неизвестно",
+                        };
+                        let reason = match d.reason {
+                            Reason::SelectedPrefix => "адрес входит в выбранные сети",
+                            Reason::ExcludedPrefix => "явное исключение имеет приоритет",
+                            Reason::ReservedAddress => "зарезервированный системный адрес",
+                            Reason::OutsideSelection => "адрес вне выбранных сетей",
+                            Reason::EndpointBypass => "адрес самого VPN endpoint",
+                            Reason::LocalNetworkBypass => "локальная сеть исключена",
+                            Reason::EndpointUnresolved => "адреса endpoint не подтверждены",
+                            Reason::LocalNetworksUnobserved => {
+                                "текущие LAN-маршруты не наблюдались"
+                            }
+                            Reason::UnsupportedFamily => "выбранный режим поддерживает только IPv4",
+                            Reason::ProxyScope => "SOCKS не задаёт системный маршрут",
+                            _ => "системный путь или DNS-происхождение имени не наблюдались",
+                        };
+                        let source = if d.context.source == Source::ManagedUnknown {
+                            "серверная политика; роль admin/user не указана"
+                        } else {
+                            "локальные настройки"
+                        };
+                        format!(
+                            "Прогноз: {path}. Причина: {reason}. Источник: {source}. Ревизия: {}. Правила: {:?}. Защита и фактический трафик не проверялись.",
+                            d.context.revision.as_deref().unwrap_or("неизвестна"),
+                            d.rules
+                        )
+                    }
+                    Err(e) => format!("Предпросмотр отклонён: {e}"),
+                };
+            }
             Message::Probe if !self.busy => {
                 if let Some(p) = self.current().cloned() {
                     self.busy = true;
@@ -1869,6 +1966,10 @@ impl App {
             Page::Diagnostics => {
                 let mut content=column![text("Проверка транспорта").size(22),text("Настоящий HTTP-запрос через TLS/HTTP2 или QUIC/HTTP3 CONNECT. Проверяет обмен данными, но не включает TUN, маршруты, DNS или kill switch."),
                     text("Назначение внутри туннеля (HOST:PORT, обычный HTTP)"),text_input("example.com:80",&self.target).on_input(Message::Target)].spacing(10);
+                content = content.push(
+                    button("Объяснить маршрут · без сетевого запроса")
+                        .on_press_maybe((!self.busy).then_some(Message::ExplainRoute)),
+                );
                 if let Some(p) = self.current() {
                     content = content.push(summary(p));
                     let supported = rtrust_engine::check_capabilities(p).is_ok();
@@ -2233,6 +2334,27 @@ mod tests {
         assert_eq!(app.networks, "198.18.0.1/32");
         let _ = app.update(Message::ToggleConnection);
         drop(task);
+    }
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn offline_preview_keeps_managed_policy_precedence_and_does_not_start_a_session() {
+        let mut app = app();
+        app.mode = Mode::Tun;
+        app.networks = "0.0.0.0/0".into();
+        app.exclude_lan = false;
+        app.saved_connection.managed_routes = Some(rtrust_store::ManagedRoutes {
+            group: "office".into(),
+            revision: "3:4".into(),
+            selection: rtrust_control::Selection::parse("10.0.0.0/8", "", false).unwrap(),
+        });
+        app.target = "198.51.100.1:443".into();
+        let _ = app.update(Message::ExplainRoute);
+        assert!(app.status.contains("напрямую") && app.status.contains("3:4"));
+        assert!(app.status.contains("серверная политика"));
+        assert!(app.session.is_none() && !app.connecting && !app.busy);
+        app.target = "https://sensitive.test/?token=canary".into();
+        let _ = app.update(Message::ExplainRoute);
+        assert!(app.status.contains("неизвестно") && !app.status.contains("canary"));
     }
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     #[test]

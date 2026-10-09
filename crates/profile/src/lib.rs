@@ -2,6 +2,7 @@
 pub mod amnezia;
 pub mod hysteria;
 mod link;
+pub mod routing;
 pub use amnezia::AmneziaWg;
 pub use hysteria::{Hysteria2, Protocol};
 use serde::{Deserialize, Serialize};
