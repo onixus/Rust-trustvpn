@@ -1964,7 +1964,7 @@ impl App {
                 list.into()
             }
             Page::Diagnostics => {
-                let mut content=column![text("Проверка транспорта").size(22),text("Настоящий HTTP-запрос через TLS/HTTP2 или QUIC/HTTP3 CONNECT. Проверяет обмен данными, но не включает TUN, маршруты, DNS или kill switch."),
+                let mut content=column![text("Диагностика и объяснение маршрута").size(22),text("Настоящий HTTP-запрос через TLS/HTTP2 или QUIC/HTTP3 CONNECT. Проверяет обмен данными, но не включает TUN, маршруты, DNS или kill switch."),
                     text("Назначение внутри туннеля (HOST:PORT, обычный HTTP)"),text_input("example.com:80",&self.target).on_input(Message::Target)].spacing(10);
                 content = content.push(
                     button("Объяснить маршрут · без сетевого запроса")
