@@ -255,6 +255,7 @@ impl Monitor {
         self.snapshot
             .invalidate(Reason::SessionStopped, EventKind::Stopped, now);
         self.stopped = true;
+        self.running = false;
         for observation in self.snapshot.observations() {
             observation.outcome = Outcome::Unknown;
             observation.reason = Reason::SessionStopped;
