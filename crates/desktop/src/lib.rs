@@ -1,5 +1,6 @@
 //! Shared desktop connection and encrypted profile controller.
 pub mod connection;
+pub mod diagnostics;
 use rtrust_profile::Profile;
 use rtrust_store::Vault;
 use serde::Serialize;

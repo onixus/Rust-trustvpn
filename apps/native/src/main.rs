@@ -198,6 +198,10 @@ struct App {
     consent: bool,
     revision: Option<Vec<u8>>,
     target: String,
+    system_target: String,
+    diagnostic_report: Option<(u64, rtrust_desktop::diagnostics::Report)>,
+    diagnostic_preview: text_editor::Content,
+    last_diagnostic: Option<std::time::Instant>,
     probe: Option<iced::task::Handle>,
     generation: u64,
     connection_epoch: u64,
@@ -264,6 +268,11 @@ enum Message {
     Saved(std::result::Result<Vec<u8>, String>),
     Target(String),
     Probe,
+    SystemTarget(String),
+    Diagnose,
+    Diagnosed(u64, u64, rtrust_desktop::diagnostics::Report),
+    DiagnosticEdit(text_editor::Action),
+    ExportDiagnostic,
     ExplainRoute,
     Probed(u64, std::result::Result<String, String>),
     Cancel,
@@ -337,6 +346,10 @@ impl App {
             consent: false,
             revision: None,
             target: "example.com:80".into(),
+            system_target: "example.com".into(),
+            diagnostic_report: None,
+            diagnostic_preview: text_editor::Content::new(),
+            last_diagnostic: None,
             probe: None,
             generation: 0,
             connection_epoch: 0,
@@ -892,6 +905,7 @@ impl App {
                 }
             }
             Message::ToggleConnection => {
+                self.cancel_diagnostic();
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 if self.always_on.enabled {
                     return self.always_update(always_on::Action::Disable);
@@ -1382,6 +1396,87 @@ impl App {
                     Err(e) => format!("Предпросмотр отклонён: {e}"),
                 };
             }
+            Message::SystemTarget(s) if !self.busy => self.system_target = s,
+            Message::DiagnosticEdit(action) if !self.busy => {
+                self.diagnostic_preview.perform(action)
+            }
+            Message::Diagnose if !self.busy => {
+                let Some(session) = self.session.clone().filter(Session::is_tun) else {
+                    self.status = "Для системной проверки подключите TUN; отдельный proxy-тест не заменяет её.".into();
+                    return Task::none();
+                };
+                if self
+                    .last_diagnostic
+                    .is_some_and(|t| t.elapsed().as_secs() < 5)
+                {
+                    self.status = "Повторная проверка доступна через пять секунд.".into();
+                    return Task::none();
+                }
+                let target = match rtrust_desktop::diagnostics::Target::parse(&self.system_target) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.status = e.into();
+                        return Task::none();
+                    }
+                };
+                self.last_diagnostic = Some(std::time::Instant::now());
+                self.busy = true;
+                self.generation += 1;
+                let generation = self.generation;
+                let epoch = self.connection_epoch;
+                let selection = if self.mode == Mode::Tun {
+                    self.tun_selection().ok()
+                } else {
+                    None
+                };
+                let context = match &self.saved_connection.managed_routes {
+                    Some(m) => rtrust_profile::routing::Context {
+                        source: rtrust_profile::routing::Source::ManagedUnknown,
+                        revision: Some(m.revision.clone()),
+                    },
+                    None => rtrust_profile::routing::Context {
+                        source: rtrust_profile::routing::Source::Local,
+                        revision: None,
+                    },
+                };
+                self.status = "Системный DNS → маршрут → HEAD HTTPS:443 / через интерфейс VPN. До 15 секунд, без изменения сети.".into();
+                let (task, handle) = Task::perform(
+                    rtrust_desktop::diagnostics::run(target, session, selection, context),
+                    move |r| Message::Diagnosed(generation, epoch, r),
+                )
+                .abortable();
+                self.probe = Some(handle);
+                return task;
+            }
+            Message::Diagnosed(g, epoch, report)
+                if g == self.generation && epoch == self.connection_epoch =>
+            {
+                self.probe = None;
+                self.busy = false;
+                self.status = report.summary();
+                self.diagnostic_preview = text_editor::Content::with_text(&report.redacted_json());
+                self.diagnostic_report = Some((epoch, report));
+            }
+            Message::ExportDiagnostic if !self.busy && self.diagnostic_report.is_some() => {
+                let preview = self.diagnostic_preview.text();
+                self.busy = true;
+                return Task::perform(
+                    async move {
+                        let Some(file) = rfd::AsyncFileDialog::new()
+                            .set_file_name("vpn-diagnostics.json")
+                            .save_file()
+                            .await
+                        else {
+                            return Ok("Экспорт отменён".into());
+                        };
+                        file.write(preview.as_bytes())
+                            .await
+                            .map_err(|_| "Не удалось сохранить отчёт".to_string())?;
+                        Ok("Отредактированный отчёт сохранён; никуда не отправлен".into())
+                    },
+                    Message::Done,
+                );
+            }
             Message::Probe if !self.busy => {
                 if let Some(p) = self.current().cloned() {
                     self.busy = true;
@@ -1436,6 +1531,7 @@ impl App {
         })
     }
     fn request_close(&mut self, exit: bool) -> Task<Message> {
+        self.cancel_diagnostic();
         if self.busy {
             self.pending_close = Some(exit);
             return Task::none();
@@ -1490,7 +1586,15 @@ impl App {
         self.confirm_replace = false;
         self.consent = false;
     }
+    fn cancel_diagnostic(&mut self) {
+        if let Some(handle) = self.probe.take() {
+            handle.abort();
+            self.generation += 1;
+            self.busy = false;
+        }
+    }
     fn disconnect(&mut self) {
+        self.cancel_diagnostic();
         self.connection_epoch += 1;
         if let Some(handle) = self.connection_task.take() {
             handle.abort();
@@ -1966,6 +2070,22 @@ impl App {
             Page::Diagnostics => {
                 let mut content=column![text("Диагностика и объяснение маршрута").size(22),text("Настоящий HTTP-запрос через TLS/HTTP2 или QUIC/HTTP3 CONNECT. Проверяет обмен данными, но не включает TUN, маршруты, DNS или kill switch."),
                     text("Назначение внутри туннеля (HOST:PORT, обычный HTTP)"),text_input("example.com:80",&self.target).on_input(Message::Target)].spacing(10);
+                content = content.push(text("Проверка действующего системного VPN").size(18))
+                    .push(text("Ниже выполняется системное разрешение имени и один HEAD запрос HTTPS:443 / к указанному адресу. Без proxy среды, перенаправлений и прямого сравнения. HTTPS отправляется только при маршруте на интерфейс RTrustTunnel и привязан к нему. Windows пока не поддерживается."))
+                    .push(text_input("hostname или IP без URL и порта", &self.system_target).on_input(Message::SystemTarget))
+                    .push(button("Проверить системный путь / повторить")
+                        .on_press_maybe((!self.busy && self.session.as_ref().is_some_and(Session::is_tun)).then_some(Message::Diagnose)));
+                if let Some((epoch, report)) = &self.diagnostic_report {
+                    let stale = *epoch != self.connection_epoch
+                        || rtrust_control::observations::now_ms()
+                            .saturating_sub(report.finished_at_ms)
+                            > 6000;
+                    content = content.push(text(if stale { "Исторический результат; повторите проверку для текущего состояния." } else { "Результат для одного адреса; защита и общий доступ в интернет не подтверждены." }))
+                        .push(text(report.summary()))
+                        .push(text("Предпросмотр экспорта: адреса, имя сайта, URL, credentials и сырые ошибки исключены. При необходимости отредактируйте перед сохранением."))
+                        .push(text_editor(&self.diagnostic_preview).on_action(Message::DiagnosticEdit).height(160))
+                        .push(button("Сохранить показанный отчёт…").on_press_maybe((!self.busy).then_some(Message::ExportDiagnostic)));
+                }
                 content = content.push(
                     button("Объяснить маршрут · без сетевого запроса")
                         .on_press_maybe((!self.busy).then_some(Message::ExplainRoute)),
@@ -2170,6 +2290,15 @@ mod tests {
         assert!(!app.login_start);
         assert!(app.status.contains("keyring locked"));
         assert!(!app.connecting && app.session.is_none());
+    }
+    #[test]
+    fn system_diagnostic_requires_active_tun_and_report_export_requires_completion() {
+        let mut app = app();
+        let _ = app.update(Message::Diagnose);
+        assert!(app.status.contains("подключите TUN"));
+        assert!(!app.busy && app.probe.is_none() && app.session.is_none());
+        let _ = app.update(Message::ExportDiagnostic);
+        assert!(!app.busy && app.diagnostic_report.is_none());
     }
     #[test]
     fn startup_settings_do_not_connect_or_dirty_profiles() {
