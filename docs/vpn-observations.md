@@ -83,7 +83,7 @@ No release is published or promoted by this PR.
 | --- | --- | --- |
 | macOS Rust suites: control, tun, desktop, mobile, iOS, Android codec, native UI | Passed: 83 tests, no failures | Host tests; Android JNI module needs a target build |
 | Native + WebView macOS compilation | Passed | No installed VPN session was altered |
-| Linux ARM64 container control/tun/mobile suites | Passed initially; final source rerun recorded in PR | Container units, not installed x86_64 or packet-level acceptance |
+| Linux ARM64 container control/tun/mobile suites | Passed: 37 tests on implementation commit 9a382aa | Container units, not installed x86_64 or packet-level acceptance |
 | Windows x86_64 service target check | Passed | Cross-compilation only |
 | iOS simulator app + PacketTunnel + widget build | Passed | Local ad-hoc simulator signing, no device VPN acceptance |
 | Android Java compilation + lintDebug | Passed | No Android JNI target build or emulator acceptance |
