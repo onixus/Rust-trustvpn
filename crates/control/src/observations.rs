@@ -244,6 +244,7 @@ impl Monitor {
             self.stopped = false;
             self.snapshot.invalidate(Reason::SessionChanged, kind, now);
             self.running = running;
+            self.last_poll = now;
             self.gap = false;
         }
     }
@@ -288,6 +289,16 @@ impl Monitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_new_connection_after_long_idle_is_fresh_without_fabricated_gap() {
+        let mut monitor = Monitor::idle(Mode::Mobile, Source::MobileLifecycle, 100);
+        assert!(monitor.sample(200).events.is_empty());
+        monitor.transition(true, 10_000);
+        let started = monitor.sample(10_001);
+        assert_eq!(started.transport.outcome, Outcome::Configured);
+        assert_eq!(started.events.len(), 1);
+        assert_eq!(started.events[0].kind, EventKind::Started);
+    }
     #[test]
     fn stop_and_expiration_cannot_leave_a_verified_session() {
         let now = now_ms();
