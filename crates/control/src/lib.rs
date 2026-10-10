@@ -414,6 +414,15 @@ pub fn validate_dns(ip: std::net::Ipv4Addr) -> Result<(), String> {
     Ok(())
 }
 
+/// The split-mode resolver: `dns`, if valid and routed by `networks`.
+/// Services then point the system at it so names do not leak to the LAN.
+pub fn tunneled_resolver(
+    networks: &[Ipv4Net],
+    dns: Option<std::net::Ipv4Addr>,
+) -> Option<std::net::Ipv4Addr> {
+    dns.filter(|ip| validate_dns(*ip).is_ok() && networks.iter().any(|n| n.contains(ip)))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -650,6 +659,15 @@ mod tests {
         assert_eq!(split["dns"], "1.1.1.1");
         let old: Command = serde_json::from_value(plain).unwrap();
         assert!(matches!(old, Command::Start { dns: None, .. }));
+    }
+    #[test]
+    fn tunneled_resolver_requires_a_routed_valid_address() {
+        let networks: Vec<Ipv4Net> = vec!["0.0.0.0/1".parse().unwrap()];
+        let ip = |s: &str| Some(s.parse().unwrap());
+        assert_eq!(tunneled_resolver(&networks, ip("1.1.1.1")), ip("1.1.1.1"));
+        assert_eq!(tunneled_resolver(&networks, ip("192.168.1.1")), None);
+        assert_eq!(tunneled_resolver(&networks, ip("127.0.0.1")), None);
+        assert_eq!(tunneled_resolver(&networks, None), None);
     }
     #[tokio::test]
     async fn oversized_frame_rejected_before_body_and_secrets_redacted() {

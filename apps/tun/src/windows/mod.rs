@@ -380,11 +380,8 @@ async fn serve(
     )?;
     // A selection that carries the resolver (e.g. everything but the LAN)
     // gets VPN DNS too; otherwise names would leak to the LAN resolver.
-    let _dns_lock = match split_dns.filter(|ip| {
-        dns.is_none()
-            && rtrust_control::validate_dns(*ip).is_ok()
-            && networks.iter().any(|n| n.contains(ip))
-    }) {
+    let split_dns = split_dns.filter(|_| dns.is_none());
+    let _dns_lock = match rtrust_control::tunneled_resolver(&networks, split_dns) {
         Some(resolver) => {
             let mut luid = Default::default();
             if unsafe {

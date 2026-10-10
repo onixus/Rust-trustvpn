@@ -297,7 +297,10 @@ async fn serve(
     };
     // A split selection that carries the resolver (e.g. everything but the
     // LAN) gets VPN DNS too; otherwise names would leak to the LAN resolver.
-    let resolver = dns.or(split_dns.filter(|ip| networks.iter().any(|n| n.contains(ip))));
+    // Like Linux without systemd-resolved, split mode skips DNS when the
+    // system resolver cannot take it; full mode still requires it.
+    let resolver = dns.or(rtrust_control::tunneled_resolver(&networks, split_dns)
+        .filter(|_| super::dns::preflight().is_ok()));
     if let Err(error) = Guard::preflight(&networks, full, resolver) {
         return reply(&mut stream, State::Error, &error).await;
     }

@@ -159,11 +159,8 @@ impl Routes {
     /// The tunneled resolver, if `dns` is routed by `networks` and
     /// systemd-resolved can take link-scoped DNS; otherwise none.
     pub fn resolver(networks: &[Ipv4Net], dns: Option<Ipv4Addr>) -> Option<Ipv4Addr> {
-        dns.filter(|ip| {
-            rtrust_control::validate_dns(*ip).is_ok()
-                && networks.iter().any(|n| n.contains(ip))
-                && command("/usr/bin/resolvectl", &["status"]).is_ok()
-        })
+        rtrust_control::tunneled_resolver(networks, dns)
+            .filter(|_| command("/usr/bin/resolvectl", &["status"]).is_ok())
     }
     pub fn install(
         uid: u32,
@@ -277,10 +274,12 @@ impl Routes {
         .release()
     }
     pub fn release(&mut self) -> Result<(), String> {
+        // Best effort: link DNS dies with the device anyway, and a failing
+        // resolved must not keep the policy rules (and the user) blocked.
         if self.journal.dns.is_some()
             && std::path::Path::new("/sys/class/net").join(DEVICE).exists()
         {
-            command("/usr/bin/resolvectl", &["revert", DEVICE])?;
+            let _ = command("/usr/bin/resolvectl", &["revert", DEVICE]);
         }
         let uid = format!("{}-{}", self.journal.uid, self.journal.uid);
         for net in &self.journal.networks {
