@@ -1,0 +1,25 @@
+# Destination diagnostics (issue #33)
+
+Native Diagnostics now offers a separate **current system path** operation, alongside the explicitly labelled independent TCP transport test and the offline route explain from #32. Connect TUN/full mode, enter a hostname or numeric IP without URL/port, then press the system-path button. The UI discloses system name resolution and one HTTPS:443 HEAD request to `/`. It does not compare with a direct request, change routes/firewall, start another transport, or claim global Internet/guard verification.
+
+## Evidence and bounds
+
+- macOS uses the system resolver (`dscacheutil`) and numeric kernel route lookup. Linux uses the system NSS resolver (`getent ahosts`) and JSON kernel route lookup with the calling effective UID, TCP and destination port 443; this matters for the desktop UID policy rule.
+- Resolver/route subprocesses have three-second limits, 8 KiB output caps and kill-on-drop cancellation. At most eight distinct answers are accepted. Only the first answer is tested; there is no automatic fallback to another address/family. Numeric inputs do not count as a DNS test. Resolver success means an answer was obtained, including system cache/NSS; it does not prove that the DNS request was tunneled.
+- The kernel route must name the service's exact interface (`utun5254` / `rtrust0`). Unknown, malformed, ambiguous and outside routes never trigger HTTPS. This is a per-destination lookup, not packet/guard attestation.
+- HTTPS sockets are bound to that interface to prevent a route change/removal from falling back to physical egress. Environment proxies are disabled. The selected answer is pinned, TLS verification remains enabled, redirects are disabled, and only HEAD headers are requested. The body is not consumed. HTTP/1 parser buffering is bounded by Hyper's default 417792 bytes and header count, rather than an unbounded response download. HTTPS has a five-second total/three-second connect limit; the whole operation has a 15-second deadline. One request per run, no retries or fallback endpoint; UI starts are limited to one per five seconds and cannot overlap.
+- Structured facts distinguish resolver, route, known TLS, connection and timeout outcomes. Wrapped `rustls::Error` is inspected through both `source` and `io::Error::get_ref`; unknown failures remain connection failure. A timeout is not proof of blocking, general loss of Internet, or endpoint failure. HTTP 4xx/5xx still prove that a certified server responded, not that the desired site function works.
+- The existing shared observation snapshot describes the service lifecycle separately. The resolved numeric destination also receives a policy prediction from the shared selection evaluator. Missing endpoint/LAN inputs, full-system predictions and unspecified managed admin/user ownership remain unknown. An opaque revision is exported as a SHA-256 fingerprint.
+- Report timestamps, connection epoch and control generation prevent old session results from becoming current proof. The UI labels reports older than six seconds or from another connection epoch as historical. Stop/close cancel an active diagnostic; repeat uses the same ordinary connection lifecycle.
+
+## Preview and export
+
+The report excludes the hostname, addresses, URLs, headers, response payload, raw errors and profile credentials. Policy revisions are hashed. Native displays an editable JSON preview, then saves only when the user explicitly chooses a file. Nothing is uploaded or automatically sent. User edits replace the default preview; users should redact any information they add themselves.
+
+## Validation and remaining acceptance
+
+Unit/regression coverage includes DNS and route refusal without HTTPS, changed-session rejection, redacted export, exact route identity, bounded command output, actual child cancellation, localhost TLS certificate rejection, a trusted localhost redirect response without following it or consuming its advertised large body, and a missing bound interface with no fallback connection. Native requires a current TUN and refuses export without a completed report.
+
+Windows currently reports unavailable checks and makes no external diagnostic request. Android/iOS and WebView system-diagnostic UI are not added here. Linux interface binding may require privilege on older kernels; failure remains an explicit connection failure and never causes an unbound retry. Flatpak may not expose host resolver/route tools; that is unsupported, not an empty successful result.
+
+This is a draft implementation, not completion of #33's installed acceptance. Still required: installed macOS/Linux/Windows package traffic correlation for split/full and IPv6, unavailable control/endpoint cases, distinguishing transport endpoint failure from a destination failure with independent evidence, package cancellation/timing tests, richer proposed actions through the normal lifecycle, and exact-head Jenkins/package/device acceptance. Existing transport-only tests do not cover these criteria. No historical release is treated as evidence for this source, and no release is promoted.
