@@ -7,7 +7,6 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
-import android.service.quicksettings.TileService;
 import android.widget.RemoteViews;
 import org.json.JSONObject;
 
@@ -47,12 +46,9 @@ public final class VpnWidget extends AppWidgetProvider {
         AppWidgetManager manager = AppWidgetManager.getInstance(context);
         int[] ids = manager.getAppWidgetIds(new ComponentName(context, VpnWidget.class));
         int status = status();
-        if (lastStatus != status) {
-            lastStatus = status;
-            TileService.requestListeningState(context, new ComponentName(context, VpnTileService.class));
-        } else if (!force) {
-            return;
-        }
+        if (!force && lastStatus == status) return;
+        lastStatus = status;
+        VpnTileService.refresh();
         for (int id : ids) {
             RemoteViews views = new RemoteViews(context.getPackageName(),
                 layoutFor(manager.getAppWidgetOptions(id)));
