@@ -5231,6 +5231,7 @@ dependencies = [
  "rtrust-profile",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "windows-service",
  "windows-sys 0.61.2",
@@ -5281,6 +5282,7 @@ dependencies = [
  "rustls-native-certs",
  "rustls-pemfile",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "smoltcp",
  "thiserror 2.0.21",
@@ -5298,8 +5300,10 @@ version = "0.5.0"
 dependencies = [
  "rtrust-control",
  "rtrust-engine",
+ "rtrust-mobile",
  "rtrust-profile",
  "rtrust-store",
+ "serde_json",
  "tokio",
 ]
 

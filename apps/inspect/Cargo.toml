@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+rtrust-mobile = { path = "../../crates/mobile" }
+serde_json.workspace = true
 rtrust-profile.workspace = true
 rtrust-engine.workspace = true
 rtrust-store.workspace = true
