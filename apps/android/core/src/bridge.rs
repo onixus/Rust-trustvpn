@@ -23,7 +23,13 @@ struct Runner {
 static RUNNER: Mutex<Option<Runner>> = Mutex::new(None);
 static STATE: AtomicU8 = AtomicU8::new(0);
 static MESSAGE: Mutex<String> = Mutex::new(String::new());
+static OBSERVATIONS: std::sync::LazyLock<Mutex<rtrust_mobile::Observations>> =
+    std::sync::LazyLock::new(|| Mutex::new(rtrust_mobile::Observations::default()));
 fn state(value: u8, message: &str) {
+    OBSERVATIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .transition(value);
     *MESSAGE.lock().unwrap_or_else(|p| p.into_inner()) = message.into();
     STATE.store(value, Ordering::SeqCst);
 }
@@ -196,7 +202,7 @@ fn status<'a>(env: &mut Env<'a>, _this: JObject<'a>) -> jni::errors::Result<JStr
     let message = MESSAGE.lock().unwrap_or_else(|p| p.into_inner());
     JString::new(
         env,
-        serde_json::json!({"state":STATE.load(Ordering::SeqCst),"message":&*message}).to_string(),
+        serde_json::json!({"state":STATE.load(Ordering::SeqCst),"message":&*message,"observations":OBSERVATIONS.lock().unwrap_or_else(|p| p.into_inner()).snapshot()}).to_string(),
     )
 }
 async fn run(

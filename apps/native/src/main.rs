@@ -1543,7 +1543,7 @@ impl App {
                     15
                 }))
                 .await;
-                session.health().await.map_err(|e| e.to_string())
+                session.lifecycle_health().await.map_err(|e| e.to_string())
             },
             move |r| Message::Health(epoch, r),
         )

@@ -36,7 +36,7 @@ class Pipe:
             if not K.ReadFile(self.handle,buffer,len(buffer),ctypes.byref(count),None):raise ctypes.WinError(ctypes.get_last_error())
             result+=buffer.raw[:count.value]
         return result
-    def request(self,command,version=1):
+    def request(self,command,version=2):
         data=json.dumps(dict(version=version,command=command)).encode();frame=struct.pack('>I',len(data))+data;count=W.DWORD()
         if not K.WriteFile(self.handle,frame,len(frame),ctypes.byref(count),None):raise ctypes.WinError(ctypes.get_last_error())
         assert count.value==len(frame)

@@ -73,16 +73,25 @@ impl Session {
         match self {
             Self::Socks(p) => p.address().to_string(),
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Self::Tun(c) => {
-                if c.status().state == rtrust_control::State::Connected {
-                    c.status().message
-                } else {
-                    "TUN · проверьте блокировку сетей".into()
-                }
-            }
+            Self::Tun(c) => crate::observation_summary(&c.status().observations, true),
         }
     }
 
+    pub fn observations(&self) -> rtrust_control::observations::Snapshot {
+        match self {
+            Self::Socks(_) => rtrust_control::observations::Monitor::new(
+                rtrust_control::observations::Mode::Proxy,
+                rtrust_control::observations::Source::ProxyLifecycle,
+                rtrust_control::observations::now_ms(),
+            )
+            .sample(rtrust_control::observations::now_ms()),
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            Self::Tun(c) => c.status().observations,
+        }
+    }
+    pub fn status_summary(&self, russian: bool) -> String {
+        crate::observation_summary(&self.observations(), russian)
+    }
     pub fn cancel(&self) {
         if let Some(proxy) = self.proxy() {
             proxy.stop();
@@ -98,7 +107,8 @@ impl Session {
             Self::Tun(c) => c.close().await,
         }
     }
-    pub async fn health(&self) -> Result<(), String> {
+    /// Worker/IPC liveness only; use observations for verified network availability.
+    pub async fn lifecycle_health(&self) -> Result<(), String> {
         match self {
             Self::Socks(p) => p.health().await.map_err(|e| e.to_string()),
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]

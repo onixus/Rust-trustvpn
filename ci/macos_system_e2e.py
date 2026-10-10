@@ -12,7 +12,7 @@ class Pipe:
     def request(self,command):
         with self.lock:return self._request(command)
     def _request(self,command):
-        data=json.dumps(dict(version=1,command=command)).encode()
+        data=json.dumps(dict(version=2,command=command)).encode()
         self.socket.sendall(struct.pack('!I',len(data))+data)
         def receive(n):
             data=b''
