@@ -14,7 +14,27 @@ use zeroize::Zeroizing;
 const PACKET_LIMIT: usize = 65535;
 const QUEUE: usize = 64;
 static RUNNER: Mutex<Option<Runner>> = Mutex::new(None);
+static OBSERVATIONS: std::sync::LazyLock<Mutex<rtrust_mobile::Observations>> =
+    std::sync::LazyLock::new(|| Mutex::new(rtrust_mobile::Observations::default()));
 static STATE: AtomicU8 = AtomicU8::new(0); // idle, connecting, connected, reconnecting, failed
+fn set_state(state: u8) {
+    OBSERVATIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .transition(state);
+    STATE.store(state, Ordering::Release);
+}
+/// Owned redacted JSON. Release using rtrust_ios_free; no credentials or destinations.
+#[unsafe(no_mangle)]
+pub extern "C" fn rtrust_ios_observations() -> *mut c_char {
+    let snapshot = OBSERVATIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .snapshot();
+    CString::new(serde_json::to_string(&snapshot).unwrap_or_default())
+        .map(CString::into_raw)
+        .unwrap_or(std::ptr::null_mut())
+}
 struct Runner {
     input: mpsc::Sender<Vec<u8>>,
     output: mpsc::Receiver<Vec<u8>>,
@@ -154,7 +174,7 @@ pub unsafe extern "C" fn rtrust_ios_start(ptr: *const u8, len: usize) -> bool {
             output: outgoing,
         });
         let (cancel, receiver) = watch::channel(false);
-        STATE.store(1, Ordering::Release);
+        set_state(1);
         let thread = std::thread::Builder::new()
             .name("rtrust-ios".into())
             .spawn(move || {
@@ -167,7 +187,7 @@ pub unsafe extern "C" fn rtrust_ios_start(ptr: *const u8, len: usize) -> bool {
                     Ok::<_, std::io::Error>(())
                 }));
                 if !matches!(result, Ok(Ok(()))) {
-                    STATE.store(4, Ordering::Release);
+                    set_state(4);
                 }
             });
         match thread {
@@ -181,7 +201,7 @@ pub unsafe extern "C" fn rtrust_ios_start(ptr: *const u8, len: usize) -> bool {
                 true
             }
             Err(_) => {
-                STATE.store(4, Ordering::Release);
+                set_state(4);
                 false
             }
         }
@@ -192,7 +212,7 @@ async fn run(profile: Profile, device: Arc<Device>, mut cancel: watch::Receiver<
     let dns = match rtrust_engine::dns::encrypted(&profile.endpoint.dns_upstreams) {
         Ok(dns) => dns.unwrap_or_default(),
         Err(_) => {
-            STATE.store(4, Ordering::Release);
+            set_state(4);
             return;
         }
     };
@@ -200,14 +220,14 @@ async fn run(profile: Profile, device: Arc<Device>, mut cancel: watch::Receiver<
         match serde_json::from_value(profile.policy.clone()) {
             Ok(p) => p,
             Err(_) => {
-                STATE.store(4, Ordering::Release);
+                set_state(4);
                 return;
             }
         };
     let router = match policy.compile() {
         Ok(r) => Arc::new(r),
         Err(_) => {
-            STATE.store(4, Ordering::Release);
+            set_state(4);
             return;
         }
     };
@@ -228,7 +248,7 @@ async fn run(profile: Profile, device: Arc<Device>, mut cancel: watch::Receiver<
         };
         match attempt {
             Ok((session, tunnel)) => {
-                STATE.store(2, Ordering::Release);
+                set_state(2);
                 let started = std::time::Instant::now();
                 tokio::select! {
                     _ = cancel.changed() => return,
@@ -245,13 +265,13 @@ async fn run(profile: Profile, device: Arc<Device>, mut cancel: watch::Receiver<
                 | rtrust_engine::Error::Profile
                 | rtrust_engine::Error::Unsupported(_),
             ) => {
-                STATE.store(4, Ordering::Release);
+                set_state(4);
                 let _ = cancel.changed().await;
                 return;
             }
             Err(_) => {}
         }
-        STATE.store(3, Ordering::Release);
+        set_state(3);
         tokio::select! { _ = cancel.changed() => return, _ = tokio::time::sleep(Duration::from_secs(delay)) => {} }
         delay = (delay * 2).min(30);
     }
@@ -268,7 +288,7 @@ pub extern "C" fn rtrust_ios_stop() {
         let _ = runner.cancel.send(true);
         let _ = runner.thread.join();
     }
-    STATE.store(0, Ordering::Release);
+    set_state(0);
 }
 /// # Safety
 /// ptr must reference len readable bytes during this call.

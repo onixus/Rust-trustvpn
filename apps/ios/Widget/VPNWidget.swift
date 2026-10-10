@@ -24,7 +24,7 @@ struct VPNWidgetView: View {
     let entry: VPNEntry
     private var label: String {
         switch entry.status {
-        case .connected: return "Connected"
+        case .connected: return "Transport running · availability unchecked"
         case .connecting, .reasserting: return "Connecting"
         case .disconnecting: return "Disconnecting"
         case .disconnected, .invalid: return "Disconnected"
@@ -36,7 +36,7 @@ struct VPNWidgetView: View {
             if family == .systemSmall { Text("R-TrustTunnel").font(.headline); Text("Last status").font(.caption2); Text(LocalizedStringKey(label)).font(.caption).foregroundStyle(.secondary) }
             if #available(iOS 17.0, *) {
                 Button(intent: ToggleVPNIntent()) { Image(systemName: "power").font(.title).padding(8) }
-                    .buttonStyle(.borderedProminent).tint(entry.status == .connected ? .green : .blue)
+                    .buttonStyle(.borderedProminent).tint(entry.status == .connected ? .orange : .blue)
                     .accessibilityLabel("Toggle VPN")
             } else { Link(destination: URL(string: "rtrust://home")!) { Image(systemName: "power").font(.title) } }
         }

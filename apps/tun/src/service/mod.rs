@@ -178,6 +178,18 @@ async fn reply(
     .await
     .map_err(|_| "IPC write timed out")?
 }
+async fn reply_observed(
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
+    state: State,
+    message: &str,
+    monitor: &mut rtrust_control::observations::Monitor,
+) -> Result<(), String> {
+    let mut response = Response::new(state, message);
+    response.observations = monitor.sample(rtrust_control::observations::now_ms());
+    tokio::time::timeout(Duration::from_secs(5), write(stream, &response))
+        .await
+        .map_err(|_| "IPC write timed out")?
+}
 async fn serve(
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
     uid: u32,
@@ -189,6 +201,9 @@ async fn serve(
         .map_err(|_| "IPC read timed out")??;
     if request.version != VERSION {
         return reply(&mut stream, State::Error, "IPC version mismatch").await;
+    }
+    if matches!(request.command, Command::Capabilities) {
+        return write(&mut stream, &Response::new(State::Idle, "Capabilities")).await;
     }
     if let Some(supervisor) = supervisor {
         match request.command {
@@ -333,7 +348,16 @@ async fn serve(
     };
     let mut retry_delay = 2;
     let mut connected_since = Instant::now();
-    reply(
+    let mut monitor = rtrust_control::observations::Monitor::new(
+        if full {
+            rtrust_control::observations::Mode::Full
+        } else {
+            rtrust_control::observations::Mode::Split
+        },
+        rtrust_control::observations::Source::ServiceLifecycle,
+        rtrust_control::observations::now_ms(),
+    );
+    reply_observed(
         &mut stream,
         State::Connected,
         if full {
@@ -341,9 +365,11 @@ async fn serve(
         } else {
             "IPv4-сети подключены"
         },
+        &mut monitor,
     )
     .await?;
     let mut state = State::Connected;
+    monitor.transition(true, rtrust_control::observations::now_ms());
     loop {
         let mut pending = Box::pin(read::<Request>(&mut stream));
         let request = loop {
@@ -351,7 +377,7 @@ async fn serve(
                 request = &mut pending => break request?,
                 _ = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() => {
                     workers.tunnel = None;
-                    state = State::Blocked;
+                    state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
                     // A flapping endpoint must not reset the backoff indefinitely.
                     if connected_since.elapsed() >= Duration::from_secs(30) { retry_delay = 2; }
                     workers.retry(&profile, &mut retry_delay, full);
@@ -367,7 +393,7 @@ async fn serve(
                         if reattached.is_ok() {
                             workers.tunnel = Some(tokio::spawn(prepared.run()));
                             connected_since = Instant::now();
-                            state = State::Connected;
+                            state = State::Connected; monitor.transition(true, rtrust_control::observations::now_ms());
                             continue;
                         }
                     }
@@ -380,7 +406,7 @@ async fn serve(
             return Err("IPC version mismatch".into());
         }
         match request.command {
-            Command::Status => reply(
+            Command::Status => reply_observed(
                 &mut stream,
                 state.clone(),
                 if state == State::Connected {
@@ -396,12 +422,16 @@ async fn serve(
                         "Связь потеряна. Выбранные сети заблокированы; выполняется переподключение."
                     }
                 },
+                &mut monitor,
             )
             .await?,
             Command::Stop => {
                 workers.stop().await;
                 return match routes.release() {
-                    Ok(()) => reply(&mut stream, State::Idle, "Отключено").await,
+                    Ok(()) => {
+                        monitor.stop(rtrust_control::observations::now_ms());
+                        reply_observed(&mut stream, State::Idle, "Отключено", &mut monitor).await
+                    }
                     Err(e) => reply(&mut stream, State::Blocked, &e).await,
                 };
             }
@@ -427,4 +457,29 @@ pub(crate) async fn boot_serve(
 
 pub(crate) fn boot_active() -> Result<bool, String> {
     boot::active()
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn capabilities_do_not_require_or_steal_a_lease() {
+        let lease = Arc::new(Mutex::new(()));
+        let _held = lease.clone().lock_owned().await;
+        let (mut client, server) = tokio::io::duplex(4096);
+        let task = tokio::spawn(serve(server, 1000, lease, None));
+        write(
+            &mut client,
+            &Request {
+                version: VERSION,
+                command: Command::Capabilities,
+            },
+        )
+        .await
+        .unwrap();
+        let response: Response = read(&mut client).await.unwrap();
+        assert_eq!(response.state, State::Idle);
+        assert!(!response.capabilities.system_probes);
+        task.await.unwrap().unwrap();
+    }
 }

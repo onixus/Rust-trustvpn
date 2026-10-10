@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+sha2 = "0.10"
 rtrust-profile.workspace = true
 serde.workspace = true
 serde_json.workspace = true

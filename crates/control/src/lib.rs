@@ -6,7 +6,8 @@ pub const SOCKET: &str = "/run/rtrust/control.sock";
 #[cfg(target_os = "macos")]
 pub const SOCKET: &str = "/private/var/run/rtrust/control.sock";
 pub const LIMIT: usize = 2 * rtrust_profile::MAX_INPUT;
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
+pub mod observations;
 pub use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
 
@@ -36,6 +37,7 @@ pub enum Command {
         profile: Box<rtrust_profile::Profile>,
         dns: std::net::Ipv4Addr,
     },
+    Capabilities,
     Status,
     PrepareUpdate,
     EnableAlwaysOn {
@@ -62,6 +64,24 @@ pub struct Response {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_on: Option<bool>,
+    pub observations: observations::Snapshot,
+    pub capabilities: Capabilities,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Capabilities {
+    pub observations_schema: u32,
+    pub lifecycle_observations: bool,
+    pub system_probes: bool,
+}
+impl Capabilities {
+    pub fn current() -> Self {
+        Self {
+            observations_schema: observations::SCHEMA,
+            lifecycle_observations: true,
+            system_probes: false,
+        }
+    }
 }
 impl Response {
     pub fn new(state: State, message: &str) -> Self {
@@ -70,6 +90,8 @@ impl Response {
             state,
             message: message.into(),
             always_on: None,
+            observations: observations::Snapshot::unknown(observations::Mode::Unknown),
+            capabilities: Capabilities::current(),
         }
     }
 }
@@ -118,6 +140,114 @@ impl Selection {
             return Err(format!("{net}: адрес не совпадает с началом сети"));
         }
         self.routes(&[], &[]).map(|_| ())
+    }
+    /// Offline prediction using the same subtraction as route installation.
+    /// None means missing evidence; an empty slice means the runtime inspected it.
+    pub fn explain(
+        &self,
+        destination: std::net::IpAddr,
+        endpoints: Option<&[Ipv4Addr]>,
+        local: Option<&[Ipv4Net]>,
+        mut context: rtrust_profile::routing::Context,
+    ) -> Result<rtrust_profile::routing::Decision, String> {
+        use rtrust_profile::routing::{Action, Basis, Decision, Reason, RuleId, RuleKind};
+        self.validate()?;
+        if context
+            .revision
+            .as_ref()
+            .is_some_and(|r| r.is_empty() || r.len() > 256 || r.chars().any(char::is_control))
+        {
+            return Err("Недопустимая ревизия политики".into());
+        }
+        if context.revision.is_none() {
+            use sha2::Digest;
+            context.revision = Some(format!(
+                "{:x}",
+                sha2::Sha256::digest(serde_json::to_vec(self).map_err(|_| "Invalid selection")?)
+            ));
+        }
+        // Validate the final runtime prefix set before describing a configuration
+        // that could not be installed at all.
+        if let Some(endpoints) = endpoints
+            && (!self.exclude_lan || local.is_some())
+        {
+            self.routes(endpoints, local.unwrap_or_default())?;
+        }
+        let std::net::IpAddr::V4(ip) = destination else {
+            return Ok(Decision::unknown(context, Reason::UnsupportedFamily));
+        };
+        let make = |action, rules, reason| Decision {
+            action,
+            scope: rtrust_profile::routing::Scope::SelectedIpv4,
+            rules,
+            context: context.clone(),
+            reason,
+            basis: Basis::NumericDestination,
+            prediction: true,
+        };
+        if let Some(index) = RESERVED
+            .iter()
+            .position(|s| s.parse::<Ipv4Net>().unwrap().contains(&ip))
+        {
+            return Ok(make(
+                Action::Direct,
+                vec![RuleId {
+                    kind: RuleKind::Reserved,
+                    index: index as u8,
+                }],
+                Reason::ReservedAddress,
+            ));
+        }
+        let rules: Vec<_> = self
+            .exclude
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.contains(&ip))
+            .map(|(index, _)| RuleId {
+                kind: RuleKind::Exclude,
+                index: index as u8,
+            })
+            .collect();
+        if !rules.is_empty() {
+            return Ok(make(Action::Direct, rules, Reason::ExcludedPrefix));
+        }
+        let rules: Vec<_> = self
+            .include
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.contains(&ip))
+            .map(|(index, _)| RuleId {
+                kind: RuleKind::Include,
+                index: index as u8,
+            })
+            .collect();
+        if rules.is_empty() {
+            return Ok(make(Action::Direct, rules, Reason::OutsideSelection));
+        }
+        let Some(endpoints) = endpoints else {
+            return Ok(Decision::unknown(context, Reason::EndpointUnresolved));
+        };
+        if endpoints.contains(&ip) {
+            return Ok(make(Action::Direct, vec![], Reason::EndpointBypass));
+        }
+        if self.exclude_lan {
+            let Some(local) = local else {
+                return Ok(Decision::unknown(context, Reason::LocalNetworksUnobserved));
+            };
+            if local.iter().any(|n| n.contains(&ip)) {
+                return Ok(make(Action::Direct, vec![], Reason::LocalNetworkBypass));
+            }
+        }
+        let installed = self.routes(endpoints, local.unwrap_or_default())?;
+        Ok(make(
+            if installed.iter().any(|n| n.contains(&ip)) {
+                Action::Tunnel
+            } else {
+                Action::Direct
+            },
+            rules,
+            Reason::SelectedPrefix,
+        ))
     }
     /// Prefixes to install. `local` is subtracted only with `exclude_lan`.
     pub fn routes(
@@ -286,6 +416,82 @@ pub fn validate_dns(ip: std::net::Ipv4Addr) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selection_explain_matches_the_prefixes_installed_with_runtime_inputs() {
+        use rtrust_profile::routing::{Action, Context, Reason};
+        let selection = Selection::parse("0.0.0.0/0", "10.0.0.0/8", true).unwrap();
+        let endpoints: [Ipv4Addr; 1] = ["203.0.113.1".parse().unwrap()];
+        let local = ["192.168.1.0/24".parse().unwrap()];
+        let routes = selection.routes(&endpoints, &local).unwrap();
+        for text in [
+            "1.1.1.1",
+            "10.1.1.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "192.168.1.1",
+            "203.0.113.1",
+            "203.0.113.2",
+            "224.0.0.1",
+        ] {
+            let ip: Ipv4Addr = text.parse().unwrap();
+            let explanation = selection
+                .explain(
+                    ip.into(),
+                    Some(&endpoints),
+                    Some(&local),
+                    Context::default(),
+                )
+                .unwrap();
+            assert_eq!(
+                explanation.action == Action::Tunnel,
+                routes.iter().any(|n| n.contains(&ip)),
+                "{text}"
+            );
+            assert!(explanation.prediction);
+            assert!(explanation.context.revision.is_some());
+        }
+        let unknown = selection
+            .explain("8.8.8.8".parse().unwrap(), None, None, Context::default())
+            .unwrap();
+        assert_eq!(unknown.action, Action::Unknown);
+        assert_eq!(unknown.reason, Reason::EndpointUnresolved);
+        let lan = selection
+            .explain(
+                "8.8.8.8".parse().unwrap(),
+                Some(&[]),
+                None,
+                Context::default(),
+            )
+            .unwrap();
+        assert_eq!(lan.reason, Reason::LocalNetworksUnobserved);
+        assert_eq!(
+            selection
+                .explain(
+                    "2001:db8::1".parse().unwrap(),
+                    Some(&[]),
+                    Some(&[]),
+                    Context::default()
+                )
+                .unwrap()
+                .action,
+            Action::Unknown
+        );
+    }
+    #[test]
+    fn selection_explain_rejects_an_uninstallable_final_policy() {
+        let selection = Selection::parse("203.0.113.1/32", "", false).unwrap();
+        let endpoints: [Ipv4Addr; 1] = ["203.0.113.1".parse().unwrap()];
+        assert!(
+            selection
+                .explain(
+                    endpoints[0].into(),
+                    Some(&endpoints),
+                    Some(&[]),
+                    rtrust_profile::routing::Context::default()
+                )
+                .is_err()
+        );
+    }
     #[test]
     fn full_dns_rejects_local_and_non_unicast_destinations() {
         for address in [

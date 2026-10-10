@@ -22,10 +22,14 @@ impl App {
         let command = match action {
             Action::Observed(generation, result) => {
                 self.always_on.polling = false;
-                if generation == self.always_on.generation
-                    && let Ok(r) = result
-                {
-                    self.always_observed(r);
+                if generation == self.always_on.generation {
+                    match result {
+                        Ok(r) => self.always_observed(r),
+                        Err(_) => {
+                            self.always_on.status =
+                                "Связь со службой потеряна; состояние защиты не подтверждено".into()
+                        }
+                    }
                 }
                 return Task::none();
             }
@@ -78,7 +82,11 @@ impl App {
                 rtrust_control::State::Error => {}
             }
         }
-        self.always_on.status = response.message;
+        self.always_on.status = format!(
+            "{}\n{}",
+            response.message,
+            rtrust_desktop::observation_summary(&response.observations, true)
+        );
     }
     pub(super) fn always_poll(&mut self) -> Option<Task<Message>> {
         if self.always_on.polling

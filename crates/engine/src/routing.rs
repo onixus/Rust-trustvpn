@@ -5,7 +5,9 @@ use hickory_proto::{
     rr::RData,
 };
 use ipnet::IpNet;
+pub use rtrust_profile::routing::{Action, Basis, Context, Decision, Reason, RuleId, RuleKind};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
@@ -32,6 +34,7 @@ struct Rule {
 }
 pub struct Router {
     selective: bool,
+    context: Context,
     rules: Vec<Rule>,
     learned: Mutex<HashMap<(IpAddr, String), Instant>>,
 }
@@ -98,6 +101,24 @@ fn rule(text: &str) -> Result<Rule> {
 }
 impl Policy {
     pub fn compile(&self) -> Result<Router> {
+        self.compile_with_context(Context::default())
+    }
+    pub fn compile_with_context(&self, mut context: Context) -> Result<Router> {
+        if context
+            .revision
+            .as_ref()
+            .is_some_and(|r| r.is_empty() || r.len() > 256 || r.chars().any(char::is_control))
+        {
+            return Err(Error::Unsupported("routing revision"));
+        }
+        if context.revision.is_none() {
+            let mut hash = Sha256::new();
+            for value in std::iter::once(&self.mode).chain(&self.exclusions) {
+                hash.update((value.len() as u64).to_be_bytes());
+                hash.update(value.as_bytes());
+            }
+            context.revision = Some(format!("{:x}", hash.finalize()));
+        }
         if !matches!(self.mode.as_str(), "general" | "selective")
             || self.exclusions.len() > 64
             || (self.mode == "selective" && self.exclusions.is_empty())
@@ -106,6 +127,7 @@ impl Policy {
         }
         Ok(Router {
             selective: self.mode == "selective",
+            context,
             rules: self
                 .exclusions
                 .iter()
@@ -120,48 +142,130 @@ impl Router {
         self.selective || !self.rules.is_empty()
     }
     pub fn tunneled(&self, destination: SocketAddr) -> bool {
-        // DNS is always resolved inside VPN; it also supplies authenticated provenance for domain rules.
+        self.evaluate(destination).0 == Action::Tunnel
+    }
+    /// Same evaluator used by the dataplane. DNS cache names are evidence of
+    /// resolver answers, not proof of the application/hostname of this flow.
+    pub fn decide(&self, destination: SocketAddr) -> Decision {
+        let (action, mask, reason, basis) = self.evaluate(destination);
+        let rules = (0..self.rules.len())
+            .filter(|index| mask & (1u64 << index) != 0)
+            .map(|index| RuleId {
+                kind: RuleKind::Flow,
+                index: index as u8,
+            })
+            .collect();
+        Decision {
+            action,
+            scope: rtrust_profile::routing::Scope::FlowPolicy,
+            rules,
+            context: self.context.clone(),
+            reason,
+            basis,
+            prediction: true,
+        }
+    }
+    fn evaluate(&self, destination: SocketAddr) -> (Action, u64, Reason, Basis) {
+        let make = |action, rules, reason, basis| (action, rules, reason, basis);
         if destination.port() == 53 {
-            return true;
+            return make(
+                Action::Tunnel,
+                0,
+                Reason::DnsAlwaysTunneled,
+                Basis::NumericDestination,
+            );
         }
         let mut names = self.learned.lock().unwrap_or_else(|p| p.into_inner());
         names.retain(|_, expiry| *expiry > Instant::now());
-        let matches = |name: Option<&str>| {
-            self.rules.iter().any(|r| {
-                if r.port.is_some_and(|p| p != destination.port()) {
-                    return false;
-                }
-                match &r.host {
-                    Host::Any => true,
-                    Host::Net(net) => net.contains(&destination.ip()),
-                    Host::Domain(domain, wildcard) => name.is_some_and(|name| {
-                        name == domain || (*wildcard && name.ends_with(&format!(".{domain}")))
-                    }),
-                }
-            })
+        let matching = |name: Option<&str>| {
+            self.rules
+                .iter()
+                .enumerate()
+                .fold(0u64, |mask, (index, r)| {
+                    if r.port.is_some_and(|p| p != destination.port()) {
+                        return mask;
+                    }
+                    let matched = match &r.host {
+                        Host::Any => true,
+                        Host::Net(net) => net.contains(&destination.ip()),
+                        Host::Domain(domain, wildcard) => name.is_some_and(|name| {
+                            name == domain || (*wildcard && name.ends_with(&format!(".{domain}")))
+                        }),
+                    };
+                    if matched {
+                        mask | (1u64 << index)
+                    } else {
+                        mask
+                    }
+                })
         };
         let known: Vec<_> = names
             .keys()
             .filter(|(ip, _)| *ip == destination.ip())
             .map(|(_, name)| name.as_str())
             .collect();
-        let matched = matches(None) || known.iter().any(|name| matches(Some(name)));
-        if self.selective {
-            // Cached application DNS / external encrypted resolvers may hide the name.
-            // Unknown destinations remain tunneled when domain rules are present.
-            matched
-                || (known.is_empty()
-                    && self
-                        .rules
-                        .iter()
-                        .any(|r| matches!(r.host, Host::Domain(..))))
-        } else {
-            // Shared CDN IPs with conflicting observed names stay protected.
-            !matched
-                || (!known.is_empty()
-                    && !matches(None)
-                    && known.iter().any(|name| !matches(Some(name))))
+        let numeric = matching(None);
+        let mut rules = numeric;
+        for name in &known {
+            rules |= matching(Some(name));
         }
+        let matched = rules != 0;
+        let has_domains = self
+            .rules
+            .iter()
+            .any(|r| matches!(r.host, Host::Domain(..)));
+        let basis = if numeric != 0 || !has_domains {
+            Basis::NumericDestination
+        } else if known.is_empty() {
+            Basis::MissingDnsName
+        } else {
+            Basis::ObservedDnsCache
+        };
+        if self.selective {
+            if matched {
+                make(Action::Tunnel, rules, Reason::MatchedRule, basis)
+            } else if known.is_empty() && has_domains {
+                make(
+                    Action::Tunnel,
+                    rules,
+                    Reason::UnknownNameProtected,
+                    Basis::MissingDnsName,
+                )
+            } else {
+                make(Action::Direct, rules, Reason::DefaultDirect, basis)
+            }
+        } else if !known.is_empty()
+            && numeric == 0
+            && matched
+            && known.iter().any(|name| matching(Some(name)) == 0)
+        {
+            make(
+                Action::Tunnel,
+                rules,
+                Reason::SharedIpConflictProtected,
+                Basis::SharedDnsNames,
+            )
+        } else if matched {
+            make(Action::Direct, rules, Reason::MatchedRule, basis)
+        } else {
+            make(
+                Action::Tunnel,
+                rules,
+                if basis == Basis::MissingDnsName {
+                    Reason::UnknownNameProtected
+                } else {
+                    Reason::DefaultTunnel
+                },
+                basis,
+            )
+        }
+    }
+    /// A user-entered hostname is not authenticated DNS provenance. This offline
+    /// preview deliberately makes no resolver request and no direct connection.
+    pub fn preview_hostname(&self) -> Decision {
+        let mut decision = Decision::unknown(self.context.clone(), Reason::SystemPathUnobserved);
+        decision.scope = rtrust_profile::routing::Scope::FlowPolicy;
+        decision
     }
     pub fn learn(&self, query: &[u8], answer: &[u8]) {
         let (Ok(query), Ok(answer)) = (Message::from_vec(query), Message::from_vec(answer)) else {
@@ -199,10 +303,22 @@ impl Router {
                 break;
             }
         }
+        // DNS provenance cannot outlive any CNAME link used to establish it.
+        // Bound conservatively across the queried chain; unrelated additions
+        // neither shorten nor supply evidence for this destination.
+        let chain_ttl = answer
+            .answers
+            .iter()
+            .filter(|record| {
+                allowed.contains(&record.name) && matches!(record.data, RData::CNAME(_))
+            })
+            .map(|record| record.ttl)
+            .min()
+            .unwrap_or(300);
         let mut learned = self.learned.lock().unwrap_or_else(|p| p.into_inner());
         learned.retain(|_, expiry| *expiry > Instant::now());
         for record in &answer.answers {
-            if !allowed.contains(&record.name) || record.ttl == 0 {
+            if !allowed.contains(&record.name) || record.ttl == 0 || chain_ttl == 0 {
                 continue;
             }
             let ip = match &record.data {
@@ -216,7 +332,7 @@ impl Router {
             }
             learned.insert(
                 key,
-                Instant::now() + Duration::from_secs(record.ttl.min(300) as u64),
+                Instant::now() + Duration::from_secs(record.ttl.min(chain_ttl).min(300) as u64),
             );
         }
     }
@@ -224,6 +340,201 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cname_evidence_is_bounded_by_chain_ttl_and_ignores_unrelated_records() {
+        use hickory_proto::{
+            op::Query,
+            rr::{
+                Name, Record, RecordType,
+                rdata::{A, CNAME},
+            },
+        };
+        let router = Policy {
+            mode: "general".into(),
+            exclusions: vec!["allowed.test".into()],
+        }
+        .compile()
+        .unwrap();
+        let name = Name::from_ascii("allowed.test.").unwrap();
+        let cname = Name::from_ascii("cdn.test.").unwrap();
+        let mut query = Message::query();
+        query.metadata.id = 41;
+        query.add_query(Query::query(name.clone(), RecordType::A));
+        let mut answer = query.clone();
+        answer.metadata.message_type = MessageType::Response;
+        answer.add_answer(Record::from_rdata(
+            name,
+            1,
+            RData::CNAME(CNAME(cname.clone())),
+        ));
+        answer.add_answer(Record::from_rdata(
+            cname,
+            60,
+            RData::A(A("192.0.2.1".parse().unwrap())),
+        ));
+        answer.add_answer(Record::from_rdata(
+            Name::from_ascii("unrelated.test.").unwrap(),
+            0,
+            RData::A(A("192.0.2.2".parse().unwrap())),
+        ));
+        router.learn(&query.to_vec().unwrap(), &answer.to_vec().unwrap());
+        assert_eq!(
+            router.decide("192.0.2.1:443".parse().unwrap()).action,
+            Action::Direct
+        );
+        let learned = router.learned.lock().unwrap();
+        assert_eq!(learned.len(), 1);
+        assert!(*learned.values().next().unwrap() <= Instant::now() + Duration::from_secs(1));
+    }
+    #[test]
+    fn explanation_keeps_dns_unknown_name_ipv6_and_port_semantics() {
+        let cases = [
+            (
+                "general",
+                vec!["192.0.2.0/24"],
+                "192.0.2.1:443",
+                Action::Direct,
+                Reason::MatchedRule,
+            ),
+            (
+                "general",
+                vec!["*:53"],
+                "192.0.2.1:53",
+                Action::Tunnel,
+                Reason::DnsAlwaysTunneled,
+            ),
+            (
+                "selective",
+                vec!["*.example.test:443"],
+                "192.0.2.1:80",
+                Action::Tunnel,
+                Reason::UnknownNameProtected,
+            ),
+            (
+                "selective",
+                vec!["192.0.2.1:443"],
+                "192.0.2.1:80",
+                Action::Direct,
+                Reason::DefaultDirect,
+            ),
+            (
+                "general",
+                vec!["[2001:db8::1]:443"],
+                "[2001:db8::1]:443",
+                Action::Direct,
+                Reason::MatchedRule,
+            ),
+            (
+                "general",
+                vec!["2001:db8::/32"],
+                "[2001:db8::1]:80",
+                Action::Direct,
+                Reason::MatchedRule,
+            ),
+        ];
+        for (mode, rules, target, action, reason) in cases {
+            let router = Policy {
+                mode: mode.into(),
+                exclusions: rules.into_iter().map(str::to_owned).collect(),
+            }
+            .compile()
+            .unwrap();
+            let destination = target.parse().unwrap();
+            let decision = router.decide(destination);
+            assert_eq!(decision.action, action);
+            assert_eq!(decision.reason, reason);
+            assert_eq!(router.tunneled(destination), action == Action::Tunnel);
+        }
+    }
+    #[test]
+    fn cdn_conflict_and_expired_dns_are_explained_and_policy_swaps_clear_names() {
+        let policy = Policy {
+            mode: "general".into(),
+            exclusions: vec!["allowed.example.test".into()],
+        };
+        let router = policy.compile().unwrap();
+        let target: SocketAddr = "192.0.2.1:443".parse().unwrap();
+        let expiry = Instant::now() + Duration::from_secs(60);
+        router
+            .learned
+            .lock()
+            .unwrap()
+            .insert((target.ip(), "allowed.example.test".into()), expiry);
+        assert_eq!(router.decide(target).action, Action::Direct);
+        router
+            .learned
+            .lock()
+            .unwrap()
+            .insert((target.ip(), "protected.example.test".into()), expiry);
+        let conflict = router.decide(target);
+        assert_eq!(conflict.action, Action::Tunnel);
+        assert_eq!(conflict.reason, Reason::SharedIpConflictProtected);
+        assert_eq!(conflict.basis, Basis::SharedDnsNames);
+        assert_eq!(
+            conflict.rules,
+            [RuleId {
+                kind: RuleKind::Flow,
+                index: 0
+            }]
+        );
+        router
+            .learned
+            .lock()
+            .unwrap()
+            .retain(|(_, name), _| name == "allowed.example.test");
+        *router
+            .learned
+            .lock()
+            .unwrap()
+            .get_mut(&(target.ip(), "allowed.example.test".into()))
+            .unwrap() = Instant::now() - Duration::from_secs(1);
+        assert_eq!(router.decide(target).reason, Reason::UnknownNameProtected);
+        assert_eq!(
+            policy.compile().unwrap().decide(target).basis,
+            Basis::MissingDnsName
+        );
+    }
+    #[test]
+    fn numeric_override_and_revision_boundaries_remain_explicit() {
+        let policy = Policy {
+            mode: "general".into(),
+            exclusions: vec!["allowed.test".into(), "192.0.2.0/24".into()],
+        };
+        let router = policy.compile().unwrap();
+        let target: SocketAddr = "192.0.2.1:443".parse().unwrap();
+        router.learned.lock().unwrap().insert(
+            (target.ip(), "protected.test".into()),
+            Instant::now() + Duration::from_secs(60),
+        );
+        assert_eq!(router.decide(target).action, Action::Direct);
+        assert_eq!(router.decide(target).basis, Basis::NumericDestination);
+        assert_eq!(
+            router.context.revision,
+            policy.compile().unwrap().context.revision
+        );
+        assert_ne!(
+            router.context.revision,
+            Policy {
+                mode: "selective".into(),
+                ..policy.clone()
+            }
+            .compile()
+            .unwrap()
+            .context
+            .revision
+        );
+        assert!(
+            policy
+                .compile_with_context(Context {
+                    source: rtrust_profile::routing::Source::Admin,
+                    revision: Some("x".repeat(257))
+                })
+                .is_err()
+        );
+        assert_eq!(router.preview_hostname().action, Action::Unknown);
+        let serialized = serde_json::to_string(&router.decide(target)).unwrap();
+        assert!(!serialized.contains("allowed.test") && !serialized.contains("192.0.2.1"));
+    }
     #[test]
     fn numeric_and_port_rules_have_explicit_general_selective_semantics() {
         let general = Policy {

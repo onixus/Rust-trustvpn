@@ -29,7 +29,7 @@
     <string name="always_status_unknown">"Open Android settings to check the system policy."</string>
     <string name="always_help">"Select R-TrustTunnel in Android VPN settings. Enable Always-on VPN and Block connections without VPN. The system then blocks traffic even if the app is force-stopped. Reopen the app to recover if Android does not restart it. With lockdown, apps outside your VPN selection have no Internet access. Keep a valid default profile saved."</string>
     <string name="open_settings">"Open settings"</string>
-    <string name="connected">"Connected"</string>
+    <string name="connected">"Transport running · availability unchecked"</string>
     <string name="connecting">"Connecting…"</string>
     <string name="reconnecting">"Reconnecting · traffic blocked"</string>
     <string name="connection_failed">"Connection failed. Check the profile and network."</string>
@@ -103,4 +103,11 @@
     <string name="profiles_header">Profiles · %1$d</string>
     <string name="empty_hint">Import a file, paste a config or scan a QR code.</string>
     <string name="profile_menu">Profile actions</string>
+    <string name="observation_unchecked">Unchecked</string>
+    <string name="observation_stale">Stale</string>
+    <string name="observation_unsupported">Check unsupported</string>
+    <string name="observation_failed">Failed</string>
+    <string name="observation_passed">Verified</string>
+    <string name="observation_running">Running, availability unchecked</string>
+    <string name="observation_summary">Transport: %1$s · route: %2$s · DNS: %3$s · guard: %4$s · connectivity: %5$s</string>
 </resources>

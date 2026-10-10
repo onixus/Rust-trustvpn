@@ -1,5 +1,6 @@
 //! Shared desktop connection and encrypted profile controller.
 pub mod connection;
+pub mod diagnostics;
 use rtrust_profile::Profile;
 use rtrust_store::Vault;
 use serde::Serialize;
@@ -17,7 +18,9 @@ pub struct View {
     pub profiles: Vec<Summary>,
     pub connection: rtrust_store::ConnectionSettings,
     pub connected: bool,
+    pub verified: bool,
     pub status: String,
+    pub observations: Option<rtrust_control::observations::Snapshot>,
 }
 pub struct Controller {
     pub vault: Vault,
@@ -75,6 +78,11 @@ impl Controller {
                 c
             },
             connected: self.session.is_some(),
+            verified: self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.observations().verified()),
+            observations: self.session.as_ref().map(connection::Session::observations),
             status: self.status.clone(),
         }
     }
@@ -183,6 +191,47 @@ impl Controller {
         self.status.clear();
         Ok(())
     }
+}
+
+/// Localize stable machine outcomes at the UI boundary; never parse service messages.
+pub fn observation_summary(
+    snapshot: &rtrust_control::observations::Snapshot,
+    russian: bool,
+) -> String {
+    use rtrust_control::observations::Outcome;
+    fn label(outcome: Outcome, ru: bool) -> &'static str {
+        match (outcome, ru) {
+            (Outcome::Passed, true) => "проверено",
+            (Outcome::Passed, false) => "verified",
+            (Outcome::Failed, true) => "сбой",
+            (Outcome::Failed, false) => "failed",
+            (Outcome::Configured, true) => "запущен, доступность не проверена",
+            (Outcome::Configured, false) => "running, availability unchecked",
+            (Outcome::Stale, true) => "устарело",
+            (Outcome::Stale, false) => "stale",
+            (Outcome::Unsupported, true) => "проверка не поддерживается",
+            (Outcome::Unsupported, false) => "check unsupported",
+            (Outcome::Unknown, true) => "не проверено",
+            (Outcome::Unknown, false) => "unchecked",
+        }
+    }
+    let names = if russian {
+        ["Транспорт", "маршрут", "DNS", "защита", "доступность"]
+    } else {
+        ["Transport", "route", "DNS", "guard", "connectivity"]
+    };
+    names
+        .into_iter()
+        .zip([
+            &snapshot.transport,
+            &snapshot.route,
+            &snapshot.dns,
+            &snapshot.guard,
+            &snapshot.connectivity,
+        ])
+        .map(|(name, o)| format!("{name}: {}", label(o.outcome, russian)))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 #[cfg(test)]

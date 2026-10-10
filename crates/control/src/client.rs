@@ -55,13 +55,26 @@ async fn exchange(stream: &mut Pipe, command: Command, seconds: u64) -> Result<R
         )
         .await?;
         let response: Response = read(stream).await?;
-        if response.version != VERSION {
+        if response.version != VERSION
+            || response.capabilities.observations_schema != observations::SCHEMA
+            || response.observations.schema != observations::SCHEMA
+            || response.observations.events.len() > observations::MAX_EVENTS
+        {
             return Err("IPC version mismatch".into());
         }
         Ok(response)
     })
     .await
     .map_err(|_| "Служба не отвечает")?
+}
+// Negotiate on a separate authenticated connection before sending credentials or mutating.
+async fn negotiate() -> Result<(), String> {
+    let mut pipe = socket().await?;
+    let response = exchange(&mut pipe, Command::Capabilities, 5).await?;
+    if !response.capabilities.lifecycle_observations || response.state != State::Idle {
+        return Err("IPC capabilities unavailable; update the UI and service together".into());
+    }
+    Ok(())
 }
 /// Holding this connection reserves an idle service for installer maintenance.
 pub struct MaintenancePermit {
@@ -75,11 +88,13 @@ impl Client {
         ) {
             return Err("Invalid always-on operation".into());
         }
+        negotiate().await?;
         let mut pipe = socket().await?;
         exchange(&mut pipe, command, 60).await
     }
 
     pub async fn prepare_update() -> Result<MaintenancePermit, String> {
+        negotiate().await?;
         let mut stream = socket().await?;
         let response = exchange(&mut stream, Command::PrepareUpdate, 5).await?;
         if response.state != State::Idle {
@@ -118,6 +133,7 @@ impl Client {
         .await
     }
     async fn start_command(command: Command) -> Result<Self, String> {
+        negotiate().await?;
         let mut stream = socket().await?;
         let response = exchange(&mut stream, command, 45).await?;
         if response.state != State::Connected {
@@ -131,7 +147,16 @@ impl Client {
                 tokio::select! {
                     reply = receiver.recv() => {
                         if let Some(reply) = reply {
-                            let result = exchange(&mut stream, Command::Stop, 45).await.and_then(|r| if r.state == State::Idle { Ok(()) } else { Err(r.message) });
+                            let result = exchange(&mut stream, Command::Stop, 45).await.and_then(|r| {
+                                let result = if r.state == State::Idle { Ok(()) } else { Err(r.message.clone()) };
+                                *shared.lock().unwrap() = r;
+                                result
+                            });
+                            if result.is_err() {
+                                let mut r = shared.lock().unwrap();
+                                r.state = State::Blocked;
+                                r.observations.invalidate(observations::Reason::ControlLost, observations::EventKind::ControlLost, observations::now_ms());
+                            }
                             let _ = reply.send(result);
                         }
                         break;
@@ -139,7 +164,13 @@ impl Client {
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {
                         match exchange(&mut stream, Command::Status, 5).await {
                             Ok(response) => *shared.lock().unwrap() = response,
-                            Err(_) => { *shared.lock().unwrap() = Response::new(State::Blocked, "Связь со службой потеряна; проверьте блокировку сетей перед повторным подключением."); break; }
+                            Err(_) => {
+                                let mut response = shared.lock().unwrap();
+                                response.state = State::Blocked;
+                                response.message = "Связь со службой потеряна; состояние защиты не подтверждено".into();
+                                response.observations.invalidate(observations::Reason::ControlLost, observations::EventKind::ControlLost, observations::now_ms());
+                                break;
+                            }
                         }
                     }
                 }
@@ -152,7 +183,9 @@ impl Client {
         })))
     }
     pub fn status(&self) -> Response {
-        self.0.status.lock().unwrap().clone()
+        let mut response = self.0.status.lock().unwrap().clone();
+        response.observations.expire(observations::now_ms());
+        response
     }
     pub async fn close(self) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
@@ -164,6 +197,7 @@ impl Client {
         rx.await.map_err(|_| "Отключение службы не подтверждено")?
     }
     pub async fn recover() -> Result<(), String> {
+        negotiate().await?;
         let mut stream = socket().await?;
         let response = exchange(&mut stream, Command::Recover, 45).await?;
         if response.state == State::Idle {
@@ -171,5 +205,54 @@ impl Client {
         } else {
             Err(response.message)
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn incompatible_schema_and_old_response_are_rejected() {
+        for schema in [0, observations::SCHEMA + 1] {
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            let task = tokio::spawn(async move {
+                let request: Request = read(&mut server).await.unwrap();
+                assert!(matches!(request.command, Command::Capabilities));
+                let mut response = Response::new(State::Idle, "caps");
+                response.capabilities.observations_schema = schema;
+                write(&mut server, &response).await.unwrap();
+            });
+            assert!(
+                exchange(&mut client, Command::Capabilities, 1)
+                    .await
+                    .is_err()
+            );
+            task.await.unwrap();
+        }
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(async move {
+            let _: Request = read(&mut server).await.unwrap();
+            write(
+                &mut server,
+                &serde_json::json!({"version":1,"state":"Idle","message":"old"}),
+            )
+            .await
+            .unwrap();
+        });
+        assert!(
+            exchange(&mut client, Command::Capabilities, 1)
+                .await
+                .is_err()
+        );
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn response_timeout_is_bounded() {
+        let (mut client, _server) = UnixStream::pair().unwrap();
+        assert!(
+            exchange(&mut client, Command::Capabilities, 0)
+                .await
+                .is_err()
+        );
     }
 }

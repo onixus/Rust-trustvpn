@@ -91,7 +91,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("SERVICE stopped");
         return Ok(());
     }
-    if args.get(1).is_some_and(|s| s == "--probe-http") {
+    if args.get(1).is_some_and(|s| s == "--explain-mobile-flow") {
+        let destination: std::net::SocketAddr = args
+            .get(2)
+            .and_then(|s| s.to_str())
+            .ok_or("Explain requires IP:PORT; it performs no DNS lookup")?
+            .parse()?;
+        let (_, plan) = rtrust_mobile::prepare(p)?;
+        let decision = plan.flow.compile()?.decide(destination);
+        println!("{}", serde_json::to_string(&decision)?);
+    } else if args.get(1).is_some_and(|s| s == "--probe-http") {
         let target = args
             .get(2)
             .and_then(|s| s.to_str())

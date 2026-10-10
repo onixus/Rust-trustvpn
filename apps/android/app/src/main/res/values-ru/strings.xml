@@ -29,7 +29,7 @@
     <string name="always_status_unknown">"Проверьте системную политику в настройках Android."</string>
     <string name="always_help">"Выберите R-TrustTunnel в настройках VPN Android. Включите «Постоянная VPN» и «Блокировать соединения без VPN». Система блокирует трафик даже после принудительной остановки приложения. Если Android не перезапустит его, откройте приложение снова. При блокировке приложения вне списка VPN не имеют доступа к интернету. Сохраните рабочий профиль по умолчанию."</string>
     <string name="open_settings">"Открыть настройки"</string>
-    <string name="connected">"Подключено"</string>
+    <string name="connected">"Транспорт запущен · доступность не проверена"</string>
     <string name="connecting">"Подключение…"</string>
     <string name="reconnecting">"Переподключение · трафик заблокирован"</string>
     <string name="connection_failed">"Ошибка подключения. Проверьте профиль и сеть."</string>
@@ -103,4 +103,11 @@
     <string name="profiles_header">Профили · %1$d</string>
     <string name="empty_hint">Импортируйте файл, вставьте конфиг или отсканируйте QR-код.</string>
     <string name="profile_menu">Действия с профилем</string>
+    <string name="observation_unchecked">Не проверено</string>
+    <string name="observation_stale">Устарело</string>
+    <string name="observation_unsupported">Проверка не поддерживается</string>
+    <string name="observation_failed">Сбой</string>
+    <string name="observation_passed">Проверено</string>
+    <string name="observation_running">Запущен, доступность не проверена</string>
+    <string name="observation_summary">Транспорт: %1$s · маршрут: %2$s · DNS: %3$s · защита: %4$s · доступность: %5$s</string>
 </resources>
