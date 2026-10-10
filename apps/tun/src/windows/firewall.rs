@@ -127,6 +127,76 @@ fn add_in(
     };
     check(unsafe { FwpmFilterAdd0(engine.0, &filter, ptr::null_mut(), ptr::null_mut()) })
 }
+/// Split-mode DNS lock: port 53 leaves only through `luid` or loopback. The filters live
+/// in a dynamic session, so they vanish with this handle or the process and
+/// never outlive the lease; Windows would otherwise race every adapter's DNS.
+pub struct DnsLock(#[allow(dead_code)] Engine);
+// The WFP engine handle is not tied to the opening thread.
+unsafe impl Send for DnsLock {}
+pub fn lock_dns(mut luid: u64) -> Result<DnsLock, String> {
+    let session = FWPM_SESSION0 {
+        flags: FWPM_SESSION_FLAG_DYNAMIC,
+        ..Default::default()
+    };
+    let mut h = ptr::null_mut();
+    check(unsafe { FwpmEngineOpen0(ptr::null(), 10, ptr::null(), &session, &mut h) })?;
+    let engine = Engine(h);
+    engine.transaction(|| {
+        let mut name: Vec<u16> = "R-TrustTunnel DNS\0".encode_utf16().collect();
+        for layer in [
+            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+        ] {
+            // Local resolvers (dnscrypt-proxy, Docker, WSL) listen on loopback.
+            let mut loopback = u32_condition(FWPM_CONDITION_FLAGS, FWP_CONDITION_FLAG_IS_LOOPBACK);
+            loopback.matchType = FWP_MATCH_FLAGS_ALL_SET;
+            let tunnel = condition(
+                FWPM_CONDITION_IP_LOCAL_INTERFACE,
+                FWP_UINT64,
+                FWP_CONDITION_VALUE0_0 { uint64: &mut luid },
+            );
+            for extra in [Some(tunnel), Some(loopback), None] {
+                let permit = extra.is_some();
+                let mut conditions = vec![condition(
+                    FWPM_CONDITION_IP_REMOTE_PORT,
+                    FWP_UINT16,
+                    FWP_CONDITION_VALUE0_0 { uint16: 53 },
+                )];
+                conditions.extend(extra);
+                let filter = FWPM_FILTER0 {
+                    displayData: FWPM_DISPLAY_DATA0 {
+                        name: name.as_mut_ptr(),
+                        description: ptr::null_mut(),
+                    },
+                    layerKey: layer,
+                    subLayerKey: FWPM_SUBLAYER_UNIVERSAL,
+                    weight: FWP_VALUE0 {
+                        r#type: FWP_UINT8,
+                        Anonymous: FWP_VALUE0_0 {
+                            uint8: if permit { 15 } else { 0 },
+                        },
+                    },
+                    numFilterConditions: conditions.len() as u32,
+                    filterCondition: conditions.as_mut_ptr(),
+                    action: FWPM_ACTION0 {
+                        r#type: if permit {
+                            FWP_ACTION_PERMIT
+                        } else {
+                            FWP_ACTION_BLOCK
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                check(unsafe {
+                    FwpmFilterAdd0(engine.0, &filter, ptr::null_mut(), ptr::null_mut())
+                })?;
+            }
+        }
+        Ok(())
+    })?;
+    Ok(DnsLock(engine))
+}
 /// `ports` replaces each endpoint's own port with these ranges (Hysteria port hopping).
 pub fn install(
     luid: u64,

@@ -54,7 +54,7 @@ impl Session {
                     .map_err(|e| e.to_string())
             }
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Mode::Tun => rtrust_control::Client::start(profile, selection)
+            Mode::Tun => rtrust_control::Client::start(profile, selection, dns.parse().ok())
                 .await
                 .map(Self::Tun),
         }

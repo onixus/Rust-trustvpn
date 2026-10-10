@@ -221,7 +221,7 @@ async fn serve(
         )
         .await;
     };
-    let (profile, networks, dns) = match request.command {
+    let (profile, networks, dns, split_dns) = match request.command {
         Command::PrepareUpdate => {
             if FullRoutes::pending() || Routes::pending() {
                 return reply(
@@ -251,6 +251,7 @@ async fn serve(
             networks,
             exclude,
             exclude_lan,
+            dns,
         } => {
             // Only this user's traffic is policy-routed; the service's own
             // endpoint connection never matches, so no endpoint exception.
@@ -269,11 +270,14 @@ async fn serve(
                     },
                 )
             }) {
-                Ok(routes) => (profile, routes, None),
+                Ok(routes) => {
+                    let resolver = Routes::resolver(&routes, dns);
+                    (profile, routes, None, resolver)
+                }
                 Err(error) => return reply(&mut stream, State::Error, &error).await,
             }
         }
-        Command::StartFull { profile, dns } => (profile, vec![], Some(dns)),
+        Command::StartFull { profile, dns } => (profile, vec![], Some(dns), None),
         _ => return reply(&mut stream, State::Error, "Start or Recover required").await,
     };
     if let Err(error) = if let Some(dns) = dns {
@@ -333,7 +337,7 @@ async fn serve(
     let mut routes = match if let Some(dns) = dns {
         FullRoutes::install(uid, dns, &profile.endpoint.addresses).map(Guard::Full)
     } else {
-        Routes::install(uid, networks).map(Guard::Selected)
+        Routes::install(uid, networks, split_dns).map(Guard::Selected)
     } {
         Ok(routes) => routes,
         Err(error) => return reply(&mut stream, State::Error, &error).await,

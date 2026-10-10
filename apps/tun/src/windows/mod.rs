@@ -254,7 +254,7 @@ async fn serve(
     let Ok(_lease) = lease.try_lock_owned() else {
         return reply(pipe, State::Error, "Служба уже обслуживает подключение").await;
     };
-    let (profile, selection, dns) = match request.command {
+    let (profile, selection, dns, split_dns) = match request.command {
         Command::PrepareUpdate => {
             if full::pending()? {
                 return reply(
@@ -274,6 +274,7 @@ async fn serve(
             networks,
             exclude,
             exclude_lan,
+            dns,
         } => {
             let selection = rtrust_control::Selection {
                 include: networks,
@@ -283,11 +284,11 @@ async fn serve(
             if let Err(error) = selection.validate() {
                 return reply(pipe, State::Error, &error).await;
             }
-            (profile, selection, None)
+            (profile, selection, None, dns)
         }
         Command::StartFull { profile, dns } => {
             rtrust_control::validate_dns(dns)?;
-            (profile, Default::default(), Some(dns))
+            (profile, Default::default(), Some(dns), None)
         }
         Command::Recover => {
             full::recover()?;
@@ -377,6 +378,28 @@ async fn serve(
             .map_err(|_| "Wintun interface index unavailable")?,
         &networks,
     )?;
+    // A selection that carries the resolver (e.g. everything but the LAN)
+    // gets VPN DNS too; otherwise names would leak to the LAN resolver.
+    let split_dns = split_dns.filter(|_| dns.is_none());
+    let _dns_lock = match rtrust_control::tunneled_resolver(&networks, split_dns) {
+        Some(resolver) => {
+            let mut luid = Default::default();
+            if unsafe {
+                windows_sys::Win32::NetworkManagement::IpHelper::ConvertInterfaceIndexToLuid(
+                    device
+                        .if_index()
+                        .map_err(|_| "Wintun interface index unavailable")?,
+                    &mut luid,
+                )
+            } != 0
+            {
+                return Err("Wintun interface LUID unavailable".into());
+            }
+            full::interface_dns(luid, resolver)?;
+            Some(firewall::lock_dns(unsafe { luid.Value })?)
+        }
+        None => None,
+    };
     if dns.is_some() {
         routes.full_ipv6(
             device

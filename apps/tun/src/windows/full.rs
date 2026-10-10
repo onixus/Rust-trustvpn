@@ -151,6 +151,10 @@ pub fn install(
     for item in &journal.routes {
         check(unsafe { CreateIpForwardEntry2(&route(item)) })?;
     }
+    interface_dns(luid, dns)
+}
+/// The adapter's own resolver; it disappears with the Wintun adapter.
+pub fn interface_dns(luid: NET_LUID_LH, dns: Ipv4Addr) -> Result<(), String> {
     let mut guid = windows_sys::core::GUID::default();
     check(unsafe { ConvertInterfaceLuidToGuid(&luid, &mut guid) })?;
     let mut nameserver: Vec<u16> = dns.to_string().encode_utf16().chain(Some(0)).collect();
