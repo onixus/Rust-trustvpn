@@ -1,4 +1,6 @@
 <resources>
+    <string name="app_name" translatable="false">R-TrustTunnel</string>
+    <string name="widget_vpn" translatable="false">VPN</string>
     <string name="widget_toggle">Toggle VPN</string>
     <string name="widget_last_status">Last status</string>
     <string name="widget_description">Connect or disconnect your default VPN profile. Opens the app for VPN consent and Always-on settings.</string>
