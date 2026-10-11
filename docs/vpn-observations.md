@@ -70,8 +70,17 @@ for one minute. Capabilities advertise `network_events=true` for the desktop
 services. Android now invalidates observations when ConnectivityManager
 changes the selected non-VPN underlying Network or reports changed link
 properties for that network. Repeated callbacks for another network or identical
-properties are not events. Android native suspend/resume collection is still
-missing; screen unlock or a delayed poll is not relabelled as a wake event.
+properties are not events. Android now also samples
+[SystemClock](https://developer.android.com/reference/android/os/SystemClock):
+`elapsedRealtime` includes deep sleep and `uptimeMillis` excludes it. An increase
+of at least two seconds in their difference invalidates the active session on
+the first existing widget poll after CPU execution resumes. Clock reads are
+bracketed by uptime samples; the new lower bound is compared with the old
+upper bound so read skew cannot inflate a short sleep past the threshold.
+A sampling span over 50 ms, invalid/reversed clocks or a new session only reset
+the baseline. Cleanup revokes the session before
+native Stop. Screen unlock and an awake polling delay are not resume evidence;
+this is kernel-clock evidence, not a native wake callback or measured device latency.
 
 iOS PacketTunnel now uses an
 [NWPathMonitor](https://developer.apple.com/documentation/network/nwpathmonitor):
@@ -98,7 +107,7 @@ not durable across process restart. Observations are advisory and do not change 
 | Windows selected / full / Always-on | Service worker lifecycle; failure/reconnect/gap; polled adapter change, kernel-clock resume | Unknown; no live system probe | Unknown | Native and WebView share the Rust verdict |
 | macOS selected / full | Service worker lifecycle; failure/reconnect/gap; routing-socket network change, kernel-clock resume | Unknown; no live system probe | Unknown | Native and WebView share the Rust verdict |
 | Desktop SOCKS | Proxy lifecycle only | Unsupported for the system path | Unknown | Explicit proxy scope |
-| Android | Shared mobile worker lifecycle; failure/recovery/gap; selected underlying Network/link-property changes; no native wake collection | Unknown; VpnService setup is not a live audit of DNS or lockdown | Unknown | JNI JSON, localized five-part summary, no green lifecycle badge |
+| Android | Shared mobile worker lifecycle; failure/recovery/gap; selected underlying Network/link-property changes; kernel deep-sleep clock evidence | Unknown; VpnService setup is not a live audit of DNS or lockdown | Unknown | JNI JSON, localized five-part summary, no green lifecycle badge |
 | iOS | Shared mobile worker lifecycle; failure/recovery/gap; provider path updates and native wake callback | Unknown; NetworkExtension status is not a live audit | Unknown | Redacted provider message; generation/age checked; localized summary |
 
 Capabilities explicitly advertise `system_probes=false`. The adapters retain
@@ -121,7 +130,7 @@ Windows target compilation does not prove installed WFP/Wintun behavior. Linux
 container unit tests do not establish a physical-node or installed-package gate.
 Existing historical acceptance reports apply to their own commits and packages.
 
-Issue #31 remains open: Android native resume collection, durable event history if required, installed-package timing/cancellation and
+Issue #31 remains open: durable event history if required, installed-package timing/cancellation and
 actual DNS/route/guard/system-connectivity evidence still need acceptance.
 Issue #33 supplies the real-path probe; issue #36 tracks package/device evidence.
 No release is published or promoted by this PR.
@@ -155,6 +164,11 @@ No release is published or promoted by this PR.
   adapter regression checks rapid network-change generation invalidation,
   rejection of an old result, native resume staleness, unknown DNS/guard and
   ignored events after Stop. Host Android codec tests do not compile Android JNI.
+- Injected pure Java clock/session regression checks a long awake polling gap,
+  subthreshold and two-second deep sleep, one event per change, clock reversal,
+  invalid/skewed reads, Stop and stale-session rejection. The standalone runner
+  uses an existing JDK and is required by the three-platform GitHub check and
+  Android build script; missing Java fails rather than skipping.
 - Modified Android NativeCore/TunnelService Java boundary compiles against the
   existing Android 36 SDK and previously generated app classes/resources in a
   disposable networkless compiler container. This is not a fresh full APK build,

@@ -22,13 +22,23 @@ public final class TunnelService extends VpnService {
     private ParcelFileDescriptor tun;
     private ConnectivityManager connectivity;
     private final Object networkEvents = new Object();
+    private final DeepSleepObserver sleepObserver = new DeepSleepObserver();
     private volatile ConnectivityManager.NetworkCallback callback;
     private volatile boolean stopping, recovering;
     private boolean cleaned;
     private final Handler widgetHandler = new Handler(Looper.getMainLooper());
     private final Runnable widgetPoll = new Runnable() {
-        public void run() { VpnWidget.refresh(TunnelService.this, false); widgetHandler.postDelayed(this, 1000); }
+        public void run() { observeDeepSleep(); VpnWidget.refresh(TunnelService.this, false); widgetHandler.postDelayed(this, 1000); }
     };
+    private void observeDeepSleep() {
+        synchronized (networkEvents) {
+            if (callback == null || stopping) return;
+            long before = SystemClock.uptimeMillis();
+            long elapsed = SystemClock.elapsedRealtime();
+            long after = SystemClock.uptimeMillis();
+            if (sleepObserver.sample(callback, elapsed, before, after)) NativeCore.INSTANCE.resumed();
+        }
+    }
     private static volatile TunnelService running;
     static void refreshPolicy() {
         TunnelService service = running;
@@ -195,6 +205,12 @@ public final class TunnelService extends VpnService {
                 endpoint.put("addresses", resolved);
                 if (stopping) return;
                 if (!NativeCore.INSTANCE.start(profile.toString(), tun.getFd(), this)) throw new IllegalStateException("Core rejected profile");
+                synchronized (networkEvents) {
+                    if (callback != null && !stopping) {
+                        sleepObserver.start(callback);
+                        observeDeepSleep();
+                    }
+                }
                 problem = "";
                 return;
             } catch (UnknownHostException unavailable) { /* Network/DNS can be unavailable at boot. */ }
@@ -220,6 +236,7 @@ public final class TunnelService extends VpnService {
             // must not touch a later worker using the process-wide Rust adapter.
             previousCallback = callback;
             callback = null;
+            sleepObserver.stop();
         }
         if (previousCallback != null) try {
             connectivity.unregisterNetworkCallback(previousCallback);

@@ -150,7 +150,9 @@ is accounted for explicitly:
   behavior and real system corroboration still require acceptance for the exact
   integrated package. Android selected underlying Network/link-property changes
   and iOS provider path/wake callbacks are now wired to the shared invalidation
-  adapter. Android native resume collection, physical-device callback evidence
+  adapter. Android deep-sleep clock differences also invalidate active-session
+  observations when existing polling resumes; injected clock/session tests do
+  not establish native callback/device latency. Physical-device event evidence
   and durable history, if required, remain separate gaps. Lifecycle
   transport/configuration remains distinct from DNS, route, guard and end-to-end
   proof; unknown/unsupported must never be green.

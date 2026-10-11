@@ -12,5 +12,7 @@ public final class NativeCore {
     public native void stop();
     /** OS-selected underlying network changed; no address/name crosses JNI. */
     public native void networkChanged();
+    /** Kernel clocks report deep sleep while this native session is active. */
+    public native void resumed();
     public native String status();
 }
