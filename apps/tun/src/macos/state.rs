@@ -169,8 +169,7 @@ impl Guard {
         full: bool,
         resolver: Option<Ipv4Addr>,
         endpoints: Vec<SocketAddrV4>,
-        udp: bool,
-        ports: &[(u16, u16)],
+        permits: &[crate::failover::Permit],
     ) -> Result<Self, String> {
         let mut planned = vec![];
         if full {
@@ -215,7 +214,7 @@ impl Guard {
             pf_token: None,
         };
         save(&j, true)?;
-        let script = firewall::policy(uid, full, &j.networks, &j.endpoints, udp, ports);
+        let script = firewall::policy(uid, full, &j.networks, permits);
         j.pf_token = Some(firewall::install(Path::new(DIRECTORY), &script)?);
         save(&j, false)?;
         for route in &j.routes {

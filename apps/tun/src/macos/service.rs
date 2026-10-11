@@ -294,8 +294,8 @@ async fn serve(
     let prepared = {
         let mut unexpected = [0];
         tokio::select! {
-            result = tokio::time::timeout(Duration::from_secs(30), device::Prepared::connect(failover.current())) => match result {
-                Ok(Ok(prepared)) => prepared,
+            result = failover.connect_initial(|profile| async move { device::Prepared::connect(&profile).await }) => match result {
+                Ok(prepared) => prepared,
                 _ => return reply(&mut stream, State::Error, "Не удалось открыть TUN: проверьте профиль, TLS и доступность endpoint").await,
             },
             _ = stream.read(&mut unexpected) => return Err("IPC closed during connect".into()),
@@ -307,8 +307,7 @@ async fn serve(
         full,
         resolver,
         endpoints,
-        failover.udp_transport(),
-        &failover.hop_port_ranges(),
+        &failover.permits()?,
     ) {
         Ok(guard) => guard,
         Err(error) => return reply(&mut stream, State::Blocked, &error).await,
@@ -329,6 +328,9 @@ async fn serve(
         rtrust_control::observations::Source::ServiceLifecycle,
         rtrust_control::observations::now_ms(),
     );
+    if failover.active().is_some_and(|index| index > 0) {
+        monitor.failed_over(rtrust_control::observations::now_ms());
+    }
     reply_observed(
         &mut stream,
         State::Connected,

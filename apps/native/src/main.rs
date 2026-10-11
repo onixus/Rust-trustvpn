@@ -1095,6 +1095,11 @@ impl App {
                 match result {
                     Ok(session) => {
                         self.session = Some(session);
+                        if let Some(index) = self.session.as_ref().and_then(Session::active_profile)
+                            && let Some(name) = self.connection_candidates.get(index as usize)
+                        {
+                            self.connection_name = name.clone();
+                        }
                         if std::mem::take(&mut self.reconnect_then_check) {
                             self.last_diagnostic = None;
                             let monitor = self.monitor_connection();

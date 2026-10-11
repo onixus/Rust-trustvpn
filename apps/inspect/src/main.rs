@@ -85,6 +85,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(target_os = "windows")]
         let terminated = std::future::pending::<()>();
         tokio::pin!(terminated);
+        if let Some(index) = client.status().active_profile.filter(|&index| index > 0) {
+            println!("SERVICE active {index}");
+        }
         println!("SERVICE connected");
         std::io::stdout().flush()?;
         let mut last_state = rtrust_control::State::Connected;

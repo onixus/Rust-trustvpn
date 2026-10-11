@@ -29,14 +29,21 @@ backups to a service that does not advertise the capability.
    pin IPv4 answers only, because their guards pin IPv4 endpoint exceptions;
    an IPv6-only endpoint is therefore unusable there.
 2. **One guard for all candidates.** The firewall, routes and DNS are installed
-   once with the union of all pinned endpoint addresses, UDP use and Hysteria
-   hop ports. Switching between candidates therefore never touches the guard:
+   once with each candidate's pinned endpoint address, transport protocol and
+   own Hysteria hop ports. TCP and UDP exceptions coexist, and hopping ranges
+   are never applied to another candidate. Switching between candidates
+   therefore never touches the guard:
    there is no moment when it is lifted or rebuilt, and no direct bypass. The
    cost is that the endpoint addresses of the allowed backups have the same
    exception as the requested endpoint for the whole session. That exception
    exists for the service's own transport. Applications still cannot reach
    those addresses directly; the Linux test checks this.
-3. **Choosing a candidate.** The transport worker uses the active candidate.
+3. **Choosing a candidate.** Startup tries each allowed candidate in order,
+   up to two attempts each, within one shared 30 s handshake budget. A single
+   candidate retains its original one-attempt, 30 s budget. Stop/EOF cancels
+   the pending attempt. Protection is installed before reporting Connected;
+   no startup attempt is reported as protected before the guard is installed.
+   The transport worker uses the active candidate.
    A failed reconnect counts as a failure, and so does a session that ends
    within 30 s of connecting, so a flapping endpoint is not mistaken for a
    working one. After **two** consecutive failures the next allowed candidate
@@ -49,7 +56,9 @@ backups to a service that does not advertise the capability.
    session is established and the guard refresh succeeds, as for any
    reconnect. Until then the host stays in the blocked state.
 5. **Visibility.** `Response.active_profile` is the active index (0 is the
-   requested profile). The observation journal records `failed_over`. Native
+   requested profile, preserving the original request indices even when a
+   backup was skipped during DNS pinning). The observation journal records
+   `failed_over`. Native
    shows "via backup profile «name»" and the desktop summary mentions the
    switch for a minute.
 6. **Stop.** Stop cancels the pending attempt; an endpoint that returns later

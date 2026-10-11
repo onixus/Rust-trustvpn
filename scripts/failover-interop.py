@@ -254,6 +254,39 @@ def main():
             s.ns("ip", "link", "show", "rtrust0", success=False)
             fetch("10.99.0.2")
             print("PASS Stop restores routes/firewall; a returning backup cannot resurrect the tunnel", flush=True)
+
+            # Cold start with the primary already down and the first backup
+            # unresolvable. The working backup must keep its request index 2.
+            skipped = d / "skipped.json"
+            skipped_data = json.loads(profiles["backup"].read_text())
+            skipped_data["name"] = "skipped"
+            skipped_data["endpoint"]["addresses"] = ["rtrust-unresolvable.invalid:8443"]
+            skipped.write_text(json.dumps(skipped_data))
+            skipped.chmod(0o600)
+            os.chown(skipped, 1000, 1000)
+            restarted = subprocess.Popen(
+                ["ip", "netns", "exec", s.NS, "setpriv", "--reuid=1000", "--regid=1000", "--clear-groups",
+                 str(s.ROOT / "target/debug/rtrust-inspect"), str(profiles["primary"]), "--serve-full", "198.18.0.1",
+                 "--fallback", str(skipped), "--fallback", str(profiles["backup"])],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            processes.append(restarted)
+            startup_lines = s.queue.Queue()
+            threading.Thread(target=lambda: ([startup_lines.put(l.strip()) for l in restarted.stdout], startup_lines.put(None)), daemon=True).start()
+            wait(startup_lines, "active 2", 45)
+            wait(startup_lines, "connected", 5)
+            assert established(BACKUP) and not established(PRIMARY)
+            reset_leaks()
+            fetch("198.18.0.1")
+            s.app(1000, "python3", "-c", f"import socket; socket.create_connection(('{BACKUP}',8443),timeout=1)", success=False)
+            assert not any(leaks().values()), leaks()
+            restarted.terminate()
+            restarted.wait(timeout=30)
+            assert restarted.returncode == 0, restarted.stderr.read()[-2000:]
+            assert s.ns("ip", "-j", "-4", "rule", "show") == baseline_rules
+            assert s.ns("ip", "-j", "-4", "route", "show", "table", "all") == baseline_routes
+            assert s.ns("nft", "-j", "list", "tables") == baseline_nft
+            print("PASS cold start: failed primary, skipped DNS backup, active original index 2; no bypass; clean Stop", flush=True)
+
     except BaseException:
         if 'd' in locals() and (d / "daemon.log").exists():
             print((d / "daemon.log").read_text()[-12000:], flush=True)

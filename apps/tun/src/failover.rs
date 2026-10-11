@@ -60,9 +60,20 @@ pub async fn pin_endpoint(mut profile: Profile, mode: Pin) -> Result<Profile, St
     Ok(profile)
 }
 
+/// An endpoint exception is tied to one candidate, never a cross-product of
+/// all candidate addresses, protocols and hopping ports.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Permit {
+    pub address: std::net::SocketAddrV4,
+    pub udp: bool,
+    pub ports: Vec<(u16, u16)>,
+}
+
 pub struct Failover {
     candidates: Vec<Profile>,
     active: usize,
+    indices: Vec<u8>,
     failures: u32,
     last_switch: Option<Instant>,
     /// Backups dropped at start because their endpoint could not be pinned.
@@ -90,14 +101,19 @@ impl Failover {
             .await
             .into_iter();
         let mut candidates = vec![results.next().expect("primary")?];
+        let mut indices = vec![0];
         let mut skipped = 0;
-        for result in results {
+        for (index, result) in results.enumerate() {
             match result {
-                Ok(profile) => candidates.push(profile),
+                Ok(profile) => {
+                    candidates.push(profile);
+                    indices.push((index + 1) as u8);
+                }
                 Err(_) => skipped += 1,
             }
         }
-        let failover = Self::new(candidates, skipped);
+        let mut failover = Self::new(candidates, skipped);
+        failover.indices = indices;
         // The platform guards accept at most 64 pinned endpoint addresses.
         if failover.endpoint_addresses().len() > 64 {
             return Err("Too many endpoint addresses".into());
@@ -116,6 +132,7 @@ impl Failover {
     }
     fn new(candidates: Vec<Profile>, skipped: usize) -> Self {
         Self {
+            indices: (0..candidates.len() as u8).collect(),
             candidates,
             active: 0,
             failures: 0,
@@ -128,7 +145,7 @@ impl Failover {
     }
     /// Reported only when the user allowed backups.
     pub fn active(&self) -> Option<u8> {
-        (self.candidates.len() > 1).then_some(self.active as u8)
+        (self.candidates.len() + self.skipped > 1).then_some(self.indices[self.active])
     }
     fn connected(&mut self) {
         self.failures = 0;
@@ -150,20 +167,58 @@ impl Failover {
         true
     }
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
-    /// Guard inputs cover every candidate, so a switch needs no guard change.
-    pub fn udp_transport(&self) -> bool {
-        self.candidates.iter().any(Profile::udp_transport)
+    pub fn permits(&self) -> Result<Vec<Permit>, String> {
+        let mut permits = Vec::new();
+        for profile in &self.candidates {
+            let ports = profile.hop_port_ranges();
+            if ports.len() > 64 {
+                return Err("Too many endpoint port ranges".into());
+            }
+            for address in &profile.endpoint.addresses {
+                let permit = Permit {
+                    address: address
+                        .parse()
+                        .map_err(|_| "Guard requires pinned IPv4 endpoints")?,
+                    udp: profile.udp_transport(),
+                    ports: ports.clone(),
+                };
+                if !permits.contains(&permit) {
+                    permits.push(permit);
+                }
+            }
+        }
+        Ok(permits)
     }
-    #[cfg(any(target_os = "macos", target_os = "windows", test))]
-    pub fn hop_port_ranges(&self) -> Vec<(u16, u16)> {
-        let mut ranges: Vec<_> = self
-            .candidates
-            .iter()
-            .flat_map(Profile::hop_port_ranges)
-            .collect();
-        ranges.sort_unstable();
-        ranges.dedup();
-        ranges
+    /// Startup has one 30 s budget shared by every candidate. Each candidate
+    /// gets two attempts before moving on, without extending the IPC deadline.
+    /// Cancellation drops the pending attempt. No routes or guard are changed.
+    pub async fn connect_initial<T, E, F, Fut>(&mut self, mut connect: F) -> Result<T, String>
+    where
+        F: FnMut(Profile) -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+    {
+        // Keep the original single-profile handshake allowance unchanged.
+        let attempts = if self.candidates.len() == 1 {
+            1
+        } else {
+            SWITCH_AFTER
+        };
+        let budget = Duration::from_secs(30) / (self.candidates.len() as u32 * attempts);
+        for index in 0..self.candidates.len() {
+            for _ in 0..attempts {
+                if let Ok(Ok(connected)) =
+                    tokio::time::timeout(budget, connect(self.candidates[index].clone())).await
+                {
+                    self.active = index;
+                    self.failures = 0;
+                    if index != 0 {
+                        self.last_switch = Some(Instant::now());
+                    }
+                    return Ok(connected);
+                }
+            }
+        }
+        Err("No allowed VPN endpoint connected within the startup budget".into())
     }
     pub fn endpoint_addresses(&self) -> Vec<String> {
         let mut addresses = Vec::new();
@@ -267,8 +322,8 @@ mod tests {
         let guard = f.guard_profile();
         assert_eq!(guard.endpoint.addresses, ["192.0.2.1:443", "192.0.2.2:443"]);
         assert_eq!(guard.endpoint.hostname, "h0.example");
-        assert!(!f.udp_transport());
-        assert!(f.hop_port_ranges().is_empty());
+        let permits = f.permits().unwrap();
+        assert!(permits.iter().all(|p| !p.udp && p.ports.is_empty()));
     }
 
     #[test]
@@ -288,12 +343,78 @@ mod tests {
             .await
             .unwrap();
             assert_eq!((f.candidates.len(), f.skipped), (2, 1));
+            let mut f = f;
+            let now = Instant::now();
+            assert!(!f.failed(now));
+            assert!(f.failed(now));
+            assert_eq!(f.active(), Some(2)); // Original index, not compacted 1.
             assert!(f.note().contains("пропущено: 1"));
             assert!(Failover::pin(bad, vec![], Pin::All).await.is_err());
             let many =
                 vec![profile("x.example", "192.0.2.9:443"); rtrust_control::MAX_FALLBACKS + 1];
             assert!(Failover::pin(good, many, Pin::All).await.is_err());
         });
+    }
+
+    #[tokio::test]
+    async fn initial_failure_tries_backups_and_keeps_the_original_index() {
+        let mut f = failover(3);
+        let mut calls = vec![];
+        let result = f
+            .connect_initial(|p| {
+                let address = p.endpoint.addresses[0].clone();
+                calls.push(address.clone());
+                async move {
+                    if address == "192.0.2.3:443" {
+                        Ok(address)
+                    } else {
+                        Err(())
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(result, "192.0.2.3:443");
+        assert_eq!(calls.len(), 5);
+        assert_eq!(f.active(), Some(2));
+        let mut working = failover(2);
+        let mut attempts = 0;
+        working
+            .connect_initial(|_| {
+                attempts += 1;
+                async { Ok::<_, ()>(()) }
+            })
+            .await
+            .unwrap();
+        assert_eq!(attempts, 1);
+        assert_eq!(working.active(), Some(0));
+        let mut fixed = failover(1);
+        assert!(
+            fixed
+                .connect_initial(|_| async { Err::<(), _>(()) })
+                .await
+                .is_err()
+        );
+        assert_eq!(fixed.active(), None);
+    }
+
+    #[test]
+    fn endpoint_permissions_keep_protocols_and_ports_per_candidate() {
+        let mut f = failover(3);
+        f.candidates[1].endpoint.upstream_protocol = "http3".into();
+        let permits = f.permits().unwrap();
+        assert!(!permits[0].udp);
+        assert!(permits[1].udp);
+        assert!(!permits[2].udp);
+        assert_eq!(permits[0].address.to_string(), "192.0.2.1:443");
+        assert!(permits.iter().all(|p| p.ports.is_empty()));
+        f.candidates[2] =
+            Profile::import("hy2://synthetic@192.0.2.3:443,20000-20010/#Hop").unwrap();
+        let permits = f.permits().unwrap();
+        assert!(!permits[0].udp && permits[0].ports.is_empty());
+        assert!(permits[1].udp && permits[1].ports.is_empty());
+        assert!(permits[2].udp);
+        assert_eq!(permits[2].ports, [(443, 443), (20000, 20010)]);
     }
 
     #[test]

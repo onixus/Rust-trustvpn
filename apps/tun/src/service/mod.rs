@@ -321,7 +321,7 @@ async fn serve(
     let prepared = {
         let mut unexpected = [0];
         tokio::select! {
-            result = crate::linux::Prepared::connect_mode(failover.current(), routes::DEVICE, routes::ADDRESS.parse().unwrap(), full) => match result {
+            result = failover.connect_initial(|profile| async move { crate::linux::Prepared::connect_mode(&profile, routes::DEVICE, routes::ADDRESS.parse().unwrap(), full).await }) => match result {
                 Ok(prepared) => prepared,
                 Err(_) => return reply(&mut stream, State::Error, "Не удалось открыть TUN: проверьте профиль, TLS и доступность endpoint").await,
             },
@@ -351,6 +351,9 @@ async fn serve(
         rtrust_control::observations::Source::ServiceLifecycle,
         rtrust_control::observations::now_ms(),
     );
+    if failover.active().is_some_and(|index| index > 0) {
+        monitor.failed_over(rtrust_control::observations::now_ms());
+    }
     reply_observed(
         &mut stream,
         State::Connected,

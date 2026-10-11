@@ -295,7 +295,7 @@ async fn serve(
         // Every allowed candidate is pinned now: the guard covers them all.
         // WFP full mode pins IPv4 endpoint exceptions: an IPv6 answer of any
         // candidate would otherwise reject the whole start.
-        let failover = crate::failover::Failover::pin(
+        let mut failover = crate::failover::Failover::pin(
             *profile,
             fallbacks,
             if dns.is_some() {
@@ -310,14 +310,16 @@ async fn serve(
         } else {
             vec![]
         };
-        let (session, udp) = transport(failover.current()).await?;
+        let (session, udp) = failover
+            .connect_initial(|profile| async move { transport(&profile).await })
+            .await?;
         Ok::<_, String>((failover, networks, session, udp))
     };
     let (mut failover, networks, session, udp) = {
         use tokio::io::AsyncReadExt;
         let mut unexpected = [0];
         tokio::select! {
-            r = tokio::time::timeout(Duration::from_secs(35), setup) => match r {
+            r = tokio::time::timeout(Duration::from_secs(42), setup) => match r {
                 Ok(Ok(v)) => v,
                 Ok(Err(error)) => return reply(pipe, State::Error, &error).await,
                 Err(_) => return reply(pipe, State::Error, "Endpoint connection timed out").await,
@@ -363,8 +365,7 @@ async fn serve(
             index,
             &full::endpoints(&failover.guard_profile())?,
             dns,
-            failover.udp_transport(),
-            &failover.hop_port_ranges(),
+            &failover.permits()?,
         )?;
         vec!["0.0.0.0/1".parse().unwrap(), "128.0.0.0/1".parse().unwrap()]
     } else {
@@ -461,6 +462,9 @@ async fn lease_loop(
         rtrust_control::observations::Source::ServiceLifecycle,
         rtrust_control::observations::now_ms(),
     );
+    if failover.active().is_some_and(|index| index > 0) {
+        monitor.failed_over(rtrust_control::observations::now_ms());
+    }
     reply_observed(
         pipe,
         State::Connected,
