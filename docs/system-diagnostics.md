@@ -34,9 +34,12 @@ A timeout is never reported as blocking. **Check endpoint** opens one separate
 authenticated session to the profile's endpoint and exchanges a health check,
 like the transport test, with a ten-second limit. It contacts no destination and
 changes no route. It may refine only a report that started before it, in the
-same connection epoch. On Linux the desktop UID policy may carry that session
-through the tunnel, so a failure there is not attributed to the endpoint
-(`endpoint_independent=false`); a pass, or an authentication refusal, is.
+same connection epoch. Desktop probes have no verified independent endpoint path: Linux can route
+them through the tunnel, while macOS PF and Windows WFP full-mode guards
+permit physical endpoint traffic only from the service. Therefore desktop
+failures on every OS remain non-attributable (`endpoint_independent=false`);
+a pass or an authentication refusal still counts as an endpoint answer.
+A service-owned independent probe is not implemented yet.
 
 **Reconnect** is the ordinary Stop then Start of the current connection; when
 Always-on owns the connection it is not offered from diagnostics. After Start,
