@@ -12,8 +12,10 @@ default one. Up to three can be allowed. The order you tick them in is the
 preference order, shown as "backup 1..3". The vault stores profile names
 (`connection.fallback_profiles`); renaming keeps the selection, and a deleted
 profile drops out. Older vaults without the field mean "no backups". WebView
-uses the same vault setting but has no editor for it. SOCKS mode and Always-on
-do not use backups: Always-on keeps its single boot profile.
+uses the same vault setting but has no editor for it. SOCKS mode does not use backups. The ordinary vault backup setting does not
+silently change Always-on: fixed `EnableAlwaysOn` keeps its single boot profile.
+A separate explicit Always-on recovery opt-in on Linux/Windows persists its
+own permitted candidates and bounded budget; see [recovery.md](recovery.md).
 
 ## What the service does
 

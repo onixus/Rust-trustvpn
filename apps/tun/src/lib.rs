@@ -3,7 +3,7 @@
 mod adapter_cleanup;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod always_on;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub mod boot_policy;
 pub mod echo;
 pub mod fragments;

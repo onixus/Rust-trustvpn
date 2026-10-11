@@ -35,6 +35,21 @@ pub extern "C" fn rtrust_ios_observations() -> *mut c_char {
         .map(CString::into_raw)
         .unwrap_or(std::ptr::null_mut())
 }
+/// Native provider callbacks carry no address, hostname or credentials.
+#[unsafe(no_mangle)]
+pub extern "C" fn rtrust_ios_network_changed() {
+    OBSERVATIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .network_changed();
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn rtrust_ios_resumed() {
+    OBSERVATIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .resumed();
+}
 struct Runner {
     input: mpsc::Sender<Vec<u8>>,
     output: mpsc::Receiver<Vec<u8>>,

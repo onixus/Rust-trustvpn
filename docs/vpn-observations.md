@@ -7,17 +7,20 @@ profile content or free-text error. Nothing is sent to a server.
 
 ## Contract and compatibility
 
-IPC version 2 requires observation schema 2 and an explicit capability response.
+IPC version 3 requires observation schema 2 and an explicit capability response.
 Schema 2 adds native network-change/resume events; schema 1 peers are rejected
 during capability negotiation, and the Android/iOS adapters accept only schema 2.
+Version 3 also adds opt-in persistent Linux/Windows recovery; observation schema remains 2.
 The desktop client negotiates through a separate authenticated, read-only
 `Capabilities` connection **before** sending a profile or issuing a mutation.
 Negotiation is available while another lease or Always-on owns the service.
-Version 1 clients and services are incompatible: upgrade the UI and service
+Version 1 and 2 clients/services are incompatible with version 3: upgrade the UI and service
 together. A mismatch fails before a new Start, Recover or update reservation;
 an existing service-owned VPN/guard is not disabled to achieve compatibility.
 Profile, routing-journal and boot-policy schema versions are unchanged.
-The Python IPC acceptance clients were updated to version 2 as well.
+The Python IPC acceptance clients must use the same negotiated IPC version.
+Legacy evidence produced with IPC v2 remains evidence for that earlier build.
+See [recovery.md](recovery.md) for version 3 recovery semantics.
 
 Every observation carries outcome, source, applicable mode, timestamp,
 freshness interval and stable reason. Results are `passed`, `failed`,
@@ -64,8 +67,31 @@ With allowed backup profiles (docs/failover.md), the service also records
 Events are advisory: they do not reconnect, change routes/DNS or the guard
 (automatic recovery is issue #34). Desktop summaries show the latest such event
 for one minute. Capabilities advertise `network_events=true` for the desktop
-services. Android/iOS do not yet collect these events; their lifecycle model is
-unchanged.
+services. Android now invalidates observations when ConnectivityManager
+changes the selected non-VPN underlying Network or reports changed link
+properties for that network. Repeated callbacks for another network or identical
+properties are not events. Android now also samples
+[SystemClock](https://developer.android.com/reference/android/os/SystemClock):
+`elapsedRealtime` includes deep sleep and `uptimeMillis` excludes it. An increase
+of at least two seconds in their difference invalidates the active session on
+the first existing widget poll after CPU execution resumes. Clock reads are
+bracketed by uptime samples; the new lower bound is compared with the old
+upper bound so read skew cannot inflate a short sleep past the threshold.
+A sampling span over 50 ms, invalid/reversed clocks or a new session only reset
+the baseline. Cleanup revokes the session before
+native Stop. Screen unlock and an awake polling delay are not resume evidence;
+this is kernel-clock evidence, not a native wake callback or measured device latency.
+
+iOS PacketTunnel now uses an
+[NWPathMonitor](https://developer.apple.com/documentation/network/nwpathmonitor):
+the first path establishes a baseline and subsequent OS path updates invalidate
+observations. The provider forwards the native
+[wake callback](https://developer.apple.com/documentation/networkextension/neprovider/wake%28%29)
+as `resumed`. The monitor runs on the provider's existing serial queue, is
+cancelled on Stop/start failure, and late callbacks from an old provider
+generation are ignored. These are advisory path events, not independent proof
+of physical-interface traffic or DNS/guard health. No network identifiers cross
+the JNI/C boundary or enter the observation journal.
 No successful DNS/route/guard evidence is invented in their absence.
 
 The local in-memory journal contains at most 64 timestamped event enums and
@@ -81,8 +107,8 @@ not durable across process restart. Observations are advisory and do not change 
 | Windows selected / full / Always-on | Service worker lifecycle; failure/reconnect/gap; polled adapter change, kernel-clock resume | Unknown; no live system probe | Unknown | Native and WebView share the Rust verdict |
 | macOS selected / full | Service worker lifecycle; failure/reconnect/gap; routing-socket network change, kernel-clock resume | Unknown; no live system probe | Unknown | Native and WebView share the Rust verdict |
 | Desktop SOCKS | Proxy lifecycle only | Unsupported for the system path | Unknown | Explicit proxy scope |
-| Android | Shared mobile worker lifecycle; failure/recovery/gap | Unknown; VpnService setup is not a live audit of DNS or lockdown | Unknown | JNI JSON, localized five-part summary, no green lifecycle badge |
-| iOS | Shared mobile worker lifecycle; failure/recovery/gap | Unknown; NetworkExtension status is not a live audit | Unknown | Redacted provider message; generation/age checked; localized summary |
+| Android | Shared mobile worker lifecycle; failure/recovery/gap; selected underlying Network/link-property changes; kernel deep-sleep clock evidence | Unknown; VpnService setup is not a live audit of DNS or lockdown | Unknown | JNI JSON, localized five-part summary, no green lifecycle badge |
+| iOS | Shared mobile worker lifecycle; failure/recovery/gap; provider path updates and native wake callback | Unknown; NetworkExtension status is not a live audit | Unknown | Redacted provider message; generation/age checked; localized summary |
 
 Capabilities explicitly advertise `system_probes=false`. The adapters retain
 existing platform differences; this change does not make unsupported checks
@@ -104,7 +130,7 @@ Windows target compilation does not prove installed WFP/Wintun behavior. Linux
 container unit tests do not establish a physical-node or installed-package gate.
 Existing historical acceptance reports apply to their own commits and packages.
 
-Issue #31 remains open: mobile network-change/resume events, durable event history if required, installed-package timing/cancellation and
+Issue #31 remains open: durable event history if required, installed-package timing/cancellation and
 actual DNS/route/guard/system-connectivity evidence still need acceptance.
 Issue #33 supplies the real-path probe; issue #36 tracks package/device evidence.
 No release is published or promoted by this PR.
@@ -131,3 +157,25 @@ No release is published or promoted by this PR.
 | Linux live netlink: dummy link + address in a `NET_ADMIN` container | Passed: change reported before the 10 s poll; own TUN name ignored | Disposable namespace, not an installed package |
 | Windows x86_64 tun strict clippy | Passed | Cross-compilation only; adapter polling not run on Windows |
 | Real sleep/wake, Wi-Fi handoff on installed packages | Not run | Issue #36 |
+
+### Mobile callback validation — 2026-10-11
+
+- Host Rust tests: mobile adapter, Android codec and iOS core pass. The shared
+  adapter regression checks rapid network-change generation invalidation,
+  rejection of an old result, native resume staleness, unknown DNS/guard and
+  ignored events after Stop. Host Android codec tests do not compile Android JNI.
+- Injected pure Java clock/session regression checks a long awake polling gap,
+  subthreshold and two-second deep sleep, one event per change, clock reversal,
+  invalid/skewed reads, Stop and stale-session rejection. The standalone runner
+  uses an existing JDK and is required by the three-platform GitHub check and
+  Android build script; missing Java fails rather than skipping.
+- Modified Android NativeCore/TunnelService Java boundary compiles against the
+  existing Android 36 SDK and previously generated app classes/resources in a
+  disposable networkless compiler container. This is not a fresh full APK build,
+  JNI target check, emulator run or physical-device acceptance. No Android Rust
+  target is installed in the inspected local toolchains; none was installed.
+- iOS provider/shared Swift sources typecheck against the installed iPhoneOS
+  27 SDK using the existing Xcode path; the modified Rust core also passes
+  `cargo check --target aarch64-apple-ios`. These checks do not launch an
+  iPhone/simulator or supply signing/install evidence. Native callback timing, cancellation and
+  path/wake behavior still require exact-package/device validation.

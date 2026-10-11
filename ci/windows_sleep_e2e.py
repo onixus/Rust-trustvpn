@@ -94,6 +94,8 @@ def compare_routes(after, label, endpoint):
     log(label + ': only non-service routes changed across sleep')
 
 def ipc(op, **values):
+    if op in ('EnableAlwaysOn', 'EnableRecovery'):
+        values['generation'] = ipc('AlwaysOnStatus')['always_on_generation']
     p = fixture.Pipe()
     try: return p.request(dict(op=op, **values))
     finally: p.close()

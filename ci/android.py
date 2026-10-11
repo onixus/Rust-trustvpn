@@ -36,6 +36,7 @@ def main():
     if not (ndk / 'toolchains/llvm/prebuilt/linux-x86_64/bin').is_dir():
         p.error('Provision Android NDK 28.2.13676358 first')
     env = dict(os.environ, ANDROID_HOME=str(sdk))
+    run(['python3', str(ROOT / 'scripts/test-android-sleep-observer.py')], env=env, timeout=60)
     for name in ('SIGTERM', 'SIGINT'):
         signal.signal(getattr(signal, name), interrupt)
     if subprocess.run(['docker', 'image', 'inspect', IMAGE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
