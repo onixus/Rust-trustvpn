@@ -5,7 +5,9 @@ use zeroize::Zeroizing;
 pub const SOCKET: &str = "/run/rtrust/control.sock";
 #[cfg(target_os = "macos")]
 pub const SOCKET: &str = "/private/var/run/rtrust/control.sock";
-pub const LIMIT: usize = 2 * rtrust_profile::MAX_INPUT;
+/// Opt-in automatic recovery: at most this many user-allowed backup profiles.
+pub const MAX_FALLBACKS: usize = 3;
+pub const LIMIT: usize = (2 + MAX_FALLBACKS) * rtrust_profile::MAX_INPUT;
 pub const VERSION: u32 = 2;
 pub mod observations;
 pub use ipnet::Ipv4Net;
@@ -32,10 +34,16 @@ pub enum Command {
         /// selection routes it through the VPN.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dns: Option<std::net::Ipv4Addr>,
+        /// Backup profiles the user allowed, in preference order. Empty keeps
+        /// the fixed-profile behavior: no transport is ever substituted.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fallbacks: Vec<rtrust_profile::Profile>,
     },
     StartFull {
         profile: Box<rtrust_profile::Profile>,
         dns: std::net::Ipv4Addr,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fallbacks: Vec<rtrust_profile::Profile>,
     },
     Capabilities,
     Status,
@@ -64,6 +72,10 @@ pub struct Response {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_on: Option<bool>,
+    /// Index of the active candidate when backups were allowed: 0 is the
+    /// requested profile, 1.. the backups in the order sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_profile: Option<u8>,
     pub observations: observations::Snapshot,
     pub capabilities: Capabilities,
 }
@@ -75,6 +87,8 @@ pub struct Capabilities {
     pub system_probes: bool,
     /// Native link/address change and resume events invalidate observations.
     pub network_events: bool,
+    /// The service accepts allowed backup profiles with Start.
+    pub failover: bool,
 }
 impl Capabilities {
     pub fn current() -> Self {
@@ -83,6 +97,7 @@ impl Capabilities {
             lifecycle_observations: true,
             system_probes: false,
             network_events: true,
+            failover: true,
         }
     }
 }
@@ -93,6 +108,7 @@ impl Response {
             state,
             message: message.into(),
             always_on: None,
+            active_profile: None,
             observations: observations::Snapshot::unknown(observations::Mode::Unknown),
             capabilities: Capabilities::current(),
         }
@@ -643,6 +659,7 @@ mod tests {
                 exclude,
                 exclude_lan,
                 dns,
+                fallbacks: vec![],
             })
             .unwrap()
         };

@@ -183,12 +183,33 @@ async fn reply_observed(
     state: State,
     message: &str,
     monitor: &mut rtrust_control::observations::Monitor,
+    active_profile: Option<u8>,
 ) -> Result<(), String> {
     let mut response = Response::new(state, message);
+    response.active_profile = active_profile;
     response.observations = monitor.sample(rtrust_control::observations::now_ms());
     tokio::time::timeout(Duration::from_secs(5), write(stream, &response))
         .await
         .map_err(|_| "IPC write timed out")?
+}
+async fn pin(mut profile: rtrust_profile::Profile) -> Result<rtrust_profile::Profile, String> {
+    let mut addresses = Vec::new();
+    for address in &profile.endpoint.addresses {
+        for address in tokio::net::lookup_host(address)
+            .await
+            .map_err(|_| "Cannot resolve endpoint")?
+        {
+            if addresses.len() >= 64 {
+                return Err("Too many endpoint addresses".into());
+            }
+            addresses.push(address.to_string());
+        }
+    }
+    if addresses.is_empty() {
+        return Err("Endpoint has no addresses".into());
+    }
+    profile.endpoint.addresses = addresses;
+    Ok(profile)
 }
 async fn serve(
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
@@ -221,7 +242,7 @@ async fn serve(
         )
         .await;
     };
-    let (profile, networks, dns, split_dns) = match request.command {
+    let (profile, networks, dns, split_dns, fallbacks) = match request.command {
         Command::PrepareUpdate => {
             if FullRoutes::pending() || Routes::pending() {
                 return reply(
@@ -252,6 +273,7 @@ async fn serve(
             exclude,
             exclude_lan,
             dns,
+            fallbacks,
         } => {
             // Only this user's traffic is policy-routed; the service's own
             // endpoint connection never matches, so no endpoint exception.
@@ -272,12 +294,16 @@ async fn serve(
             }) {
                 Ok(routes) => {
                     let resolver = Routes::resolver(&routes, dns);
-                    (profile, routes, None, resolver)
+                    (profile, routes, None, resolver, fallbacks)
                 }
                 Err(error) => return reply(&mut stream, State::Error, &error).await,
             }
         }
-        Command::StartFull { profile, dns } => (profile, vec![], Some(dns), None),
+        Command::StartFull {
+            profile,
+            dns,
+            fallbacks,
+        } => (profile, vec![], Some(dns), None, fallbacks),
         _ => return reply(&mut stream, State::Error, "Start or Recover required").await,
     };
     if let Err(error) = if let Some(dns) = dns {
@@ -288,46 +314,34 @@ async fn serve(
         return reply(&mut stream, State::Error, &error).await;
     }
     let full = dns.is_some();
-    let profile = if full {
-        let result = tokio::time::timeout(Duration::from_secs(10), async {
-            let mut profile = profile;
-            let mut addresses = Vec::new();
-            for address in &profile.endpoint.addresses {
-                for address in tokio::net::lookup_host(address)
-                    .await
-                    .map_err(|_| "Cannot resolve endpoint")?
-                {
-                    if addresses.len() >= 64 {
-                        return Err("Too many endpoint addresses");
-                    }
-                    addresses.push(address.to_string());
-                }
+    // Full mode pins every allowed candidate: the guard covers them all.
+    // Selected mode routes only this user's traffic, so nothing is pinned.
+    let pinned = tokio::time::timeout(
+        Duration::from_secs(10),
+        crate::failover::Failover::pin(*profile, fallbacks, |profile| async move {
+            if full {
+                pin(profile).await
+            } else {
+                Ok(profile)
             }
-            if addresses.is_empty() {
-                return Err("Endpoint has no addresses");
-            }
-            profile.endpoint.addresses = addresses;
-            Ok(profile)
-        })
-        .await;
-        match result {
-            Ok(Ok(profile)) => profile,
-            _ => {
-                return reply(
-                    &mut stream,
-                    State::Error,
-                    "Не удалось разрешить адрес VPN-сервера",
-                )
-                .await;
-            }
+        }),
+    )
+    .await;
+    let mut failover = match pinned {
+        Ok(Ok(failover)) => failover,
+        _ => {
+            return reply(
+                &mut stream,
+                State::Error,
+                "Не удалось разрешить адрес VPN-сервера",
+            )
+            .await;
         }
-    } else {
-        profile
     };
     let prepared = {
         let mut unexpected = [0];
         tokio::select! {
-            result = crate::linux::Prepared::connect_mode(&profile, routes::DEVICE, routes::ADDRESS.parse().unwrap(), full) => match result {
+            result = crate::linux::Prepared::connect_mode(failover.current(), routes::DEVICE, routes::ADDRESS.parse().unwrap(), full) => match result {
                 Ok(prepared) => prepared,
                 Err(_) => return reply(&mut stream, State::Error, "Не удалось открыть TUN: проверьте профиль, TLS и доступность endpoint").await,
             },
@@ -335,7 +349,7 @@ async fn serve(
         }
     };
     let mut routes = match if let Some(dns) = dns {
-        FullRoutes::install(uid, dns, &profile.endpoint.addresses).map(Guard::Full)
+        FullRoutes::install(uid, dns, &failover.endpoint_addresses()).map(Guard::Full)
     } else {
         Routes::install(uid, networks, split_dns).map(Guard::Selected)
     } {
@@ -360,12 +374,17 @@ async fn serve(
     reply_observed(
         &mut stream,
         State::Connected,
-        if full {
-            "Весь компьютер: IPv4, IPv6 и DNS через VPN"
-        } else {
-            "IPv4-сети подключены"
-        },
+        &format!(
+            "{}{}",
+            if full {
+                "Весь компьютер: IPv4, IPv6 и DNS через VPN"
+            } else {
+                "IPv4-сети подключены"
+            },
+            failover.note()
+        ),
         &mut monitor,
+        failover.active(),
     )
     .await?;
     let mut state = State::Connected;
@@ -385,7 +404,11 @@ async fn serve(
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
                     // A flapping endpoint must not reset the backoff indefinitely.
                     if connected_since.elapsed() >= Duration::from_secs(30) { retry_delay = 2; }
-                    workers.retry(&profile, &mut retry_delay, full);
+                    if failover.ended(connected_since.elapsed(), Instant::now()) {
+                        monitor.failed_over(rtrust_control::observations::now_ms());
+                        retry_delay = 2;
+                    }
+                    workers.retry(failover.current(), &mut retry_delay, full);
                 }
                 result = async { workers.reconnect.as_mut().unwrap().await }, if workers.reconnect.is_some() => {
                     workers.reconnect = None;
@@ -402,7 +425,12 @@ async fn serve(
                             continue;
                         }
                     }
-                    workers.retry(&profile, &mut retry_delay, full);
+                    // The guard already covers every candidate.
+                    if failover.failed(Instant::now()) {
+                        monitor.failed_over(rtrust_control::observations::now_ms());
+                        retry_delay = 2;
+                    }
+                    workers.retry(failover.current(), &mut retry_delay, full);
                 }
             }
         };
@@ -428,6 +456,7 @@ async fn serve(
                     }
                 },
                 &mut monitor,
+                failover.active(),
             )
             .await?,
             Command::Stop => {
@@ -435,7 +464,8 @@ async fn serve(
                 return match routes.release() {
                     Ok(()) => {
                         monitor.stop(rtrust_control::observations::now_ms());
-                        reply_observed(&mut stream, State::Idle, "Отключено", &mut monitor).await
+                        reply_observed(&mut stream, State::Idle, "Отключено", &mut monitor, None)
+                            .await
                     }
                     Err(e) => reply(&mut stream, State::Blocked, &e).await,
                 };

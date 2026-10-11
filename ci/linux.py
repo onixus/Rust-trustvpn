@@ -78,6 +78,7 @@ python3 scripts/full-tunnel-interop.py /fixture/trusttunnel_endpoint
 python3 scripts/full-tunnel-interop.py /fixture/trusttunnel_endpoint --http3
 python3 scripts/full-tunnel-interop.py /tmp/hysteria/hysteria-linux-HYSTERIA_ARCH --hysteria2
 python3 scripts/full-tunnel-interop.py /fixture/amneziawg-fixture --amneziawg
+python3 scripts/failover-interop.py /fixture/trusttunnel_endpoint
 python3 ci/linux_installer_smoke.py
 python3 scripts/package-preview.py
 mkdir -p dist/webview-libs

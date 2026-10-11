@@ -35,12 +35,27 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .get(2)
             .and_then(|s| s.to_str())
             .ok_or("Requires CIDRs or DNS address")?;
+        // Optional allowed backups: `--fallback FILE`, repeated, in order.
+        let mut fallbacks = Vec::new();
+        let mut rest = args[3..].iter();
+        while let Some(flag) = rest.next() {
+            if flag != "--fallback" {
+                return Err("Unknown argument; expected --fallback FILE".into());
+            }
+            let file = rest.next().ok_or("--fallback requires FILE")?;
+            let bytes =
+                rtrust_store::read_bounded(std::path::Path::new(file), rtrust_profile::MAX_INPUT)?;
+            fallbacks.push(rtrust_profile::Profile::import(
+                std::str::from_utf8(&bytes).map_err(|_| "Input must be UTF-8")?,
+            )?);
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let client = if args[1] == "--serve-full" {
-            rtrust_control::Client::start_full(p, argument.parse()?).await?
+            rtrust_control::Client::start_full(p, fallbacks, argument.parse()?).await?
         } else {
             rtrust_control::Client::start(
                 p,
+                fallbacks,
                 rtrust_control::Selection {
                     include: rtrust_control::networks(argument)?,
                     ..Default::default()
@@ -52,6 +67,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(target_os = "windows")]
         let client = rtrust_control::Client::start(
             p,
+            fallbacks,
             rtrust_control::Selection {
                 include: rtrust_control::networks(argument)?,
                 ..Default::default()
@@ -72,13 +88,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("SERVICE connected");
         std::io::stdout().flush()?;
         let mut last_state = rtrust_control::State::Connected;
+        let mut last_active = client.status().active_profile;
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             tokio::select! {
                 _ = &mut terminated => break,
                 _ = tokio::signal::ctrl_c() => break,
                 _ = tick.tick() => {
-                    let state = client.status().state;
+                    let status = client.status();
+                    if status.active_profile != last_active {
+                        println!("SERVICE active {}", status.active_profile.unwrap_or(0));
+                        last_active = status.active_profile;
+                    }
+                    let state = status.state;
                     if state != last_state {
                         println!("SERVICE {}", if state == rtrust_control::State::Connected { "connected" } else { "blocked" });
                         std::io::stdout().flush()?;

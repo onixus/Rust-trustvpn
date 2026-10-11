@@ -44,6 +44,10 @@ pub struct ConnectionSettings {
     /// TUN selection while present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_routes: Option<ManagedRoutes>,
+    /// Opt-in automatic recovery: names of profiles the service may switch to
+    /// when the default profile's endpoint fails, in preference order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_profiles: Vec<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,6 +81,7 @@ impl Default for ConnectionSettings {
             exclude: vec![],
             exclude_lan: false,
             managed_routes: None,
+            fallback_profiles: vec![],
         }
     }
 }
@@ -96,7 +101,24 @@ impl ConnectionSettings {
         if let Some(managed) = &self.managed_routes {
             managed.validate()?;
         }
+        if self.fallback_profiles.len() > rtrust_control::MAX_FALLBACKS
+            || self.fallback_profiles.iter().enumerate().any(|(i, name)| {
+                name.is_empty() || name.len() > 1024 || self.fallback_profiles[..i].contains(name)
+            })
+        {
+            return Err(Error::Invalid);
+        }
         Ok(())
+    }
+    /// Allowed backups that still exist, never the default profile itself.
+    pub fn fallbacks(&self, profiles: &[rtrust_profile::Profile]) -> Vec<rtrust_profile::Profile> {
+        let primary = profiles.first().map(|p| p.name.as_str());
+        self.fallback_profiles
+            .iter()
+            .filter(|name| Some(name.as_str()) != primary)
+            .filter_map(|name| profiles.iter().find(|p| &p.name == name).cloned())
+            .take(rtrust_control::MAX_FALLBACKS)
+            .collect()
     }
     /// The local TUN selection, ignoring any server policy.
     pub fn selection(&self) -> rtrust_control::Selection {
@@ -489,6 +511,7 @@ mod tests {
             exclude: vec![],
             exclude_lan: false,
             managed_routes: None,
+            fallback_profiles: vec![],
         };
         let new = save_in(dir.path(), &vault, Some(old.clone()), |create| {
             assert!(!create);
@@ -622,5 +645,32 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(fs::metadata(p).unwrap().permissions().mode() & 0o777, 0o600);
         }
+    }
+    #[test]
+    fn backups_are_bounded_unique_existing_and_never_the_default_profile() {
+        let profile = |name: &str| {
+            let mut p = Profile::import(
+                "hostname='vpn.example'\naddresses=['192.0.2.1:443']\nusername='u'\npassword='p'\n",
+            )
+            .unwrap();
+            p.name = name.into();
+            p
+        };
+        let profiles = [profile("main"), profile("b1"), profile("b2")];
+        let mut c = ConnectionSettings {
+            fallback_profiles: vec!["b2".into(), "main".into(), "gone".into(), "b1".into()],
+            ..Default::default()
+        };
+        // Over the limit: rejected on save; resolution still never exceeds it.
+        assert!(c.validate().is_err());
+        let names: Vec<_> = c.fallbacks(&profiles).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["b2", "b1"]);
+        c.fallback_profiles = vec!["b1".into(), "b1".into()];
+        assert!(c.validate().is_err());
+        c.fallback_profiles = vec!["b1".into()];
+        assert!(c.validate().is_ok());
+        // Older vaults without the field read as "no backups".
+        let json = serde_json::to_value(ConnectionSettings::default()).unwrap();
+        assert!(json.get("fallback_profiles").is_none());
     }
 }

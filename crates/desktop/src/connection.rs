@@ -32,6 +32,7 @@ pub enum Session {
 impl Session {
     pub async fn start(
         profile: rtrust_profile::Profile,
+        fallbacks: Vec<rtrust_profile::Profile>,
         mode: Mode,
         port: u16,
         selection: rtrust_control::Selection,
@@ -42,21 +43,25 @@ impl Session {
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             Mode::Full => rtrust_control::Client::start_full(
                 profile,
+                fallbacks,
                 dns.parse().map_err(|_| "Некорректный IPv4 DNS")?,
             )
             .await
             .map(Self::Tun),
             Mode::Socks => {
-                let _ = selection;
+                // The proxy has no service supervisor; backups apply to TUN modes.
+                let _ = (selection, fallbacks);
                 rtrust_engine::proxy::Proxy::start(&profile, port)
                     .await
                     .map(Self::Socks)
                     .map_err(|e| e.to_string())
             }
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Mode::Tun => rtrust_control::Client::start(profile, selection, dns.parse().ok())
-                .await
-                .map(Self::Tun),
+            Mode::Tun => {
+                rtrust_control::Client::start(profile, fallbacks, selection, dns.parse().ok())
+                    .await
+                    .map(Self::Tun)
+            }
         }
     }
     pub fn proxy(&self) -> Option<&rtrust_engine::proxy::Proxy> {
@@ -87,6 +92,14 @@ impl Session {
             .sample(rtrust_control::observations::now_ms()),
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             Self::Tun(c) => c.status().observations,
+        }
+    }
+    /// 0 is the requested profile, 1.. the allowed backups in the order sent.
+    pub fn active_profile(&self) -> Option<u8> {
+        match self {
+            Self::Socks(_) => None,
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            Self::Tun(c) => c.status().active_profile,
         }
     }
     pub fn status_summary(&self, russian: bool) -> String {

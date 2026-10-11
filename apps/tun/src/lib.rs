@@ -11,6 +11,8 @@ pub mod ipv6;
 pub mod packet;
 pub mod stack;
 
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+mod failover;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]

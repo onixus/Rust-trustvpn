@@ -100,6 +100,8 @@ pub enum EventKind {
     Stopped,
     NetworkChanged,
     Resumed,
+    /// Opt-in recovery moved to another user-allowed profile.
+    FailedOver,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -269,6 +271,12 @@ impl Monitor {
             self.snapshot
                 .invalidate(Reason::SystemResumed, EventKind::Resumed, now);
             self.gap = true;
+        }
+    }
+    /// Recorded before the new transport starts; its own transition follows.
+    pub fn failed_over(&mut self, now: u64) {
+        if !self.stopped {
+            self.snapshot.event(EventKind::FailedOver, now);
         }
     }
     pub fn stop(&mut self, now: u64) {
