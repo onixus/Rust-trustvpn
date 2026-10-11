@@ -1,4 +1,4 @@
-//! User-initiated, read-only destination diagnostics. No transport is created.
+//! Automatic or user-initiated read-only destination diagnostics. No transport is created.
 //! Results are per destination, never global VPN/guard verification.
 use crate::connection::Session;
 #[cfg(any(target_os = "windows", test))]
@@ -269,15 +269,36 @@ impl Report {
                 Fact::Rejected => "endpoint отклонил учётные данные или запрос",
             }
         }
+        let dns = if self.dns == Fact::NotChecked && self.answer_count > 0 {
+            "пропущено: указан IP, а не имя сайта"
+        } else if self.dns == Fact::NotChecked {
+            "пропущено: VPN не активен"
+        } else if self.dns == Fact::Passed {
+            "имя разрешено системным DNS (путь DNS не подтверждён)"
+        } else {
+            label(self.dns)
+        };
+        let route = if self.route == Fact::NotChecked {
+            "пропущено: нет результата DNS или VPN не активен"
+        } else if self.route == Fact::Passed {
+            "на интерфейс RTrustTunnel"
+        } else {
+            label(self.route)
+        };
+        let https = if self.https == Fact::NotChecked {
+            "не отправлен: маршрут через VPN не подтверждён"
+        } else if self.https == Fact::Passed {
+            "ответ получен через VPN, TLS подтверждён"
+        } else {
+            label(self.https)
+        };
         format!(
-            "Проверка {}–{} · DNS: {} · маршрут: {} · HTTPS: {}{}{} · состояние защиты не подтверждается этой проверкой.",
-            self.started_at_ms,
-            self.finished_at_ms,
-            label(self.dns),
-            label(self.route),
-            label(self.https),
+            "DNS: {} · маршрут VPN: {} · HTTPS: {}{}{} · защита от утечек: отдельная проверка firewall не выполнена. Результат относится к одному адресу.",
+            dns,
+            route,
+            https,
             self.http_status
-                .map(|s| format!(" · HTTP {s} (не доказывает работу функции сайта)"))
+                .map(|s| format!(" (HTTP {s})"))
                 .unwrap_or_default(),
             self.endpoint_at_ms
                 .map(|at| format!(" · endpoint ({at}): {}", label(self.endpoint)))
@@ -1053,6 +1074,27 @@ mod tests {
         stopped.lifecycle.transport.outcome = rtrust_control::observations::Outcome::Unknown;
         diagnose(&f, &Target::parse("service.example").unwrap(), &mut stopped).await;
         assert_eq!(stopped.verdict().cause, Cause::SessionChanged);
+    }
+    #[tokio::test]
+    async fn summary_explains_each_skipped_stage_without_fake_success() {
+        let mut f = fake(Ok(false));
+        let mut r = Report::new(f.lifecycle());
+        diagnose(&f, &Target::parse("service.example").unwrap(), &mut r).await;
+        let summary = r.summary();
+        assert!(summary.contains("DNS: имя разрешено"));
+        assert!(summary.contains("маршрут вне интерфейса VPN"));
+        assert!(summary.contains("HTTPS: не отправлен"));
+        assert!(summary.contains("проверка firewall не выполнена"));
+        f.dns = Err(Fact::Unsupported);
+        let mut r = Report::new(f.lifecycle());
+        diagnose(&f, &Target::parse("service.example").unwrap(), &mut r).await;
+        assert!(r.summary().contains("DNS: не поддерживается"));
+        assert!(r.summary().contains("нет результата DNS"));
+        assert!(!r.summary().contains("не проверено"));
+        let mut r = Report::new(f.lifecycle());
+        assert!(r.summary().contains("VPN не активен"));
+        r.answer_count = 1;
+        assert!(r.summary().contains("указан IP"));
     }
     #[tokio::test]
     async fn unresolved_or_outside_route_never_sends_https() {

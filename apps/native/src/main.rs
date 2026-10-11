@@ -238,7 +238,12 @@ struct App {
     system_target: String,
     diagnostic_report: Option<(u64, rtrust_desktop::diagnostics::Report)>,
     diagnostic_preview: text_editor::Content,
+    diagnostic_preview_dirty: bool,
+    diagnostic_export_report: Option<rtrust_desktop::diagnostics::Report>,
+    system_target_edited_at: Option<std::time::Instant>,
     last_diagnostic: Option<std::time::Instant>,
+    diagnostic_task: Option<iced::task::Handle>,
+    diagnostic_generation: u64,
     /// Set by a proposed action; attached to the next completed report.
     follow_up: Option<rtrust_desktop::diagnostics::FollowUp>,
     /// Reconnect action in progress: Stop, then Start, then repeat the check.
@@ -321,6 +326,7 @@ enum Message {
     Fallback(String, bool),
     EndpointChecked(u64, u64, rtrust_desktop::diagnostics::EndpointCheck),
     DiagnosticEdit(text_editor::Action),
+    ResetDiagnosticPreview,
     ExportDiagnostic,
     ExplainRoute,
     Probed(u64, std::result::Result<String, String>),
@@ -401,7 +407,12 @@ impl App {
             system_target: "example.com".into(),
             diagnostic_report: None,
             diagnostic_preview: text_editor::Content::new(),
+            diagnostic_preview_dirty: false,
+            diagnostic_export_report: None,
+            system_target_edited_at: None,
             last_diagnostic: None,
+            diagnostic_task: None,
+            diagnostic_generation: 0,
             follow_up: None,
             reconnect_then_check: false,
             connection_candidates: vec![],
@@ -1112,8 +1123,10 @@ impl App {
                             let monitor = self.monitor_connection();
                             return Task::batch([monitor, self.update(Message::Diagnose)]);
                         }
+                        self.last_diagnostic = None;
+                        self.diagnostic_report = None;
                         self.status = if self.mode == Mode::Socks { "Прокси SOCKS5/HTTP включён. Его можно указать и как системный прокси Windows. Для DNS выберите разрешение имён через прокси." } else if self.saved_connection.mode == rtrust_store::Mode::Full && self.connection_ipv6 { "IPv4, IPv6 и DNS всего компьютера через VPN. Пересылка между интерфейсами заблокирована." } else if self.saved_connection.mode == rtrust_store::Mode::Full { "IPv4 и DNS всего компьютера через VPN. Сервер без IPv6: IPv6 заблокирован, приложения переходят на IPv4. Пересылка между интерфейсами заблокирована." } else { "Выбранные IPv4-сети подключены через службу. Исключения, остальной трафик и системный DNS идут напрямую." }.into();
-                        return self.monitor_connection();
+                        return Task::batch([self.monitor_connection(), self.start_diagnostic()]);
                     }
                     Err(error) => {
                         self.reconnect_then_check = false;
@@ -1134,19 +1147,32 @@ impl App {
                     Ok(()) => {
                         if self.session.as_ref().is_some_and(Session::is_tun) {
                             let session = self.session.as_ref().unwrap();
-                            self.status = session.address();
-                            if let Some(name) = session
-                                .active_profile()
-                                .filter(|&index| index > 0)
-                                .and_then(|index| self.connection_candidates.get(index as usize))
-                            {
-                                self.status += &format!(" · через резервный профиль «{name}»");
+                            if !self.busy && self.probe.is_none() {
+                                self.status = self.connection_check_summary();
+                                if let Some(name) = session
+                                    .active_profile()
+                                    .filter(|&index| index > 0)
+                                    .and_then(|index| {
+                                        self.connection_candidates.get(index as usize)
+                                    })
+                                {
+                                    self.status += &format!(" · через резервный профиль «{name}»");
+                                }
+                            }
+                            if self.diagnostic_due() {
+                                return Task::batch([
+                                    self.monitor_connection(),
+                                    self.start_diagnostic(),
+                                ]);
                             }
                         }
                         return self.monitor_connection();
                     }
                     Err(error) => {
                         if self.session.as_ref().is_some_and(Session::is_tun) {
+                            self.cancel_diagnostic();
+                            self.last_diagnostic = None;
+                            self.diagnostic_report = None;
                             self.status = error;
                             return self.monitor_connection();
                         }
@@ -1466,73 +1492,49 @@ impl App {
                     Err(e) => format!("Предпросмотр отклонён: {e}"),
                 };
             }
-            Message::SystemTarget(s) if !self.busy => self.system_target = s,
+            Message::SystemTarget(s) if !self.busy => {
+                self.cancel_diagnostic();
+                self.system_target = s;
+                self.diagnostic_report = None;
+                self.follow_up = None;
+                self.system_target_edited_at = Some(std::time::Instant::now());
+            }
             Message::DiagnosticEdit(action) if !self.busy => {
+                self.diagnostic_preview_dirty |= action.is_edit();
                 self.diagnostic_preview.perform(action)
             }
-            Message::Diagnose if !self.busy => {
-                // A follow-up belongs only to a check that actually starts.
-                let follow_up = self.follow_up.take();
-                let Some(session) = self.session.clone().filter(Session::is_tun) else {
-                    self.status = "Для системной проверки подключите TUN; отдельный proxy-тест не заменяет её.".into();
-                    return Task::none();
-                };
-                if self
-                    .last_diagnostic
-                    .is_some_and(|t| t.elapsed().as_secs() < 5)
-                {
-                    self.status = "Повторная проверка доступна через пять секунд.".into();
-                    return Task::none();
+            Message::ResetDiagnosticPreview if !self.busy => {
+                if let Some((_, report)) = self.diagnostic_report.clone() {
+                    self.diagnostic_preview_dirty = false;
+                    self.refresh_diagnostic_preview(&report);
                 }
-                let target = match rtrust_desktop::diagnostics::Target::parse(&self.system_target) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        self.status = e.into();
-                        return Task::none();
-                    }
-                };
-                self.last_diagnostic = Some(std::time::Instant::now());
-                self.follow_up = follow_up;
-                self.busy = true;
-                self.generation += 1;
-                let generation = self.generation;
-                let epoch = self.connection_epoch;
-                let selection = if self.mode == Mode::Tun {
-                    self.tun_selection().ok()
-                } else {
-                    None
-                };
-                let context = match &self.saved_connection.managed_routes {
-                    Some(m) => rtrust_profile::routing::Context {
-                        source: rtrust_profile::routing::Source::ManagedUnknown,
-                        revision: Some(m.revision.clone()),
-                    },
-                    None => rtrust_profile::routing::Context {
-                        source: rtrust_profile::routing::Source::Local,
-                        revision: None,
-                    },
-                };
-                self.status = "Системный DNS → маршрут → HEAD HTTPS:443 / через интерфейс VPN. До 15 секунд, без изменения сети.".into();
-                let (task, handle) = Task::perform(
-                    rtrust_desktop::diagnostics::run(target, session, selection, context),
-                    move |r| Message::Diagnosed(generation, epoch, r),
-                )
-                .abortable();
-                self.probe = Some(handle);
-                return task;
+            }
+            Message::Diagnose if !self.busy => {
+                return self.start_diagnostic();
             }
             Message::Diagnosed(g, epoch, report)
-                if g == self.generation && epoch == self.connection_epoch =>
+                if g == self.diagnostic_generation
+                    && epoch == self.connection_epoch
+                    && self.session.as_ref().is_some_and(Session::is_tun) =>
             {
-                self.probe = None;
-                self.busy = false;
+                self.diagnostic_task = None;
+                // A service reconnect can keep the same UI epoch. Reject its old evidence too.
+                if self.session.as_ref().unwrap().observations().generation
+                    != report.lifecycle.generation
+                {
+                    self.last_diagnostic = None;
+                    self.diagnostic_report = None;
+                    return self.start_diagnostic();
+                }
                 let mut report = report;
                 report.follows = self.follow_up.take();
-                self.status = format!("{} {}", report.verdict_text(), report.summary());
-                self.diagnostic_preview = text_editor::Content::with_text(&report.redacted_json());
+                self.refresh_diagnostic_preview(&report);
                 self.diagnostic_report = Some((epoch, report));
+                if !self.busy && self.probe.is_none() {
+                    self.status = self.connection_check_summary();
+                }
             }
-            Message::DiagnosticAction(action) if !self.busy => {
+            Message::DiagnosticAction(action) if !self.busy && self.diagnostic_task.is_none() => {
                 use rtrust_desktop::diagnostics::{Action, FollowUp};
                 let Some((epoch, report)) = &self.diagnostic_report else {
                     return Task::none();
@@ -1558,6 +1560,7 @@ impl App {
                         };
                     }
                     Action::CheckEndpoint if current => {
+                        self.cancel_diagnostic();
                         let Some(session) = self.session.clone() else {
                             return Task::none();
                         };
@@ -1598,16 +1601,20 @@ impl App {
             {
                 self.probe = None;
                 self.busy = false;
-                if let Some((report_epoch, report)) = &mut self.diagnostic_report
+                let updated = if let Some((report_epoch, report)) = &mut self.diagnostic_report
                     && *report_epoch == epoch
                     && report.attach_endpoint(check)
                 {
                     self.status = format!("{} {}", report.verdict_text(), report.summary());
-                    self.diagnostic_preview =
-                        text_editor::Content::with_text(&report.redacted_json());
+                    Some(report.clone())
+                } else {
+                    None
+                };
+                if let Some(report) = updated {
+                    self.refresh_diagnostic_preview(&report);
                 }
             }
-            Message::ExportDiagnostic if !self.busy && self.diagnostic_report.is_some() => {
+            Message::ExportDiagnostic if !self.busy && self.diagnostic_export_report.is_some() => {
                 let preview = self.diagnostic_preview.text();
                 self.busy = true;
                 return Task::perform(
@@ -1655,12 +1662,9 @@ impl App {
                 self.status = r.unwrap_or_else(|e| e);
             }
             Message::Cancel => {
-                if let Some(handle) = self.probe.take() {
-                    handle.abort();
-                    self.generation += 1;
-                    self.busy = false;
-                    self.status = "Проверка отменена; сеть не изменялась.".into();
-                }
+                self.cancel_diagnostic();
+                self.follow_up = None;
+                self.status = "Проверка отменена.".into();
             }
             _ => {}
         }
@@ -1736,7 +1740,117 @@ impl App {
         self.confirm_replace = false;
         self.consent = false;
     }
+    fn refresh_diagnostic_preview(&mut self, report: &rtrust_desktop::diagnostics::Report) {
+        // The editable export is a separate snapshot once the user changes it.
+        if !self.diagnostic_preview_dirty {
+            self.diagnostic_preview = text_editor::Content::with_text(&report.redacted_json());
+            self.diagnostic_export_report = Some(report.clone());
+        }
+    }
+    fn diagnostic_start_allowed(&self, now: std::time::Instant) -> bool {
+        self.diagnostic_task.is_none()
+            && self.last_diagnostic.is_none_or(|started| {
+                now.saturating_duration_since(started) >= std::time::Duration::from_secs(5)
+            })
+            && self.system_target_edited_at.is_none_or(|edited| {
+                now.saturating_duration_since(edited) >= std::time::Duration::from_secs(1)
+            })
+    }
+    fn diagnostic_due(&self) -> bool {
+        self.diagnostic_start_allowed(std::time::Instant::now())
+            && !self.busy
+            && self.probe.is_none()
+            && self.session.as_ref().is_some_and(Session::is_tun)
+            && (self.system_target_edited_at.is_some()
+                || self
+                    .last_diagnostic
+                    .is_none_or(|t| t.elapsed().as_secs() >= 30)
+                || self.diagnostic_report.as_ref().is_some_and(|(_, report)| {
+                    self.session.as_ref().unwrap().observations().generation
+                        != report.lifecycle.generation
+                }))
+    }
+    fn connection_check_summary(&self) -> String {
+        if self.diagnostic_task.is_some() {
+            return format!(
+                "Проверяем {}: DNS → маршрут VPN → HTTPS…",
+                self.system_target
+            );
+        }
+        if let Some((epoch, report)) = &self.diagnostic_report
+            && *epoch == self.connection_epoch
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.observations().generation == report.lifecycle.generation)
+        {
+            let age =
+                rtrust_control::observations::now_ms().saturating_sub(report.finished_at_ms) / 1000;
+            return format!(
+                "Последняя проверка ({} с назад): {} {}",
+                age,
+                report.verdict_text(),
+                report.summary()
+            );
+        }
+        "Транспорт запущен. Проверка системного пути ожидается.".into()
+    }
+    fn start_diagnostic(&mut self) -> Task<Message> {
+        let follow_up = self.follow_up.take();
+        let Some(session) = self.session.clone().filter(Session::is_tun) else {
+            // SOCKS health is already checked using the active transport, never another profile.
+            if self.session.is_none() {
+                self.status = "Для системной проверки подключите TUN.".into();
+            }
+            return Task::none();
+        };
+        if !self.diagnostic_start_allowed(std::time::Instant::now()) {
+            return Task::none();
+        }
+        let target = match rtrust_desktop::diagnostics::Target::parse(&self.system_target) {
+            Ok(t) => t,
+            Err(e) => {
+                self.status = e.into();
+                return Task::none();
+            }
+        };
+        self.follow_up = follow_up;
+        self.system_target_edited_at = None;
+        self.last_diagnostic = Some(std::time::Instant::now());
+        self.diagnostic_generation += 1;
+        let generation = self.diagnostic_generation;
+        let epoch = self.connection_epoch;
+        let selection = if self.mode == Mode::Tun {
+            self.tun_selection().ok()
+        } else {
+            None
+        };
+        let context = match &self.saved_connection.managed_routes {
+            Some(m) => rtrust_profile::routing::Context {
+                source: rtrust_profile::routing::Source::ManagedUnknown,
+                revision: Some(m.revision.clone()),
+            },
+            None => rtrust_profile::routing::Context {
+                source: rtrust_profile::routing::Source::Local,
+                revision: None,
+            },
+        };
+        let (task, handle) = Task::perform(
+            rtrust_desktop::diagnostics::run(target, session, selection, context),
+            move |r| Message::Diagnosed(generation, epoch, r),
+        )
+        .abortable();
+        self.diagnostic_task = Some(handle);
+        if !self.busy && self.probe.is_none() {
+            self.status = self.connection_check_summary();
+        }
+        task
+    }
     fn cancel_diagnostic(&mut self) {
+        if let Some(handle) = self.diagnostic_task.take() {
+            handle.abort();
+            self.diagnostic_generation += 1;
+        }
         if let Some(handle) = self.probe.take() {
             handle.abort();
             self.generation += 1;
@@ -2255,12 +2369,16 @@ impl App {
                 let mut content=column![text("Диагностика и объяснение маршрута").size(22),text("Настоящий HTTP-запрос через TLS/HTTP2 или QUIC/HTTP3 CONNECT. Проверяет обмен данными, но не включает TUN, маршруты, DNS или kill switch."),
                     text("Назначение внутри туннеля (HOST:PORT, обычный HTTP)"),text_input("example.com:80",&self.target).on_input(Message::Target)].spacing(10);
                 content = content.push(text("Проверка действующего системного VPN").size(18))
+                    .push(text("Запускается при подключении и повторяется каждые 30 секунд. Проверяется адрес ниже; управление VPN остаётся доступным."))
                     .push(text("Ниже выполняется системное разрешение имени и один HEAD запрос HTTPS:443 / к указанному адресу. Без proxy среды, перенаправлений и прямого сравнения. HTTPS отправляется только при маршруте на интерфейс RTrustTunnel и привязан к нему. Windows пока не поддерживается."))
                     .push(text_input("hostname или IP без URL и порта", &self.system_target).on_input(Message::SystemTarget))
                     .push(button("Проверить системный путь / повторить")
-                        .on_press_maybe((!self.busy && self.session.as_ref().is_some_and(Session::is_tun)).then_some(Message::Diagnose)));
+                        .on_press_maybe((!self.busy && self.diagnostic_start_allowed(std::time::Instant::now()) && self.session.as_ref().is_some_and(Session::is_tun)).then_some(Message::Diagnose)));
                 if let Some((epoch, report)) = &self.diagnostic_report {
                     let stale = *epoch != self.connection_epoch
+                        || self.session.as_ref().is_none_or(|session| {
+                            session.observations().generation != report.lifecycle.generation
+                        })
                         || rtrust_control::observations::now_ms()
                             .saturating_sub(report.finished_at_ms)
                             > 6000;
@@ -2270,11 +2388,19 @@ impl App {
                         .push(report.verdict().actions.into_iter().fold(row![].spacing(8), |actions, action| {
                             use rtrust_desktop::diagnostics::Action;
                             // Old results may still be repeated, never acted upon.
-                            let allowed = !self.busy && (action == Action::Recheck || !stale);
+                            let allowed = !self.busy && self.diagnostic_task.is_none() && (action == Action::Recheck || !stale) && (action != Action::Recheck || self.diagnostic_start_allowed(std::time::Instant::now()));
                             actions.push(button(action.label()).on_press_maybe(allowed.then_some(Message::DiagnosticAction(action))))
-                        }))
-                        .push(text("Предпросмотр экспорта: адреса, имя сайта, URL, credentials и сырые ошибки исключены. При необходимости отредактируйте перед сохранением."))
+                        }));
+                }
+                if self.diagnostic_export_report.is_some() {
+                    content = content.push(text(if self.diagnostic_preview_dirty {
+                        "Редактируемая копия отчёта для экспорта. Ручные правки сохраняются; результаты автоматических проверок обновляются отдельно."
+                    } else {
+                        "Копия последнего отчёта для экспорта. Адреса, имя сайта, URL, credentials и сырые ошибки исключены."
+                    }))
                         .push(text_editor(&self.diagnostic_preview).on_action(Message::DiagnosticEdit).height(160))
+                        .push(button("Заменить копию последним результатом")
+                            .on_press_maybe((!self.busy && self.diagnostic_report.is_some()).then_some(Message::ResetDiagnosticPreview)))
                         .push(button("Сохранить показанный отчёт…").on_press_maybe((!self.busy).then_some(Message::ExportDiagnostic)));
                 }
                 content = content.push(
@@ -2291,7 +2417,7 @@ impl App {
                 } else {
                     content = content.push(text("Сначала выберите профиль."));
                 }
-                if self.probe.is_some() {
+                if self.probe.is_some() || self.diagnostic_task.is_some() {
                     content = content.push(button("Отмена").on_press(Message::Cancel));
                 }
                 content.into()
@@ -2483,6 +2609,87 @@ mod tests {
         assert!(!app.connecting && app.session.is_none());
     }
     #[test]
+    fn background_check_cancellation_preserves_unrelated_busy_operation() {
+        let mut app = app();
+        let (_task, handle) =
+            Task::perform(std::future::pending::<()>(), |_| Message::Tick).abortable();
+        app.diagnostic_task = Some(handle);
+        app.busy = true; // e.g. saving a profile, independent of the background check
+        let before = app.diagnostic_generation;
+        app.cancel_diagnostic();
+        assert!(app.busy);
+        assert!(app.diagnostic_task.is_none());
+        assert_eq!(app.diagnostic_generation, before + 1);
+    }
+    #[test]
+    fn changing_destination_discards_previous_check_and_does_not_lock_ui() {
+        let mut app = app();
+        let (_task, handle) =
+            Task::perform(std::future::pending::<()>(), |_| Message::Tick).abortable();
+        app.diagnostic_task = Some(handle);
+        app.last_diagnostic = Some(std::time::Instant::now());
+        let _ = app.update(Message::SystemTarget("other.example".into()));
+        assert_eq!(app.system_target, "other.example");
+        assert!(app.diagnostic_task.is_none() && app.last_diagnostic.is_some());
+        assert!(app.system_target_edited_at.is_some());
+        assert!(!app.busy);
+    }
+    #[test]
+    fn edited_export_survives_background_and_endpoint_updates_until_explicit_reset() {
+        use rtrust_desktop::diagnostics::Report;
+        let mut app = app();
+        let mut first = Report::new(rtrust_control::observations::Snapshot::unknown(
+            rtrust_control::observations::Mode::Full,
+        ));
+        first.started_at_ms = 100;
+        app.refresh_diagnostic_preview(&first);
+        // Selecting text alone must not freeze automatic updates.
+        let _ = app.update(Message::DiagnosticEdit(text_editor::Action::SelectAll));
+        assert!(!app.diagnostic_preview_dirty);
+        let _ = app.update(Message::DiagnosticEdit(text_editor::Action::Edit(
+            text_editor::Edit::Paste(std::sync::Arc::new("user-redacted report".into())),
+        )));
+        assert!(app.diagnostic_preview_dirty);
+        let edited = app.diagnostic_preview.text();
+        let mut newer = first.clone();
+        newer.started_at_ms = 200;
+        app.refresh_diagnostic_preview(&newer);
+        assert_eq!(app.diagnostic_preview.text(), edited);
+        assert_eq!(
+            app.diagnostic_export_report.as_ref().unwrap().started_at_ms,
+            100
+        );
+        // Endpoint refinement and a destination edit must also preserve the copy.
+        newer.endpoint = rtrust_desktop::diagnostics::Fact::Passed;
+        app.refresh_diagnostic_preview(&newer);
+        let _ = app.update(Message::SystemTarget("other.example".into()));
+        assert_eq!(app.diagnostic_preview.text(), edited);
+        app.diagnostic_report = Some((app.connection_epoch, newer.clone()));
+        let _ = app.update(Message::ResetDiagnosticPreview);
+        assert!(!app.diagnostic_preview_dirty);
+        assert_eq!(app.diagnostic_preview.text(), newer.redacted_json());
+        assert_eq!(
+            app.diagnostic_export_report.as_ref().unwrap().started_at_ms,
+            200
+        );
+    }
+    #[test]
+    fn destination_edits_debounce_without_resetting_the_request_cooldown() {
+        let mut app = app();
+        let started = std::time::Instant::now();
+        app.last_diagnostic = Some(started);
+        let _ = app.update(Message::SystemTarget("other.example".into()));
+        assert_eq!(app.last_diagnostic, Some(started));
+        assert!(!app.diagnostic_start_allowed(started + std::time::Duration::from_secs(2)));
+        // A later keystroke restarts the debounce, but keeps the original cooldown.
+        app.system_target_edited_at = Some(started + std::time::Duration::from_millis(4900));
+        assert!(!app.diagnostic_start_allowed(started + std::time::Duration::from_secs(5)));
+        assert!(app.diagnostic_start_allowed(started + std::time::Duration::from_secs(6)));
+        // Cancellation does not reopen the cooldown either.
+        let _ = app.update(Message::Cancel);
+        assert_eq!(app.last_diagnostic, Some(started));
+    }
+    #[test]
     fn system_diagnostic_requires_active_tun_and_report_export_requires_completion() {
         let mut app = app();
         let _ = app.update(Message::Diagnose);
@@ -2507,21 +2714,28 @@ mod tests {
         // A repeat that cannot start leaves no dangling follow-up.
         let _ = app.update(Message::DiagnosticAction(Action::Recheck));
         assert!(app.status.contains("подключите TUN") && app.follow_up.is_none());
-        // A completed check consumes the follow-up exactly once.
-        app.follow_up = Some(FollowUp {
+        // A delayed completion after disconnect cannot replace the displayed report.
+        app.busy = true;
+        let _ = app.update(Message::Diagnosed(
+            app.diagnostic_generation,
+            app.connection_epoch,
+            Report::new(snapshot.clone()),
+        ));
+        assert_eq!(
+            app.diagnostic_report.as_ref().unwrap().0,
+            app.connection_epoch + 1
+        );
+        assert!(app.busy);
+        // Follow-up provenance is retained on the report, not inferred from success.
+        let mut report = Report::new(snapshot);
+        report.follows = Some(FollowUp {
             action: Action::Reconnect,
             previous_cause: Cause::Undetermined,
             previous_finished_at_ms: 7,
         });
-        app.busy = true;
-        let _ = app.update(Message::Diagnosed(
-            app.generation,
-            app.connection_epoch,
-            Report::new(snapshot.clone()),
-        ));
+        assert!(report.verdict_text().contains("Повторная проверка"));
+        app.diagnostic_report = Some((app.connection_epoch, report));
         let (_, report) = app.diagnostic_report.as_ref().unwrap();
-        assert_eq!(report.follows.as_ref().unwrap().previous_finished_at_ms, 7);
-        assert!(app.follow_up.is_none() && app.status.contains("Повторная проверка"));
         // An endpoint result for this connection refines the shown report.
         app.busy = true;
         let started = report.started_at_ms;
