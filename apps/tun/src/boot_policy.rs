@@ -176,6 +176,7 @@ pub fn save(policy: &Policy) -> Result<(), String> {
         .map_err(|_| "Cannot save protected boot policy")?;
     sync_directory()
 }
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn sync_directory() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     std::fs::File::open(directory()?)
