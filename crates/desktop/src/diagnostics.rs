@@ -28,6 +28,89 @@ pub enum Fact {
     RouteMismatch,
     TlsFailed,
     ConnectionFailed,
+    /// The VPN endpoint answered but refused the credentials or tunnel request.
+    Rejected,
+}
+/// Most likely explanation. `basis` says whether it was observed or inferred.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cause {
+    Responded,
+    ServiceUnavailable,
+    TransportDown,
+    SessionChanged,
+    NameResolution,
+    RouteOutsideVpn,
+    CertificateRejected,
+    EndpointUnreachable,
+    EndpointRejected,
+    DestinationUnreachable,
+    CheckUnsupported,
+    Undetermined,
+}
+impl Cause {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Responded => "сайт ответил через VPN-интерфейс",
+            Self::ServiceUnavailable => "служба VPN недоступна для приложения",
+            Self::TransportDown => "транспорт VPN остановлен, служба переподключается",
+            Self::SessionChanged => "подключение изменилось во время проверки",
+            Self::NameResolution => "системный DNS не вернул адрес",
+            Self::RouteOutsideVpn => "маршрут к адресу идёт мимо VPN",
+            Self::CertificateRejected => {
+                "сертификат сайта не прошёл проверку (подмена или ошибка сайта)"
+            }
+            Self::EndpointUnreachable => "VPN endpoint недоступен",
+            Self::EndpointRejected => {
+                "VPN endpoint отклонил подключение (учётные данные или доступ)"
+            }
+            Self::DestinationUnreachable => "endpoint работает, сайт не отвечает через VPN",
+            Self::CheckUnsupported => "нужная проверка недоступна на этой системе",
+            Self::Undetermined => "причина не установлена; один таймаут не доказывает блокировку",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Basis {
+    Observed,
+    Inferred,
+}
+/// Every action runs through the normal lifecycle; none changes routes or the
+/// guard by itself, and each is followed by an explicit repeat check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Action {
+    Recheck,
+    /// Independent authenticated session to the VPN endpoint; no destination request.
+    CheckEndpoint,
+    /// Ordinary Stop then Start of the current connection.
+    Reconnect,
+    /// Show the policy decision and the selection settings; nothing is applied.
+    ReviewRules,
+}
+impl Action {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Recheck => "Повторить проверку",
+            Self::CheckEndpoint => "Проверить VPN endpoint",
+            Self::Reconnect => "Переподключить VPN",
+            Self::ReviewRules => "Показать правило маршрута",
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Verdict {
+    pub cause: Cause,
+    pub basis: Basis,
+    pub actions: Vec<Action>,
+}
+/// Links a repeat check to the action that preceded it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FollowUp {
+    pub action: Action,
+    pub previous_cause: Cause,
+    pub previous_finished_at_ms: u64,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Report {
@@ -42,13 +125,21 @@ pub struct Report {
     pub https: Fact,
     pub http_status: Option<u16>,
     pub ipv6: bool,
+    /// Independent endpoint check, only when the user ran it for this report.
+    pub endpoint: Fact,
+    pub endpoint_at_ms: Option<u64>,
+    /// False where the endpoint session itself may be policy-routed into the
+    /// tunnel (Linux desktop UID rule): its failure is then not attributable.
+    pub endpoint_independent: bool,
+    pub follows: Option<FollowUp>,
     /// HTTPS response does not certify application functionality or general Internet.
     pub scope: &'static str,
 }
 impl Report {
-    fn new(snapshot: Snapshot) -> Self {
+    /// An empty report; only `run` fills in observed facts.
+    pub fn new(snapshot: Snapshot) -> Self {
         Self {
-            schema: 1,
+            schema: 2,
             started_at_ms: now_ms(),
             finished_at_ms: 0,
             lifecycle: snapshot,
@@ -59,12 +150,104 @@ impl Report {
             https: Fact::NotChecked,
             http_status: None,
             ipv6: false,
+            endpoint: Fact::NotChecked,
+            endpoint_at_ms: None,
+            endpoint_independent: false,
+            follows: None,
             scope: "one_destination_system_path_no_global_protection_claim",
         }
     }
     /// Safe default export. Contains no target, addresses, URL, headers or raw errors.
     pub fn redacted_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("typed report")
+    }
+    /// Attach an independent endpoint result. Only facts observed after this
+    /// report started may refine it; an older check is not evidence for it.
+    pub fn attach_endpoint(&mut self, check: EndpointCheck) -> bool {
+        if check.started_at_ms < self.started_at_ms {
+            return false;
+        }
+        self.endpoint = check.fact;
+        self.endpoint_at_ms = Some(check.finished_at_ms);
+        self.endpoint_independent = check.independent;
+        true
+    }
+    pub fn verdict(&self) -> Verdict {
+        use rtrust_control::observations::{Outcome, Reason as Lifecycle};
+        use {Action::*, Basis::*, Cause::*};
+        let endpoint_checked = self.endpoint != Fact::NotChecked;
+        let check = if endpoint_checked {
+            None
+        } else {
+            Some(CheckEndpoint)
+        };
+        let verdict = |cause, basis, actions: &[Option<Action>]| Verdict {
+            cause,
+            basis,
+            actions: actions.iter().flatten().copied().collect(),
+        };
+        // The independent endpoint result overrides weaker destination guesses.
+        let endpoint = match self.endpoint {
+            // A refusal is the endpoint's own answer, whatever path carried it.
+            Fact::Rejected => Some(EndpointRejected),
+            Fact::Failed | Fact::Timeout | Fact::ConnectionFailed | Fact::TlsFailed
+                if self.endpoint_independent =>
+            {
+                Some(EndpointUnreachable)
+            }
+            _ => None,
+        };
+        let transport = &self.lifecycle.transport;
+        if transport.reason == Lifecycle::ControlLost {
+            return verdict(
+                ServiceUnavailable,
+                Observed,
+                &[Some(Reconnect), Some(Recheck)],
+            );
+        }
+        if self.route == Fact::SessionChanged || self.https == Fact::SessionChanged {
+            return verdict(SessionChanged, Observed, &[Some(Recheck)]);
+        }
+        if transport.outcome == Outcome::Failed {
+            return match endpoint {
+                Some(cause) => verdict(cause, Observed, &[Some(Reconnect), Some(Recheck)]),
+                None => verdict(
+                    TransportDown,
+                    Observed,
+                    &[check, Some(Reconnect), Some(Recheck)],
+                ),
+            };
+        }
+        match (self.dns, self.route, self.https) {
+            (_, _, Fact::Passed) => verdict(Responded, Observed, &[Some(Recheck)]),
+            (_, _, Fact::TlsFailed) => verdict(CertificateRejected, Observed, &[Some(Recheck)]),
+            (_, Fact::RouteMismatch, _) => verdict(
+                RouteOutsideVpn,
+                Observed,
+                &[Some(ReviewRules), Some(Recheck)],
+            ),
+            (Fact::Unsupported, ..) | (_, Fact::Unsupported, _) | (.., Fact::Unsupported) => {
+                verdict(CheckUnsupported, Observed, &[check])
+            }
+            (Fact::Failed, ..) => match endpoint {
+                // The resolver goes through the tunnel in full mode: a dead
+                // endpoint explains a failed lookup better than the name does.
+                Some(cause) => verdict(cause, Inferred, &[Some(Reconnect), Some(Recheck)]),
+                None => verdict(NameResolution, Observed, &[check, Some(Recheck)]),
+            },
+            (Fact::Timeout, ..)
+            | (_, Fact::Timeout | Fact::Failed, _)
+            | (.., Fact::Timeout | Fact::ConnectionFailed | Fact::Failed) => match endpoint {
+                Some(cause) => verdict(cause, Inferred, &[Some(Reconnect), Some(Recheck)]),
+                None if self.endpoint == Fact::Passed => verdict(
+                    DestinationUnreachable,
+                    Inferred,
+                    &[Some(Reconnect), Some(Recheck)],
+                ),
+                None => verdict(Undetermined, Inferred, &[check, Some(Recheck)]),
+            },
+            _ => verdict(Undetermined, Inferred, &[check, Some(Recheck)]),
+        }
     }
     pub fn summary(&self) -> String {
         fn label(f: Fact) -> &'static str {
@@ -78,10 +261,11 @@ impl Report {
                 Fact::RouteMismatch => "маршрут вне интерфейса VPN; HTTPS не отправлен",
                 Fact::TlsFailed => "ошибка проверки TLS",
                 Fact::ConnectionFailed => "соединение не установлено (причина неизвестна)",
+                Fact::Rejected => "endpoint отклонил учётные данные или запрос",
             }
         }
         format!(
-            "Проверка {}–{} · DNS: {} · маршрут: {} · HTTPS: {}{} · состояние защиты не подтверждается этой проверкой.",
+            "Проверка {}–{} · DNS: {} · маршрут: {} · HTTPS: {}{}{} · состояние защиты не подтверждается этой проверкой.",
             self.started_at_ms,
             self.finished_at_ms,
             label(self.dns),
@@ -89,8 +273,32 @@ impl Report {
             label(self.https),
             self.http_status
                 .map(|s| format!(" · HTTP {s} (не доказывает работу функции сайта)"))
+                .unwrap_or_default(),
+            self.endpoint_at_ms
+                .map(|at| format!(" · endpoint ({at}): {}", label(self.endpoint)))
                 .unwrap_or_default()
         )
+    }
+    /// Localized at the UI boundary; the machine contract is `verdict()`.
+    pub fn verdict_text(&self) -> String {
+        let verdict = self.verdict();
+        let basis = match verdict.basis {
+            Basis::Observed => "наблюдение",
+            Basis::Inferred => "вероятная причина",
+        };
+        let follows = self
+            .follows
+            .as_ref()
+            .map(|f| {
+                format!(
+                    "Повторная проверка после действия «{}»; до него ({}): {}. ",
+                    f.action.label(),
+                    f.previous_finished_at_ms,
+                    f.previous_cause.label()
+                )
+            })
+            .unwrap_or_default();
+        format!("{follows}Итог ({basis}): {}.", verdict.cause.label())
     }
 }
 #[derive(Clone, Debug)]
@@ -128,6 +336,49 @@ impl Target {
         } else {
             format!("https://{}/", self.host)
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EndpointCheck {
+    pub fact: Fact,
+    pub started_at_ms: u64,
+    pub finished_at_ms: u64,
+    pub independent: bool,
+}
+const ENDPOINT_LIMIT: Duration = Duration::from_secs(10);
+/// One authenticated session and health exchange with the profile's endpoint,
+/// like the transport test: no destination is contacted and nothing is routed.
+pub async fn check_endpoint(profile: rtrust_profile::Profile) -> EndpointCheck {
+    let started_at_ms = now_ms();
+    let fact = match tokio::time::timeout(ENDPOINT_LIMIT, async {
+        rtrust_engine::Session::connect(&profile)
+            .await?
+            .health()
+            .await
+    })
+    .await
+    {
+        Err(_) => Fact::Timeout,
+        Ok(Ok(())) => Fact::Passed,
+        Ok(Err(error)) => endpoint_fact(&error),
+    };
+    EndpointCheck {
+        fact,
+        started_at_ms,
+        finished_at_ms: now_ms(),
+        independent: !cfg!(target_os = "linux"),
+    }
+}
+fn endpoint_fact(error: &rtrust_engine::Error) -> Fact {
+    use rtrust_engine::Error;
+    match error {
+        Error::Tls | Error::Trust => Fact::TlsFailed,
+        Error::Authentication | Error::Rejected(_) => Fact::Rejected,
+        Error::Timeout => Fact::Timeout,
+        Error::Connect | Error::ConnectIo(_) => Fact::ConnectionFailed,
+        Error::Unsupported(_) => Fact::Unsupported,
+        _ => Fact::Failed,
     }
 }
 
@@ -174,6 +425,9 @@ impl Backend for System {
                 self.session.observations().transport.outcome,
                 rtrust_control::observations::Outcome::Configured
                     | rtrust_control::observations::Outcome::Passed
+                    // After sleep or a polling gap the running worker is stale
+                    // until proven; this check is that proof, not an assumption.
+                    | rtrust_control::observations::Outcome::Stale
             )
     }
     async fn resolve(&self, target: &Target) -> Result<Vec<IpAddr>, Fact> {
@@ -537,6 +791,133 @@ mod tests {
             calls: AtomicUsize::new(0),
             change: false,
         }
+    }
+    fn report(dns: Fact, route: Fact, https: Fact) -> Report {
+        let mut r = Report::new(Snapshot::unknown(rtrust_control::observations::Mode::Full));
+        r.dns = dns;
+        r.route = route;
+        r.https = https;
+        r
+    }
+    fn endpoint(fact: Fact, started_at_ms: u64, independent: bool) -> EndpointCheck {
+        EndpointCheck {
+            fact,
+            started_at_ms,
+            finished_at_ms: started_at_ms + 1,
+            independent,
+        }
+    }
+    #[test]
+    fn a_timeout_alone_is_undetermined_and_asks_for_independent_evidence() {
+        use Fact::*;
+        let mut r = report(Passed, Passed, Timeout);
+        let v = r.verdict();
+        assert_eq!((v.cause, v.basis), (Cause::Undetermined, Basis::Inferred));
+        assert_eq!(v.actions, [Action::CheckEndpoint, Action::Recheck]);
+        // Endpoint answers: the destination is the likelier problem, still inferred.
+        assert!(r.attach_endpoint(endpoint(Passed, r.started_at_ms, true)));
+        let v = r.verdict();
+        assert_eq!(
+            (v.cause, v.basis),
+            (Cause::DestinationUnreachable, Basis::Inferred)
+        );
+        assert!(!v.actions.contains(&Action::CheckEndpoint));
+        // An endpoint failure is attributable only off the tunnel path.
+        r.attach_endpoint(endpoint(ConnectionFailed, r.started_at_ms, true));
+        assert_eq!(r.verdict().cause, Cause::EndpointUnreachable);
+        r.attach_endpoint(endpoint(ConnectionFailed, r.started_at_ms, false));
+        assert_eq!(r.verdict().cause, Cause::Undetermined);
+        // A refusal is the endpoint's own answer on any path.
+        r.attach_endpoint(endpoint(Rejected, r.started_at_ms, false));
+        assert_eq!(r.verdict().cause, Cause::EndpointRejected);
+    }
+    #[test]
+    fn an_endpoint_check_older_than_the_report_is_not_evidence() {
+        let mut r = report(Fact::Passed, Fact::Passed, Fact::Timeout);
+        assert!(!r.attach_endpoint(endpoint(Fact::Passed, r.started_at_ms - 1, true)));
+        assert_eq!(r.endpoint, Fact::NotChecked);
+        assert_eq!(r.verdict().cause, Cause::Undetermined);
+    }
+    #[test]
+    fn observed_stages_map_to_distinct_causes_and_actions() {
+        use Fact::*;
+        let cases = [
+            (
+                report(Passed, Passed, Passed),
+                Cause::Responded,
+                Basis::Observed,
+            ),
+            (
+                report(Passed, Passed, TlsFailed),
+                Cause::CertificateRejected,
+                Basis::Observed,
+            ),
+            (
+                report(Passed, RouteMismatch, NotChecked),
+                Cause::RouteOutsideVpn,
+                Basis::Observed,
+            ),
+            (
+                report(Failed, NotChecked, NotChecked),
+                Cause::NameResolution,
+                Basis::Observed,
+            ),
+            (
+                report(Unsupported, NotChecked, NotChecked),
+                Cause::CheckUnsupported,
+                Basis::Observed,
+            ),
+            (
+                report(Passed, SessionChanged, NotChecked),
+                Cause::SessionChanged,
+                Basis::Observed,
+            ),
+            (
+                report(Timeout, NotChecked, NotChecked),
+                Cause::Undetermined,
+                Basis::Inferred,
+            ),
+        ];
+        for (r, cause, basis) in cases {
+            let v = r.verdict();
+            assert_eq!(
+                (v.cause, v.basis),
+                (cause, basis),
+                "{:?}",
+                (r.dns, r.route, r.https)
+            );
+            assert!(!v.actions.is_empty() || cause == Cause::CheckUnsupported);
+        }
+        assert!(
+            report(Passed, RouteMismatch, NotChecked)
+                .verdict()
+                .actions
+                .contains(&Action::ReviewRules)
+        );
+    }
+    #[test]
+    fn lifecycle_failures_outrank_destination_facts() {
+        use rtrust_control::observations::{Outcome, Reason as Lifecycle};
+        let mut r = report(Fact::Passed, Fact::Passed, Fact::Timeout);
+        r.lifecycle.transport.outcome = Outcome::Failed;
+        let v = r.verdict();
+        assert_eq!(v.cause, Cause::TransportDown);
+        assert!(v.actions.contains(&Action::Reconnect));
+        r.lifecycle.transport.reason = Lifecycle::ControlLost;
+        assert_eq!(r.verdict().cause, Cause::ServiceUnavailable);
+    }
+    #[test]
+    fn a_follow_up_names_the_action_and_the_earlier_result_without_target_data() {
+        let mut r = report(Fact::Passed, Fact::Passed, Fact::Passed);
+        r.follows = Some(FollowUp {
+            action: Action::Reconnect,
+            previous_cause: Cause::Undetermined,
+            previous_finished_at_ms: 42,
+        });
+        let text = r.verdict_text();
+        assert!(text.contains("Переподключить") && text.contains("42"));
+        let json = r.redacted_json();
+        assert!(json.contains("\"follows\"") && json.contains("reconnect"));
     }
     #[tokio::test]
     async fn unresolved_or_outside_route_never_sends_https() {
