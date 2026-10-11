@@ -167,7 +167,7 @@ async fn enrollment_then_complete_snapshot_uses_origin_bound_token() {
         snapshot.profiles[0].1.endpoint.password.expose(),
         "FIXTURE-SECRET"
     );
-    assert!(snapshot.routing.is_none());
+    assert_eq!(snapshot.routing, RoutingState::Available(None));
     assert_eq!(fixture.observed.lock().unwrap().len(), 7);
     assert!(!format!("{client:?}").contains(&"x".repeat(43)));
 }

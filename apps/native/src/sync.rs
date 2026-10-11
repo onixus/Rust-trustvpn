@@ -48,6 +48,18 @@ fn managed(policy: rtrust_portal::RoutingPolicy) -> Result<rtrust_store::Managed
         .map_err(|_| "Сервер прислал недопустимую группу маршрутов".to_owned())?;
     Ok(routes)
 }
+fn managed_update(
+    state: rtrust_portal::RoutingState,
+    previously_managed: bool,
+) -> Result<Option<rtrust_store::ManagedRoutes>, String> {
+    match state {
+        rtrust_portal::RoutingState::Unsupported if previously_managed => {
+            Err("Панель больше не поддерживает ранее выданную политику маршрутов".into())
+        }
+        rtrust_portal::RoutingState::Unsupported => Ok(None),
+        rtrust_portal::RoutingState::Available(policy) => policy.map(managed).transpose(),
+    }
+}
 fn changed_profiles(
     settings: &rtrust_store::SyncSettings,
     profiles: Vec<(RemoteProfile, Profile)>,
@@ -127,6 +139,7 @@ impl App {
                 self.busy = true;
                 let existing = self.portal.client.clone();
                 let settings = self.saved_connection.sync.clone();
+                let previously_managed = self.saved_connection.managed_routes.is_some();
                 let fetch = async move {
                     let client = match existing {
                         Some(c) => c,
@@ -146,7 +159,7 @@ impl App {
                         .map(|(meta, _)| meta.id.clone())
                         .collect();
                     let changed = changed_profiles(&settings, snapshot.profiles)?;
-                    let routing = snapshot.routing.map(managed).transpose()?;
+                    let routing = managed_update(snapshot.routing, previously_managed)?;
                     Ok(Box::new(Batch {
                         origin: settings.origin,
                         client,
@@ -359,6 +372,21 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn older_api_cannot_silently_clear_an_existing_managed_policy() {
+        use rtrust_portal::RoutingState;
+        assert!(managed_update(RoutingState::Unsupported, true).is_err());
+        assert!(
+            managed_update(RoutingState::Unsupported, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            managed_update(RoutingState::Available(None), true)
+                .unwrap()
+                .is_none()
+        );
+    }
     fn meta() -> RemoteProfile {
         RemoteProfile {
             id: "remote-1".into(),

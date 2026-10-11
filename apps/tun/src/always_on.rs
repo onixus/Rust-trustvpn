@@ -290,6 +290,7 @@ fn launch(
                     .expect("validated backups"),
             )
         };
+        let mut fixed_budget = rtrust_control::recovery::Budget::default();
         let mut observations = rtrust_control::recovery::Observations::new(
             state.borrow().observations.clone(),
             observation_epochs,
@@ -397,15 +398,16 @@ fn launch(
                 .await
                 .map(|t| t.elapsed().as_secs().max(1))
                 .unwrap_or(0);
+            fixed_budget.disconnected(Duration::from_secs(connected_seconds));
             let delay = planner
                 .as_mut()
-                .map(|p| p.failed(rand::random(), connected_seconds))
-                .unwrap_or(3);
+                .map(|p| Duration::from_secs(p.failed(rand::random(), connected_seconds)))
+                .unwrap_or_else(|| fixed_budget.next_delay(rand::random()));
             response.recovery = planner.as_ref().map(|p| p.status());
             observations.begin(rtrust_control::observations::now_ms());
             response.observations = observations.snapshot();
             state.send_replace(response);
-            tokio::select! {_=stopped.changed()=>{},_=tokio::time::sleep(Duration::from_secs(delay))=>{}}
+            tokio::select! {_=stopped.changed()=>{},_=tokio::time::sleep(delay)=>{}}
         }
     });
     (stop, task)

@@ -490,7 +490,7 @@ async fn lease_loop(
     monitor.transition(true, rtrust_control::observations::now_ms());
     let mut netwatch = crate::netwatch::Watch::new(DEVICE);
     let mut retry = Box::pin(tokio::time::sleep(Duration::from_secs(2)));
-    let mut delay = 2;
+    let mut budget = rtrust_control::recovery::Budget::default();
     let mut connected_since = std::time::Instant::now();
     let mut connecting = Box::pin(std::future::pending::<
         Result<(Session, rtrust_engine::Tunnel), String>,
@@ -515,21 +515,22 @@ async fn lease_loop(
                 _ = stop.changed() => return Ok(None),
                 _ = worker.finished(), if state == State::Connected => {
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
-                    if connected_since.elapsed() >= Duration::from_secs(30) { delay=2; }
+                    budget.disconnected(connected_since.elapsed());
                     if failover.ended(connected_since.elapsed(), std::time::Instant::now()) {
                         monitor.failed_over(rtrust_control::observations::now_ms());
-                        delay=2;
                     }
-                    retry.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(delay));
+                    retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                 },
                 _ = &mut retry, if state == State::Blocked && !reconnecting => {
                     if full && full::refresh(device.if_index().map_err(|_| "Missing Wintun interface")?, &full::endpoints(&failover.guard_profile())?).is_err() {
-                        delay=(delay*2).min(30);
-                        retry.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(delay));
+                        retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                         continue;
                     }
                     let profile = failover.current().clone();
-                    connecting = Box::pin(async move { transport(&profile).await }); reconnecting=true;
+                    connecting = Box::pin(async move {
+                        tokio::time::timeout(rtrust_control::recovery::ATTEMPT_TIMEOUT, transport(&profile))
+                            .await.map_err(|_| "Reconnect timed out".to_owned())?
+                    }); reconnecting=true;
                 },
                 result = &mut connecting, if reconnecting => {
                     reconnecting=false;
@@ -539,13 +540,11 @@ async fn lease_loop(
                             state=State::Connected; monitor.transition(true, rtrust_control::observations::now_ms()); connected_since=std::time::Instant::now();
                         },
                         Err(_) => {
-                            delay=(delay*2).min(30);
                             // The guard already covers every candidate.
                             if failover.failed(std::time::Instant::now()) {
                                 monitor.failed_over(rtrust_control::observations::now_ms());
-                                delay=2;
                             }
-                            retry.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(delay));
+                            retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                         },
                     }
                 },

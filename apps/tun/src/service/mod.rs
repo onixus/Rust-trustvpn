@@ -53,12 +53,16 @@ impl Drop for Workers {
     }
 }
 impl Workers {
-    fn retry(&mut self, profile: &rtrust_profile::Profile, delay: &mut u64, full: bool) {
+    fn retry(
+        &mut self,
+        profile: &rtrust_profile::Profile,
+        delay: &mut rtrust_control::recovery::Budget,
+        full: bool,
+    ) {
         let profile = profile.clone();
-        let wait = *delay;
-        *delay = (*delay * 2).min(30);
+        let wait = delay.next_delay(rand::random());
         self.reconnect = Some(tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(wait)).await;
+            tokio::time::sleep(wait).await;
             tokio::time::timeout(
                 Duration::from_secs(30),
                 crate::linux::Prepared::connect_mode(
@@ -348,7 +352,7 @@ async fn serve(
         tunnel: Some(tokio::spawn(prepared.run())),
         reconnect: None,
     };
-    let mut retry_delay = 2;
+    let mut retry_delay = rtrust_control::recovery::Budget::default();
     let mut connected_since = Instant::now();
     let mut monitor = rtrust_control::observations::Monitor::new(
         if full {
@@ -411,11 +415,10 @@ async fn serve(
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
                     endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     // A flapping endpoint must not reset the backoff indefinitely.
-                    if connected_since.elapsed() >= Duration::from_secs(30) { retry_delay = 2; }
+                    retry_delay.disconnected(connected_since.elapsed());
                     if failover.ended(connected_since.elapsed(), Instant::now()) {
                         monitor.failed_over(rtrust_control::observations::now_ms());
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
-                        retry_delay = 2;
                     }
                     workers.retry(failover.current(), &mut retry_delay, full);
                 }
@@ -440,7 +443,6 @@ async fn serve(
                     if failover.failed(Instant::now()) {
                         monitor.failed_over(rtrust_control::observations::now_ms());
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
-                        retry_delay = 2;
                     }
                     workers.retry(failover.current(), &mut retry_delay, full);
                 }

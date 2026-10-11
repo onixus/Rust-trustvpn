@@ -34,6 +34,12 @@ pub struct RoutingPolicy {
     pub exclude: Vec<Ipv4Net>,
     pub exclude_lan: bool,
 }
+/// An older API is distinct from an explicit removal of the device's group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RoutingState {
+    Unsupported,
+    Available(Option<RoutingPolicy>),
+}
 #[derive(Deserialize)]
 struct Routing {
     // Explicit deserializer: a missing `policy` key is an error, `null` is "no group".
@@ -99,7 +105,7 @@ impl Capabilities {
 /// Downloaded secrets are deliberately excluded from Debug and serialization.
 pub struct Snapshot {
     pub profiles: Vec<(RemoteProfile, Profile)>,
-    pub routing: Option<RoutingPolicy>,
+    pub routing: RoutingState,
 }
 fn same_revisions(before: &[RemoteProfile], after: &[RemoteProfile]) -> bool {
     before.len() == after.len()
@@ -402,7 +408,7 @@ impl Client {
     pub async fn snapshot(&self) -> Result<Snapshot, String> {
         self.check_capabilities().await?;
         let profiles = self.list().await?;
-        let routing = self.routing().await?;
+        let routing = self.routing_state().await?;
         let mut downloaded = Vec::with_capacity(profiles.len());
         let mut bytes = 0usize;
         for meta in &profiles {
@@ -418,7 +424,9 @@ impl Client {
             }
             downloaded.push((meta.clone(), profile));
         }
-        if !same_revisions(&profiles, &self.list().await?) || routing != self.routing().await? {
+        if !same_revisions(&profiles, &self.list().await?)
+            || routing != self.routing_state().await?
+        {
             return Err("Данные панели изменились. Повторите синхронизацию.".into());
         }
         Ok(Snapshot {
@@ -457,9 +465,15 @@ impl Client {
     }
     /// Routing policy of this device's group; `None` without a group or on servers without the endpoint.
     pub async fn routing(&self) -> Result<Option<RoutingPolicy>, String> {
+        match self.routing_state().await? {
+            RoutingState::Available(policy) => Ok(policy),
+            RoutingState::Unsupported => Ok(None),
+        }
+    }
+    pub async fn routing_state(&self) -> Result<RoutingState, String> {
         match self.exchange(Method::GET, "routing", None, true).await? {
-            Some(routing) => routing_policy(routing),
-            None => Ok(None),
+            Some(routing) => routing_policy(routing).map(RoutingState::Available),
+            None => Ok(RoutingState::Unsupported),
         }
     }
     pub async fn commit(&self, preview: &Preview) -> Result<(), String> {
