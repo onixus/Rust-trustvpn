@@ -27,6 +27,14 @@ public final class VpnWidget extends AppWidgetProvider {
         } catch (Exception ignored) { return R.string.vpn_status_unavailable; }
     }
 
+    /** The 1×1 layout has no room for text, so the button colour carries the state. */
+    static int button(int status) {
+        if (status == R.string.connected) return R.drawable.widget_button_on;
+        if (status == R.string.disconnected) return R.drawable.widget_button_off;
+        if (status == R.string.connecting || status == R.string.reconnecting) return R.drawable.widget_button_busy;
+        return R.drawable.widget_button_error;
+    }
+
     static PendingIntent action(Context context) {
         return PendingIntent.getActivity(context, 42,
             new Intent(context, WidgetActivity.class).setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP),
@@ -54,7 +62,9 @@ public final class VpnWidget extends AppWidgetProvider {
                 layoutFor(manager.getAppWidgetOptions(id)));
             views.setTextViewText(R.id.widget_status, context.getString(status));
             views.setOnClickPendingIntent(R.id.widget_power, action(context));
-            views.setContentDescription(R.id.widget_power, context.getString(R.string.widget_toggle));
+            views.setInt(R.id.widget_power, "setBackgroundResource", button(status));
+            views.setContentDescription(R.id.widget_power,
+                context.getString(R.string.widget_toggle) + ". " + context.getString(status));
             manager.updateAppWidget(id, views);
         }
     }
