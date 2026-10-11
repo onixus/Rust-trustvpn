@@ -68,11 +68,17 @@ async fn exchange(stream: &mut Pipe, command: Command, seconds: u64) -> Result<R
     .map_err(|_| "Служба не отвечает")?
 }
 // Negotiate on a separate authenticated connection before sending credentials or mutating.
-async fn negotiate() -> Result<(), String> {
+async fn negotiate() -> Result<Capabilities, String> {
     let mut pipe = socket().await?;
     let response = exchange(&mut pipe, Command::Capabilities, 5).await?;
     if !response.capabilities.lifecycle_observations || response.state != State::Idle {
         return Err("IPC capabilities unavailable; update the UI and service together".into());
+    }
+    Ok(response.capabilities)
+}
+fn validate_fallbacks(fallbacks: &[rtrust_profile::Profile]) -> Result<(), String> {
+    if fallbacks.len() > MAX_FALLBACKS {
+        return Err(format!("Не больше {MAX_FALLBACKS} резервных профилей"));
     }
     Ok(())
 }
@@ -105,10 +111,12 @@ impl Client {
 
     pub async fn start(
         profile: rtrust_profile::Profile,
+        fallbacks: Vec<rtrust_profile::Profile>,
         selection: Selection,
         dns: Option<std::net::Ipv4Addr>,
     ) -> Result<Self, String> {
         selection.validate()?;
+        validate_fallbacks(&fallbacks)?;
         if let Some(dns) = dns {
             validate_dns(dns)?;
         }
@@ -118,22 +126,32 @@ impl Client {
             exclude: selection.exclude,
             exclude_lan: selection.exclude_lan,
             dns,
+            fallbacks,
         })
         .await
     }
     pub async fn start_full(
         profile: rtrust_profile::Profile,
+        fallbacks: Vec<rtrust_profile::Profile>,
         dns: std::net::Ipv4Addr,
     ) -> Result<Self, String> {
         validate_dns(dns)?;
+        validate_fallbacks(&fallbacks)?;
         Self::start_command(Command::StartFull {
             profile: Box::new(profile),
             dns,
+            fallbacks,
         })
         .await
     }
     async fn start_command(command: Command) -> Result<Self, String> {
-        negotiate().await?;
+        let capabilities = negotiate().await?;
+        if let Command::Start { fallbacks, .. } | Command::StartFull { fallbacks, .. } = &command
+            && !fallbacks.is_empty()
+            && !capabilities.failover
+        {
+            return Err("Служба не поддерживает резервные профили; обновите службу".into());
+        }
         let mut stream = socket().await?;
         let response = exchange(&mut stream, command, 45).await?;
         if response.state != State::Connected {

@@ -156,8 +156,10 @@ async fn reply_observed(
     state: State,
     message: &str,
     monitor: &mut rtrust_control::observations::Monitor,
+    active_profile: Option<u8>,
 ) -> Result<(), String> {
     let mut response = Response::new(state, message);
+    response.active_profile = active_profile;
     response.observations = monitor.sample(rtrust_control::observations::now_ms());
     tokio::time::timeout(Duration::from_secs(5), write(stream, &response))
         .await
@@ -185,7 +187,7 @@ async fn serve(
         )
         .await;
     };
-    let (profile, selection, dns, split_dns) = match request.command {
+    let (profile, selection, dns, split_dns, fallbacks) = match request.command {
         Command::PrepareUpdate => {
             if state::pending() {
                 return reply(
@@ -216,6 +218,7 @@ async fn serve(
             exclude,
             exclude_lan,
             dns,
+            fallbacks,
         } => {
             let selection = rtrust_control::Selection {
                 include: networks,
@@ -225,9 +228,13 @@ async fn serve(
             if let Err(error) = selection.validate() {
                 return reply(&mut stream, State::Error, &error).await;
             }
-            (profile, selection, None, dns)
+            (profile, selection, None, dns, fallbacks)
         }
-        Command::StartFull { profile, dns } => (profile, Default::default(), Some(dns), None),
+        Command::StartFull {
+            profile,
+            dns,
+            fallbacks,
+        } => (profile, Default::default(), Some(dns), None, fallbacks),
         _ => return reply(&mut stream, State::Error, "Start or Recover required").await,
     };
     let full = dns.is_some();
@@ -242,41 +249,21 @@ async fn serve(
     }
     // Both modes pin IPv4 endpoint addresses: PF blocks selected networks
     // outside the tunnel, so the endpoint must be known and left out of them.
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
-        let mut profile = profile;
-        let mut addresses = Vec::new();
-        for address in &profile.endpoint.addresses {
-            for address in tokio::net::lookup_host(address)
-                .await
-                .map_err(|_| "Cannot resolve endpoint")?
-            {
-                if !address.is_ipv4() {
-                    continue;
-                }
-                if addresses.len() >= 64 {
-                    return Err("Too many endpoint addresses");
-                }
-                addresses.push(address.to_string());
+    // Every allowed backup is pinned now: the guard covers all candidates.
+    let mut failover =
+        match crate::failover::Failover::pin(*profile, fallbacks, crate::failover::Pin::Ipv4).await
+        {
+            Ok(failover) => failover,
+            _ => {
+                return reply(
+                    &mut stream,
+                    State::Error,
+                    "Не удалось разрешить адрес VPN-сервера",
+                )
+                .await;
             }
-        }
-        if addresses.is_empty() {
-            return Err("Endpoint has no addresses");
-        }
-        profile.endpoint.addresses = addresses;
-        Ok(profile)
-    })
-    .await;
-    let profile = match result {
-        Ok(Ok(profile)) => profile,
-        _ => {
-            return reply(
-                &mut stream,
-                State::Error,
-                "Не удалось разрешить адрес VPN-сервера",
-            )
-            .await;
-        }
-    };
+        };
+    let profile = failover.guard_profile();
     let endpoints = match state::endpoints(&profile) {
         Ok(e) => e,
         Err(e) => return reply(&mut stream, State::Error, &e).await,
@@ -307,8 +294,8 @@ async fn serve(
     let prepared = {
         let mut unexpected = [0];
         tokio::select! {
-            result = tokio::time::timeout(Duration::from_secs(30), device::Prepared::connect(&profile)) => match result {
-                Ok(Ok(prepared)) => prepared,
+            result = failover.connect_initial(|profile| async move { device::Prepared::connect(&profile).await }) => match result {
+                Ok(prepared) => prepared,
                 _ => return reply(&mut stream, State::Error, "Не удалось открыть TUN: проверьте профиль, TLS и доступность endpoint").await,
             },
             _ = stream.read(&mut unexpected) => return Err("IPC closed during connect".into()),
@@ -320,8 +307,7 @@ async fn serve(
         full,
         resolver,
         endpoints,
-        profile.udp_transport(),
-        &profile.hop_port_ranges(),
+        &failover.permits()?,
     ) {
         Ok(guard) => guard,
         Err(error) => return reply(&mut stream, State::Blocked, &error).await,
@@ -342,15 +328,23 @@ async fn serve(
         rtrust_control::observations::Source::ServiceLifecycle,
         rtrust_control::observations::now_ms(),
     );
+    if failover.active().is_some_and(|index| index > 0) {
+        monitor.failed_over(rtrust_control::observations::now_ms());
+    }
     reply_observed(
         &mut stream,
         State::Connected,
-        if full {
-            "Весь компьютер: IPv4, IPv6 и DNS через VPN"
-        } else {
-            "IPv4-сети подключены"
-        },
+        &format!(
+            "{}{}",
+            if full {
+                "Весь компьютер: IPv4, IPv6 и DNS через VPN"
+            } else {
+                "IPv4-сети подключены"
+            },
+            failover.note()
+        ),
         &mut monitor,
+        failover.active(),
     )
     .await?;
     let mut state = State::Connected;
@@ -376,7 +370,11 @@ async fn serve(
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
                     // A flapping endpoint must not reset the backoff indefinitely.
                     if connected_since.elapsed() >= Duration::from_secs(30) { retry_delay = 2; }
-                    workers.retry(&profile, &mut retry_delay, device.clone());
+                    if failover.ended(connected_since.elapsed(), Instant::now()) {
+                        monitor.failed_over(rtrust_control::observations::now_ms());
+                        retry_delay = 2;
+                    }
+                    workers.retry(failover.current(), &mut retry_delay, device.clone());
                 }
                 result = async { workers.reconnect.as_mut().unwrap().await }, if workers.reconnect.is_some() => {
                     workers.reconnect = None;
@@ -387,7 +385,13 @@ async fn serve(
                             state = State::Connected; monitor.transition(true, rtrust_control::observations::now_ms());
                             continue;
                     }
-                    workers.retry(&profile, &mut retry_delay, device.clone());
+                    // The guard already covers every candidate: switching
+                    // changes only which endpoint the next attempt uses.
+                    if failover.failed(Instant::now()) {
+                        monitor.failed_over(rtrust_control::observations::now_ms());
+                        retry_delay = 2;
+                    }
+                    workers.retry(failover.current(), &mut retry_delay, device.clone());
                 }
             }
         };
@@ -410,6 +414,7 @@ async fn serve(
                         &last_failure
                     },
                     &mut monitor,
+                    failover.active(),
                 )
                 .await?
             }
@@ -418,7 +423,8 @@ async fn serve(
                 return match guard.release() {
                     Ok(()) => {
                         monitor.stop(rtrust_control::observations::now_ms());
-                        reply_observed(&mut stream, State::Idle, "Отключено", &mut monitor).await
+                        reply_observed(&mut stream, State::Idle, "Отключено", &mut monitor, None)
+                            .await
                     }
                     Err(e) => reply(&mut stream, State::Blocked, &e).await,
                 };

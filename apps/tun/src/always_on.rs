@@ -206,6 +206,7 @@ fn launch(policy: Policy, lease: Arc<Mutex<()>>, state: watch::Sender<Response>)
                             command: Command::StartFull {
                                 profile: Box::new(policy.profile.clone()),
                                 dns: policy.dns,
+                                fallbacks: vec![],
                             },
                         },
                     )

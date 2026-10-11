@@ -58,6 +58,9 @@ lease, `network_changed` and `resumed`, with matching stale reasons:
   earlier passes become stale. The running worker's lifecycle status is not
   proof either way and is reported again on the next poll.
 
+With allowed backup profiles (docs/failover.md), the service also records
+`failed_over` when it moves to another candidate.
+
 Events are advisory: they do not reconnect, change routes/DNS or the guard
 (automatic recovery is issue #34). Desktop summaries show the latest such event
 for one minute. Capabilities advertise `network_events=true` for the desktop

@@ -239,6 +239,8 @@ struct App {
     follow_up: Option<rtrust_desktop::diagnostics::FollowUp>,
     /// Reconnect action in progress: Stop, then Start, then repeat the check.
     reconnect_then_check: bool,
+    /// Names sent with the last Start: the requested profile, then backups.
+    connection_candidates: Vec<String>,
     probe: Option<iced::task::Handle>,
     generation: u64,
     connection_epoch: u64,
@@ -309,6 +311,8 @@ enum Message {
     Diagnose,
     Diagnosed(u64, u64, rtrust_desktop::diagnostics::Report),
     DiagnosticAction(rtrust_desktop::diagnostics::Action),
+    /// Allow or disallow a profile as an automatic backup.
+    Fallback(String, bool),
     EndpointChecked(u64, u64, rtrust_desktop::diagnostics::EndpointCheck),
     DiagnosticEdit(text_editor::Action),
     ExportDiagnostic,
@@ -391,6 +395,7 @@ impl App {
             last_diagnostic: None,
             follow_up: None,
             reconnect_then_check: false,
+            connection_candidates: vec![],
             probe: None,
             generation: 0,
             connection_epoch: 0,
@@ -540,6 +545,14 @@ impl App {
             exclude,
             exclude_lan: self.exclude_lan,
             managed_routes: self.saved_connection.managed_routes.clone(),
+            // Deleted profiles drop out; the order is the user's preference.
+            fallback_profiles: self
+                .saved_connection
+                .fallback_profiles
+                .iter()
+                .filter(|name| self.profiles.iter().any(|p| &p.name == *name))
+                .cloned()
+                .collect(),
         };
         settings
             .validate()
@@ -555,6 +568,19 @@ impl App {
                 rtrust_control::Selection::parse(&self.networks, &self.exclude, self.exclude_lan)
             }
         }
+    }
+    /// The profile the service is using now: after a failover, a backup.
+    fn active_profile(&self) -> Option<Profile> {
+        let index = self
+            .session
+            .as_ref()
+            .and_then(Session::active_profile)
+            .unwrap_or(0) as usize;
+        self.connection_candidates
+            .get(index)
+            .and_then(|name| self.profiles.iter().find(|p| &p.name == name))
+            .or_else(|| self.profiles.first())
+            .cloned()
     }
     fn current(&self) -> Option<&Profile> {
         self.profiles.get(self.selected)
@@ -576,6 +602,7 @@ impl App {
         let edited = matches!(
             &m,
             Message::AutoConnect(_)
+                | Message::Fallback(..)
                 | Message::Accept
                 | Message::Rename
                 | Message::Delete
@@ -621,6 +648,14 @@ impl App {
             Message::ResolveStore(choice) => return self.resolve_store_conflict(choice),
             Message::AutoConnect(enabled) if self.can_change_profiles() => {
                 self.saved_connection.auto_connect = enabled;
+                self.dirty = true;
+            }
+            Message::Fallback(name, allowed) if self.can_change_profiles() => {
+                let list = &mut self.saved_connection.fallback_profiles;
+                list.retain(|n| *n != name);
+                if allowed && list.len() < rtrust_control::MAX_FALLBACKS {
+                    list.push(name);
+                }
                 self.dirty = true;
             }
             Message::StartupRefresh if !self.startup_busy => {
@@ -779,6 +814,12 @@ impl App {
                         "Название должно быть непустым, без управляющих символов, до 1024 байт."
                             .into();
                 } else if let Some(profile) = self.profiles.get_mut(self.selected) {
+                    // An allowed backup stays allowed under its new name.
+                    for allowed in &mut self.saved_connection.fallback_profiles {
+                        if *allowed == profile.name {
+                            *allowed = name.to_owned();
+                        }
+                    }
                     profile.name = name.to_owned();
                     self.dirty = true;
                     self.status = "Профиль переименован. Автоматическое сохранение…".into();
@@ -1018,6 +1059,10 @@ impl App {
                     };
                     let mode = self.mode;
                     let dns = self.dns.clone();
+                    let fallbacks = self.saved_connection.fallbacks(&self.profiles);
+                    self.connection_candidates = std::iter::once(profile.name.clone())
+                        .chain(fallbacks.iter().map(|p| p.name.clone()))
+                        .collect();
                     self.connection_epoch += 1;
                     let epoch = self.connection_epoch;
                     self.connecting = true;
@@ -1031,7 +1076,7 @@ impl App {
                     .into();
                     let (task, handle) = Task::perform(
                         async move {
-                            Session::start(profile, mode, port, selection, dns)
+                            Session::start(profile, fallbacks, mode, port, selection, dns)
                                 .await
                                 .map_err(|e| e.to_string())
                         },
@@ -1050,6 +1095,11 @@ impl App {
                 match result {
                     Ok(session) => {
                         self.session = Some(session);
+                        if let Some(index) = self.session.as_ref().and_then(Session::active_profile)
+                            && let Some(name) = self.connection_candidates.get(index as usize)
+                        {
+                            self.connection_name = name.clone();
+                        }
                         if std::mem::take(&mut self.reconnect_then_check) {
                             self.last_diagnostic = None;
                             let monitor = self.monitor_connection();
@@ -1076,7 +1126,15 @@ impl App {
                 match result {
                     Ok(()) => {
                         if self.session.as_ref().is_some_and(Session::is_tun) {
-                            self.status = self.session.as_ref().unwrap().address();
+                            let session = self.session.as_ref().unwrap();
+                            self.status = session.address();
+                            if let Some(name) = session
+                                .active_profile()
+                                .filter(|&index| index > 0)
+                                .and_then(|index| self.connection_candidates.get(index as usize))
+                            {
+                                self.status += &format!(" · через резервный профиль «{name}»");
+                            }
                         }
                         return self.monitor_connection();
                     }
@@ -1517,7 +1575,7 @@ impl App {
                         };
                     }
                     Action::CheckEndpoint if current => {
-                        let Some(profile) = self.profiles.first().cloned() else {
+                        let Some(profile) = self.active_profile() else {
                             return Task::none();
                         };
                         self.busy = true;
@@ -1723,6 +1781,39 @@ impl App {
         ])
     }
 
+    fn fallback_settings(&self) -> Element<'_, Message> {
+        let allowed = &self.saved_connection.fallback_profiles;
+        let mut list = column![
+            text("Автоматическое восстановление").size(18),
+            text(format!(
+                "Служба может переключиться на отмеченные профили, если endpoint профиля по умолчанию не отвечает: после двух неудачных попыток подряд и не чаще раза в {} с. Защита при переключении не снимается: адреса endpoint всех отмеченных профилей разрешены с начала подключения. Открытые соединения при переключении обрываются. Только TUN и «весь компьютер», не Always-on. Без отмеченных профилей используется только профиль по умолчанию.",
+                20
+            ))
+            .size(13)
+        ]
+        .spacing(8);
+        for profile in self.profiles.iter().skip(1) {
+            let checked = allowed.contains(&profile.name);
+            let mut entry =
+                checkbox(checked).label(match allowed.iter().position(|n| *n == profile.name) {
+                    Some(order) => format!("{} · резерв {}", profile.name, order + 1),
+                    None => profile.name.clone(),
+                });
+            if self.can_change_profiles()
+                && (checked || allowed.len() < rtrust_control::MAX_FALLBACKS)
+            {
+                let name = profile.name.clone();
+                entry = entry.on_toggle(move |on| Message::Fallback(name.clone(), on));
+            }
+            list = list.push(entry);
+        }
+        if self.profiles.len() < 2 {
+            list = list.push(
+                text("Добавьте второй профиль, чтобы разрешить резервное подключение.").size(13),
+            );
+        }
+        list.into()
+    }
     fn proxy_settings(&self) -> Element<'_, Message> {
         let mut port = text_input("1080", &self.proxy_port).width(80);
         if self.can_change_profiles() {
@@ -2062,6 +2153,7 @@ impl App {
                 ]
                 .spacing(12);
                 panel = panel.push(connect).push(text("Одна попытка после загрузки хранилища. При открытии файла или tt-ссылки автоподключение не выполняется. До подключения трафик не защищён VPN.").size(13));
+                panel = panel.push(self.fallback_settings());
                 if self.startup_busy {
                     panel = panel.push(text("Проверка настройки автозапуска…"));
                 }
@@ -2417,6 +2509,16 @@ mod tests {
         assert!(!app.busy && app.diagnostic_report.is_none());
     }
     #[test]
+    fn endpoint_checks_follow_the_candidates_of_the_running_connection() {
+        let mut app = app();
+        assert_eq!(app.active_profile().unwrap().name, app.profiles[0].name);
+        // Candidates are named at Start; index 0 is whichever profile was requested.
+        app.connection_candidates = vec![app.profiles[1].name.clone()];
+        assert_eq!(app.active_profile().unwrap().name, app.profiles[1].name);
+        app.connection_candidates = vec!["deleted since".into()];
+        assert_eq!(app.active_profile().unwrap().name, app.profiles[0].name);
+    }
+    #[test]
     fn diagnostic_actions_need_a_current_report_and_follow_ups_attach_once() {
         use rtrust_desktop::diagnostics::{Action, Cause, FollowUp, Report};
         let mut app = app();
@@ -2463,6 +2565,34 @@ mod tests {
         let (_, report) = app.diagnostic_report.as_ref().unwrap();
         assert_eq!(report.endpoint, rtrust_desktop::diagnostics::Fact::Passed);
         assert!(!app.busy);
+    }
+    #[test]
+    fn backup_profiles_are_opt_in_saved_in_order_and_follow_a_rename() {
+        let mut app = app();
+        let backup = app.profiles[1].name.clone();
+        assert!(app.saved_connection.fallbacks(&app.profiles).is_empty());
+        let _ = app.update(Message::Fallback(backup.clone(), true));
+        assert!(app.dirty);
+        assert_eq!(
+            app.connection_settings().unwrap().fallback_profiles,
+            std::slice::from_ref(&backup)
+        );
+        // Renaming the backup keeps it allowed.
+        app.selected = 1;
+        app.draft_name = "renamed backup".into();
+        let _ = app.update(Message::Rename);
+        assert_eq!(app.saved_connection.fallback_profiles, ["renamed backup"]);
+        assert_eq!(
+            app.saved_connection.fallbacks(&app.profiles)[0].name,
+            "renamed backup"
+        );
+        let _ = app.update(Message::Fallback("renamed backup".into(), false));
+        assert!(
+            app.connection_settings()
+                .unwrap()
+                .fallback_profiles
+                .is_empty()
+        );
     }
     #[test]
     fn a_failed_reconnect_action_drops_its_planned_repeat_check() {
@@ -2762,6 +2892,7 @@ mod tests {
             exclude: rtrust_control::networks("198.18.0.128/25").unwrap(),
             exclude_lan: true,
             managed_routes: None,
+            fallback_profiles: vec![],
         };
         let vault = rtrust_store::Vault {
             profiles: app.profiles.clone(),

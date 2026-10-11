@@ -167,9 +167,18 @@ impl Controller {
             rtrust_store::Mode::Full => connection::Mode::Full,
         };
         let selection = c.effective_selection();
+        let fallbacks = c.fallbacks(&self.vault.profiles);
         let ipv4_only = mode == connection::Mode::Full && !p.endpoint.has_ipv6;
         self.session = Some(
-            connection::Session::start(p, mode, c.socks_port, selection, c.dns.to_string()).await?,
+            connection::Session::start(
+                p,
+                fallbacks,
+                mode,
+                c.socks_port,
+                selection,
+                c.dns.to_string(),
+            )
+            .await?,
         );
         self.connected_note = if ipv4_only {
             "Connected · IPv4 and DNS. The server has no IPv6, so IPv6 is blocked and apps use IPv4."
@@ -256,6 +265,8 @@ fn recent_change(
         (EventKind::NetworkChanged, false) => "network changed, earlier checks are stale",
         (EventKind::Resumed, true) => "после сна, прежние проверки устарели",
         (EventKind::Resumed, false) => "resumed from sleep, earlier checks are stale",
+        (EventKind::FailedOver, true) => "переключено на разрешённый резервный профиль",
+        (EventKind::FailedOver, false) => "switched to an allowed backup profile",
         _ => return None,
     };
     Some(text.into())
