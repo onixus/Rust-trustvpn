@@ -128,8 +128,8 @@ pub struct Report {
     /// Independent endpoint check, only when the user ran it for this report.
     pub endpoint: Fact,
     pub endpoint_at_ms: Option<u64>,
-    /// False where the endpoint session itself may be policy-routed into the
-    /// tunnel (Linux desktop UID rule): its failure is then not attributable.
+    /// False unless the endpoint session has a verified service-owned path.
+    /// Desktop probes can be tunneled or denied by the local PF/WFP guard.
     pub endpoint_independent: bool,
     pub follows: Option<FollowUp>,
     /// HTTPS response does not certify application functionality or general Internet.
@@ -367,8 +367,14 @@ pub async fn check_endpoint(profile: rtrust_profile::Profile) -> EndpointCheck {
         fact,
         started_at_ms,
         finished_at_ms: now_ms(),
-        independent: !cfg!(target_os = "linux"),
+        // The desktop process has no guaranteed physical endpoint path:
+        // Linux can route it into the tunnel; PF/WFP full guards permit
+        // only the service. A local refusal/timeout is not endpoint evidence.
+        independent: desktop_endpoint_independent(),
     }
+}
+fn desktop_endpoint_independent() -> bool {
+    false
 }
 fn endpoint_fact(error: &rtrust_engine::Error) -> Fact {
     use rtrust_engine::Error;
@@ -843,6 +849,29 @@ mod tests {
         assert_eq!(r.verdict().cause, Cause::Undetermined);
         // A refusal is the endpoint's own answer on any path.
         r.attach_endpoint(endpoint(Rejected, r.started_at_ms, false));
+        assert_eq!(r.verdict().cause, Cause::EndpointRejected);
+    }
+    #[test]
+    fn local_guard_refusal_is_not_evidence_that_the_endpoint_is_down() {
+        assert!(!desktop_endpoint_independent());
+        for fact in [
+            Fact::ConnectionFailed,
+            Fact::Timeout,
+            Fact::Failed,
+            Fact::TlsFailed,
+        ] {
+            let mut r = report(Fact::Passed, Fact::Passed, Fact::Timeout);
+            r.attach_endpoint(endpoint(
+                fact,
+                r.started_at_ms,
+                desktop_endpoint_independent(),
+            ));
+            assert_eq!(r.verdict().cause, Cause::Undetermined);
+        }
+        let mut r = report(Fact::Passed, Fact::Passed, Fact::Timeout);
+        r.attach_endpoint(endpoint(Fact::Passed, r.started_at_ms, false));
+        assert_eq!(r.verdict().cause, Cause::DestinationUnreachable);
+        r.attach_endpoint(endpoint(Fact::Rejected, r.started_at_ms, false));
         assert_eq!(r.verdict().cause, Cause::EndpointRejected);
     }
     #[test]
