@@ -413,7 +413,7 @@ impl Client {
                 .map_err(|_| "Получен недопустимый профиль")?
                 .content
                 .len();
-            if bytes > LIMIT {
+            if bytes > 4 * MAX_INPUT {
                 return Err("Партия профилей слишком большая".into());
             }
             downloaded.push((meta.clone(), profile));
