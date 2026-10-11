@@ -204,8 +204,9 @@ impl App {
     // Match the app Connect action: the selected profile and permitted backups.
     fn next_connection_endpoints(&self) -> Option<Vec<(String, Vec<String>)>> {
         let primary = self.current()?;
-        let mut backups = self.saved_connection.fallbacks(&self.profiles);
-        backups.retain(|candidate| candidate.name != primary.name);
+        let backups = self
+            .saved_connection
+            .fallbacks_for(&self.profiles, Some(primary));
         Some(
             std::iter::once(primary)
                 .chain(backups.iter())

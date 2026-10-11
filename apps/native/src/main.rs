@@ -1064,8 +1064,9 @@ impl App {
                     };
                     let mode = self.mode;
                     let dns = self.dns.clone();
-                    let mut fallbacks = self.saved_connection.fallbacks(&self.profiles);
-                    fallbacks.retain(|candidate| candidate.name != profile.name);
+                    let fallbacks = self
+                        .saved_connection
+                        .fallbacks_for(&self.profiles, Some(&profile));
                     self.connection_candidates = std::iter::once(profile.name.clone())
                         .chain(fallbacks.iter().map(|p| p.name.clone()))
                         .collect();
@@ -2685,6 +2686,19 @@ mod tests {
         app.saved_connection.fallback_profiles = vec!["second.example".into()];
         let task = app.update(Message::ToggleConnection);
         assert_eq!(app.connection_candidates, vec!["second.example"]);
+        drop(task);
+    }
+    #[test]
+    fn selected_connection_retains_a_permitted_default_backup() {
+        let mut app = app();
+        let _ = app.update(Message::Select(1));
+        app.saved_connection.fallback_profiles =
+            vec!["first.example".into(), "second.example".into()];
+        let task = app.update(Message::ToggleConnection);
+        assert_eq!(
+            app.connection_candidates,
+            vec!["second.example", "first.example"]
+        );
         drop(task);
     }
     #[test]

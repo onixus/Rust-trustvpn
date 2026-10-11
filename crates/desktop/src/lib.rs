@@ -172,8 +172,7 @@ impl Controller {
             rtrust_store::Mode::Full => connection::Mode::Full,
         };
         let selection = c.effective_selection();
-        let mut fallbacks = c.fallbacks(&self.vault.profiles);
-        fallbacks.retain(|candidate| candidate.name != p.name);
+        let fallbacks = c.fallbacks_for(&self.vault.profiles, Some(&p));
         let ipv4_only = mode == connection::Mode::Full && !p.endpoint.has_ipv6;
         self.session = Some(
             connection::Session::start(

@@ -112,7 +112,16 @@ impl ConnectionSettings {
     }
     /// Allowed backups that still exist, never the default profile itself.
     pub fn fallbacks(&self, profiles: &[rtrust_profile::Profile]) -> Vec<rtrust_profile::Profile> {
-        let primary = profiles.first().map(|p| p.name.as_str());
+        self.fallbacks_for(profiles, profiles.first())
+    }
+    /// Resolve backups relative to the profile this action actually connects.
+    /// A manually selected backup must not remove a different default candidate.
+    pub fn fallbacks_for(
+        &self,
+        profiles: &[rtrust_profile::Profile],
+        primary: Option<&rtrust_profile::Profile>,
+    ) -> Vec<rtrust_profile::Profile> {
+        let primary = primary.map(|p| p.name.as_str());
         self.fallback_profiles
             .iter()
             .filter(|name| Some(name.as_str()) != primary)
@@ -665,6 +674,13 @@ mod tests {
         assert!(c.validate().is_err());
         let names: Vec<_> = c.fallbacks(&profiles).into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["b2", "b1"]);
+        c.fallback_profiles = vec!["b1".into(), "main".into(), "b2".into()];
+        let names: Vec<_> = c
+            .fallbacks_for(&profiles, Some(&profiles[1]))
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["main", "b2"]);
         c.fallback_profiles = vec!["b1".into(), "b1".into()];
         assert!(c.validate().is_err());
         c.fallback_profiles = vec!["b1".into()];
