@@ -16,6 +16,8 @@ mod sync;
 mod tray;
 #[cfg(target_os = "windows")]
 mod updates;
+#[cfg(target_os = "macos")]
+mod widget;
 use connection::{Mode, Session};
 use iced::{
     Color, Element, Length, Task, Theme,
@@ -116,7 +118,7 @@ fn main() -> iced::Result {
     }
     #[cfg(target_os = "macos")]
     open_url::install();
-    iced::daemon(
+    let result = iced::daemon(
         || {
             let (app, task) = App::boot();
             (app, Task::batch([task, open_window()]))
@@ -157,7 +159,10 @@ fn main() -> iced::Result {
         default_text_size: 14.0.into(),
         ..Default::default()
     })
-    .run()
+    .run();
+    #[cfg(target_os = "macos")]
+    widget::closed();
+    result
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
@@ -170,6 +175,9 @@ enum Page {
 struct App {
     #[cfg(target_os = "macos")]
     glass_enabled: bool,
+    /// None in CI and preview runs, which must not touch the widget status.
+    #[cfg(target_os = "macos")]
+    widget: Option<widget::Publisher>,
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     always_on: always_on::State,
     #[cfg(target_os = "windows")]
@@ -318,6 +326,8 @@ impl App {
         let mut app = Self {
             #[cfg(target_os = "macos")]
             glass_enabled: glass::preference(),
+            #[cfg(target_os = "macos")]
+            widget: None,
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             always_on: always_on::State::default(),
             #[cfg(target_os = "windows")]
@@ -421,6 +431,11 @@ impl App {
                     |_| Message::SmokeExit,
                 ),
             );
+        }
+        // Unit tests boot the app too and must not write into the real home.
+        #[cfg(all(target_os = "macos", not(test)))]
+        {
+            app.widget = Some(widget::Publisher::default());
         }
         app.boot_connect_pending = args.iter().all(|arg| arg == "--autostart");
         app.login_start = args.iter().any(|arg| arg == "--autostart");
@@ -876,6 +891,10 @@ impl App {
                     }
                 }
                 #[cfg(target_os = "macos")]
+                if let Some(task) = self.widget_tick() {
+                    return task;
+                }
+                #[cfg(target_os = "macos")]
                 if !self.busy
                     && let Some(link) = open_url::take()
                 {
@@ -996,6 +1015,10 @@ impl App {
                 match result {
                     Ok(session) => {
                         self.session = Some(session);
+                        #[cfg(target_os = "macos")]
+                        if let Some(widget) = &mut self.widget {
+                            widget.problem = false;
+                        }
                         self.status = if self.mode == Mode::Socks { "Прокси SOCKS5/HTTP включён. Его можно указать и как системный прокси Windows. Для DNS выберите разрешение имён через прокси." } else if self.saved_connection.mode == rtrust_store::Mode::Full && self.connection_ipv6 { "IPv4, IPv6 и DNS всего компьютера через VPN. Пересылка между интерфейсами заблокирована." } else if self.saved_connection.mode == rtrust_store::Mode::Full { "IPv4 и DNS всего компьютера через VPN. Сервер без IPv6: IPv6 заблокирован, приложения переходят на IPv4. Пересылка между интерфейсами заблокирована." } else { "Выбранные IPv4-сети подключены через службу. Исключения, остальной трафик и системный DNS идут напрямую." }.into();
                         return self.monitor_connection();
                     }
@@ -1012,6 +1035,10 @@ impl App {
                 if epoch == self.connection_epoch && self.session.is_some() =>
             {
                 self.connection_task = None;
+                #[cfg(target_os = "macos")]
+                if let Some(widget) = &mut self.widget {
+                    widget.problem = result.is_err();
+                }
                 match result {
                     Ok(()) => {
                         if self.session.as_ref().is_some_and(Session::is_tun) {
@@ -1592,6 +1619,70 @@ impl App {
             self.generation += 1;
             self.busy = false;
         }
+    }
+    /// Publishes the connection phase and runs at most one widget action.
+    #[cfg(target_os = "macos")]
+    fn widget_tick(&mut self) -> Option<Task<Message>> {
+        let widget = self.widget.as_mut()?;
+        let phase = if self.disconnecting {
+            widget::Phase::Disconnecting
+        } else if self.connecting {
+            widget::Phase::Connecting
+        } else if self.session.is_some() && widget.problem {
+            widget::Phase::Problem
+        } else if self.session.is_some() {
+            widget::Phase::On
+        } else {
+            widget::Phase::Off
+        };
+        let tun = self
+            .session
+            .as_ref()
+            .map_or(self.mode == Mode::Tun, Session::is_tun);
+        let mode = (phase != widget::Phase::Off).then_some(if !tun {
+            "Прокси SOCKS5"
+        } else if self.saved_connection.mode == rtrust_store::Mode::Full {
+            "Весь компьютер"
+        } else {
+            "Выбранные сети"
+        });
+        widget.publish(phase, mode);
+        let active = self.connecting || self.session.is_some();
+        let Some(link) = open_url::take_widget() else {
+            // The Control Center toggle switches in the background, without a window.
+            let signal = widget.signal()?;
+            widget::log(&format!(
+                "toggle {signal:?}, active={active}, busy={}",
+                self.busy
+            ));
+            return match signal {
+                widget::Action::Connect if !active && !self.disconnecting && !self.busy => {
+                    Some(self.update(Message::ToggleConnection))
+                }
+                widget::Action::Disconnect if active && !self.disconnecting => {
+                    Some(self.update(Message::ToggleConnection))
+                }
+                _ => None,
+            };
+        };
+        let action = widget.action(&link);
+        // The link itself carries the token, so only the parsed action is logged.
+        widget::log(&format!(
+            "link action {action:?}, active={active}, busy={}",
+            self.busy
+        ));
+        Some(match action {
+            // Acts only in the direction the widget showed; a stale tap is ignored.
+            Some(widget::Action::Connect) if !active && !self.disconnecting && !self.busy => {
+                self.update(Message::ToggleConnection)
+            }
+            Some(widget::Action::Disconnect) if active && !self.disconnecting => {
+                self.update(Message::ToggleConnection)
+            }
+            Some(widget::Action::Connect | widget::Action::Disconnect) => Task::none(),
+            // Open, and links with an old token (e.g. from before a restart).
+            _ => Self::show_window(),
+        })
     }
     fn disconnect(&mut self) {
         self.cancel_diagnostic();

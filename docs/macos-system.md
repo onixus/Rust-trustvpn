@@ -92,3 +92,65 @@ Other platforms retain their existing software renderer. This changes the Native
 frontend only; the optional WebView frontend retains its current appearance.
 
 The Native Settings screen includes “Стекло — прозрачный фон окна”. It updates the window immediately and persists in NSUserDefaults, separately from VPN profiles. `--appearance-preview` opens this screen without accessing the vault or connecting VPN.
+
+## Desktop widget
+
+The Native system package embeds a WidgetKit extension (macOS 14+,
+`Contents/PlugIns/VPNWidget.appex`, sources in `apps/macos/Widget`). Add it via
+Edit Widgets → R-TrustTunnel → VPN, in small or medium size. It shows the phase
+(connected, connecting, no link, disconnected), the mode and the connection
+time, and connects or disconnects the default profile the same way as the tray
+menu. A running transport is shown in amber with “availability not checked”;
+no green shield or verified-protection claim is derived from the session
+lifecycle, including SOCKS mode. When the app is not running, the widget only opens it.
+
+On macOS 26+ the same extension adds a Control Center toggle: Control Center →
+Edit Controls → R-TrustTunnel VPN. It shows the phase and switches the VPN in
+the background without bringing the app forward; when the app is not running
+it opens the app instead.
+The toggle needs a signing identity with a Team ID: `linkd` rejects App
+Intents clients without one, and an ad-hoc toggle hangs until `chronod` kills
+the extension. A free Apple ID in Xcode → Settings → Accounts provides an
+"Apple Development" certificate; build with
+`python3 scripts/package-macos-system.py --sign "Apple Development: …"`.
+Ad-hoc packages (the default, CI) contain only the desktop widget.
+
+- The extension is sandboxed and reads only
+  `~/Library/Application Support/org.rtrusttunnel.Native/Widget/status.json`
+  (temporary-exception entitlement, read-only). The file has no profile data:
+  phase, mode label, start time and a per-launch token.
+- Widget actions are `rtrust-widget://` links handled by the app. Connect/disconnect
+  require the token, so a web page cannot switch the VPN; stale or invalid
+  links only open the window. An action applies only in the direction the
+  widget showed.
+- The toggle's App Intent runs in the extension and posts a Darwin
+  notification `org.rtrusttunnel.Native.<token>.connect|disconnect`; the app
+  polls both names. Only readers of the 0600 status file know them.
+- The app calls `WidgetCenter` and `ControlCenter` through `Contents/Frameworks/libRTrustWidgetBridge.dylib`
+  on every change. Without the bridge (e.g. `cargo run`) the widget refreshes
+  every 15 minutes.
+- Built by `scripts/build-macos-widget.py` with the Xcode toolchain but no
+  Xcode project: `swiftc` emits const values and `appintentsmetadataprocessor`
+  writes `Metadata.appintents`, without which the toggle intent is not found.
+  Packaging the Native UI therefore requires Xcode (`DEVELOPER_DIR`). No App
+  Group: ad-hoc signing has no team prefix.
+
+Unit tests cover the token check, the status format and Darwin notification
+names. A sandboxed binary with the widget entitlements could read the status
+file and post the notification, and could not read other home files.
+
+Accepted on macOS 26 (Apple Development signed package): the desktop widget
+renders, its connect/disconnect links reach the app and switch the VPN, and
+the app reacts to the toggle's Darwin notifications.
+
+**Open: the Control Center toggle does not switch yet.** The toggle appears
+and renders its state, and `chronod` picks the extension for `SetVPNIntent`,
+but the App Intents executor stays in `Connecting` without an error, so
+`perform` never runs. The extension binary matches an Xcode-built one (same
+sections, libraries and metadata). Suspected stale `chronod` state from
+earlier unsigned/broken builds (it scheduled a retry for the next day); it is
+SIP-protected and restarts only on logout/reboot. If the toggle still hangs
+after that, fall back to a `ControlWidgetButton` with `OpenURLIntent` and the
+tokenized `rtrust-widget://` link. Debug with
+`log show --predicate 'subsystem == "org.rtrusttunnel.widget"'` and the
+`widget:` lines of `rtrust-native`.

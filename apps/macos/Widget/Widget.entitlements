@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- WidgetKit requires a sandboxed extension. -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- Only the status directory written by the app, read-only. No App Group:
+	     it needs a team-prefixed identifier that ad-hoc signing cannot provide. -->
+	<key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
+	<array>
+		<string>/Library/Application Support/org.rtrusttunnel.Native/Widget/</string>
+	</array>
+</dict>
+</plist>

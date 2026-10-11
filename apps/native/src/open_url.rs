@@ -2,6 +2,8 @@
 //! argv, both on cold launch and to an already running instance. The handler
 //! only queues the link; the UI drains it on its tick and shows the usual import
 //! preview, so opening a link never connects or saves a profile by itself.
+//! rtrust-widget:// links from the widget go to a separate queue; the app
+//! checks their token before acting on them.
 use objc2::{
     AllocAnyThread, define_class, msg_send,
     rc::Retained,
@@ -16,6 +18,7 @@ const GET_URL: u32 = u32::from_be_bytes(*b"GURL");
 const DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
 
 static PENDING: Mutex<Option<String>> = Mutex::new(None);
+static WIDGET: Mutex<Option<String>> = Mutex::new(None);
 
 define_class!(
     #[unsafe(super(NSObject))]
@@ -30,8 +33,10 @@ define_class!(
             let Some(descriptor) = descriptor else { return };
             let link: Option<Retained<NSString>> = unsafe { msg_send![&*descriptor, stringValue] };
             if let Some(link) = link {
+                let link = link.to_string();
                 // Only the most recent link is kept, matching the single import preview.
-                *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(link.to_string());
+                let queue = if link.starts_with("rtrust-widget:") { &WIDGET } else { &PENDING };
+                *queue.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
             }
         }
     }
@@ -54,4 +59,8 @@ pub fn install() {
 
 pub fn take() -> Option<String> {
     PENDING.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+pub fn take_widget() -> Option<String> {
+    WIDGET.lock().unwrap_or_else(|e| e.into_inner()).take()
 }

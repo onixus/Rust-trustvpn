@@ -2,14 +2,18 @@
 """Build an unsigned macOS system VPN candidate; does not install it."""
 import argparse
 import hashlib
+import importlib
 import pathlib
 import plistlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
+widget = importlib.import_module('build-macos-widget')
 
 
 def run(*args):
@@ -24,6 +28,9 @@ def main():
     parser.add_argument('--bundled-service', action='store_true',
                         help='Use the separately named bundled-candidate output')
     parser.add_argument('--ui',choices=['native','webview','both'],default='native')
+    parser.add_argument('--sign', default='-',
+                        help='codesign identity, e.g. "Apple Development: …"; '
+                             'a Team ID enables the Control Center toggle')
     args = parser.parse_args()
     frontend='rtrust-webview' if args.ui=='webview' else 'rtrust-native'
     version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
@@ -49,7 +56,8 @@ def main():
             NSHighResolutionCapable=True,
             # Only the primary app claims profile links so LaunchServices has one handler.
             CFBundleURLTypes=[dict(CFBundleURLName='org.rtrusttunnel.profile-link',
-                CFBundleURLSchemes=['tt','hy2','hysteria2'])])))
+                CFBundleURLSchemes=['tt','hy2','hysteria2']),
+                *([widget.url_type()] if frontend == 'rtrust-native' else [])])))
         (app / 'Resources').mkdir()
         shutil.copy2(ROOT / 'packaging/branding/icon.icns', app / 'Resources/rtrust.icns')
         secondary=None
@@ -60,16 +68,19 @@ def main():
             (secondary/'Info.plist').write_bytes(plistlib.dumps(dict(CFBundleExecutable='rtrust-webview',CFBundleIdentifier='org.rtrusttunnel.Webview',CFBundleName='R-TrustTunnel WebView',CFBundlePackageType='APPL',CFBundleIconFile='rtrust.icns',CFBundleShortVersionString=version,CFBundleVersion=version,NSHighResolutionCapable=True)))
             (secondary/'Resources').mkdir()
             shutil.copy2(ROOT/'packaging/branding/icon.icns',secondary/'Resources/rtrust.icns')
-            run('/usr/bin/codesign','--force','--sign','-',str(secondary.parent))
+            run('/usr/bin/codesign','--force','--sign',args.sign,str(secondary.parent))
         helper = app / 'Library/LaunchServices/org.rtrusttunnel.service'
         helper.parent.mkdir(parents=True)
         shutil.copy2(binary / 'rtrust-service', helper)
         helper.chmod(0o755)
         # Ad-hoc signing seals nested code; this is NOT Developer ID signing
         # or notarization. A per-app macOS approval may still be required.
-        run('/usr/bin/codesign', '--force', '--sign', '-', '--identifier',
+        run('/usr/bin/codesign', '--force', '--sign', args.sign, '--identifier',
             'org.rtrusttunnel.service', str(helper))
-        run('/usr/bin/codesign', '--force', '--sign', '-', str(app.parent))
+        if frontend == 'rtrust-native':
+            # Only the native UI publishes the status the widget shows.
+            widget.install(app, version, args.sign)
+        run('/usr/bin/codesign', '--force', '--sign', args.sign, str(app.parent))
         run('/usr/bin/codesign', '--verify', '--deep', '--strict', str(app.parent))
         daemon = payload / 'Library/LaunchDaemons/org.rtrusttunnel.service.plist'
         daemon.parent.mkdir(parents=True)
