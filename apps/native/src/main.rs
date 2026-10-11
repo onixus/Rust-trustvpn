@@ -238,6 +238,9 @@ struct App {
     system_target: String,
     diagnostic_report: Option<(u64, rtrust_desktop::diagnostics::Report)>,
     diagnostic_preview: text_editor::Content,
+    diagnostic_preview_dirty: bool,
+    diagnostic_export_report: Option<rtrust_desktop::diagnostics::Report>,
+    system_target_edited_at: Option<std::time::Instant>,
     last_diagnostic: Option<std::time::Instant>,
     diagnostic_task: Option<iced::task::Handle>,
     diagnostic_generation: u64,
@@ -323,6 +326,7 @@ enum Message {
     Fallback(String, bool),
     EndpointChecked(u64, u64, rtrust_desktop::diagnostics::EndpointCheck),
     DiagnosticEdit(text_editor::Action),
+    ResetDiagnosticPreview,
     ExportDiagnostic,
     ExplainRoute,
     Probed(u64, std::result::Result<String, String>),
@@ -402,6 +406,9 @@ impl App {
             system_target: "example.com".into(),
             diagnostic_report: None,
             diagnostic_preview: text_editor::Content::new(),
+            diagnostic_preview_dirty: false,
+            diagnostic_export_report: None,
+            system_target_edited_at: None,
             last_diagnostic: None,
             diagnostic_task: None,
             diagnostic_generation: 0,
@@ -1479,10 +1486,18 @@ impl App {
                 self.cancel_diagnostic();
                 self.system_target = s;
                 self.diagnostic_report = None;
-                self.last_diagnostic = None;
+                self.follow_up = None;
+                self.system_target_edited_at = Some(std::time::Instant::now());
             }
             Message::DiagnosticEdit(action) if !self.busy => {
+                self.diagnostic_preview_dirty |= action.is_edit();
                 self.diagnostic_preview.perform(action)
+            }
+            Message::ResetDiagnosticPreview if !self.busy => {
+                if let Some((_, report)) = self.diagnostic_report.clone() {
+                    self.diagnostic_preview_dirty = false;
+                    self.refresh_diagnostic_preview(&report);
+                }
             }
             Message::Diagnose if !self.busy => {
                 return self.start_diagnostic();
@@ -1503,7 +1518,7 @@ impl App {
                 }
                 let mut report = report;
                 report.follows = self.follow_up.take();
-                self.diagnostic_preview = text_editor::Content::with_text(&report.redacted_json());
+                self.refresh_diagnostic_preview(&report);
                 self.diagnostic_report = Some((epoch, report));
                 if !self.busy && self.probe.is_none() {
                     self.status = self.connection_check_summary();
@@ -1576,16 +1591,20 @@ impl App {
             {
                 self.probe = None;
                 self.busy = false;
-                if let Some((report_epoch, report)) = &mut self.diagnostic_report
+                let updated = if let Some((report_epoch, report)) = &mut self.diagnostic_report
                     && *report_epoch == epoch
                     && report.attach_endpoint(check)
                 {
                     self.status = format!("{} {}", report.verdict_text(), report.summary());
-                    self.diagnostic_preview =
-                        text_editor::Content::with_text(&report.redacted_json());
+                    Some(report.clone())
+                } else {
+                    None
+                };
+                if let Some(report) = updated {
+                    self.refresh_diagnostic_preview(&report);
                 }
             }
-            Message::ExportDiagnostic if !self.busy && self.diagnostic_report.is_some() => {
+            Message::ExportDiagnostic if !self.busy && self.diagnostic_export_report.is_some() => {
                 let preview = self.diagnostic_preview.text();
                 self.busy = true;
                 return Task::perform(
@@ -1711,14 +1730,31 @@ impl App {
         self.confirm_replace = false;
         self.consent = false;
     }
-    fn diagnostic_due(&self) -> bool {
+    fn refresh_diagnostic_preview(&mut self, report: &rtrust_desktop::diagnostics::Report) {
+        // The editable export is a separate snapshot once the user changes it.
+        if !self.diagnostic_preview_dirty {
+            self.diagnostic_preview = text_editor::Content::with_text(&report.redacted_json());
+            self.diagnostic_export_report = Some(report.clone());
+        }
+    }
+    fn diagnostic_start_allowed(&self, now: std::time::Instant) -> bool {
         self.diagnostic_task.is_none()
+            && self.last_diagnostic.is_none_or(|started| {
+                now.saturating_duration_since(started) >= std::time::Duration::from_secs(5)
+            })
+            && self.system_target_edited_at.is_none_or(|edited| {
+                now.saturating_duration_since(edited) >= std::time::Duration::from_secs(1)
+            })
+    }
+    fn diagnostic_due(&self) -> bool {
+        self.diagnostic_start_allowed(std::time::Instant::now())
             && !self.busy
             && self.probe.is_none()
             && self.session.as_ref().is_some_and(Session::is_tun)
-            && (self
-                .last_diagnostic
-                .is_none_or(|t| t.elapsed().as_secs() >= 30)
+            && (self.system_target_edited_at.is_some()
+                || self
+                    .last_diagnostic
+                    .is_none_or(|t| t.elapsed().as_secs() >= 30)
                 || self.diagnostic_report.as_ref().is_some_and(|(_, report)| {
                     self.session.as_ref().unwrap().observations().generation
                         != report.lifecycle.generation
@@ -1758,11 +1794,7 @@ impl App {
             }
             return Task::none();
         };
-        if self.diagnostic_task.is_some()
-            || self
-                .last_diagnostic
-                .is_some_and(|t| t.elapsed().as_secs() < 5)
-        {
+        if !self.diagnostic_start_allowed(std::time::Instant::now()) {
             return Task::none();
         }
         let target = match rtrust_desktop::diagnostics::Target::parse(&self.system_target) {
@@ -1773,6 +1805,7 @@ impl App {
             }
         };
         self.follow_up = follow_up;
+        self.system_target_edited_at = None;
         self.last_diagnostic = Some(std::time::Instant::now());
         self.diagnostic_generation += 1;
         let generation = self.diagnostic_generation;
@@ -2331,7 +2364,7 @@ impl App {
                     .push(text("Ниже выполняется системное разрешение имени и один HEAD запрос HTTPS:443 / к указанному адресу. Без proxy среды, перенаправлений и прямого сравнения. HTTPS отправляется только при маршруте на интерфейс RTrustTunnel и привязан к нему. Windows пока не поддерживается."))
                     .push(text_input("hostname или IP без URL и порта", &self.system_target).on_input(Message::SystemTarget))
                     .push(button("Проверить системный путь / повторить")
-                        .on_press_maybe((!self.busy && self.diagnostic_task.is_none() && self.session.as_ref().is_some_and(Session::is_tun)).then_some(Message::Diagnose)));
+                        .on_press_maybe((!self.busy && self.diagnostic_start_allowed(std::time::Instant::now()) && self.session.as_ref().is_some_and(Session::is_tun)).then_some(Message::Diagnose)));
                 if let Some((epoch, report)) = &self.diagnostic_report {
                     let stale = *epoch != self.connection_epoch
                         || self.session.as_ref().is_none_or(|session| {
@@ -2346,11 +2379,19 @@ impl App {
                         .push(report.verdict().actions.into_iter().fold(row![].spacing(8), |actions, action| {
                             use rtrust_desktop::diagnostics::Action;
                             // Old results may still be repeated, never acted upon.
-                            let allowed = !self.busy && self.diagnostic_task.is_none() && (action == Action::Recheck || !stale);
+                            let allowed = !self.busy && self.diagnostic_task.is_none() && (action == Action::Recheck || !stale) && (action != Action::Recheck || self.diagnostic_start_allowed(std::time::Instant::now()));
                             actions.push(button(action.label()).on_press_maybe(allowed.then_some(Message::DiagnosticAction(action))))
-                        }))
-                        .push(text("Предпросмотр экспорта: адреса, имя сайта, URL, credentials и сырые ошибки исключены. При необходимости отредактируйте перед сохранением."))
+                        }));
+                }
+                if self.diagnostic_export_report.is_some() {
+                    content = content.push(text(if self.diagnostic_preview_dirty {
+                        "Редактируемая копия отчёта для экспорта. Ручные правки сохраняются; результаты автоматических проверок обновляются отдельно."
+                    } else {
+                        "Копия последнего отчёта для экспорта. Адреса, имя сайта, URL, credentials и сырые ошибки исключены."
+                    }))
                         .push(text_editor(&self.diagnostic_preview).on_action(Message::DiagnosticEdit).height(160))
+                        .push(button("Заменить копию последним результатом")
+                            .on_press_maybe((!self.busy && self.diagnostic_report.is_some()).then_some(Message::ResetDiagnosticPreview)))
                         .push(button("Сохранить показанный отчёт…").on_press_maybe((!self.busy).then_some(Message::ExportDiagnostic)));
                 }
                 content = content.push(
@@ -2580,8 +2621,64 @@ mod tests {
         app.last_diagnostic = Some(std::time::Instant::now());
         let _ = app.update(Message::SystemTarget("other.example".into()));
         assert_eq!(app.system_target, "other.example");
-        assert!(app.diagnostic_task.is_none() && app.last_diagnostic.is_none());
+        assert!(app.diagnostic_task.is_none() && app.last_diagnostic.is_some());
+        assert!(app.system_target_edited_at.is_some());
         assert!(!app.busy);
+    }
+    #[test]
+    fn edited_export_survives_background_and_endpoint_updates_until_explicit_reset() {
+        use rtrust_desktop::diagnostics::Report;
+        let mut app = app();
+        let mut first = Report::new(rtrust_control::observations::Snapshot::unknown(
+            rtrust_control::observations::Mode::Full,
+        ));
+        first.started_at_ms = 100;
+        app.refresh_diagnostic_preview(&first);
+        // Selecting text alone must not freeze automatic updates.
+        let _ = app.update(Message::DiagnosticEdit(text_editor::Action::SelectAll));
+        assert!(!app.diagnostic_preview_dirty);
+        let _ = app.update(Message::DiagnosticEdit(text_editor::Action::Edit(
+            text_editor::Edit::Paste(std::sync::Arc::new("user-redacted report".into())),
+        )));
+        assert!(app.diagnostic_preview_dirty);
+        let edited = app.diagnostic_preview.text();
+        let mut newer = first.clone();
+        newer.started_at_ms = 200;
+        app.refresh_diagnostic_preview(&newer);
+        assert_eq!(app.diagnostic_preview.text(), edited);
+        assert_eq!(
+            app.diagnostic_export_report.as_ref().unwrap().started_at_ms,
+            100
+        );
+        // Endpoint refinement and a destination edit must also preserve the copy.
+        newer.endpoint = rtrust_desktop::diagnostics::Fact::Passed;
+        app.refresh_diagnostic_preview(&newer);
+        let _ = app.update(Message::SystemTarget("other.example".into()));
+        assert_eq!(app.diagnostic_preview.text(), edited);
+        app.diagnostic_report = Some((app.connection_epoch, newer.clone()));
+        let _ = app.update(Message::ResetDiagnosticPreview);
+        assert!(!app.diagnostic_preview_dirty);
+        assert_eq!(app.diagnostic_preview.text(), newer.redacted_json());
+        assert_eq!(
+            app.diagnostic_export_report.as_ref().unwrap().started_at_ms,
+            200
+        );
+    }
+    #[test]
+    fn destination_edits_debounce_without_resetting_the_request_cooldown() {
+        let mut app = app();
+        let started = std::time::Instant::now();
+        app.last_diagnostic = Some(started);
+        let _ = app.update(Message::SystemTarget("other.example".into()));
+        assert_eq!(app.last_diagnostic, Some(started));
+        assert!(!app.diagnostic_start_allowed(started + std::time::Duration::from_secs(2)));
+        // A later keystroke restarts the debounce, but keeps the original cooldown.
+        app.system_target_edited_at = Some(started + std::time::Duration::from_millis(4900));
+        assert!(!app.diagnostic_start_allowed(started + std::time::Duration::from_secs(5)));
+        assert!(app.diagnostic_start_allowed(started + std::time::Duration::from_secs(6)));
+        // Cancellation does not reopen the cooldown either.
+        let _ = app.update(Message::Cancel);
+        assert_eq!(app.last_diagnostic, Some(started));
     }
     #[test]
     fn system_diagnostic_requires_active_tun_and_report_export_requires_completion() {

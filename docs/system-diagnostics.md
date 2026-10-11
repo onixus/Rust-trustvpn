@@ -1,6 +1,6 @@
 # Destination diagnostics (issue #33)
 
-Native Diagnostics now offers a separate **current system path** operation, alongside the explicitly labelled independent TCP transport test and the offline route explain from #32. In TUN/full mode, checks start automatically on connection and repeat every 30 seconds against the destination shown in Diagnostics (default `example.com`). Enter a hostname or numeric IP without URL/port to change it; the repeat button remains available. Checks run in the background without blocking disconnect, navigation or other operations. The UI discloses system name resolution and one HTTPS:443 HEAD request to `/`. It does not compare with a direct request, change routes/firewall, start another transport, or claim global Internet/guard verification.
+Native Diagnostics now offers a separate **current system path** operation, alongside the explicitly labelled independent TCP transport test and the offline route explain from #32. In TUN/full mode, checks start automatically on connection and repeat every 30 seconds against the destination shown in Diagnostics (default `example.com`). Enter a hostname or numeric IP without URL/port to change it; checks wait for one second without edits and retain the five-second request cooldown across destination edits. The repeat button remains available. Checks run in the background without blocking disconnect, navigation or other operations. The UI discloses system name resolution and one HTTPS:443 HEAD request to `/`. It does not compare with a direct request, change routes/firewall, start another transport, or claim global Internet/guard verification.
 
 ## Evidence and bounds
 
@@ -67,7 +67,7 @@ evidence. A failed worker or changed generation still refuses or invalidates it.
 
 ## Preview and export
 
-The report excludes the hostname, addresses, URLs, headers, response payload, raw errors and profile credentials. Policy revisions are hashed. Native displays an editable JSON preview, then saves only when the user explicitly chooses a file. Nothing is uploaded or automatically sent. User edits replace the default preview; users should redact any information they add themselves.
+The report excludes the hostname, addresses, URLs, headers, response payload, raw errors and profile credentials. Policy revisions are hashed. Native displays an editable JSON preview, then saves only when the user explicitly chooses a file. Once edited, this export copy retains its source report and user edits across automatic checks, endpoint refinements and destination changes. The latest diagnostic result continues updating separately; replacing the edited export with it requires the explicit replace-copy button. Nothing is uploaded or automatically sent. User edits replace the default preview; users should redact any information they add themselves.
 
 ## Validation and remaining acceptance
 
