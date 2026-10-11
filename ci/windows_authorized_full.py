@@ -4,7 +4,7 @@ Never called by ordinary CI. Preserves GUI, vault, SCM identity and original ser
 import argparse, hashlib, json, os, pathlib, shutil, subprocess, sys, time, uuid
 p=argparse.ArgumentParser();p.add_argument('fixture',type=pathlib.Path);p.add_argument('--allow-existing-installation',action='store_true');p.add_argument('--service-sha256',required=True);p.add_argument('--crash-cycles',type=int,choices=range(1,4),default=1)
 # windows_production_e2e.py runs the same rollback-guarded flow with production profiles.
-p.add_argument('--worker',choices=['windows_full_e2e.py','windows_production_e2e.py','windows_sleep_e2e.py'],default='windows_full_e2e.py')
+p.add_argument('--worker',choices=['windows_full_e2e.py','windows_selected_e2e.py','windows_production_e2e.py','windows_sleep_e2e.py'],default='windows_full_e2e.py')
 # windows_sleep_e2e.py suspends the host; worker and rollback deadlines include the sleep.
 p.add_argument('--sleep-minutes',type=int,choices=range(1,121),default=None)
 p.add_argument('--always-on',action='store_true',help='Sleep with the service always-on tunnel instead of a client session');a=p.parse_args()
