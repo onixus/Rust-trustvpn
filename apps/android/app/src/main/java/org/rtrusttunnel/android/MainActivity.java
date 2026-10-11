@@ -315,12 +315,13 @@ public class MainActivity extends Activity {
                 catch (ActivityNotFoundException e) { startActivity(new Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS)); }
             }).show();
     }
-    protected boolean useDefaultProfile() { return false; }
-    protected final void toggle() {
+    protected final void toggle() { toggle(false); }
+    protected final void toggleDefaultProfile() { toggle(true); }
+    private void toggle(boolean useDefault) {
         if (TunnelService.active && TunnelService.alwaysOn) { vpnSettings(); return; }
         if (TunnelService.active) { startService(new Intent(this, TunnelService.class).setAction(TunnelService.STOP)); return; }
         try {
-            pendingConnectId = useDefaultProfile() ? vault.read().getString("default") : selectedId;
+            pendingConnectId = useDefault ? vault.read().getString("default") : selectedId;
             JSONObject profile = vault.profile(pendingConnectId);
             JSONObject prepared = new JSONObject(NativeCore.INSTANCE.plan(profile.toString()));
             if (!prepared.getBoolean("ok")) {

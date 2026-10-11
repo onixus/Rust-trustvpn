@@ -87,6 +87,16 @@ final class ProfileSelectionAcceptance {
             activity = (MainActivity) test.startActivitySync(new Intent(context, WidgetActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             awaitPlan(context, false);
             check(vault.read().getString("default").equals("first"), "Widget retains default");
+            stop(context);
+            MainActivity widgetScreen = activity;
+            test.runOnMainSync(() -> {
+                View title = find(widgetScreen.findViewById(android.R.id.content), "Selection second");
+                check(title != null, "Widget-opened screen exposes profile selection");
+                ((View) title.getParent().getParent()).performClick();
+                widgetScreen.toggle();
+            });
+            awaitPlan(context, true);
+            check(vault.read().getString("default").equals("first"), "App connection after widget open retains default");
         } finally {
             try { stop(context); } finally {
                 if (activity != null) { MainActivity closing = activity; test.runOnMainSync(closing::finish); }

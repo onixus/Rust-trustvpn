@@ -201,11 +201,11 @@ impl App {
         }
         Task::none()
     }
-    // Match ToggleConnection: the default profile, then explicitly permitted
-    // backups. Merely selecting a row in the profile editor changes neither.
+    // Match the app Connect action: the selected profile and permitted backups.
     fn next_connection_endpoints(&self) -> Option<Vec<(String, Vec<String>)>> {
-        let primary = self.profiles.first()?;
-        let backups = self.saved_connection.fallbacks(&self.profiles);
+        let primary = self.current()?;
+        let mut backups = self.saved_connection.fallbacks(&self.profiles);
+        backups.retain(|candidate| candidate.name != primary.name);
         Some(
             std::iter::once(primary)
                 .chain(backups.iter())
@@ -400,7 +400,7 @@ mod tests {
         assert!(app.intent.preview.is_none() && !app.dirty);
     }
     #[test]
-    fn endpoint_inputs_follow_default_and_permitted_backups_not_editor_selection() {
+    fn endpoint_inputs_follow_selected_profile_without_duplicate_backups() {
         let mut app = configured();
         app.profiles[0].endpoint.addresses = vec!["198.18.0.10:443".into()];
         app.profiles[1].endpoint.addresses = vec!["198.18.0.20:443".into()];
@@ -409,23 +409,20 @@ mod tests {
         assert_eq!(default_only[0].1, ["198.18.0.10:443"]);
         let base = app.intent_base();
         app.selected = 1;
-        assert!(app.intent_base() == base);
+        assert!(app.intent_base() != base);
         app.saved_connection
             .fallback_profiles
             .push(app.profiles[1].name.clone());
         let candidates = app.next_connection_endpoints().unwrap();
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[1].1, ["198.18.0.20:443"]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].1, ["198.18.0.20:443"]);
         let endpoints = app.offline_route_endpoints().unwrap();
         if cfg!(target_os = "linux") {
             assert!(endpoints.is_empty());
         } else {
             assert_eq!(
                 endpoints,
-                [
-                    "198.18.0.10".parse::<std::net::Ipv4Addr>().unwrap(),
-                    "198.18.0.20".parse().unwrap()
-                ]
+                ["198.18.0.20".parse::<std::net::Ipv4Addr>().unwrap()]
             );
         }
         let decision = app
@@ -446,6 +443,18 @@ mod tests {
                 rtrust_profile::routing::Reason::EndpointBypass
             }
         );
+    }
+    #[test]
+    fn selecting_another_profile_invalidates_a_route_preview() {
+        let mut app = configured();
+        open(&mut app);
+        preview(&mut app);
+        assert!(app.intent.preview.is_some());
+        let _ = app.update(Message::Select(1));
+        let _ = app.intent_update(Action::Apply);
+        assert!(app.intent.preview.is_none());
+        assert!(!app.dirty);
+        assert!(app.intent.report.contains("изменились после предпросмотра"));
     }
     #[test]
     fn unresolved_permitted_backup_is_unknown_without_offline_dns() {

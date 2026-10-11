@@ -6,7 +6,6 @@ import android.os.Bundle;
 /** Only our immutable widget PendingIntent can enter this non-exported activity. */
 public final class WidgetActivity extends MainActivity {
     private boolean pending;
-    @Override protected boolean useDefaultProfile() { return true; }
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         pending = state == null; // Rotation/process restoration must not toggle again.
@@ -21,7 +20,7 @@ public final class WidgetActivity extends MainActivity {
         super.onResume();
         if (pending) {
             pending = false;
-            if (!recoveryRequested) { TunnelService.refreshPolicy(); toggle(); }
+            if (!recoveryRequested) { TunnelService.refreshPolicy(); toggleDefaultProfile(); }
         }
     }
 }
