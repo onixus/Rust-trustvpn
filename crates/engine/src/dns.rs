@@ -170,6 +170,42 @@ async fn read_message<T: AsyncRead + Unpin>(stream: &mut T) -> Result<Vec<u8>> {
     stream.read_exact(&mut answer).await?;
     Ok(answer)
 }
+/// One forwarded UDP DNS query owns one upstream stream. Keeping the query's
+/// epoch outside a shared tuple/ID table prevents late replies from acquiring a
+/// newer policy epoch and avoids a lifetime limit on DNS routing evidence.
+pub async fn forward_udp(
+    session: &Session,
+    query: crate::udp::Datagram,
+    router: &crate::routing::Router,
+) -> Result<crate::udp::Datagram> {
+    let version = router.version();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut tunnel = session.open_udp().await?;
+        forward_udp_query(&mut tunnel, &query, router, &version).await
+    })
+    .await
+    .map_err(|_| Error::Timeout)?
+}
+async fn forward_udp_query<T: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut T,
+    query: &crate::udp::Datagram,
+    router: &crate::routing::Router,
+    version: &crate::routing::PolicyVersion,
+) -> Result<crate::udp::Datagram> {
+    if !(12..=LIMIT).contains(&query.payload.len()) || query.destination.port() != 53 {
+        return Err(Error::Protocol);
+    }
+    stream
+        .write_all(&crate::udp::encode(query, "rtrust-tun")?)
+        .await?;
+    let reply = crate::udp::read(stream).await?;
+    if reply.source != query.destination || reply.destination != query.source {
+        return Err(Error::Protocol);
+    }
+    validate_answer(&query.payload, &reply.payload)?;
+    router.learn_for(version, &query.payload, &reply.payload);
+    Ok(reply)
+}
 fn validate_answer(query: &[u8], answer: &[u8]) -> Result<()> {
     if answer.len() < 12
         || answer.len() > LIMIT
@@ -274,6 +310,138 @@ mod tests {
         m.metadata.recursion_desired = true;
         m.add_query(Query::query("example.com.".parse().unwrap(), kind));
         m.to_vec().unwrap()
+    }
+    // A real framed reply over an independent duplex stream, using the same
+    // helper as the production per-query stream. The server validates the wire
+    // request rather than mirroring implementation data structures.
+    async fn udp_reply(
+        router: &crate::routing::Router,
+        version: &crate::routing::PolicyVersion,
+        wrong_tuple: bool,
+        wrong_question: bool,
+    ) -> Result<crate::udp::Datagram> {
+        use hickory_proto::{
+            op::{Message, MessageType},
+            rr::{Name, RData, Record, RecordType, rdata::A},
+        };
+        let q = query(RecordType::A);
+        let request = crate::udp::Datagram {
+            source: "169.254.254.2:12345".parse().unwrap(),
+            destination: "1.1.1.1:53".parse().unwrap(),
+            payload: q.clone(),
+        };
+        let mut answer = Message::from_vec(&q).unwrap();
+        answer.metadata.message_type = MessageType::Response;
+        if wrong_question {
+            answer.queries[0].set_name(Name::from_ascii("other.example.").unwrap());
+        }
+        answer.add_answer(Record::from_rdata(
+            Name::from_ascii("example.com.").unwrap(),
+            60,
+            RData::A(A("192.0.2.1".parse().unwrap())),
+        ));
+        let reply = crate::udp::Datagram {
+            source: if wrong_tuple {
+                "8.8.8.8:53".parse().unwrap()
+            } else {
+                request.destination
+            },
+            destination: request.source,
+            payload: answer.to_vec().unwrap(),
+        };
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let wire = crate::udp::encode(&request, "rtrust-tun").unwrap();
+        let task = tokio::spawn(async move {
+            let mut actual = vec![0; wire.len()];
+            server.read_exact(&mut actual).await.unwrap();
+            assert_eq!(actual, wire);
+            let mut encoded = crate::udp::encode(&reply, "").unwrap();
+            // Incoming _udp2 frames do not carry the outbound application byte.
+            encoded.remove(40);
+            let len = (encoded.len() - 4) as u32;
+            encoded[..4].copy_from_slice(&len.to_be_bytes());
+            server.write_all(&encoded).await.unwrap();
+        });
+        let result = forward_udp_query(&mut client, &request, router, version).await;
+        task.await.unwrap();
+        result
+    }
+    fn udp_router() -> crate::routing::Router {
+        crate::routing::Policy {
+            mode: "general".into(),
+            exclusions: vec!["example.com".into()],
+        }
+        .compile_with_context(crate::routing::Context {
+            revision: Some("r1".into()),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+    #[tokio::test]
+    async fn forwarded_udp_keeps_learning_after_512_completed_and_reused_id_queries() {
+        let router = udp_router();
+        for n in 0..514 {
+            // Clear cached evidence between queries, so every success proves a
+            // fresh answer learned under the new epoch, even with reused tuple/ID.
+            if n > 0 {
+                router
+                    .apply_local(
+                        &router.version(),
+                        &crate::routing::Policy {
+                            mode: "general".into(),
+                            exclusions: vec!["example.com".into()],
+                        },
+                        crate::routing::Context {
+                            revision: Some(format!("r{}", n + 1)),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                router.decide("192.0.2.1:443".parse().unwrap()).action,
+                crate::routing::Action::Tunnel
+            );
+            udp_reply(&router, &router.version(), false, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                router.decide("192.0.2.1:443".parse().unwrap()).action,
+                crate::routing::Action::Direct
+            );
+        }
+    }
+    #[tokio::test]
+    async fn forwarded_udp_rejects_mismatched_replies_and_obsolete_query_epoch() {
+        let router = udp_router();
+        let old = router.version();
+        assert!(udp_reply(&router, &old, true, false).await.is_err());
+        assert!(udp_reply(&router, &old, false, true).await.is_err());
+        router
+            .apply_local(
+                &old,
+                &crate::routing::Policy {
+                    mode: "general".into(),
+                    exclusions: vec!["example.com".into()],
+                },
+                crate::routing::Context {
+                    revision: Some("r2".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        udp_reply(&router, &old, false, false).await.unwrap();
+        assert_eq!(
+            router.decide("192.0.2.1:443".parse().unwrap()).action,
+            crate::routing::Action::Tunnel
+        );
+        udp_reply(&router, &router.version(), false, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            router.decide("192.0.2.1:443".parse().unwrap()).action,
+            crate::routing::Action::Direct
+        );
     }
     #[test]
     fn aaaa_gets_valid_empty_answer() {
