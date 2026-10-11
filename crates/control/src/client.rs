@@ -90,11 +90,19 @@ impl Client {
     pub async fn always_on(command: Command) -> Result<Response, String> {
         if !matches!(
             command,
-            Command::EnableAlwaysOn { .. } | Command::DisableAlwaysOn | Command::AlwaysOnStatus
+            Command::EnableAlwaysOn { .. }
+                | Command::EnableRecovery { .. }
+                | Command::DisableAlwaysOn
+                | Command::AlwaysOnStatus
         ) {
             return Err("Invalid always-on operation".into());
         }
-        negotiate().await?;
+        let capabilities = negotiate().await?;
+        if matches!(command, Command::EnableRecovery { .. }) && !capabilities.automatic_recovery {
+            return Err(
+                "Служба не поддерживает автоматическое восстановление на этой платформе".into(),
+            );
+        }
         let mut pipe = socket().await?;
         exchange(&mut pipe, command, 60).await
     }

@@ -227,7 +227,7 @@ async fn serve(
     if let Some(supervisor) = supervisor {
         match request.command {
             Command::AlwaysOnStatus=>return write(pipe,&supervisor.state()).await,
-            command @ (Command::EnableAlwaysOn{..}|Command::DisableAlwaysOn)=>return write(pipe,&supervisor.command(command).await).await,
+            command @ (Command::EnableAlwaysOn{..}|Command::EnableRecovery{..}|Command::DisableAlwaysOn)=>return write(pipe,&supervisor.command(command).await).await,
             _ if supervisor.enabled()=>return reply(pipe,State::Error,"Always-on управляется системной службой. Для обслуживания сначала выключите always-on.").await,
             _=>{},
         }

@@ -8,8 +8,9 @@ pub const SOCKET: &str = "/private/var/run/rtrust/control.sock";
 /// Opt-in automatic recovery: at most this many user-allowed backup profiles.
 pub const MAX_FALLBACKS: usize = 3;
 pub const LIMIT: usize = (2 + MAX_FALLBACKS) * rtrust_profile::MAX_INPUT;
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub mod observations;
+pub mod recovery;
 pub use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
 
@@ -52,6 +53,11 @@ pub enum Command {
         profile: Box<rtrust_profile::Profile>,
         dns: std::net::Ipv4Addr,
     },
+    EnableRecovery {
+        profile: Box<rtrust_profile::Profile>,
+        dns: std::net::Ipv4Addr,
+        backups: Vec<rtrust_profile::Profile>,
+    },
     DisableAlwaysOn,
     AlwaysOnStatus,
     Stop,
@@ -76,6 +82,8 @@ pub struct Response {
     /// requested profile, 1.. the backups in the order sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_profile: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<recovery::Status>,
     pub observations: observations::Snapshot,
     pub capabilities: Capabilities,
 }
@@ -89,6 +97,8 @@ pub struct Capabilities {
     pub network_events: bool,
     /// The service accepts allowed backup profiles with Start.
     pub failover: bool,
+    #[serde(default)]
+    pub automatic_recovery: bool,
 }
 impl Capabilities {
     pub fn current() -> Self {
@@ -98,6 +108,7 @@ impl Capabilities {
             system_probes: false,
             network_events: true,
             failover: true,
+            automatic_recovery: cfg!(any(target_os = "linux", target_os = "windows")),
         }
     }
 }
@@ -109,6 +120,7 @@ impl Response {
             message: message.into(),
             always_on: None,
             active_profile: None,
+            recovery: None,
             observations: observations::Snapshot::unknown(observations::Mode::Unknown),
             capabilities: Capabilities::current(),
         }

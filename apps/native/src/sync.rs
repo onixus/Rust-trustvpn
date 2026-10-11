@@ -7,6 +7,7 @@ pub(super) struct State {
     due: Option<std::time::Instant>,
     pending: Vec<(RemoteProfile, Profile)>,
     status: String,
+    deferred: Option<Box<Batch>>,
 }
 #[derive(Clone)]
 pub(super) enum Action {
@@ -22,7 +23,8 @@ pub(super) struct Batch {
     client: Client,
     changed: Vec<(RemoteProfile, Profile)>,
     available: Vec<String>,
-    /// Err keeps the previous policy; profile updates still apply.
+    resolved: Vec<(RemoteProfile, Profile, bool)>,
+    /// Any error rejects the complete profile/policy batch.
     routing: Result<Option<rtrust_store::ManagedRoutes>, String>,
 }
 /// The device group's TUN route policy, checked before it can replace the
@@ -45,6 +47,26 @@ fn managed(policy: rtrust_portal::RoutingPolicy) -> Result<rtrust_store::Managed
         .validate()
         .map_err(|_| "Сервер прислал недопустимую группу маршрутов".to_owned())?;
     Ok(routes)
+}
+fn changed_profiles(
+    settings: &rtrust_store::SyncSettings,
+    profiles: Vec<(RemoteProfile, Profile)>,
+) -> Result<Vec<(RemoteProfile, Profile)>, String> {
+    let mut changed = Vec::new();
+    for (meta, profile) in profiles {
+        if let Some(previous) = settings.tracked.iter().find(|item| item.id == meta.id)
+            && previous.revision == meta.revision
+        {
+            if previous.baseline != profile {
+                return Err(
+                    "Содержимое профиля изменилось без изменения ревизии. Партия отклонена.".into(),
+                );
+            }
+            continue;
+        }
+        changed.push((meta, profile));
+    }
+    Ok(changed)
 }
 fn track(tracked: &mut Vec<TrackedProfile>, meta: &RemoteProfile, profile: Profile) {
     let item = TrackedProfile {
@@ -117,38 +139,21 @@ impl App {
                             "Привязка панели изменилась. Включите синхронизацию заново.".into()
                         );
                     }
-                    let listed = client.list().await?;
-                    let available = listed.iter().map(|p| p.id.clone()).collect();
-                    let mut changed = Vec::new();
-                    let mut total = 0;
-                    for remote in listed {
-                        if !settings
-                            .tracked
-                            .iter()
-                            .any(|p| p.id == remote.id && p.revision == remote.revision)
-                        {
-                            let profile = client.download(&remote).await?;
-                            total += profile
-                                .export(Format::Json)
-                                .map_err(|_| "Некорректный профиль")?
-                                .content
-                                .len();
-                            if total > 4 * rtrust_profile::MAX_INPUT {
-                                return Err("Обновление профилей превышает лимит 4 MiB".into());
-                            }
-                            changed.push((remote, profile));
-                        }
-                    }
-                    let routing = client
-                        .routing()
-                        .await
-                        .and_then(|policy| policy.map(managed).transpose());
+                    let snapshot = client.snapshot().await?;
+                    let available = snapshot
+                        .profiles
+                        .iter()
+                        .map(|(meta, _)| meta.id.clone())
+                        .collect();
+                    let changed = changed_profiles(&settings, snapshot.profiles)?;
+                    let routing = snapshot.routing.map(managed).transpose()?;
                     Ok(Box::new(Batch {
                         origin: settings.origin,
                         client,
                         changed,
                         available,
-                        routing,
+                        resolved: Vec::new(),
+                        routing: Ok(routing),
                     }))
                 };
                 return Task::perform(
@@ -167,6 +172,49 @@ impl App {
                         if self.saved_connection.sync.enabled
                             && batch.origin == self.saved_connection.sync.origin =>
                     {
+                        if let Err(error) = &batch.routing {
+                            self.sync_state.status = format!(
+                                "Обновление отклонено целиком: {error}. Локальные профили и маршруты сохранены."
+                            );
+                            return Task::none();
+                        }
+                        let conflicts: Vec<_> = batch
+                            .changed
+                            .iter()
+                            .filter(|(meta, _)| {
+                                self.saved_connection
+                                    .sync
+                                    .tracked
+                                    .iter()
+                                    .find(|p| p.id == meta.id)
+                                    .is_some_and(|old| {
+                                        self.profiles.iter().filter(|p| *p == &old.baseline).count()
+                                            != 1
+                                            || batch
+                                                .changed
+                                                .iter()
+                                                .filter(|(other, _)| {
+                                                    self.saved_connection
+                                                        .sync
+                                                        .tracked
+                                                        .iter()
+                                                        .find(|entry| entry.id == other.id)
+                                                        .is_some_and(|entry| {
+                                                            entry.baseline == old.baseline
+                                                        })
+                                                })
+                                                .count()
+                                                > 1
+                                    })
+                            })
+                            .cloned()
+                            .collect();
+                        if !conflicts.is_empty() {
+                            self.sync_state.pending = conflicts;
+                            self.sync_state.deferred = Some(batch);
+                            self.sync_state.status = "Синхронизация ожидает решения конфликтов. Профили и политика маршрутов пока не изменены.".into();
+                            return Task::none();
+                        }
                         self.portal.url = batch.origin.clone();
                         self.portal.client = Some(batch.client);
                         let previous_profiles = self.profiles.clone();
@@ -188,7 +236,7 @@ impl App {
                                 .find(|p| p.id == meta.id);
                             let matches: Vec<usize> = old
                                 .map(|old| {
-                                    self.profiles
+                                    previous_profiles
                                         .iter()
                                         .enumerate()
                                         .filter_map(|(i, p)| (p == &old.baseline).then_some(i))
@@ -196,8 +244,13 @@ impl App {
                                 })
                                 .unwrap_or_default();
                             if old.is_some() && matches.len() != 1 {
-                                self.sync_state.pending.push((meta, incoming));
-                                continue;
+                                self.profiles = previous_profiles;
+                                self.saved_connection.sync = previous_sync;
+                                self.saved_connection.managed_routes = previous_routes;
+                                self.sync_state.status =
+                                    "Локальная версия изменилась; обновление целиком отклонено"
+                                        .into();
+                                return Task::none();
                             }
                             if let Some(&index) = matches.first() {
                                 self.profiles[index] = incoming.clone();
@@ -205,6 +258,13 @@ impl App {
                                 self.profiles.push(incoming.clone());
                             }
                             track(&mut self.saved_connection.sync.tracked, &meta, incoming);
+                            updated += 1;
+                        }
+                        for (meta, profile, keep_both) in batch.resolved {
+                            if keep_both && !self.profiles.contains(&profile) {
+                                self.profiles.push(profile.clone());
+                            }
+                            track(&mut self.saved_connection.sync.tracked, &meta, profile);
                             updated += 1;
                         }
                         let candidate = rtrust_store::Vault {
@@ -253,12 +313,18 @@ impl App {
                     && !self.sync_state.pending.is_empty() =>
             {
                 let (meta, profile) = self.sync_state.pending.remove(0);
-                if matches!(action, Action::KeepBoth) && !self.profiles.contains(&profile) {
-                    self.profiles.push(profile.clone());
+                if let Some(batch) = &mut self.sync_state.deferred {
+                    batch.changed.retain(|(item, _)| item.id != meta.id);
+                    batch
+                        .resolved
+                        .push((meta, profile, matches!(action, Action::KeepBoth)));
                 }
-                track(&mut self.saved_connection.sync.tracked, &meta, profile);
-                self.dirty = true;
-                return self.update(Message::Save);
+                if self.sync_state.pending.is_empty()
+                    && let Some(batch) = self.sync_state.deferred.take()
+                {
+                    return self.sync_update(Action::Received(Ok(batch)));
+                }
+                return Task::none();
             }
             _ => {}
         }
@@ -323,8 +389,57 @@ mod tests {
             client: Client::new("https://example.test").unwrap(),
             changed: vec![(meta(), profile)],
             available: vec!["remote-1".into()],
+            resolved: Vec::new(),
             routing: Ok(None),
         }
+    }
+    #[test]
+    fn unchanged_revision_with_new_credentials_rejects_batch() {
+        let app = configured();
+        let mut remote = app.profiles[0].clone();
+        remote.name = "changed without revision".into();
+        let mut meta = meta();
+        meta.revision = "1".into();
+        assert!(
+            changed_profiles(&app.saved_connection.sync, vec![(meta.clone(), remote)]).is_err()
+        );
+        assert!(
+            changed_profiles(
+                &app.saved_connection.sync,
+                vec![(meta, app.profiles[0].clone())]
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+    #[test]
+    fn shared_baseline_cannot_partially_apply_two_remote_updates() {
+        let mut app = configured();
+        let old = app.profiles[0].clone();
+        app.saved_connection.sync.tracked.push(TrackedProfile {
+            id: "remote-2".into(),
+            revision: "1".into(),
+            baseline: old.clone(),
+        });
+        let mut remote1 = old.clone();
+        remote1.name = "first".into();
+        let mut remote2 = old.clone();
+        remote2.name = "second".into();
+        let mut meta2 = meta();
+        meta2.id = "remote-2".into();
+        let mut result = batch(remote1);
+        result.changed.push((meta2, remote2));
+        result.available.push("remote-2".into());
+        let before = app.profiles.clone();
+        let _ = app.sync_update(Action::Received(Ok(Box::new(result))));
+        assert_eq!(app.profiles, before);
+        assert_eq!(app.sync_state.pending.len(), 2);
+        assert!(!app.dirty);
+        let _ = app.sync_update(Action::KeepBoth);
+        assert_eq!(app.profiles, before);
+        let _ = app.sync_update(Action::KeepBoth);
+        assert_eq!(app.profiles.len(), before.len() + 2);
+        assert_eq!(app.profiles[0], old);
     }
     #[test]
     fn clean_update_replaces_in_place_without_connecting() {
@@ -390,7 +505,7 @@ mod tests {
         assert_eq!(app.tun_selection().unwrap(), applied.selection);
         assert!(app.sync_state.status.contains("группа «office»"));
         // A policy that leaves nothing to route is refused, keeps the previous
-        // policy and does not stop profile updates.
+        // policy and all profiles as one atomic batch.
         let refused = managed(policy("10.0.0.0/8", "10.0.0.0/8"));
         assert!(refused.is_err());
         let mut remote = app.profiles[0].clone();
@@ -400,8 +515,8 @@ mod tests {
         app.busy = false;
         let _ = app.sync_update(Action::Received(Ok(Box::new(result))));
         assert_eq!(app.saved_connection.managed_routes.as_ref(), Some(&applied));
-        assert_eq!(app.profiles[0], remote);
-        assert!(app.sync_state.status.contains("не обновлены"));
+        assert_ne!(app.profiles[0], remote);
+        assert!(app.sync_state.status.contains("отклонено целиком"));
         let mut result = batch(app.profiles[0].clone());
         result.changed.clear();
         let _ = app.sync_update(Action::Received(Ok(Box::new(result))));
@@ -411,6 +526,81 @@ mod tests {
         app.busy = false; // the save started by the previous batch has finished
         let _ = app.sync_update(Action::Enable(false));
         assert!(app.saved_connection.managed_routes.is_none());
+    }
+    #[test]
+    fn conflict_defers_entire_policy_and_profile_batch() {
+        let mut app = configured();
+        let mut remote = app.profiles[0].clone();
+        remote.name = "new remote".into();
+        app.profiles[0].name = "edited locally".into();
+        let before = app.profiles.clone();
+        let mut result = batch(remote);
+        result.routing = Ok(Some(
+            managed(rtrust_portal::RoutingPolicy {
+                group: "office".into(),
+                revision: "2".into(),
+                include: rtrust_control::networks("0.0.0.0/0").unwrap(),
+                exclude: vec![],
+                exclude_lan: true,
+            })
+            .unwrap(),
+        ));
+        let _ = app.sync_update(Action::Received(Ok(Box::new(result))));
+        assert_eq!(app.profiles, before);
+        assert!(app.saved_connection.managed_routes.is_none());
+        assert!(!app.dirty);
+        let _ = app.sync_update(Action::KeepLocal);
+        assert_eq!(app.profiles, before);
+        assert_eq!(app.saved_connection.sync.tracked[0].revision, "2");
+        assert_eq!(
+            app.saved_connection
+                .managed_routes
+                .as_ref()
+                .unwrap()
+                .revision,
+            "2"
+        );
+        assert!(app.dirty);
+    }
+    #[test]
+    fn failed_snapshot_preserves_all_local_state() {
+        let mut app = configured();
+        let before = app.profiles.clone();
+        let tracked = app.saved_connection.sync.tracked[0].revision.clone();
+        let _ = app.sync_update(Action::Received(Err("revision conflict".into())));
+        assert_eq!(app.profiles, before);
+        assert_eq!(app.saved_connection.sync.tracked[0].revision, tracked);
+        assert!(app.saved_connection.managed_routes.is_none());
+        assert!(!app.dirty);
+    }
+    #[test]
+    fn replacements_use_original_indices_when_one_incoming_equals_another_baseline() {
+        let mut app = configured();
+        let second = app.profiles[1].clone();
+        app.saved_connection.sync.tracked.push(TrackedProfile {
+            id: "remote-2".into(),
+            revision: "1".into(),
+            baseline: second.clone(),
+        });
+        let mut next_second = second.clone();
+        next_second.name = "new second".into();
+        let mut result = batch(second.clone());
+        let mut second_meta = meta();
+        second_meta.id = "remote-2".into();
+        result.changed.push((second_meta, next_second.clone()));
+        result.available.push("remote-2".into());
+        let _ = app.sync_update(Action::Received(Ok(Box::new(result))));
+        assert_eq!(app.profiles[0], second);
+        assert_eq!(app.profiles[1], next_second);
+        assert!(app.sync_state.pending.is_empty());
+        assert!(app.dirty);
+        assert!(
+            app.saved_connection
+                .sync
+                .tracked
+                .iter()
+                .all(|p| p.revision == "2")
+        );
     }
     #[test]
     fn sync_does_not_start_during_connection_or_unsaved_edits() {

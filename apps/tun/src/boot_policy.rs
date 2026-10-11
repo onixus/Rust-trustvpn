@@ -9,6 +9,8 @@ pub struct Policy {
     pub owner: String,
     pub profile: rtrust_profile::Profile,
     pub dns: Ipv4Addr,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backups: Vec<rtrust_profile::Profile>,
 }
 impl Policy {
     pub fn validate(&self, owner: &str) -> Result<(), String> {
@@ -30,6 +32,27 @@ impl Policy {
                 return Err("Invalid always-on endpoint".into());
             }
         }
+        if self.backups.len() > rtrust_control::recovery::MAX_BACKUPS {
+            return Err("Too many backup profiles".into());
+        }
+        for profile in &self.backups {
+            let candidate = Policy {
+                version: self.version,
+                owner: self.owner.clone(),
+                profile: profile.clone(),
+                dns: self.dns,
+                backups: vec![],
+            };
+            candidate.validate(owner)?;
+            if profile == &self.profile {
+                return Err("Backup duplicates primary profile".into());
+            }
+        }
+        for (i, profile) in self.backups.iter().enumerate() {
+            if self.backups[..i].contains(profile) {
+                return Err("Duplicate backup profile".into());
+            }
+        }
         Ok(())
     }
 }
@@ -41,6 +64,9 @@ fn seal(policy: &Policy, key: &[u8; 32]) -> Result<Vec<u8>, String> {
     };
     let plain =
         Zeroizing::new(serde_json::to_vec(policy).map_err(|_| "Cannot encode boot policy")?);
+    if plain.len() + 40 > rtrust_control::LIMIT {
+        return Err("Combined recovery policy exceeds service frame limit".into());
+    }
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let mut result = nonce.to_vec();
     result.extend(
@@ -227,7 +253,7 @@ mod tests {
     use super::*;
     #[test]
     fn boot_policy_is_authenticated_owner_bound_and_has_no_plaintext_credentials() {
-        let policy=Policy{version:1,owner:"1000".into(),profile:rtrust_profile::Profile::import("hostname='boot.example'\naddresses=['192.0.2.1:443']\nusername='boot-user'\npassword='boot-secret-canary'\n").unwrap(),dns:"1.1.1.1".parse().unwrap()};
+        let policy=Policy{version:1,owner:"1000".into(),profile:rtrust_profile::Profile::import("hostname='boot.example'\naddresses=['192.0.2.1:443']\nusername='boot-user'\npassword='boot-secret-canary'\n").unwrap(),backups:vec![],dns:"1.1.1.1".parse().unwrap()};
         let key = [7; 32];
         let encrypted = seal(&policy, &key).unwrap();
         assert!(!encrypted.windows(18).any(|w| w == b"boot-secret-canary"));
@@ -240,5 +266,31 @@ mod tests {
         let mut corrupt = encrypted;
         corrupt[30] ^= 1;
         assert!(unseal(&corrupt, &key, "1000").is_err());
+    }
+    #[test]
+    fn backups_remain_authenticated_and_duplicate_or_oversized_policies_are_rejected() {
+        let profile = |host: &str| {
+            rtrust_profile::Profile::import(&format!(
+                "hostname='{host}'\naddresses=['192.0.2.1:443']\nusername='u'\npassword='p'\n"
+            ))
+            .unwrap()
+        };
+        let mut policy = Policy {
+            version: 1,
+            owner: "1000".into(),
+            profile: profile("primary.example"),
+            dns: "1.1.1.1".parse().unwrap(),
+            backups: vec![profile("backup.example")],
+        };
+        let bytes = seal(&policy, &[7; 32]).unwrap();
+        let restored = unseal(&bytes, &[7; 32], "1000").unwrap();
+        assert_eq!(restored.backups, policy.backups);
+        policy.backups.push(policy.backups[0].clone());
+        assert!(policy.validate("1000").is_err());
+        policy.backups = vec![policy.profile.clone()];
+        assert!(policy.validate("1000").is_err());
+        policy.backups.clear();
+        policy.profile.name = "x".repeat(rtrust_control::LIMIT);
+        assert!(seal(&policy, &[7; 32]).is_err());
     }
 }

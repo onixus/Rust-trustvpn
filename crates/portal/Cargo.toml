@@ -13,3 +13,6 @@ keyring = "4"
 ipnet = { version = "2", features = ["serde"] }
 [dev-dependencies]
 tokio.workspace = true
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

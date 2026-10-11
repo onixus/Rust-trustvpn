@@ -7,17 +7,20 @@ profile content or free-text error. Nothing is sent to a server.
 
 ## Contract and compatibility
 
-IPC version 2 requires observation schema 2 and an explicit capability response.
+IPC version 3 requires observation schema 2 and an explicit capability response.
 Schema 2 adds native network-change/resume events; schema 1 peers are rejected
 during capability negotiation, and the Android/iOS adapters accept only schema 2.
+Version 3 also adds opt-in persistent Linux/Windows recovery; observation schema remains 2.
 The desktop client negotiates through a separate authenticated, read-only
 `Capabilities` connection **before** sending a profile or issuing a mutation.
 Negotiation is available while another lease or Always-on owns the service.
-Version 1 clients and services are incompatible: upgrade the UI and service
+Version 1 and 2 clients/services are incompatible with version 3: upgrade the UI and service
 together. A mismatch fails before a new Start, Recover or update reservation;
 an existing service-owned VPN/guard is not disabled to achieve compatibility.
 Profile, routing-journal and boot-policy schema versions are unchanged.
-The Python IPC acceptance clients were updated to version 2 as well.
+The Python IPC acceptance clients must use the same negotiated IPC version.
+Legacy evidence produced with IPC v2 remains evidence for that earlier build.
+See [recovery.md](recovery.md) for version 3 recovery semantics.
 
 Every observation carries outcome, source, applicable mode, timestamp,
 freshness interval and stable reason. Results are `passed`, `failed`,
