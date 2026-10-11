@@ -65,14 +65,22 @@ struct VaultData: Codable {
     var version = 1
     var profiles: [SavedProfile] = []
     var selected: String?
+    var defaultProfileID: String?
     var portal: PortalSession?
     var active: SavedProfile? { profiles.first { $0.id == selected } }
+    var defaultProfile: SavedProfile? { defaultProfileID == nil ? profiles.first : profiles.first { $0.id == defaultProfileID } }
+    func connectionProfile(id: String?) throws -> SavedProfile {
+        guard let profile = id == nil ? defaultProfile : profiles.first(where: { $0.id == id }) else { throw AppError.message("Selected profile no longer exists") }
+        return profile
+    }
     mutating func repairSelection() {
+        if !profiles.contains(where: { $0.id == defaultProfileID }) { defaultProfileID = profiles.first?.id }
         if active == nil { selected = profiles.first?.id }
     }
     func validate() throws {
         guard version == 1, profiles.count <= 64, Set(profiles.map(\.id)).count == profiles.count,
-              (profiles.isEmpty && selected == nil) || active != nil else { throw AppError.message("Invalid profile vault") }
+              ((profiles.isEmpty && selected == nil) || active != nil),
+              defaultProfileID == nil || profiles.contains(where: { $0.id == defaultProfileID }) else { throw AppError.message("Invalid profile vault") }
     }
 }
 // One atomic Keychain item. App is the only writer; provider reads a coherent snapshot.
@@ -98,9 +106,10 @@ enum ProfileVault {
         // Explicit migration from the first single-profile preview; preserve credentials.
         if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any], object["schema_version"] != nil {
             let profile = SavedProfile.imported(try ProfilePlan.parse(data), id: "migrated-profile")
-            return VaultData(profiles: [profile], selected: profile.id)
+            return VaultData(profiles: [profile], selected: profile.id, defaultProfileID: profile.id)
         }
-        let result = try JSONDecoder().decode(VaultData.self, from: data)
+        var result = try JSONDecoder().decode(VaultData.self, from: data)
+        if result.defaultProfileID == nil { result.defaultProfileID = result.selected }
         try result.validate()
         return result
     }
@@ -119,8 +128,8 @@ enum ProfileVault {
         if status == errSecItemNotFound { status = SecItemAdd(query.merging(attributes) { _, new in new } as CFDictionary, nil) }
         guard status == errSecSuccess else { throw AppError.message("Cannot store profile in Keychain") }
     }
-    static func load() throws -> Data {
-        guard let profile = try snapshot().active else { throw AppError.message("Select a profile first") }
+    static func load(profileID: String? = nil) throws -> Data {
+        let profile = try snapshot().connectionProfile(id: profileID)
         return Data(profile.content.utf8)
     }
 }

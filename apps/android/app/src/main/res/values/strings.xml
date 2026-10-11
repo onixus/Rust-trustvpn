@@ -110,4 +110,9 @@
     <string name="observation_passed">Verified</string>
     <string name="observation_running">Running, availability unchecked</string>
     <string name="observation_summary">Transport: %1$s · route: %2$s · DNS: %3$s · guard: %4$s · connectivity: %5$s</string>
+    <string name="connect_selected_profile">Connect selected profile</string>
+    <string name="selected_profile_label">Selected profile</string>
+    <string name="make_default_profile">Make default for widgets</string>
+    <string name="import_and_select_a_profile">Import and select a profile first.</string>
+    <string name="no_selected_profile">No profile selected</string>
 </resources>

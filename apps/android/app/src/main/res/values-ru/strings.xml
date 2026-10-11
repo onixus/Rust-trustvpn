@@ -110,4 +110,9 @@
     <string name="observation_passed">Проверено</string>
     <string name="observation_running">Запущен, доступность не проверена</string>
     <string name="observation_summary">Транспорт: %1$s · маршрут: %2$s · DNS: %3$s · защита: %4$s · доступность: %5$s</string>
+    <string name="connect_selected_profile">Подключить выбранный профиль</string>
+    <string name="selected_profile_label">Выбранный профиль</string>
+    <string name="make_default_profile">По умолчанию для виджетов</string>
+    <string name="import_and_select_a_profile">Сначала импортируйте и выберите профиль.</string>
+    <string name="no_selected_profile">Профиль не выбран</string>
 </resources>

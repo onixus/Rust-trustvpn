@@ -156,3 +156,5 @@ h2{font-size:16px;letter-spacing:-.2px}
  .modes{grid-template-columns:1fr}
 }
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+.profile.selected{border-color:var(--blue);background:var(--raised)}
