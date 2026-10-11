@@ -353,6 +353,16 @@ async fn portal_upload(
     client.commit(&preview).await
 }
 #[tauri::command]
+async fn portal_renew(revision: u64, state: State<'_, Shared>) -> Result<(), String> {
+    let c = state.lock().await;
+    c.check(revision)?;
+    let client = rtrust_portal::Client::restore()?;
+    if c.vault.connection.sync.origin != client.address() {
+        return Err("Portal registration changed".into());
+    }
+    client.renew_access().await?.remember()
+}
+#[tauri::command]
 async fn portal_forget(revision: u64, state: State<'_, Shared>) -> Result<(), String> {
     let mut c = state.lock().await;
     c.check(revision)?;
@@ -433,6 +443,7 @@ fn main() {
             disconnect,
             export_profile,
             portal_enroll,
+            portal_renew,
             portal_sync,
             portal_forget,
             portal_auto,

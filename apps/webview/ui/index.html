@@ -55,10 +55,10 @@
  <div class="page-head"><div><h2>Sync</h2><p>Register this device with your server to download and upload profiles.</p></div></div>
  <div class="fields">
   <label>Portal HTTPS address<input id="address" type="url" placeholder="https://vpn.example.com"></label>
-  <label>Enrollment code<input id="code" type="password" autocomplete="off"></label>
+  <label>Enrollment code or invitation JSON<input id="code" type="password" autocomplete="off"></label>
   <label>Device name<input id="name" value="Desktop"></label>
  </div>
- <div class="row"><button id="enroll" class="secondary">Register device</button><button id="sync" class="ghost">Sync profiles now</button></div>
+ <div class="row"><button id="enroll" class="secondary">Register device</button><button id="sync" class="ghost">Sync profiles now</button><button id="renew" class="ghost">Renew portal access</button></div>
  <label class="switch"><input id="syncauto" type="checkbox"><span>Background synchronization</span></label>
  <details class="panel quiet"><summary>Registration</summary><div class="panel-body"><p>Forget this local registration. Downloaded VPN credentials have independent access; this does not revoke them on the server.</p><button id="forget" class="danger">Forget registration</button></div></details>
 </section>

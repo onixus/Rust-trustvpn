@@ -308,6 +308,16 @@ public class MainActivity extends Activity {
             else startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE), QR_IMAGE);
         }).show();
     }
+    private void qrPayload(String raw) {
+        try {
+            JSONObject data=new JSONObject(raw);
+            if (data.optString("kind").equals("rtrust_enrollment")) {
+                new PortalDialog(this,vault,this::reload).enroll(raw);
+                return;
+            }
+        } catch (JSONException ignored) { }
+        preview(raw);
+    }
     private void vpnSettings() {
         String state = TunnelService.active ? getString(R.string.always_status, TunnelService.alwaysOn, TunnelService.lockdown) : getString(R.string.always_status_unknown);
         new AlertDialog.Builder(this).setTitle(R.string.always_on).setMessage(state + "\n\n" + getString(R.string.always_help))
@@ -350,13 +360,13 @@ public class MainActivity extends Activity {
             return;
         }
         com.google.zxing.integration.android.IntentResult qr = com.google.zxing.integration.android.IntentIntegrator.parseActivityResult(request, result, data);
-        if (qr != null) { if (qr.getContents() != null) preview(qr.getContents()); return; }
+        if (qr != null) { if (qr.getContents() != null) qrPayload(qr.getContents()); return; }
         if (request == QR_IMAGE && result == RESULT_OK && data != null) {
             android.net.Uri uri = data.getData();
             new Thread(() -> {
                 try (InputStream in = getContentResolver().openInputStream(uri)) {
                     if (in == null) throw new IOException(); String raw = QrImport.decode(in);
-                    runOnUiThread(() -> { if (!isDestroyed()) preview(raw); });
+                    runOnUiThread(() -> { if (!isDestroyed()) qrPayload(raw); });
                 } catch (Exception e) { runOnUiThread(() -> { if (!isDestroyed()) error(getString(R.string.qr_failed)); }); }
             }, "qr-import").start();
         }

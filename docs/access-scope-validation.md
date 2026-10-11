@@ -41,6 +41,19 @@ managed устройство успешно открыло новые H2/H3 со
 ещё не подтверждает активные туннельные сессии, установленный пакет или SLA.
 Windows release build WebView/TUN также прошёл без запуска сервиса.
 
+Exact-commit лаборатория для baef08c прошла build/tests/Clippy, service, H2,
+H3 и failover. Manifest: passed=true, cleanup_failures=[]; source archive
+SHA-256 6d114c98f068bad4d03aaf7ef55b513f92cd2caa5191abcd7aa44f8f1c2bda5c.
+GitHub Ubuntu/macOS/Windows checks для baef08c прошли. Следующие QR/renewal
+изменения требуют своих current-head проверок.
+
+Дополнительно реализованы QR origin/expiry/reuse и явный token renewal.
+Для них прошли 18 Rust portal tests, desktop Clippy, 90 scoped server tests,
+Android APK/test APK/lint. Instrumentation ещё не выполнена: read-only
+Fedora API36 emulator трижды упал с SIGSEGV до появления в adb; phone install
+по-прежнему требует подтверждения. Упавшие emulator processes завершены,
+исходный AVD не сбрасывался и snapshots не записывались.
+
 USB Android отклонил side APK установку с INSTALL_FAILED_USER_RESTRICTED;
 ожидается подтверждение пользователя на телефоне. Side package:
 `org.rtrusttunnel.android.scopetest`; рабочие пакеты и vault сохраняются.
@@ -52,7 +65,7 @@ USB Android отклонил side APK установку с INSTALL_FAILED_USER_
 | #32 | OS route cutover/rollback и физические старые TCP/UDP flows; mobile group-policy adapter |
 | #33 | Реальная UI/системная диагностика full/split, IPv6, outage/control loss на разрешённых устройствах |
 | #34 | Sleep/reboot/handoff/crash/outage, rollback cleanup, измерения retry/CPU/energy |
-| #35 / tunnel#22 | Реальный endpoint H2/H3 rotate/revoke, активные сессии и соседнее устройство; legacy/shared migration, QR/renewal/freshness contracts |
+| #35 / tunnel#22 | Активные сессии и физический SLA; legacy/shared migration, mobile groups, QR/renewal physical acceptance, обязательная offline freshness |
 | #36 | Exact commit/package hashes, installed update/rollback/vault tests, publisher signatures, 24h soak и budgets |
 
 Новый `PolicyChanged` event отличается от физической смены сети. APK/JNI

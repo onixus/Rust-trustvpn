@@ -13,6 +13,7 @@ $('file').onclick=()=>run(async()=>preview(await invoke('pick_import')));
 $('save').onclick=()=>run(()=>invoke('save_settings',{revision:state.revision,settings:{...state.connection,auto_connect:$('auto').checked,mode:$('mode').value,socks_port:Number($('port').value),networks:$('networks').value.split(',').map(s=>s.trim()).filter(Boolean),dns:$('dns').value}}));
 $('enroll').onclick=()=>run(async()=>{const code=$('code').value;$('code').value='';await invoke('portal_enroll',{revision:state.revision,address:$('address').value,code,name:$('name').value})});
 $('sync').onclick=()=>run(()=>invoke('portal_sync',{revision:state.revision}));$('forget').onclick=()=>run(()=>invoke('portal_forget',{revision:state.revision}));
+$('renew').onclick=()=>run(()=>invoke('portal_renew',{revision:state.revision}));
 run(async()=>{}).then(()=>{if(state)invoke('ui_ready').catch(e=>{$('status').textContent=String(e)})});
 
 $('pending').onclick=()=>run(()=>invoke('commit_import',{revision:state.revision}));

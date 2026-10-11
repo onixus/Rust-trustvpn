@@ -5,6 +5,14 @@ import java.nio.charset.StandardCharsets;
 
 final class DiagnosticsAcceptance {
     static void run() throws Exception {
+        org.json.JSONObject invite=new org.json.JSONObject().put("kind","rtrust_enrollment").put("version",1)
+            .put("origin","https://panel.example").put("code","synthetic-one-time-code-123456").put("expires_at",System.currentTimeMillis()/1000+180);
+        PortalClient.invitation(invite.toString(),"https://panel.example");
+        try { PortalClient.invitation(invite.toString(),"https://foreign.example"); throw new AssertionError("QR origin changed"); }
+        catch (IOException expected) { }
+        invite.put("expires_at",1);
+        try { PortalClient.invitation(invite.toString(),"https://panel.example"); throw new AssertionError("Expired QR accepted"); }
+        catch (IOException expected) { }
         for (String input : new String[]{"https://secret.example/?token=secret", "host:443", "a\r\nHost: secret", " user.example", "-bad.example"}) {
             if (DiagnosticsDialog.validTarget(input)) throw new AssertionError("Unsafe diagnostic target accepted");
         }

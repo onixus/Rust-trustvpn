@@ -22,6 +22,27 @@ struct Fixture {
     observed: Arc<Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
+#[tokio::test]
+async fn explicit_renewal_preserves_token_and_expired_access_never_contacts_server() {
+    let f = fixture(vec![step(
+        "/portal/v2/token/renew",
+        json!({"expires_in":3600,"scope":"portal_access_only"}),
+    )])
+    .await;
+    let mut client = f.client.clone();
+    client.token = Zeroizing::new("x".repeat(43));
+    let mut expired = client.clone();
+    expired.expires_at = Some(1);
+    assert!(expired.renew_access().await.is_err());
+    assert!(f.observed.lock().unwrap().is_empty());
+    let renewed = client.renew_access().await.unwrap();
+    assert_eq!(renewed.token.as_str(), "x".repeat(43));
+    assert!(renewed.expires_at.unwrap() > now().unwrap());
+    assert_eq!(
+        f.observed.lock().unwrap().as_slice(),
+        ["/portal/v2/token/renew"]
+    );
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.task.abort();
@@ -90,6 +111,11 @@ async fn fixture(steps: Vec<Step>) -> Fixture {
                     serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
                 assert_eq!(body["revision"], "1");
                 assert_eq!(body["include_secrets"], true);
+            }
+            if step.path.ends_with("/token/renew") {
+                let body: Value =
+                    serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+                assert_eq!(body, json!({"consent":true}));
             }
             recorded.lock().unwrap().push(step.path.into());
             if let Some(stalled) = step.stalled {

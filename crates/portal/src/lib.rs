@@ -6,6 +6,88 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 const LIMIT: usize = 8 * MAX_INPUT;
+
+/// A QR contains a short-lived enrollment code, never persistent credentials.
+/// The selected HTTPS origin is an independent trust input; QR cannot replace it.
+fn enrollment_code(
+    input: &str,
+    expected_origin: &Url,
+    unix_seconds: u64,
+) -> Result<Zeroizing<String>, String> {
+    if !input.trim_start().starts_with('{') {
+        return Ok(Zeroizing::new(input.trim().to_owned()));
+    }
+    #[derive(Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+    #[serde(deny_unknown_fields)]
+    struct Invitation {
+        kind: String,
+        version: u64,
+        origin: String,
+        code: String,
+        expires_at: u64,
+    }
+    let invalid = || "Некорректное, просроченное или чужое приглашение панели".to_string();
+    if input.len() > 4096 {
+        return Err(invalid());
+    }
+    let mut invitation: Invitation = serde_json::from_str(input).map_err(|_| invalid())?;
+    let origin = Client::new(&invitation.origin)
+        .map_err(|_| invalid())?
+        .origin;
+    if invitation.kind != "rtrust_enrollment"
+        || invitation.version != 1
+        || origin != *expected_origin
+        || invitation.expires_at <= unix_seconds
+        || invitation.expires_at - unix_seconds > 300
+    {
+        return Err(invalid());
+    }
+    Ok(Zeroizing::new(std::mem::take(&mut invitation.code)))
+}
+
+#[cfg(test)]
+mod invitation_tests {
+    use super::*;
+    #[test]
+    fn qr_cannot_change_origin_extend_expiry_or_add_credentials() {
+        let expected = Url::parse("https://panel.example/").unwrap();
+        let code = "synthetic-one-time-code-123456";
+        let good = json!({"kind":"rtrust_enrollment","version":1,"origin":"https://panel.example","code":code,"expires_at":180});
+        assert_eq!(
+            enrollment_code(&good.to_string(), &expected, 100)
+                .unwrap()
+                .as_str(),
+            code
+        );
+        for (key, value) in [
+            ("origin", json!("https://foreign.example")),
+            ("origin", json!("https://panel.example/path")),
+            ("origin", json!("http://panel.example")),
+            ("expires_at", json!(100)),
+            ("expires_at", json!(401)),
+            ("version", json!(2)),
+            ("password", json!("synthetic-secret-canary")),
+        ] {
+            let mut bad = good.clone();
+            bad[key] = value;
+            let error = enrollment_code(&bad.to_string(), &expected, 100).unwrap_err();
+            assert!(!error.contains(code));
+            assert!(!error.contains("synthetic-secret-canary"));
+        }
+    }
+    #[tokio::test]
+    async fn expired_qr_is_rejected_before_contacting_portal() {
+        let client = Client::new("https://127.0.0.1:1").unwrap();
+        let expired = json!({"kind":"rtrust_enrollment","version":1,"origin":"https://127.0.0.1:1","code":"synthetic-one-time-code-123456","expires_at":1});
+        assert!(
+            client
+                .enroll(&expired.to_string(), "test")
+                .await
+                .unwrap_err()
+                .contains("приглашение")
+        );
+    }
+}
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct Summary {
     pub name: String,
@@ -442,7 +524,36 @@ impl Client {
             .map(Some)
             .map_err(|_| "Некорректный ответ панели".into())
     }
+    /// Explicit renewal while this device token is still valid. An expired or
+    /// revoked registration must enroll again; endpoint access is independent.
+    pub async fn renew_access(mut self) -> Result<Self, String> {
+        if self.token.is_empty() {
+            return Err("Сначала привяжите устройство к панели".into());
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Renewed {
+            expires_in: u64,
+            scope: String,
+        }
+        let requested_at = now()?;
+        let result: Renewed = self
+            .request(Method::POST, "token/renew", Some(json!({"consent":true})))
+            .await?;
+        if result.expires_in == 0
+            || result.expires_in > 30 * 86400
+            || result.scope != "portal_access_only"
+        {
+            return Err("Некорректный срок продления доступа панели".into());
+        }
+        self.expires_at = token_deadline(requested_at, Some(result.expires_in))?;
+        if self.access_expired(now()?) {
+            return Err("Срок продления доступа панели истёк".into());
+        }
+        Ok(self)
+    }
     pub async fn enroll(mut self, code: &str, name: &str) -> Result<Self, String> {
+        let code = enrollment_code(code, &self.origin, now()?)?;
         if !(20..=128).contains(&code.len())
             || !code
                 .bytes()
@@ -477,7 +588,7 @@ impl Client {
             .request(
                 Method::POST,
                 "enroll",
-                Some(json!({"code":code,"name":name,"platform":platform})),
+                Some(json!({"code":code.as_str(),"name":name,"platform":platform})),
             )
             .await?;
         let token = Zeroizing::new(value.token);

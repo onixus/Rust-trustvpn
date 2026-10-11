@@ -25,6 +25,8 @@ pub(super) enum Action {
     Ready(Result<Client, String>),
     Refresh,
     Access,
+    Renew,
+    Renewed(Result<Client, String>),
     AccessReady(Result<rtrust_portal::DeviceAccess, String>),
     Listed(Result<Vec<RemoteProfile>, String>),
     Download(usize),
@@ -123,6 +125,33 @@ impl App {
                         self.status="Локальная привязка удалена. Для отзыва доступа устройства удалите его в панели.".into();
                     }
                     Err(e) => self.status = e,
+                }
+            }
+            Renew if !self.busy => {
+                if let Some(client) = self.portal.client.clone() {
+                    self.busy = true;
+                    return task(
+                        async move {
+                            let client = client.renew_access().await?;
+                            let saved = client.clone();
+                            tokio::task::spawn_blocking(move || saved.remember())
+                                .await
+                                .map_err(|_| "Ошибка системного хранилища")??;
+                            Ok(client)
+                        },
+                        Renewed,
+                    );
+                }
+            }
+            Renewed(result) => {
+                self.busy = false;
+                match result {
+                    Ok(client) => {
+                        self.portal.client = Some(client);
+                        self.status =
+                            "Доступ панели продлён. Доступ VPN проверяется отдельно.".into();
+                    }
+                    Err(error) => self.status = error,
                 }
             }
             Access if !self.busy => {
@@ -259,7 +288,7 @@ impl App {
                         .on_input(|v| Message::Portal(Action::Name(v))),
                 )
                 .push(
-                    text_input("Одноразовый код со страницы /profiles", &self.portal.code)
+                    text_input("Одноразовый код или JSON приглашения", &self.portal.code)
                         .secure(true)
                         .on_input(|v| Message::Portal(Action::Code(v))),
                 )
@@ -299,10 +328,15 @@ impl App {
                 ]
                 .spacing(8),
             );
-            content = content.push(
-                button("Проверить управляемый доступ")
-                    .on_press_maybe((!self.busy).then_some(Message::Portal(Action::Access))),
-            );
+            content = content
+                .push(
+                    button("Проверить управляемый доступ")
+                        .on_press_maybe((!self.busy).then_some(Message::Portal(Action::Access))),
+                )
+                .push(
+                    button("Продлить доступ панели")
+                        .on_press_maybe((!self.busy).then_some(Message::Portal(Action::Renew))),
+                );
             if let Some(access) = &self.portal.access {
                 content = content.push(text("Датированное состояние credentials на сервере; доступность текущего VPN и внешних сервисов не проверяется.").size(12));
                 for credential in &access.profiles {

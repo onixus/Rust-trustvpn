@@ -26,12 +26,17 @@ final class PortalDialog {
             JSONObject session = vault.read().optJSONObject("portal");
             if (session == null) { enroll(); return; }
             new AlertDialog.Builder(activity).setTitle(session.getString("origin"))
-                .setItems(new String[]{activity.getString(R.string.portal_sync), activity.getString(R.string.portal_upload), activity.getString(R.string.portal_forget), activity.getString(R.string.portal_background)}, (d, choice) -> {
+                .setItems(new String[]{activity.getString(R.string.portal_sync), activity.getString(R.string.portal_upload), activity.getString(R.string.portal_forget), activity.getString(R.string.portal_background),activity.getString(R.string.portal_renew)}, (d, choice) -> {
                     if (choice == 0) sync(session);
                     if (choice == 1) upload(session);
                     if (choice == 2) new AlertDialog.Builder(activity).setMessage(R.string.portal_forget_warning).setNegativeButton(android.R.string.cancel, null)
                         .setPositiveButton(R.string.portal_forget, (a,b) -> { try { if (TunnelService.active) throw new IllegalStateException(); vault.forgetPortal(); PortalSyncWorker.schedule(activity); saved.run(); } catch (Exception e) { error(activity.getString(R.string.portal_disconnect)); } }).show();
                     if (choice == 3) backgroundSettings(session);
+                    if (choice == 4) background(() -> {
+                        long deadline=client(session).renewAccess();
+                        vault.renewPortalAccess(session,deadline);
+                        activity.runOnUiThread(() -> error(activity.getString(R.string.portal_renewed)));
+                    });
                 }).show();
         } catch (Exception e) { error(activity.getString(R.string.portal_failed)); }
     }
@@ -49,10 +54,22 @@ final class PortalDialog {
             }).show();
     }
     void enroll() {
+        enroll(null);
+    }
+    void enroll(String invitation) {
+        JSONObject invite=null;
+        try {
+            if (invitation!=null) {
+                if (vault.read().optJSONObject("portal")!=null) throw new IllegalStateException();
+                JSONObject value=new JSONObject(invitation);
+                invite=PortalClient.invitation(invitation,value.getString("origin"));
+            }
+        } catch (Exception failure) { error(activity.getString(R.string.portal_failed)); return; }
         LinearLayout panel = new LinearLayout(activity); panel.setOrientation(LinearLayout.VERTICAL);
         EditText url = new EditText(activity); url.setHint("https://vpn.example.com"); url.setSingleLine(true); url.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI); panel.addView(url);
         EditText code = new EditText(activity); code.setHint(R.string.portal_code); code.setSingleLine(true); code.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD); code.setImportantForAutofill(android.view.View.IMPORTANT_FOR_AUTOFILL_NO); panel.addView(code);
         EditText name = new EditText(activity); name.setText(Build.MODEL); name.setSingleLine(true); name.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(80)}); panel.addView(name);
+        if (invite!=null) { try { url.setText(invite.getString("origin")); code.setText(invitation); } catch (JSONException failure) { return; } }
         new AlertDialog.Builder(activity).setTitle(R.string.portal_register).setMessage(R.string.portal_enroll_help).setView(panel).setNegativeButton(android.R.string.cancel, null)
             .setPositiveButton(R.string.portal_register, (d,w) -> {
                 String origin = url.getText().toString(), secret = code.getText().toString().trim(), label = name.getText().toString().trim(); code.setText("");
