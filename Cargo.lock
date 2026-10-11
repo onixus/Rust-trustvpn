@@ -5228,6 +5228,7 @@ name = "rtrust-control"
 version = "0.5.0"
 dependencies = [
  "ipnet",
+ "libc",
  "rtrust-profile",
  "serde",
  "serde_json",

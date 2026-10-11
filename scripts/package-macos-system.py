@@ -19,6 +19,7 @@ def run(*args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--pkg-only', action='store_true', help='Create and verify the PKG without a disk image')
     parser.add_argument('--binary-dir', type=pathlib.Path,
                         help='Use binaries from a verified CI build')
     parser.add_argument('--bundled-service', action='store_true',
@@ -108,6 +109,12 @@ def main():
             'This candidate is not signed or notarized with an Apple certificate.\n'
             'Privileged networking and package lifecycle require runtime acceptance tests.\n'
             'Do not disable Gatekeeper globally.\n')
+        if args.pkg_only:
+            destination = output.with_suffix('.pkg')
+            shutil.copy2(pkg, destination)
+            destination.with_suffix('.pkg.sha256').write_text(f'{hashlib.sha256(destination.read_bytes()).hexdigest()}  {destination.name}\n')
+            print(f'PASS package payload and ad-hoc signature: {destination}')
+            return
         image = work / output.name
         run('/usr/bin/hdiutil', 'create', '-quiet', '-volname', 'R-TrustTunnel System',
             '-srcfolder', str(stage), '-format', 'UDZO', str(image))

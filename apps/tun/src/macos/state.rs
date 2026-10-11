@@ -12,7 +12,7 @@ use std::{
 };
 pub(super) const DIRECTORY: &str = "/Library/Application Support/RTrustTunnel";
 const JOURNAL: &str = "/Library/Application Support/RTrustTunnel/route-state.json";
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {
     version: u32,
@@ -24,6 +24,7 @@ struct Journal {
     routes: Vec<Route>,
     pf_token: Option<String>,
 }
+#[derive(Clone)]
 pub(super) struct Guard(Journal);
 pub(super) fn directory() -> Result<(), String> {
     for parent in ["/Library", "/Library/Application Support"] {
@@ -155,6 +156,9 @@ impl Guard {
             routes::physical_interface()?;
         } else {
             rtrust_control::validate_routes(networks)?;
+            if dns::routed_system_resolver(networks)?.is_some() {
+                dns::preflight()?;
+            }
         }
         for key in ["net.inet.ip.forwarding", "net.inet6.ip6.forwarding"] {
             if command::run("/usr/sbin/sysctl", &["-n", key])?.trim() != "0" {
@@ -171,6 +175,10 @@ impl Guard {
         endpoints: Vec<SocketAddrV4>,
         permits: &[crate::failover::Permit],
     ) -> Result<Self, String> {
+        let tunnel_dns = match resolver {
+            Some(resolver) => Some(resolver),
+            None => dns::routed_system_resolver(&networks)?,
+        };
         let mut planned = vec![];
         if full {
             let physical = routes::physical_interface()?;
@@ -207,7 +215,7 @@ impl Guard {
             version: 1,
             uid,
             boot: boot()?,
-            dns: resolver,
+            dns: tunnel_dns,
             networks,
             endpoints,
             routes: planned,
@@ -220,7 +228,7 @@ impl Guard {
         for route in &j.routes {
             route.add()?;
         }
-        if let Some(resolver) = resolver {
+        if let Some(resolver) = tunnel_dns {
             dns::install(uid, resolver)?;
         }
         Ok(Self(j))
@@ -228,6 +236,9 @@ impl Guard {
     pub fn refresh(&self) -> Result<(), String> {
         for route in &self.0.routes {
             route.ensure()?;
+        }
+        if let Some(resolver) = self.0.dns {
+            dns::ensure(self.0.uid, resolver)?;
         }
         Ok(())
     }
