@@ -355,12 +355,17 @@ async fn serve(
     .await?;
     let mut state = State::Connected;
     monitor.transition(true, rtrust_control::observations::now_ms());
+    let mut netwatch = crate::netwatch::Watch::new(super::device::DEVICE);
     let mut last_failure = String::new();
     loop {
         let mut pending = Box::pin(read::<Request>(&mut stream));
         let request = loop {
             tokio::select! {
                 request = &mut pending => break request?,
+                change = netwatch.next() => match change {
+                    crate::netwatch::Change::Network => monitor.network_changed(rtrust_control::observations::now_ms()),
+                    crate::netwatch::Change::Resumed => monitor.resumed(rtrust_control::observations::now_ms()),
+                },
                 result = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() => {
                     last_failure = match result {
                         Ok(Err(error)) => format!("VPN transport stopped: {error}"),

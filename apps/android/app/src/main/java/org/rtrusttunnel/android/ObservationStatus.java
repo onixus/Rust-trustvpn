@@ -25,7 +25,7 @@ final class ObservationStatus {
         return context.getString(id);
     }
     static String summary(Context context, JSONObject snapshot) {
-        if (snapshot == null || snapshot.optInt("schema") != 1) snapshot = new JSONObject();
+        if (snapshot == null || snapshot.optInt("schema") != 2) snapshot = new JSONObject();
         return context.getString(R.string.observation_summary,
             label(context, snapshot.optJSONObject("transport")), label(context, snapshot.optJSONObject("route")),
             label(context, snapshot.optJSONObject("dns")), label(context, snapshot.optJSONObject("guard")),

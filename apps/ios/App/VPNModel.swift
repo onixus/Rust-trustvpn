@@ -43,7 +43,7 @@ final class VPNModel: ObservableObject {
                 guard let self, epoch == self.observationEpoch, self.active,
                       let data, data.count <= 65536,
                       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      object["schema"] as? Int == 1 else { return }
+                      object["schema"] as? Int == 2 else { return }
                 self.observations = object
                 self.observationReceived = Date()
             }

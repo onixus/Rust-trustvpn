@@ -230,13 +230,60 @@ pub fn observation_summary(
             &snapshot.connectivity,
         ])
         .map(|(name, o)| format!("{name}: {}", label(o.outcome, russian)))
+        .chain(recent_change(
+            snapshot,
+            russian,
+            rtrust_control::observations::now_ms(),
+        ))
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// Earlier checks no longer describe the network after an OS-reported change.
+fn recent_change(
+    snapshot: &rtrust_control::observations::Snapshot,
+    russian: bool,
+    now: u64,
+) -> Option<String> {
+    use rtrust_control::observations::EventKind;
+    const RECENT_MS: u64 = 60_000;
+    let event = snapshot.events.last()?;
+    if now < event.at_ms || now - event.at_ms > RECENT_MS {
+        return None;
+    }
+    let text = match (event.kind, russian) {
+        (EventKind::NetworkChanged, true) => "сеть изменилась, прежние проверки устарели",
+        (EventKind::NetworkChanged, false) => "network changed, earlier checks are stale",
+        (EventKind::Resumed, true) => "после сна, прежние проверки устарели",
+        (EventKind::Resumed, false) => "resumed from sleep, earlier checks are stale",
+        _ => return None,
+    };
+    Some(text.into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_recent_network_change_or_resume_is_shown_then_ages_out() {
+        use rtrust_control::observations::{Mode, Monitor, Source};
+        let mut monitor = Monitor::new(Mode::Full, Source::ServiceLifecycle, 1_000);
+        monitor.network_changed(2_000);
+        let changed = monitor.sample(2_001);
+        assert_eq!(
+            recent_change(&changed, false, 3_000).as_deref(),
+            Some("network changed, earlier checks are stale")
+        );
+        assert_eq!(recent_change(&changed, false, 70_000), None);
+        assert_eq!(recent_change(&changed, true, 1_000), None);
+        monitor.resumed(4_000);
+        let resumed = monitor.sample(4_001);
+        assert!(
+            recent_change(&resumed, true, 5_000)
+                .unwrap()
+                .contains("сна")
+        );
+    }
     #[test]
     fn webview_metadata_never_exposes_profile_or_sync_credentials() {
         let mut profile =
