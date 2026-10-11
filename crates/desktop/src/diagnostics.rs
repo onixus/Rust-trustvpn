@@ -641,9 +641,18 @@ fn linux_route(bytes: &[u8]) -> Result<bool, Fact> {
         .ok_or(Fact::Failed)?;
     Ok(device == "rtrust0")
 }
+/// The VPN itself is down: that is the finding, not a changed session.
+fn unavailable(snapshot: &Snapshot) -> bool {
+    use rtrust_control::observations::{Outcome, Reason};
+    snapshot.transport.outcome == Outcome::Failed
+        || snapshot.transport.reason == Reason::ControlLost
+}
 async fn diagnose(backend: &impl Backend, target: &Target, report: &mut Report) {
     if !backend.active() {
-        report.route = Fact::SessionChanged;
+        // Leave the stages unchecked so the verdict reports the lifecycle.
+        if !unavailable(&report.lifecycle) {
+            report.route = Fact::SessionChanged;
+        }
         return;
     }
     let initial = backend.lifecycle();
@@ -721,6 +730,7 @@ pub async fn run(
     };
     let mut report = Report::new(system.lifecycle());
     let initial = report.lifecycle.clone();
+    let started_active = system.active();
     if tokio::time::timeout(TOTAL, diagnose(&system, &target, &mut report))
         .await
         .is_err()
@@ -733,7 +743,8 @@ pub async fn run(
             report.dns = Fact::Timeout;
         }
     }
-    if !system.unchanged(&initial) {
+    // A check that could not start keeps the lifecycle verdict from diagnose.
+    if started_active && !system.unchanged(&initial) {
         report.https = Fact::SessionChanged;
         report.http_status = None;
     }
@@ -751,6 +762,7 @@ mod tests {
         https: Result<u16, Fact>,
         calls: AtomicUsize,
         change: bool,
+        transport: rtrust_control::observations::Outcome,
     }
     impl Backend for Fake {
         fn lifecycle(&self) -> Snapshot {
@@ -758,10 +770,11 @@ mod tests {
             if self.change && self.calls.load(Ordering::SeqCst) > 0 {
                 s.generation = 1;
             }
+            s.transport.outcome = self.transport;
             s
         }
         fn active(&self) -> bool {
-            true
+            self.transport != rtrust_control::observations::Outcome::Failed
         }
         fn policy(&self, _: IpAddr) -> Decision {
             Decision::unknown(
@@ -790,6 +803,7 @@ mod tests {
             https: Ok(503),
             calls: AtomicUsize::new(0),
             change: false,
+            transport: rtrust_control::observations::Outcome::Configured,
         }
     }
     fn report(dns: Fact, route: Fact, https: Fact) -> Report {
@@ -918,6 +932,29 @@ mod tests {
         assert!(text.contains("Переподключить") && text.contains("42"));
         let json = r.redacted_json();
         assert!(json.contains("\"follows\"") && json.contains("reconnect"));
+    }
+    #[tokio::test]
+    async fn a_failed_transport_is_reported_as_down_not_as_a_changed_session() {
+        let mut f = fake(Ok(true));
+        f.transport = rtrust_control::observations::Outcome::Failed;
+        let mut r = Report::new(f.lifecycle());
+        diagnose(&f, &Target::parse("service.example").unwrap(), &mut r).await;
+        assert_eq!(
+            (r.dns, r.route, r.https),
+            (Fact::NotChecked, Fact::NotChecked, Fact::NotChecked)
+        );
+        assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+        let v = r.verdict();
+        assert_eq!(v.cause, Cause::TransportDown);
+        assert!(
+            v.actions.contains(&Action::CheckEndpoint) && v.actions.contains(&Action::Reconnect)
+        );
+        // A stopped session that is not a failure still asks for a repeat.
+        let mut stopped = Report::new(Snapshot::unknown(rtrust_control::observations::Mode::Full));
+        f.transport = rtrust_control::observations::Outcome::Failed;
+        stopped.lifecycle.transport.outcome = rtrust_control::observations::Outcome::Unknown;
+        diagnose(&f, &Target::parse("service.example").unwrap(), &mut stopped).await;
+        assert_eq!(stopped.verdict().cause, Cause::SessionChanged);
     }
     #[tokio::test]
     async fn unresolved_or_outside_route_never_sends_https() {
