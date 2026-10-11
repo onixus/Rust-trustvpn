@@ -72,6 +72,7 @@ def worker(run_dir, endpoint_archive):
                     tool_recipe_sha256=hashlib.sha256(RECIPE.encode()).hexdigest(),
                     boundary='isolated Docker/network namespaces; not installed-package/device acceptance')
     image = 'rtrust-lab-tools:' + run_id
+    target_volume = 'rtrust-lab-' + run_id + '-target'
     active = None
     build_image = False
 
@@ -87,6 +88,14 @@ def worker(run_dir, endpoint_archive):
                     failures.append(name)
             except (OSError, subprocess.TimeoutExpired):
                 failures.append(name)
+        try:
+            result = subprocess.run(['docker', 'volume', 'rm', target_volume], stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, timeout=30)
+            if result.returncode and subprocess.run(['docker', 'volume', 'inspect', target_volume], stdout=subprocess.DEVNULL,
+                                                    stderr=subprocess.DEVNULL, timeout=10).returncode == 0:
+                failures.append(target_volume)
+        except (OSError, subprocess.TimeoutExpired):
+            failures.append(target_volume)
         if build_image:
             try:
                 result = subprocess.run(['docker', 'image', 'rm', image], stdout=subprocess.DEVNULL,
@@ -187,9 +196,7 @@ def worker(run_dir, endpoint_archive):
         logged('tool-image', ['docker', 'build', '--pull=false', '-t', image, str(context)], 600)
         manifest['tool_image_id'] = checked(['docker', 'image', 'inspect', image, '--format', '{{.Id}}'], capture_output=True, text=True).stdout.strip()
         (source / 'target/debug').mkdir(parents=True)
-        target = run_dir / 'target'
-        target.mkdir()
-        manifest['build_target'] = 'private_per_run_directory'
+        manifest['build_target_volume'] = target_volume
         build = '''set -eu
 rustc --version; cargo --version; cargo clippy --version; dpkg-query -W
 cargo test --locked --offline -p rtrust-tun -p rtrust-control --quiet
@@ -200,7 +207,7 @@ chmod 755 /out/bin/*
 '''
         logged('build', ['docker', 'run', '--rm', '--name', names[0], '--network', 'none',
                         '--security-opt', 'label=disable', '-v', f'{source}:/work:ro',
-                        '-v', f'{target}:/work/target',
+                        '-v', f'{target_volume}:/work/target',
                         '-v', 'rtrust-linux-cargo:/usr/local/cargo/registry',
                         '-v', f'{out}:/out', '-w', '/work', manifest['tool_image_id'], 'sh', '-c', build], 900)
         manifest['binary_sha256'] = {p.name: digest(p) for p in (out / 'bin').iterdir()}
@@ -297,7 +304,7 @@ if owned(): os.kill(pid,signal.SIGKILL)
             if not (output / 'evidence.tar.gz').exists():
                 subprocess.run(['scp', '-q', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', args.host + ':' + remote + '/evidence.tar.gz', str(output / 'evidence.tar.gz')], timeout=120)
         finally:
-            remove = 'docker rm -f ' + ' '.join(docker_names(run_id)) + ' >/dev/null 2>&1; docker image rm rtrust-lab-tools:' + run_id + ' >/dev/null 2>&1; rm -rf -- ' + shlex.quote(remote)
+            remove = 'docker rm -f ' + ' '.join(docker_names(run_id)) + ' >/dev/null 2>&1; docker image rm rtrust-lab-tools:' + run_id + ' >/dev/null 2>&1; docker volume rm rtrust-lab-' + run_id + '-target >/dev/null 2>&1; rm -rf -- ' + shlex.quote(remote)
             subprocess.run([*ssh, remove], timeout=90)
 
 

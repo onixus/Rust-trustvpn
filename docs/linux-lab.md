@@ -19,7 +19,7 @@ The SSH destination must already be configured and trusted. The pinned tool
 image and official TrustTunnel v1.1.0 x86_64 endpoint archive must already be
 cached on an x86_64 Linux Docker VM. The archive checksum is checked before
 extracting a new fixture binary. The runner uses the existing
-`rtrust-linux-cargo` registry cache and a private build directory for each run;
+`rtrust-linux-cargo` registry cache and a private Docker build volume for each run;
 `cargo build --locked --offline` fails explicitly if a dependency is absent.
 Only `rtrust-tun` and `rtrust-inspect` are built. Unit tests and strict all-target Clippy check `rtrust-tun` and
 `rtrust-control`. The disposable extracted source receives fresh regular-file
@@ -44,7 +44,7 @@ host resolver configuration is mounted. The runner never installs a system
 service or changes host routes/firewall.
 
 Build/image/scenario steps have independent deadlines. Interrupts and failures
-remove only this run's explicitly named containers and image. If SSH is lost,
+remove only this run's explicitly named containers, build volume and image. If SSH is lost,
 the local cleanup path stops only the recorded worker whose process command
 still matches this run's temporary directory, then removes its containers.
 An unreachable VM prevents remote cleanup confirmation; reconnect and inspect
