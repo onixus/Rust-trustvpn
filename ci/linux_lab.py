@@ -187,6 +187,9 @@ def worker(run_dir, endpoint_archive):
         logged('tool-image', ['docker', 'build', '--pull=false', '-t', image, str(context)], 600)
         manifest['tool_image_id'] = checked(['docker', 'image', 'inspect', image, '--format', '{{.Id}}'], capture_output=True, text=True).stdout.strip()
         (source / 'target/debug').mkdir(parents=True)
+        target = run_dir / 'target'
+        target.mkdir()
+        manifest['build_target'] = 'private_per_run_directory'
         build = '''set -eu
 rustc --version; cargo --version; cargo clippy --version; dpkg-query -W
 cargo test --locked --offline -p rtrust-tun -p rtrust-control --quiet
@@ -197,7 +200,7 @@ chmod 755 /out/bin/*
 '''
         logged('build', ['docker', 'run', '--rm', '--name', names[0], '--network', 'none',
                         '--security-opt', 'label=disable', '-v', f'{source}:/work:ro',
-                        '-v', 'rtrust-ci-linux-x86_64-target:/work/target',
+                        '-v', f'{target}:/work/target',
                         '-v', 'rtrust-linux-cargo:/usr/local/cargo/registry',
                         '-v', f'{out}:/out', '-w', '/work', manifest['tool_image_id'], 'sh', '-c', build], 900)
         manifest['binary_sha256'] = {p.name: digest(p) for p in (out / 'bin').iterdir()}

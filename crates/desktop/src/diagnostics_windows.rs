@@ -18,16 +18,26 @@ fn response_status(bytes: &[u8]) -> Result<Option<u16>, Fact> {
     if bytes.len() > 8192 {
         return Err(Fact::Failed);
     }
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-    let mut response = httparse::Response::new(&mut headers);
-    match response.parse(bytes).map_err(|_| Fact::Failed)? {
-        httparse::Status::Partial => Ok(None),
-        httparse::Status::Complete(_) => {
-            let code = response.code.ok_or(Fact::Failed)?;
-            if !(200..=599).contains(&code) {
-                return Err(Fact::Failed);
+    let mut remaining = bytes;
+    let mut interim = 0;
+    loop {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut response = httparse::Response::new(&mut headers);
+        match response.parse(remaining).map_err(|_| Fact::Failed)? {
+            httparse::Status::Partial => return Ok(None),
+            httparse::Status::Complete(consumed) => {
+                let code = response.code.ok_or(Fact::Failed)?;
+                if (200..=599).contains(&code) {
+                    return Ok(Some(code));
+                }
+                // An unsolicited upgrade is not a final HEAD response. Other
+                // informational blocks precede the final response (RFC 9110).
+                if !(100..=199).contains(&code) || code == 101 || interim == 8 {
+                    return Err(Fact::Failed);
+                }
+                interim += 1;
+                remaining = &remaining[consumed..];
             }
-            Ok(Some(code))
         }
     }
 }
@@ -349,16 +359,65 @@ mod tests {
             response_status(b"HTTP/1.1 503 Service Unavailable\r\n\r\n"),
             Ok(Some(503))
         );
-        assert_eq!(
-            response_status(b"HTTP/1.1 100 Continue\r\n\r\n"),
-            Err(Fact::Failed)
-        );
+        assert_eq!(response_status(b"HTTP/1.1 100 Continue\r\n\r\n"), Ok(None));
         assert_eq!(
             response_status(b"HTTP/1.1 999 Wrong\r\n\r\n"),
             Err(Fact::Failed)
         );
         assert_eq!(response_status(&vec![b'a'; 8193]), Err(Fact::Failed));
         assert_eq!(response_status(b"not HTTP\r\n\r\n"), Err(Fact::Failed));
+    }
+    #[tokio::test]
+    async fn informational_responses_wait_for_the_final_status_across_reads() {
+        use tokio::io::AsyncWriteExt;
+        let hints = b"HTTP/1.1 103 Early Hints\r\nLink: </asset>; rel=preload\r\n\r\n";
+        let final_response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        let mut combined = hints.to_vec();
+        combined.extend_from_slice(final_response);
+        assert_eq!(response_status(&combined), Ok(Some(200)));
+        assert_eq!(response_status(hints), Ok(None));
+        for prefix in 0..final_response.len() {
+            let mut partial = hints.to_vec();
+            partial.extend_from_slice(&final_response[..prefix]);
+            assert_eq!(response_status(&partial), Ok(None));
+        }
+        let (mut client, mut server) = tokio::io::duplex(512);
+        server.write_all(hints).await.unwrap();
+        // Polling must consume hints without completing or leaving a reader.
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                read_response(&mut client)
+            )
+            .await
+            .is_err()
+        );
+        // A cancelled call discards its own input; use a fresh stream to exercise
+        // a single reader spanning separated writes of hints and final headers.
+        drop(client);
+        let (mut client, mut server) = tokio::io::duplex(512);
+        let reader = tokio::spawn(async move { read_response(&mut client).await });
+        server.write_all(hints).await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(!reader.is_finished());
+        server.write_all(final_response).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), reader)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(200)
+        );
+        let many = b"HTTP/1.1 103 Early Hints\r\n\r\n".repeat(9);
+        assert_eq!(response_status(&many), Err(Fact::Failed));
+        assert_eq!(
+            response_status(b"HTTP/1.1 101 Switching Protocols\r\n\r\n"),
+            Err(Fact::Failed)
+        );
+        let (mut client, mut server) = tokio::io::duplex(512);
+        server.write_all(hints).await.unwrap();
+        drop(server);
+        assert_eq!(read_response(&mut client).await, Err(Fact::Failed));
     }
     #[test]
     fn resolver_rejects_overflow_and_malformed_output_without_guessing() {
