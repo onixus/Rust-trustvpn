@@ -7,6 +7,7 @@ import secrets
 import shutil
 import signal
 import subprocess
+import sys
 import tarfile
 import urllib.request
 
@@ -32,6 +33,7 @@ signal.signal(signal.SIGTERM, interrupted)
 signal.signal(signal.SIGINT, interrupted)
 
 def main():
+    subprocess.run([sys.executable, str(ROOT / 'ci/test_amneziawg_cache.py')], check=True)
     CACHE.mkdir(parents=True, exist_ok=True)
     clippy=CACHE/CLIPPY_SHA
     if not clippy.exists() or hashlib.sha256(clippy.read_bytes()).hexdigest()!=CLIPPY_SHA:
@@ -76,6 +78,7 @@ python3 scripts/full-tunnel-interop.py /fixture/trusttunnel_endpoint
 python3 scripts/full-tunnel-interop.py /fixture/trusttunnel_endpoint --http3
 python3 scripts/full-tunnel-interop.py /tmp/hysteria/hysteria-linux-HYSTERIA_ARCH --hysteria2
 python3 scripts/full-tunnel-interop.py /fixture/amneziawg-fixture --amneziawg
+python3 scripts/failover-interop.py /fixture/trusttunnel_endpoint
 python3 ci/linux_installer_smoke.py
 python3 scripts/package-preview.py
 mkdir -p dist/webview-libs

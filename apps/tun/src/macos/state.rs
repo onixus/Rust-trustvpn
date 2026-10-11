@@ -108,7 +108,8 @@ fn load(uid: u32) -> Result<Journal, String> {
     if let Some(dns) = j.dns {
         rtrust_control::validate_dns(dns)?;
     }
-    if j.dns.is_none() || !j.networks.is_empty() {
+    // Full mode journals no networks; split mode may also carry a resolver.
+    if !j.networks.is_empty() || j.dns.is_none() {
         rtrust_control::validate_routes(&j.networks)?;
     }
     Ok(j)
@@ -139,6 +140,7 @@ pub(super) fn endpoints(profile: &rtrust_profile::Profile) -> Result<Vec<SocketA
 impl Guard {
     pub fn preflight(
         networks: &[rtrust_control::Ipv4Net],
+        full: bool,
         resolver: Option<Ipv4Addr>,
     ) -> Result<(), String> {
         directory()?;
@@ -149,6 +151,8 @@ impl Guard {
         if let Some(resolver) = resolver {
             rtrust_control::validate_dns(resolver)?;
             dns::preflight()?;
+        }
+        if full {
             routes::physical_interface()?;
         } else {
             rtrust_control::validate_routes(networks)?;
@@ -166,17 +170,17 @@ impl Guard {
     pub fn install(
         uid: u32,
         networks: Vec<rtrust_control::Ipv4Net>,
+        full: bool,
         resolver: Option<Ipv4Addr>,
         endpoints: Vec<SocketAddrV4>,
-        udp: bool,
-        ports: &[(u16, u16)],
+        permits: &[crate::failover::Permit],
     ) -> Result<Self, String> {
         let tunnel_dns = match resolver {
             Some(resolver) => Some(resolver),
             None => dns::routed_system_resolver(&networks)?,
         };
         let mut planned = vec![];
-        if resolver.is_some() {
+        if full {
             let physical = routes::physical_interface()?;
             for endpoint in &endpoints {
                 let route = routes::endpoint(*endpoint.ip(), &physical)?;
@@ -185,7 +189,7 @@ impl Guard {
                 }
             }
         }
-        let prefixes: Vec<(bool, String)> = if resolver.is_some() {
+        let prefixes: Vec<(bool, String)> = if full {
             vec![
                 (false, "0.0.0.0/1".into()),
                 (false, "128.0.0.0/1".into()),
@@ -218,14 +222,7 @@ impl Guard {
             pf_token: None,
         };
         save(&j, true)?;
-        let script = firewall::policy(
-            uid,
-            resolver.is_some(),
-            &j.networks,
-            &j.endpoints,
-            udp,
-            ports,
-        );
+        let script = firewall::policy(uid, full, &j.networks, permits);
         j.pf_token = Some(firewall::install(Path::new(DIRECTORY), &script)?);
         save(&j, false)?;
         for route in &j.routes {

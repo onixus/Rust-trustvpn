@@ -1,6 +1,0 @@
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center" android:padding="12dp" android:background="@drawable/widget_background">
-    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="R-TrustTunnel" android:textColor="#E8EEF7" android:textStyle="bold" android:textSize="15sp" />
-    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/widget_last_status" android:textColor="#B9C8DC" android:textSize="11sp" />
-    <TextView android:id="@+id/widget_status" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/disconnected" android:textColor="#E8EEF7" android:textSize="12sp" android:maxLines="2" />
-    <ImageButton android:id="@+id/widget_power" android:layout_width="56dp" android:layout_height="56dp" android:layout_marginTop="6dp" android:padding="16dp" android:src="@drawable/ic_power" android:tint="#FFFFFF" android:background="@drawable/widget_button" android:contentDescription="@string/widget_toggle" />
-</LinearLayout>

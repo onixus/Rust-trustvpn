@@ -1,33 +1,37 @@
 # macOS system VPN — development preview
 
-## Sleep recovery candidate
+## Sleep recovery integration
 
-The service detects resume using both wall and monotonic clocks (Darwin's
-monotonic clock excludes system sleep), cancels the old transport and retries
-with the existing utun and PF guard. Each retry restores owned endpoint/tunnel
-routes and DNS before connecting. Conflicting routes or DNS entries still
-retain protection rather than overwriting another owner's configuration.
-The dataplane health probe has an outer deadline, including HTTP/2 readiness.
-The desktop IPC client preserves its partially read response and extends a
-timeout caused by suspension, without resending the command or dropping the
-VPN lease. Ordinary unresponsive-service timeouts remain bounded.
+The service listens to native IOKit sleep/powered-on notifications. Sleep cancels
+old transport work while retaining the existing utun/PF guard. Powered-on permits
+a retry; early wake does not. Cancelled synchronous route mutations are drained
+without blocking Status IPC, and Stop drains them before releasing owned state.
+Each retry restores owned endpoint/tunnel routes and DNS before and after connecting.
+Conflicting routes or DNS entries retain protection instead of overwriting another
+owner. Dataplane health checks have a ten-second outer deadline.
+
+Recovery preserves the permitted backup candidates and the shared jittered retry
+budget: power events do not replenish a burst or skip its five-minute cooldown.
+Sleep invalidates previous observations, and late pre-wake transport completions
+cannot start a session. Transport liveness still does not prove DNS/routes/guard
+or end-to-end availability.
+
+The desktop client keeps a partially read IPC response through sleep and never
+resends the command. Kernel clocks detect suspension without wall-clock assumptions.
+macOS status polls allow 30 seconds, with at most one further 30-second extension
+for an observed sleep. Dead services cannot extend the exchange indefinitely.
 
 Selected-network mode mirrors the primary configured IPv4 DNS server without
-physical-interface scoping when its address belongs to the tunnel networks.
-This prevents PF from blocking system DNS sent on Wi-Fi while the tunnel is
-healthy. Persistent network-service settings are unchanged; Stop and recovery
-remove the owned temporary DNS entry. Per-domain resolvers are not selected.
+physical-interface scoping only when its address belongs to the tunnel networks.
+Per-domain, supplemental and mDNS resolvers are excluded. Persistent network-service
+preferences remain unchanged; Stop/recovery remove the owned temporary DNS entry.
+Lifecycle logs contain only bounded, redacted events.
 
-Privileged refresh runs in the reconnect worker with `block_in_place`, so it
-keeps IPC responsive. The worker retains the service lease until it stops, and
-Stop drains in-flight mutations before releasing protection. macOS status polls
-allow 30 seconds for asymmetric service/desktop resume; errors include the
-actual IPC failure reason.
-
-Clock, DNS selection, slow-refresh cancellation and partial-IPC regressions are covered by local macOS tests. Actual
-sleep/wake acceptance and handoff to a changed physical gateway remain pending.
-To recover an existing blocked installation, use the app's reset/recovery
-control before reconnecting or installing an update.
+The integrated source has supervisor/IPC/DNS regression tests and native IOKit
+registration checks. Historical installed acceptance is recorded separately in
+[macOS sleep investigation](macos-sleep-recovery-validation.md). Those results do
+not accept the new package: physical sleep during reconnect, changed-gateway
+handoff and signed installer/update/rollback still require exact-package evidence.
 
 ## Published Flow branding: v0.3.2-ui.2
 

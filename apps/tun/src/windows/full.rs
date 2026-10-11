@@ -73,8 +73,7 @@ pub fn install(
     index: u32,
     endpoints: &[SocketAddrV4],
     dns: Ipv4Addr,
-    udp: bool,
-    ports: &[(u16, u16)],
+    permits: &[crate::failover::Permit],
 ) -> Result<(), String> {
     rtrust_control::validate_dns(dns)?;
     if pending()? {
@@ -144,13 +143,17 @@ pub fn install(
     file.sync_all()
         .map_err(|_| "Cannot sync recovery journal")?;
     // No Drop cleanup: once this commits, crashes must retain the blocking policy.
-    firewall::install(unsafe { luid.Value }, endpoints, udp, ports)?;
+    firewall::install(unsafe { luid.Value }, permits)?;
     if firewall::boot_active()? {
-        firewall::install_boot(unsafe { luid.Value }, endpoints, udp, ports)?;
+        firewall::install_boot_permits(unsafe { luid.Value }, permits)?;
     }
     for item in &journal.routes {
         check(unsafe { CreateIpForwardEntry2(&route(item)) })?;
     }
+    interface_dns(luid, dns)
+}
+/// The adapter's own resolver; it disappears with the Wintun adapter.
+pub fn interface_dns(luid: NET_LUID_LH, dns: Ipv4Addr) -> Result<(), String> {
     let mut guid = windows_sys::core::GUID::default();
     check(unsafe { ConvertInterfaceLuidToGuid(&luid, &mut guid) })?;
     let mut nameserver: Vec<u16> = dns.to_string().encode_utf16().chain(Some(0)).collect();

@@ -52,7 +52,7 @@ impl Workers {
     fn retry(
         &mut self,
         profile: &rtrust_profile::Profile,
-        delay: &mut u64,
+        delay: &mut rtrust_control::recovery::Budget,
         device: Arc<tun_rs::AsyncDevice>,
         guard: &Guard,
         lease: &Lease,
@@ -60,10 +60,9 @@ impl Workers {
         let profile = profile.clone();
         let guard = guard.clone();
         let lease = lease.clone();
-        let wait = *delay;
-        *delay = (*delay * 2).min(30);
+        let wait = delay.next_delay(rand::random());
         self.reconnect = Some(tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(wait)).await;
+            tokio::time::sleep(wait).await;
             // Darwin can discard endpoint host routes during sleep. Restore
             // them before opening a socket, or split routes send it into utun.
             guarded_connect(lease, || guard.refresh(), async {
@@ -167,9 +166,9 @@ pub async fn run() -> Result<(), String> {
                 let lease = lease.clone();
                 let power = power.events.clone();
                 tasks.spawn(async move {
-                    if let Err(error) = serve(stream, uid, lease, power).await {
-                        events::record(&format!("ipc_session_ended: {error}"));
-                        if let Ok(error) = std::ffi::CString::new(error) {
+                    if serve(stream, uid, lease, power).await.is_err() {
+                        events::record("ipc_session_ended");
+                        if let Ok(error) = std::ffi::CString::new("redacted IPC failure") {
                         // launchd discards our stderr; retain redacted IPC
                         // failures in the macOS system log for diagnosis.
                         unsafe {
@@ -201,6 +200,20 @@ async fn reply(
     .await
     .map_err(|_| "IPC write timed out")?
 }
+async fn reply_observed(
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
+    state: State,
+    message: &str,
+    monitor: &mut rtrust_control::observations::Monitor,
+    active_profile: Option<u8>,
+) -> Result<(), String> {
+    let mut response = Response::new(state, message);
+    response.active_profile = active_profile;
+    response.observations = monitor.sample(rtrust_control::observations::now_ms());
+    tokio::time::timeout(Duration::from_secs(5), write(stream, &response))
+        .await
+        .map_err(|_| "IPC write timed out")?
+}
 async fn serve(
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
     uid: u32,
@@ -213,6 +226,9 @@ async fn serve(
     if request.version != VERSION {
         return reply(&mut stream, State::Error, "IPC version mismatch").await;
     }
+    if matches!(request.command, Command::Capabilities) {
+        return write(&mut stream, &Response::new(State::Idle, "Capabilities")).await;
+    }
     let Ok(_lease) = lease.try_lock_owned() else {
         return reply(
             &mut stream,
@@ -223,7 +239,7 @@ async fn serve(
     };
     let held_lease = Arc::new(_lease);
     power.borrow_and_update();
-    let (profile, selection, dns) = match request.command {
+    let (profile, selection, dns, split_dns, fallbacks) = match request.command {
         Command::PrepareUpdate => {
             if state::pending() {
                 return reply(
@@ -253,6 +269,8 @@ async fn serve(
             networks,
             exclude,
             exclude_lan,
+            dns,
+            fallbacks,
         } => {
             let selection = rtrust_control::Selection {
                 include: networks,
@@ -262,9 +280,13 @@ async fn serve(
             if let Err(error) = selection.validate() {
                 return reply(&mut stream, State::Error, &error).await;
             }
-            (profile, selection, None)
+            (profile, selection, None, dns, fallbacks)
         }
-        Command::StartFull { profile, dns } => (profile, Default::default(), Some(dns)),
+        Command::StartFull {
+            profile,
+            dns,
+            fallbacks,
+        } => (profile, Default::default(), Some(dns), None, fallbacks),
         _ => return reply(&mut stream, State::Error, "Start or Recover required").await,
     };
     let full = dns.is_some();
@@ -279,41 +301,21 @@ async fn serve(
     }
     // Both modes pin IPv4 endpoint addresses: PF blocks selected networks
     // outside the tunnel, so the endpoint must be known and left out of them.
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
-        let mut profile = profile;
-        let mut addresses = Vec::new();
-        for address in &profile.endpoint.addresses {
-            for address in tokio::net::lookup_host(address)
-                .await
-                .map_err(|_| "Cannot resolve endpoint")?
-            {
-                if !address.is_ipv4() {
-                    continue;
-                }
-                if addresses.len() >= 64 {
-                    return Err("Too many endpoint addresses");
-                }
-                addresses.push(address.to_string());
+    // Every allowed backup is pinned now: the guard covers all candidates.
+    let mut failover =
+        match crate::failover::Failover::pin(*profile, fallbacks, crate::failover::Pin::Ipv4).await
+        {
+            Ok(failover) => failover,
+            _ => {
+                return reply(
+                    &mut stream,
+                    State::Error,
+                    "Не удалось разрешить адрес VPN-сервера",
+                )
+                .await;
             }
-        }
-        if addresses.is_empty() {
-            return Err("Endpoint has no addresses");
-        }
-        profile.endpoint.addresses = addresses;
-        Ok(profile)
-    })
-    .await;
-    let profile = match result {
-        Ok(Ok(profile)) => profile,
-        _ => {
-            return reply(
-                &mut stream,
-                State::Error,
-                "Не удалось разрешить адрес VPN-сервера",
-            )
-            .await;
-        }
-    };
+        };
+    let profile = failover.guard_profile();
     let endpoints = match state::endpoints(&profile) {
         Ok(e) => e,
         Err(e) => return reply(&mut stream, State::Error, &e).await,
@@ -332,7 +334,13 @@ async fn serve(
             Err(e) => return reply(&mut stream, State::Error, &e).await,
         }
     };
-    if let Err(error) = Guard::preflight(&networks, dns) {
+    // A split selection that carries the resolver (e.g. everything but the
+    // LAN) gets VPN DNS too; otherwise names would leak to the LAN resolver.
+    // Like Linux without systemd-resolved, split mode skips DNS when the
+    // system resolver cannot take it; full mode still requires it.
+    let resolver = dns.or(rtrust_control::tunneled_resolver(&networks, split_dns)
+        .filter(|_| super::dns::preflight().is_ok()));
+    if let Err(error) = Guard::preflight(&networks, full, resolver) {
         return reply(&mut stream, State::Error, &error).await;
     }
     if !power.borrow().awake {
@@ -346,8 +354,8 @@ async fn serve(
     let prepared = {
         let mut unexpected = [0];
         tokio::select! {
-            result = tokio::time::timeout(Duration::from_secs(30), device::Prepared::connect(&profile)) => match result {
-                Ok(Ok(prepared)) => prepared,
+            result = failover.connect_initial(|profile| async move { device::Prepared::connect(&profile).await }) => match result {
+                Ok(prepared) => prepared,
                 _ => return reply(&mut stream, State::Error, "Не удалось открыть TUN: проверьте профиль, TLS и доступность endpoint").await,
             },
             _ = stream.read(&mut unexpected) => return Err("IPC closed during connect".into()),
@@ -356,10 +364,10 @@ async fn serve(
     let guard = match Guard::install(
         uid,
         networks,
-        dns,
+        full,
+        resolver,
         endpoints,
-        profile.udp_transport(),
-        &profile.hop_port_ranges(),
+        &failover.permits()?,
     ) {
         Ok(guard) => guard,
         Err(error) => return reply(&mut stream, State::Blocked, &error).await,
@@ -375,8 +383,9 @@ async fn serve(
         workers,
         full,
         power,
-        move |workers, delay| {
-            workers.retry(&profile, delay, device.clone(), &retry_guard, &held_lease)
+        failover,
+        move |workers, profile, delay| {
+            workers.retry(profile, delay, device.clone(), &retry_guard, &held_lease)
         },
         move || guard.release(),
     )
@@ -391,23 +400,44 @@ async fn connected(
     mut workers: Workers,
     full: bool,
     mut power: tokio::sync::watch::Receiver<power::State>,
-    mut retry: impl FnMut(&mut Workers, &mut u64),
+    mut failover: crate::failover::Failover,
+    mut retry: impl FnMut(&mut Workers, &rtrust_profile::Profile, &mut rtrust_control::recovery::Budget),
     release: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     events::record("tunnel_connected");
-    let mut retry_delay = 2;
+    let mut retry_delay = rtrust_control::recovery::Budget::default();
     let mut connected_since = Instant::now();
-    reply(
+    let mut monitor = rtrust_control::observations::Monitor::new(
+        if full {
+            rtrust_control::observations::Mode::Full
+        } else {
+            rtrust_control::observations::Mode::Split
+        },
+        rtrust_control::observations::Source::ServiceLifecycle,
+        rtrust_control::observations::now_ms(),
+    );
+    if failover.active().is_some_and(|index| index > 0) {
+        monitor.failed_over(rtrust_control::observations::now_ms());
+    }
+    reply_observed(
         &mut stream,
         State::Connected,
-        if full {
-            "Весь компьютер: IPv4, IPv6 и DNS через VPN"
-        } else {
-            "IPv4-сети подключены"
-        },
+        &format!(
+            "{}{}",
+            if full {
+                "Весь компьютер: IPv4, IPv6 и DNS через VPN"
+            } else {
+                "IPv4-сети подключены"
+            },
+            failover.note()
+        ),
+        &mut monitor,
+        failover.active(),
     )
     .await?;
     let mut state = State::Connected;
+    monitor.transition(true, rtrust_control::observations::now_ms());
+    let mut netwatch = crate::netwatch::Watch::new(super::device::DEVICE);
     let mut last_failure = String::new();
     let mut restart_pending = false;
     let mut awake = power.borrow().awake;
@@ -417,8 +447,8 @@ async fn connected(
             // Aborted block_in_place work can still own route mutations. Join
             // completion in select below, keeping Status and EOF responsive.
             if awake && workers.idle() {
-                events::record(&format!("reconnect_scheduled delay={retry_delay}"));
-                retry(&mut workers, &mut retry_delay);
+                events::record("reconnect_scheduled");
+                retry(&mut workers, failover.current(), &mut retry_delay);
                 restart_pending = false;
             }
             tokio::select! {
@@ -432,20 +462,29 @@ async fn connected(
                     restart_pending = true;
                     state = State::Blocked;
                     last_failure = if awake { "Восстановление VPN после сна" } else { "VPN приостановлен на время сна" }.into();
-                    retry_delay = 2;
+                    if awake { monitor.resumed(rtrust_control::observations::now_ms()); }
+                    monitor.transition(false, rtrust_control::observations::now_ms());
                 }
+                change = netwatch.next() => match change {
+                    crate::netwatch::Change::Network => monitor.network_changed(rtrust_control::observations::now_ms()),
+                    crate::netwatch::Change::Resumed => monitor.resumed(rtrust_control::observations::now_ms()),
+                },
                 result = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() => {
                     workers.tunnel = None;
                     if restart_pending { continue; }
                     last_failure = match result {
-                        Ok(Err(error)) => format!("VPN transport stopped: {error}"),
+                        Ok(Err(_)) => "VPN transport stopped".into(),
                         Ok(Ok(())) => "VPN transport stopped".into(),
                         Err(_) => "VPN transport worker failed".into(),
                     };
                     events::record(&last_failure);
                     state = State::Blocked;
                     // A flapping endpoint must not reset the backoff indefinitely.
-                    if connected_since.elapsed() >= Duration::from_secs(30) { retry_delay = 2; }
+                    monitor.transition(false, rtrust_control::observations::now_ms());
+                    retry_delay.disconnected(connected_since.elapsed());
+                    if failover.ended(connected_since.elapsed(), Instant::now()) {
+                        monitor.failed_over(rtrust_control::observations::now_ms());
+                    }
                 }
                 result = async { workers.reconnect.as_mut().unwrap().await }, if workers.reconnect.is_some() => {
                     workers.reconnect = None;
@@ -453,8 +492,8 @@ async fn connected(
                     // its pre-wake transport even if its result was successful.
                     if restart_pending { continue; }
                     match &result {
-                        Ok(Err(error)) => {
-                            last_failure = format!("VPN reconnect failed: {error}");
+                        Ok(Err(_)) => {
+                            last_failure = "VPN reconnect failed".into();
                             events::record(&last_failure);
                         }
                         Err(_) => last_failure = "VPN reconnect worker failed".into(),
@@ -464,8 +503,12 @@ async fn connected(
                         workers.tunnel = Some(tokio::spawn(prepared.run()));
                         connected_since = Instant::now();
                         state = State::Connected;
+                        monitor.transition(true, rtrust_control::observations::now_ms());
                         events::record("reconnect_complete");
                         continue;
+                    }
+                    if failover.failed(Instant::now()) {
+                        monitor.failed_over(rtrust_control::observations::now_ms());
                     }
                 }
             }
@@ -476,7 +519,7 @@ async fn connected(
         }
         match request.command {
             Command::Status => {
-                reply(
+                reply_observed(
                     &mut stream,
                     state.clone(),
                     if state == State::Connected {
@@ -488,6 +531,8 @@ async fn connected(
                     } else {
                         &last_failure
                     },
+                    &mut monitor,
+                    failover.active(),
                 )
                 .await?
             }
@@ -495,7 +540,11 @@ async fn connected(
                 events::record("stop_requested");
                 workers.stop().await;
                 return match release() {
-                    Ok(()) => reply(&mut stream, State::Idle, "Отключено").await,
+                    Ok(()) => {
+                        monitor.stop(rtrust_control::observations::now_ms());
+                        reply_observed(&mut stream, State::Idle, "Отключено", &mut monitor, None)
+                            .await
+                    }
                     Err(e) => reply(&mut stream, State::Blocked, &e).await,
                 };
             }
@@ -507,6 +556,13 @@ async fn connected(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn failover() -> crate::failover::Failover {
+        let profile = rtrust_profile::Profile::import("hostname='test.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='synthetic'\n").unwrap();
+        crate::failover::Failover::pin(profile, vec![], crate::failover::Pin::Ipv4)
+            .await
+            .unwrap()
+    }
 
     #[tokio::test]
     async fn sleep_waits_for_powered_on_and_stop_remains_available() {
@@ -522,7 +578,8 @@ mod tests {
             },
             false,
             receiver,
-            move |workers, _| {
+            failover().await,
+            move |workers, _, _| {
                 attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 workers.reconnect = Some(tokio::spawn(std::future::pending()));
             },
@@ -582,6 +639,76 @@ mod tests {
         supervisor.await.unwrap().unwrap();
     }
 
+    #[tokio::test]
+    async fn repeated_power_events_preserve_retry_budget_and_stale_evidence() {
+        let (power, receiver) = tokio::sync::watch::channel(power::State::default());
+        let delays = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = delays.clone();
+        let (mut client, server) = tokio::io::duplex(4096);
+        let supervisor = tokio::spawn(connected(
+            server,
+            Workers {
+                tunnel: Some(tokio::spawn(std::future::pending())),
+                reconnect: None,
+            },
+            false,
+            receiver,
+            failover().await,
+            move |workers, _, budget| {
+                recorded.lock().unwrap().push(budget.next_delay(0));
+                workers.reconnect = Some(tokio::spawn(std::future::pending()));
+            },
+            || Ok(()),
+        ));
+        let initial: Response = read(&mut client).await.unwrap();
+        for attempt in 1..=9 {
+            power.send_modify(|s| s.generation += 1);
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    write(
+                        &mut client,
+                        &Request {
+                            version: VERSION,
+                            command: Command::Status,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    let status: Response = read(&mut client).await.unwrap();
+                    if delays.lock().unwrap().len() == attempt && status.state == State::Blocked {
+                        assert_ne!(
+                            status.observations.generation,
+                            initial.observations.generation
+                        );
+                        assert!(!status.observations.verified());
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            delays.lock().unwrap()[8],
+            rtrust_control::recovery::COOLDOWN
+        );
+        write(
+            &mut client,
+            &Request {
+                version: VERSION,
+                command: Command::Stop,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read::<Response>(&mut client).await.unwrap().state,
+            State::Idle
+        );
+        supervisor.await.unwrap().unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wake_during_route_refresh_keeps_real_supervisor_responsive() {
         let lease = Arc::new(Mutex::new(()));
@@ -612,7 +739,8 @@ mod tests {
             },
             false,
             power_events,
-            move |workers, _| {
+            failover().await,
+            move |workers, _, _| {
                 attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 workers.reconnect = Some(tokio::spawn(std::future::pending()));
             },
@@ -733,6 +861,36 @@ mod tests {
         assert!(lease.try_lock().is_ok());
     }
 
+    #[tokio::test]
+    async fn capabilities_are_read_only_and_available_during_an_active_lease() {
+        let lease = Arc::new(Mutex::new(()));
+        let _held = lease.clone().lock_owned().await;
+        let (mut client, server) = tokio::io::duplex(4096);
+        let task = tokio::spawn(serve(
+            server,
+            501,
+            lease,
+            tokio::sync::watch::channel(power::State::default()).1,
+        ));
+        write(
+            &mut client,
+            &Request {
+                version: VERSION,
+                command: Command::Capabilities,
+            },
+        )
+        .await
+        .unwrap();
+        let response: Response = read(&mut client).await.unwrap();
+        assert_eq!(response.state, State::Idle);
+        assert_eq!(
+            response.capabilities.observations_schema,
+            rtrust_control::observations::SCHEMA
+        );
+        assert!(!response.capabilities.system_probes);
+        assert!(!response.observations.verified());
+        task.await.unwrap().unwrap();
+    }
     #[tokio::test]
     async fn rejects_wrong_version_before_any_privileged_operation() {
         let (mut client, server) = tokio::io::duplex(4096);

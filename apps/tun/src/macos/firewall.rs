@@ -1,6 +1,6 @@
 //! A private PF anchor. Never flush the root ruleset, foreign states or tables.
 use super::{command, device::DEVICE};
-use std::{io::Write, net::SocketAddrV4, path::Path};
+use std::{io::Write, path::Path};
 const ANCHOR: &str = "com.apple/zz-rtrust";
 fn pf(args: &[&str]) -> Result<String, String> {
     command::run("/sbin/pfctl", args)
@@ -58,9 +58,7 @@ pub(super) fn policy(
     uid: u32,
     full: bool,
     networks: &[rtrust_control::Ipv4Net],
-    endpoints: &[SocketAddrV4],
-    udp: bool,
-    ports: &[(u16, u16)],
+    permits: &[crate::failover::Permit],
 ) -> String {
     let mut rules = vec![
         "pass out quick on lo0 all no state".into(),
@@ -68,21 +66,23 @@ pub(super) fn policy(
     ];
     if full {
         // QUIC (HTTP/3, Hysteria 2) and AmneziaWG use UDP.
-        let transport = if udp { "udp" } else { "tcp" };
-        let flags = if transport == "tcp" { " flags any" } else { "" };
-        // Hysteria port hopping sends to any port of the server's set.
-        let hop = ports
-            .iter()
-            .map(|(a, b)| {
-                if a == b {
-                    a.to_string()
-                } else {
-                    format!("{a}:{b}")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        for endpoint in endpoints {
+        for permit in permits {
+            let endpoint = &permit.address;
+            let transport = if permit.udp { "udp" } else { "tcp" };
+            let flags = if transport == "tcp" { " flags any" } else { "" };
+            // Hysteria port hopping sends to any port of the server's set.
+            let hop = permit
+                .ports
+                .iter()
+                .map(|(a, b)| {
+                    if a == b {
+                        a.to_string()
+                    } else {
+                        format!("{a}:{b}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             let port = if hop.is_empty() {
                 endpoint.port().to_string()
             } else {
@@ -166,22 +166,66 @@ mod tests {
     use super::*;
     #[test]
     fn hysteria_hop_ports_open_only_the_server_port_set() {
-        let endpoint: SocketAddrV4 = "192.0.2.10:443".parse().unwrap();
-        let plain = policy(501, true, &[], &[endpoint], true, &[]);
+        let endpoint: std::net::SocketAddrV4 = "192.0.2.10:443".parse().unwrap();
+        let plain = policy(
+            501,
+            true,
+            &[],
+            &[crate::failover::Permit {
+                address: endpoint,
+                udp: true,
+                ports: vec![],
+            }],
+        );
         assert!(plain.contains("proto udp to 192.0.2.10 port 443 user root no state"));
         let hop = policy(
             501,
             true,
             &[],
-            &[endpoint],
-            true,
-            &[(443, 443), (20000, 20010)],
+            &[crate::failover::Permit {
+                address: endpoint,
+                udp: true,
+                ports: vec![(443, 443), (20000, 20010)],
+            }],
         );
         assert!(
             hop.contains("proto udp to 192.0.2.10 port { 443, 20000:20010 } user root no state")
         );
         assert!(!hop.contains("port 443 user"));
         assert!(hop.contains("block drop out quick all"));
+    }
+    #[test]
+    fn mixed_transports_and_hopping_keep_separate_exceptions() {
+        use crate::failover::Permit;
+        let script = policy(
+            501,
+            true,
+            &[],
+            &[
+                Permit {
+                    address: "192.0.2.1:443".parse().unwrap(),
+                    udp: false,
+                    ports: vec![],
+                },
+                Permit {
+                    address: "192.0.2.2:8443".parse().unwrap(),
+                    udp: true,
+                    ports: vec![],
+                },
+                Permit {
+                    address: "192.0.2.3:443".parse().unwrap(),
+                    udp: true,
+                    ports: vec![(20000, 20010)],
+                },
+            ],
+        );
+        assert!(script.contains("proto tcp to 192.0.2.1 port 443 user root flags any"));
+        assert!(script.contains("proto udp to 192.0.2.2 port 8443 user root"));
+        assert!(script.contains("proto udp to 192.0.2.3 port { 20000:20010 } user root"));
+        assert!(!script.contains("proto udp to 192.0.2.1"));
+        assert!(!script.contains("proto tcp to 192.0.2.2"));
+        assert!(!script.contains("192.0.2.1 port {"));
+        assert!(script.contains("block drop out quick all"));
     }
     #[test]
     fn accepts_stock_scrub_anchor_but_not_foreign_filter_rules() {

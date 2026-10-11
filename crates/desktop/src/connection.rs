@@ -32,6 +32,7 @@ pub enum Session {
 impl Session {
     pub async fn start(
         profile: rtrust_profile::Profile,
+        fallbacks: Vec<rtrust_profile::Profile>,
         mode: Mode,
         port: u16,
         selection: rtrust_control::Selection,
@@ -42,21 +43,25 @@ impl Session {
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             Mode::Full => rtrust_control::Client::start_full(
                 profile,
+                fallbacks,
                 dns.parse().map_err(|_| "Некорректный IPv4 DNS")?,
             )
             .await
             .map(Self::Tun),
             Mode::Socks => {
-                let _ = selection;
+                // The proxy has no service supervisor; backups apply to TUN modes.
+                let _ = (selection, fallbacks);
                 rtrust_engine::proxy::Proxy::start(&profile, port)
                     .await
                     .map(Self::Socks)
                     .map_err(|e| e.to_string())
             }
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Mode::Tun => rtrust_control::Client::start(profile, selection)
-                .await
-                .map(Self::Tun),
+            Mode::Tun => {
+                rtrust_control::Client::start(profile, fallbacks, selection, dns.parse().ok())
+                    .await
+                    .map(Self::Tun)
+            }
         }
     }
     pub fn proxy(&self) -> Option<&rtrust_engine::proxy::Proxy> {
@@ -73,16 +78,33 @@ impl Session {
         match self {
             Self::Socks(p) => p.address().to_string(),
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Self::Tun(c) => {
-                if c.status().state == rtrust_control::State::Connected {
-                    c.status().message
-                } else {
-                    "TUN · проверьте блокировку сетей".into()
-                }
-            }
+            Self::Tun(c) => crate::observation_summary(&c.status().observations, true),
         }
     }
 
+    pub fn observations(&self) -> rtrust_control::observations::Snapshot {
+        match self {
+            Self::Socks(_) => rtrust_control::observations::Monitor::new(
+                rtrust_control::observations::Mode::Proxy,
+                rtrust_control::observations::Source::ProxyLifecycle,
+                rtrust_control::observations::now_ms(),
+            )
+            .sample(rtrust_control::observations::now_ms()),
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            Self::Tun(c) => c.status().observations,
+        }
+    }
+    /// 0 is the requested profile, 1.. the allowed backups in the order sent.
+    pub fn active_profile(&self) -> Option<u8> {
+        match self {
+            Self::Socks(_) => None,
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            Self::Tun(c) => c.status().active_profile,
+        }
+    }
+    pub fn status_summary(&self, russian: bool) -> String {
+        crate::observation_summary(&self.observations(), russian)
+    }
     pub fn cancel(&self) {
         if let Some(proxy) = self.proxy() {
             proxy.stop();
@@ -98,7 +120,8 @@ impl Session {
             Self::Tun(c) => c.close().await,
         }
     }
-    pub async fn health(&self) -> Result<(), String> {
+    /// Worker/IPC liveness only; use observations for verified network availability.
+    pub async fn lifecycle_health(&self) -> Result<(), String> {
         match self {
             Self::Socks(p) => p.health().await.map_err(|e| e.to_string()),
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]

@@ -8,6 +8,8 @@ use std::{
 };
 pub const ORIGIN: &str = "https://onixus-rf.duckdns.org";
 pub const CURRENT_SEQUENCE: u64 = 9;
+/// Signed package transaction compatibility. This legacy wire field is independent
+/// of the GUI/service IPC: both components are replaced together by the installer.
 pub const CURRENT_IPC: u32 = 1;
 const ROOT: &[u8] = include_bytes!("root.pub");
 const MAX_PACKAGE: u64 = 256 * 1024 * 1024;
@@ -114,6 +116,27 @@ fn verify_key(
         manifest: m,
         envelope: data.to_vec(),
     })
+}
+/// Bind a verified envelope to the exact immutable publication location and bytes.
+pub fn verify_publication(
+    release: &Release,
+    artifact: &mut std::fs::File,
+    target: &str,
+    sequence: u64,
+) -> Result<(), String> {
+    let filename = match target {
+        "windows-x86_64" => "setup.exe",
+        "macos-aarch64" => "client.dmg",
+        _ => return Err("Unsupported publication target".into()),
+    };
+    let manifest = release.manifest();
+    if manifest.target != target
+        || manifest.sequence != sequence
+        || manifest.url != format!("{ORIGIN}/rtrust/releases/{sequence}/{target}/{filename}")
+    {
+        return Err("Manifest differs from publication identity".into());
+    }
+    verify_file(artifact, release)
 }
 fn http() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -236,6 +259,9 @@ async fn download_mode(
 /// An explicitly requested rollback must be the exact currently running release,
 /// signed by the same root. Expiry of historical metadata does not change its hash.
 pub fn verify_rollback(data: &[u8]) -> Result<Release, String> {
+    verify_rollback_key(data, ROOT)
+}
+fn verify_rollback_key(data: &[u8], key: &[u8]) -> Result<Release, String> {
     if data.len() > 16384 {
         return Err("Слишком большой манифест отката".into());
     }
@@ -246,7 +272,7 @@ pub fn verify_rollback(data: &[u8]) -> Result<Release, String> {
         .map_err(|_| "Некорректный манифест отката")?;
     let m: Manifest =
         serde_json::from_slice(&payload).map_err(|_| "Некорректный манифест отката")?;
-    let release = verify(data, &target(), m.published, CURRENT_SEQUENCE)?;
+    let release = verify_key(data, key, &target(), m.published, CURRENT_SEQUENCE)?;
     if release.manifest.sequence != CURRENT_SEQUENCE {
         return Err("Пакет отката не соответствует установленной версии".into());
     }
@@ -321,8 +347,8 @@ mod tests {
             sequence: 5,
             version: "0.2.0".into(),
             target: "windows-x86_64".into(),
-            min_ipc: 1,
-            max_ipc: 1,
+            min_ipc: CURRENT_IPC,
+            max_ipc: CURRENT_IPC,
             published: 1000,
             expires: 2000,
             url: format!("{ORIGIN}/rtrust/releases/5/setup.exe"),
@@ -342,6 +368,44 @@ mod tests {
             signature: STANDARD.encode(pair.sign(&bytes).as_ref()),
         })
         .unwrap()
+    }
+    #[test]
+    fn legacy_updater_protocol_accepts_new_packages_and_historical_rollback() {
+        assert_eq!(CURRENT_IPC, 1);
+        const { assert!(rtrust_control::VERSION > CURRENT_IPC) };
+        let (pair, mut m) = fixture();
+        let key = pair.public_key().as_ref();
+        m.min_ipc = 1;
+        m.max_ipc = 1;
+        m.sequence = CURRENT_SEQUENCE + 1;
+        assert!(verify_key(&signed(&pair, &m), key, &m.target, 1500, CURRENT_SEQUENCE).is_ok());
+        m.sequence = CURRENT_SEQUENCE;
+        m.target = target();
+        // Historical expiry remains allowed only for the exact installed release.
+        assert!(verify_rollback_key(&signed(&pair, &m), key).is_ok());
+        m.sequence -= 1;
+        assert!(verify_rollback_key(&signed(&pair, &m), key).is_err());
+        m.sequence = CURRENT_SEQUENCE;
+        m.min_ipc = 2;
+        m.max_ipc = 4;
+        assert!(verify_rollback_key(&signed(&pair, &m), key).is_err());
+    }
+    #[test]
+    fn publication_requires_exact_sequence_path_and_installer_bytes() {
+        let (pair, mut m) = fixture();
+        let key = pair.public_key().as_ref();
+        m.url = format!("{ORIGIN}/rtrust/releases/5/windows-x86_64/setup.exe");
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"abc").unwrap();
+        use std::io::{Seek, SeekFrom};
+        let release = verify_key(&signed(&pair, &m), key, &m.target, 1500, 5).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        assert!(verify_publication(&release, &mut file, &m.target, 5).is_ok());
+        assert!(verify_publication(&release, &mut file, &m.target, 6).is_err());
+        assert!(verify_publication(&release, &mut file, "macos-aarch64", 5).is_err());
+        m.url = format!("{ORIGIN}/rtrust/releases/other/setup.exe");
+        let release = verify_key(&signed(&pair, &m), key, &m.target, 1500, 5).unwrap();
+        assert!(verify_publication(&release, &mut file, &m.target, 5).is_err());
     }
     #[tokio::test]
     async fn installed_release_is_not_staged_as_an_update() {
@@ -370,7 +434,10 @@ mod tests {
         assert!(verify_key(&data, key, "windows-x86_64", 1500, 6).is_err());
         assert!(verify_key(&data, key, "windows-x86_64", 2000, 5).is_err());
         assert!(verify_key(&data, &[0u8; 32], "windows-x86_64", 1500, 5).is_err());
-        m.min_ipc = 2;
+        m.min_ipc = CURRENT_IPC + 1;
+        assert!(verify_key(&signed(&pair, &m), key, "windows-x86_64", 1500, 5).is_err());
+        m.min_ipc = CURRENT_IPC - 1;
+        m.max_ipc = CURRENT_IPC - 1;
         assert!(verify_key(&signed(&pair, &m), key, "windows-x86_64", 1500, 5).is_err());
     }
     #[test]

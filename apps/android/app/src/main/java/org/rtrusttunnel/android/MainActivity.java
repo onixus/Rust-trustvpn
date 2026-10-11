@@ -25,6 +25,7 @@ public class MainActivity extends Activity {
     private Button connect;
     private int connectionColor;
     private ProfileVault vault;
+    private AlertDialog flowCapture;
     private final Runnable poll = new Runnable() {
         public void run() {
             try {
@@ -32,6 +33,7 @@ public class MainActivity extends Activity {
                 TunnelService.refreshPolicy();
                 int nativeState = state.optInt("state", 0);
                 String message = !TunnelService.problem.isEmpty() ? TunnelService.problem : nativeState == 2 ? getString(R.string.connected) : nativeState == 1 ? getString(R.string.connecting) : nativeState == 3 ? getString(R.string.reconnecting) : nativeState == 4 ? getString(R.string.connection_failed) : "";
+                if (nativeState == 2 && TunnelService.problem.isEmpty()) message = ObservationStatus.summary(MainActivity.this, state.optJSONObject("observations"));
                 if (message.isEmpty()) message = TunnelService.active ? getString(R.string.starting_vpn) : getString(R.string.disconnected);
                 if (!status.getText().toString().equals(message)) status.setText(message);
                 String action = TunnelService.active ? getString(R.string.disconnect) : getString(R.string.connect_default_profile);
@@ -102,8 +104,10 @@ public class MainActivity extends Activity {
         }).show();
     }
     private void settingsMenu() {
-        new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on)}, (dialog, which) -> {
-            if (which == 0) new PortalDialog(this, vault, this::reload).show(); else vpnSettings();
+        new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on), java.util.Locale.getDefault().getLanguage().equals("ru") ? "Наблюдать решения маршрутизации" : "Observe local flow decisions"}, (dialog, which) -> {
+            if (which == 0) new PortalDialog(this, vault, this::reload).show();
+            else if (which == 1) vpnSettings();
+            else { if (flowCapture != null) flowCapture.dismiss(); flowCapture = FlowCaptureDialog.show(this); }
         }).show();
     }
     private int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
@@ -147,7 +151,7 @@ public class MainActivity extends Activity {
     static int connectionColor(boolean active, int state, boolean problem) {
         if (problem || state == 4 || state < 0 || state > 4) return Color.rgb(229, 72, 77);
         if (!active) return Color.rgb(77, 163, 255);
-        return state == 2 ? Color.rgb(47, 191, 113) : Color.rgb(224, 165, 38);
+        return Color.rgb(224, 165, 38); // Lifecycle is not verified network availability.
     }
     /** {@code lit} colors the status dot; an idle tunnel keeps it neutral. */
     private void paintConnection(int color, boolean lit) {
@@ -163,7 +167,7 @@ public class MainActivity extends Activity {
             try { startService(new Intent(this, TunnelService.class).setAction(TunnelService.RECOVER)); } catch (Exception ignored) { /* Retry on next resume. */ }
         handler.post(poll);
     }
-    @Override public void onPause() { handler.removeCallbacks(poll); super.onPause(); }
+    @Override public void onPause() { if (flowCapture != null) {flowCapture.dismiss(); flowCapture=null;} handler.removeCallbacks(poll); super.onPause(); }
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); setIntent(intent); incoming(intent); }
     private void incoming(Intent intent) {
         if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null && java.util.Arrays.asList("tt", "hy2", "hysteria2").contains(intent.getData().getScheme())) {

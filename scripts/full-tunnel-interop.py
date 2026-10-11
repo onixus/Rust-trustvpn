@@ -256,7 +256,9 @@ def main():
             # Each command uses a short-lived authenticated GUI connection. The
             # supervisor must keep the VPN alive after that connection closes.
             def ipc(op, **values):
-                request=json.dumps(dict(version=1,command=dict(op=op,**values)))
+                if op in ('EnableAlwaysOn', 'EnableRecovery'):
+                    values['generation'] = ipc('AlwaysOnStatus')['always_on_generation']
+                request=json.dumps(dict(version=4,command=dict(op=op,**values)))
                 program="""import socket,struct,json,sys
 c=socket.socket(socket.AF_UNIX);c.settimeout(60);c.connect('/run/rtrust/control.sock')
 b=sys.argv[1].encode();c.sendall(struct.pack('!I',len(b))+b)
@@ -279,6 +281,22 @@ print(exact(n).decode())
             assert not policy.exists(), "Never replace an existing boot policy"
             assert ipc("EnableAlwaysOn",profile=json.loads(profile.read_text()),dns="198.18.0.1")["state"]=="Blocked"
             connected(); fetch(1000,"198.18.0.1"); ipv6(True,True)
+            # Disposable veth is deliberately not physical endpoint-path proof.
+            # The separate diagnostic channel must leave Always-on and traffic intact.
+            status = ipc("AlwaysOnStatus")
+            probe_token = status.get("endpoint_probe_token")
+            assert status["capabilities"]["endpoint_probes"] and probe_token
+            probe = ipc("ProbeEndpoint", token=probe_token)["endpoint_probe"]
+            assert not probe["independent"]
+            expected = "Unsupported" if (http3 or hysteria or amnezia) else "Inconclusive"
+            assert probe["outcome"] == expected, probe["outcome"]
+            limited = ipc("ProbeEndpoint", token=probe_token)["endpoint_probe"]
+            assert limited["outcome"] == "RateLimited" and not limited["independent"]
+            stale_token = dict(probe_token, generation=probe_token["generation"] + 1)
+            stale = ipc("ProbeEndpoint", token=stale_token)["endpoint_probe"]
+            assert stale["reason"] == "StaleLease" and not stale["independent"]
+            fetch(1000,"198.18.0.1"); ipv6(True,True)
+            print("PASS service endpoint probe: virtual path unproven, cooldown, stale token, active VPN intact", flush=True)
             assert policy.stat().st_mode & 0o077 == 0
             assert secret.encode() not in policy.read_bytes()
             for op in ("Recover","PrepareUpdate"):

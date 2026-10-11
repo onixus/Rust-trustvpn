@@ -7,8 +7,13 @@ pub mod suspend;
 pub const SOCKET: &str = "/run/rtrust/control.sock";
 #[cfg(target_os = "macos")]
 pub const SOCKET: &str = "/private/var/run/rtrust/control.sock";
-pub const LIMIT: usize = 2 * rtrust_profile::MAX_INPUT;
-pub const VERSION: u32 = 1;
+/// Opt-in automatic recovery: at most this many user-allowed backup profiles.
+pub const MAX_FALLBACKS: usize = 3;
+pub const LIMIT: usize = (2 + MAX_FALLBACKS) * rtrust_profile::MAX_INPUT;
+pub const VERSION: u32 = 4;
+pub mod endpoint;
+pub mod observations;
+pub mod recovery;
 pub use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
 
@@ -29,16 +34,40 @@ pub enum Command {
         exclude: Vec<Ipv4Net>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         exclude_lan: bool,
+        /// Resolver for the system; a service uses it only when the
+        /// selection routes it through the VPN.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dns: Option<std::net::Ipv4Addr>,
+        /// Backup profiles the user allowed, in preference order. Empty keeps
+        /// the fixed-profile behavior: no transport is ever substituted.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fallbacks: Vec<rtrust_profile::Profile>,
     },
     StartFull {
         profile: Box<rtrust_profile::Profile>,
         dns: std::net::Ipv4Addr,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fallbacks: Vec<rtrust_profile::Profile>,
     },
+    ProbeEndpoint {
+        token: endpoint::Token,
+    },
+    Capabilities,
     Status,
     PrepareUpdate,
     EnableAlwaysOn {
         profile: Box<rtrust_profile::Profile>,
         dns: std::net::Ipv4Addr,
+        /// Fence obtained from AlwaysOnStatus before sending this mutation.
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    EnableRecovery {
+        profile: Box<rtrust_profile::Profile>,
+        dns: std::net::Ipv4Addr,
+        backups: Vec<rtrust_profile::Profile>,
+        #[serde(default)]
+        generation: Option<u64>,
     },
     DisableAlwaysOn,
     AlwaysOnStatus,
@@ -60,6 +89,48 @@ pub struct Response {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_on: Option<bool>,
+    /// Service-issued cancellation fence; absence forbids enabling always-on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_on_generation: Option<u64>,
+    /// Index of the active candidate when backups were allowed: 0 is the
+    /// requested profile, 1.. the backups in the order sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_profile: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<recovery::Status>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_probe_token: Option<endpoint::Token>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_probe: Option<endpoint::Result>,
+    pub observations: observations::Snapshot,
+    pub capabilities: Capabilities,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Capabilities {
+    pub observations_schema: u32,
+    pub lifecycle_observations: bool,
+    pub system_probes: bool,
+    pub endpoint_probes: bool,
+    /// Native link/address change and resume events invalidate observations.
+    pub network_events: bool,
+    /// The service accepts allowed backup profiles with Start.
+    pub failover: bool,
+    #[serde(default)]
+    pub automatic_recovery: bool,
+}
+impl Capabilities {
+    pub fn current() -> Self {
+        Self {
+            observations_schema: observations::SCHEMA,
+            lifecycle_observations: true,
+            system_probes: false,
+            endpoint_probes: cfg!(target_os = "linux"),
+            network_events: true,
+            failover: true,
+            automatic_recovery: cfg!(any(target_os = "linux", target_os = "windows")),
+        }
+    }
 }
 impl Response {
     pub fn new(state: State, message: &str) -> Self {
@@ -68,6 +139,13 @@ impl Response {
             state,
             message: message.into(),
             always_on: None,
+            always_on_generation: None,
+            active_profile: None,
+            recovery: None,
+            endpoint_probe_token: None,
+            endpoint_probe: None,
+            observations: observations::Snapshot::unknown(observations::Mode::Unknown),
+            capabilities: Capabilities::current(),
         }
     }
 }
@@ -116,6 +194,114 @@ impl Selection {
             return Err(format!("{net}: адрес не совпадает с началом сети"));
         }
         self.routes(&[], &[]).map(|_| ())
+    }
+    /// Offline prediction using the same subtraction as route installation.
+    /// None means missing evidence; an empty slice means the runtime inspected it.
+    pub fn explain(
+        &self,
+        destination: std::net::IpAddr,
+        endpoints: Option<&[Ipv4Addr]>,
+        local: Option<&[Ipv4Net]>,
+        mut context: rtrust_profile::routing::Context,
+    ) -> Result<rtrust_profile::routing::Decision, String> {
+        use rtrust_profile::routing::{Action, Basis, Decision, Reason, RuleId, RuleKind};
+        self.validate()?;
+        if context
+            .revision
+            .as_ref()
+            .is_some_and(|r| r.is_empty() || r.len() > 256 || r.chars().any(char::is_control))
+        {
+            return Err("Недопустимая ревизия политики".into());
+        }
+        if context.revision.is_none() {
+            use sha2::Digest;
+            context.revision = Some(format!(
+                "{:x}",
+                sha2::Sha256::digest(serde_json::to_vec(self).map_err(|_| "Invalid selection")?)
+            ));
+        }
+        // Validate the final runtime prefix set before describing a configuration
+        // that could not be installed at all.
+        if let Some(endpoints) = endpoints
+            && (!self.exclude_lan || local.is_some())
+        {
+            self.routes(endpoints, local.unwrap_or_default())?;
+        }
+        let std::net::IpAddr::V4(ip) = destination else {
+            return Ok(Decision::unknown(context, Reason::UnsupportedFamily));
+        };
+        let make = |action, rules, reason| Decision {
+            action,
+            scope: rtrust_profile::routing::Scope::SelectedIpv4,
+            rules,
+            context: context.clone(),
+            reason,
+            basis: Basis::NumericDestination,
+            prediction: true,
+        };
+        if let Some(index) = RESERVED
+            .iter()
+            .position(|s| s.parse::<Ipv4Net>().unwrap().contains(&ip))
+        {
+            return Ok(make(
+                Action::Direct,
+                vec![RuleId {
+                    kind: RuleKind::Reserved,
+                    index: index as u8,
+                }],
+                Reason::ReservedAddress,
+            ));
+        }
+        let rules: Vec<_> = self
+            .exclude
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.contains(&ip))
+            .map(|(index, _)| RuleId {
+                kind: RuleKind::Exclude,
+                index: index as u8,
+            })
+            .collect();
+        if !rules.is_empty() {
+            return Ok(make(Action::Direct, rules, Reason::ExcludedPrefix));
+        }
+        let rules: Vec<_> = self
+            .include
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.contains(&ip))
+            .map(|(index, _)| RuleId {
+                kind: RuleKind::Include,
+                index: index as u8,
+            })
+            .collect();
+        if rules.is_empty() {
+            return Ok(make(Action::Direct, rules, Reason::OutsideSelection));
+        }
+        let Some(endpoints) = endpoints else {
+            return Ok(Decision::unknown(context, Reason::EndpointUnresolved));
+        };
+        if endpoints.contains(&ip) {
+            return Ok(make(Action::Direct, vec![], Reason::EndpointBypass));
+        }
+        if self.exclude_lan {
+            let Some(local) = local else {
+                return Ok(Decision::unknown(context, Reason::LocalNetworksUnobserved));
+            };
+            if local.iter().any(|n| n.contains(&ip)) {
+                return Ok(make(Action::Direct, vec![], Reason::LocalNetworkBypass));
+            }
+        }
+        let installed = self.routes(endpoints, local.unwrap_or_default())?;
+        Ok(make(
+            if installed.iter().any(|n| n.contains(&ip)) {
+                Action::Tunnel
+            } else {
+                Action::Direct
+            },
+            rules,
+            Reason::SelectedPrefix,
+        ))
     }
     /// Prefixes to install. `local` is subtracted only with `exclude_lan`.
     pub fn routes(
@@ -282,8 +468,93 @@ pub fn validate_dns(ip: std::net::Ipv4Addr) -> Result<(), String> {
     Ok(())
 }
 
+/// The split-mode resolver: `dns`, if valid and routed by `networks`.
+/// Services then point the system at it so names do not leak to the LAN.
+pub fn tunneled_resolver(
+    networks: &[Ipv4Net],
+    dns: Option<std::net::Ipv4Addr>,
+) -> Option<std::net::Ipv4Addr> {
+    dns.filter(|ip| validate_dns(*ip).is_ok() && networks.iter().any(|n| n.contains(ip)))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selection_explain_matches_the_prefixes_installed_with_runtime_inputs() {
+        use rtrust_profile::routing::{Action, Context, Reason};
+        let selection = Selection::parse("0.0.0.0/0", "10.0.0.0/8", true).unwrap();
+        let endpoints: [Ipv4Addr; 1] = ["203.0.113.1".parse().unwrap()];
+        let local = ["192.168.1.0/24".parse().unwrap()];
+        let routes = selection.routes(&endpoints, &local).unwrap();
+        for text in [
+            "1.1.1.1",
+            "10.1.1.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "192.168.1.1",
+            "203.0.113.1",
+            "203.0.113.2",
+            "224.0.0.1",
+        ] {
+            let ip: Ipv4Addr = text.parse().unwrap();
+            let explanation = selection
+                .explain(
+                    ip.into(),
+                    Some(&endpoints),
+                    Some(&local),
+                    Context::default(),
+                )
+                .unwrap();
+            assert_eq!(
+                explanation.action == Action::Tunnel,
+                routes.iter().any(|n| n.contains(&ip)),
+                "{text}"
+            );
+            assert!(explanation.prediction);
+            assert!(explanation.context.revision.is_some());
+        }
+        let unknown = selection
+            .explain("8.8.8.8".parse().unwrap(), None, None, Context::default())
+            .unwrap();
+        assert_eq!(unknown.action, Action::Unknown);
+        assert_eq!(unknown.reason, Reason::EndpointUnresolved);
+        let lan = selection
+            .explain(
+                "8.8.8.8".parse().unwrap(),
+                Some(&[]),
+                None,
+                Context::default(),
+            )
+            .unwrap();
+        assert_eq!(lan.reason, Reason::LocalNetworksUnobserved);
+        assert_eq!(
+            selection
+                .explain(
+                    "2001:db8::1".parse().unwrap(),
+                    Some(&[]),
+                    Some(&[]),
+                    Context::default()
+                )
+                .unwrap()
+                .action,
+            Action::Unknown
+        );
+    }
+    #[test]
+    fn selection_explain_rejects_an_uninstallable_final_policy() {
+        let selection = Selection::parse("203.0.113.1/32", "", false).unwrap();
+        let endpoints: [Ipv4Addr; 1] = ["203.0.113.1".parse().unwrap()];
+        assert!(
+            selection
+                .explain(
+                    endpoints[0].into(),
+                    Some(&endpoints),
+                    Some(&[]),
+                    rtrust_profile::routing::Context::default()
+                )
+                .is_err()
+        );
+    }
     #[test]
     fn full_dns_rejects_local_and_non_unicast_destinations() {
         for address in [
@@ -416,20 +687,42 @@ mod tests {
             "hostname='vpn.example'\naddresses=['192.0.2.1:443']\nusername='u'\npassword='p'\n",
         )
         .unwrap();
-        let command = |exclude: Vec<Ipv4Net>, exclude_lan| {
+        let command = |exclude: Vec<Ipv4Net>, exclude_lan, dns| {
             serde_json::to_value(Command::Start {
                 profile: Box::new(profile.clone()),
                 networks: vec!["10.0.0.0/8".parse().unwrap()],
                 exclude,
                 exclude_lan,
+                dns,
+                fallbacks: vec![],
             })
             .unwrap()
         };
-        let plain = command(vec![], false);
-        assert!(plain.get("exclude").is_none() && plain.get("exclude_lan").is_none());
-        let split = command(vec!["10.1.0.0/16".parse().unwrap()], true);
+        let plain = command(vec![], false, None);
+        assert!(
+            plain.get("exclude").is_none()
+                && plain.get("exclude_lan").is_none()
+                && plain.get("dns").is_none()
+        );
+        let split = command(
+            vec!["10.1.0.0/16".parse().unwrap()],
+            true,
+            Some("1.1.1.1".parse().unwrap()),
+        );
         assert_eq!(split["exclude"][0], "10.1.0.0/16");
         assert_eq!(split["exclude_lan"], true);
+        assert_eq!(split["dns"], "1.1.1.1");
+        let old: Command = serde_json::from_value(plain).unwrap();
+        assert!(matches!(old, Command::Start { dns: None, .. }));
+    }
+    #[test]
+    fn tunneled_resolver_requires_a_routed_valid_address() {
+        let networks: Vec<Ipv4Net> = vec!["0.0.0.0/1".parse().unwrap()];
+        let ip = |s: &str| Some(s.parse().unwrap());
+        assert_eq!(tunneled_resolver(&networks, ip("1.1.1.1")), ip("1.1.1.1"));
+        assert_eq!(tunneled_resolver(&networks, ip("192.168.1.1")), None);
+        assert_eq!(tunneled_resolver(&networks, ip("127.0.0.1")), None);
+        assert_eq!(tunneled_resolver(&networks, None), None);
     }
     #[tokio::test]
     async fn oversized_frame_rejected_before_body_and_secrets_redacted() {

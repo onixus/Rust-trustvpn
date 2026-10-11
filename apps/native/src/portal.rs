@@ -254,6 +254,23 @@ impl App {
                     .spacing(8),
                 );
         } else {
+            if let Some(client) = &self.portal.client {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_secs());
+                let access = match (client.expires_at(), now) {
+                    (_, None) => "Системное время недоступно; срок доступа не подтверждён",
+                    (Some(_), Some(now)) if client.access_expired(now) => {
+                        "Срок доступа к панели истёк; требуется новая привязка"
+                    }
+                    (Some(_), Some(_)) => {
+                        "Срок API-доступа известен; доступ проверяется при запросе к панели"
+                    }
+                    (None, _) => "Панель не сообщила срок API-доступа",
+                };
+                content = content.push(text(access).size(12)).push(text("Скачанные конфиги имеют независимый доступ к VPN. Удаление привязки к панели не подтверждает их отзыв на сервере.").size(12));
+            }
             content = content.push(text(&self.portal.url)).push(
                 row![
                     button("Обновить список")

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+sha2 = "0.10"
 rtrust-profile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -18,3 +19,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

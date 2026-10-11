@@ -158,6 +158,8 @@ SOCKS5 по умолчанию слушает 127.0.0.1:1080:
 
 SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS UDP domain addressing и SOCKS UDP fragmentation не поддерживаются.
 
+В split-режиме системного VPN DNS из настроек становится системным резолвером, если выбранные сети ведут его через туннель (например, «всё, кроме LAN»). Как и в полном режиме, имена только из LAN (например, `router.lan`) после этого не резолвятся. Иначе DNS не меняется. На Windows в этом случае порт 53 открыт только через туннель и loopback. Если система не может принять резолвер (на Linux нет systemd-resolved, на macOS не прошла DNS-проверка), DNS пропускается и подключение не прерывается.
+
 См. [desktop lifecycle](docs/desktop-lifecycle.md) и [Always-on](docs/always-on.md).
 
 ### Android

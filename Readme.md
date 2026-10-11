@@ -157,6 +157,8 @@ SOCKS5 mode listens on 127.0.0.1:1080 by default:
 
 SOCKS5 mode does not change system routes or DNS. BIND, SOCKS UDP domain addressing and SOCKS UDP fragmentation are not supported.
 
+In system VPN split mode, the configured DNS server becomes the system resolver when the selected networks route it through the tunnel (for example, everything except the LAN). As in full mode, LAN-only names such as `router.lan` then stop resolving. Otherwise DNS is left unchanged. On Windows, port 53 is then allowed only through the tunnel and loopback. If the system cannot accept a resolver (no systemd-resolved on Linux; the macOS DNS preflight fails), DNS is skipped instead of failing the connection.
+
 See [desktop lifecycle](docs/desktop-lifecycle.md) and [Always-on](docs/always-on.md).
 
 ### Android

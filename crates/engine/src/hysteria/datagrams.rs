@@ -138,6 +138,8 @@ async fn relay(session: HysteriaSession, bridge: DuplexStream) -> Result<()> {
                 let d=data?;drop(request);request=Box::pin(outgoing(&mut read));
                 let id=if let Some((&id,flow))=flows.iter_mut().find(|(_,f)|f.source==d.source&&f.destination==d.destination){flow.seen=Instant::now();id}else{
                     if flows.len()>=256{continue}
+                    // Keep the declared Rust 1.89 MSRV; newer compilers rename this API.
+                    #[allow(deprecated)]
                     let id=session.0.next_id.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|n|n.checked_add(1)).map_err(|_|Error::Protocol)?;
                     let mut routes=session.0.routes.lock().unwrap_or_else(|e|e.into_inner());routes.retain(|_,s|!s.is_closed());if routes.len()>=1024{continue}
                     routes.insert(id,sender.clone());registration.ids.insert(id);flows.insert(id,Flow{source:d.source,destination:d.destination,seen:Instant::now()});id

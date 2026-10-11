@@ -5228,9 +5228,11 @@ name = "rtrust-control"
 version = "0.5.0"
 dependencies = [
  "ipnet",
+ "libc",
  "rtrust-profile",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "windows-service",
  "windows-sys 0.61.2",
@@ -5242,14 +5244,23 @@ dependencies = [
 name = "rtrust-desktop"
 version = "0.5.0"
 dependencies = [
+ "httparse",
+ "libc",
+ "rcgen",
+ "reqwest 0.12.28",
  "rtrust-control",
  "rtrust-engine",
  "rtrust-portal",
  "rtrust-profile",
  "rtrust-store",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
+ "tokio-rustls",
+ "webpki-roots",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -5281,6 +5292,7 @@ dependencies = [
  "rustls-native-certs",
  "rustls-pemfile",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "smoltcp",
  "thiserror 2.0.21",
@@ -5298,8 +5310,10 @@ version = "0.5.0"
 dependencies = [
  "rtrust-control",
  "rtrust-engine",
+ "rtrust-mobile",
  "rtrust-profile",
  "rtrust-store",
+ "serde_json",
  "tokio",
 ]
 
@@ -5321,10 +5335,13 @@ name = "rtrust-mobile"
 version = "0.5.0"
 dependencies = [
  "ipnet",
+ "rtrust-control",
  "rtrust-engine",
  "rtrust-profile",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tokio",
 ]
 
 [[package]]
@@ -5361,11 +5378,14 @@ version = "0.5.0"
 dependencies = [
  "ipnet",
  "keyring",
+ "rcgen",
  "reqwest 0.12.28",
  "rtrust-profile",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "zeroize",
 ]
 

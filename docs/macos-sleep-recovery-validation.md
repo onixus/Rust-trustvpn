@@ -78,3 +78,25 @@ was gone, then requested pushing this macOS update to Git. This is confirmation 
 the installed recovery behavior, not proof that the intermittent HTTP/3 failure or
 DNS discrepancy has been fixed. Repeated sleep-during-reconnect acceptance remains
 outstanding.
+
+## Integration re-audit — 2026-10-12
+
+The four historical recovery commits are integrated with main `e849ac4`. The
+merged implementation retains IPC v4/capability negotiation, observation epochs,
+permitted candidate pinning and jittered burst/cooldown recovery. Native power
+events invalidate observations without resetting the retry budget. The client
+uses kernel clocks and permits at most one deadline extension per exchange.
+Raw transport/IPC error payloads are excluded from lifecycle logs.
+
+New regressions cover repeated power events reaching the original cooldown,
+stale evidence after wake, repeated resume notifications against a dead service,
+and rejection of per-domain/supplemental/mDNS resolver mirroring. Native IOKit
+registration/cleanup has passed on the development Mac without changing its VPN,
+routes, DNS or installed package. Exact integrated-package physical/network
+acceptance has not been performed. The earlier installed helper hash, timings
+and user confirmation above remain evidence only for that historical candidate.
+
+Local validation of the integrated tree: 293 workspace tests passed, 10 ignored;
+strict workspace/all-target Clippy passed. Native IOKit registration/cleanup was
+also run separately and passed. Current-head CI and package evidence must remain
+bound to their own commit and artifacts.

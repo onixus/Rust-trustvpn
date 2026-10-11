@@ -146,3 +146,25 @@ invalid certificates must not. A regression test failed before the fix and passe
 after it. The separate Android Jenkins job adds security, packaging, storage and
 APK upgrade checks. This is a preview, not physical-device or stable-release
 acceptance. See [android.md](android.md) for exact limits and remaining work.
+
+## Оставшиеся GitHub issues: аудит 2026-10-11
+
+После ревью изменения согласованы с `main` (`ee03543`); сохранены его
+opt-in recovery, revision-checked sync и Windows/mobile диагностика. Проверки исходников и тестовых fixtures
+не являются приёмкой нового установленного пакета. Изменения виджета macOS,
+находившиеся в рабочем каталоге, в эту итерацию не входят.
+
+| Issue | Реализовано | Что требуется для завершения |
+|---|---|---|
+| #31 | Общая модель наблюдений и актуальный строгий IPC; транзакция обновления сохраняет совместимость с updater 1 | Приёмка freshness/отмены/несовместимости на установленной версии по матрице ОС |
+| #32 | Общий explain и предпросмотр; неизвестные возможности отражены в документации | Сверка установленного dataplane с explain, CDN/CNAME/TTL/IPv6 и сменой политики |
+| #33 | Системная диагностика macOS/Linux/Windows и mobile события, ограничение запросов и редактируемый отчёт | Windows/mobile проверки, независимое различение endpoint/site/Internet, сверка с трафиком пакета |
+| #34 | Общий бюджет guarded reconnect, jitter/cooldown и Windows attempt timeout | Opt-in и переход между разрешёнными резервами реализованы в main; остаются мобильная интеграция, packet-level и энергоприёмка |
+| #35 | Origin-bound enrollment/vault/sync; ошибка политики отменяет всю партию, исчезновение API не очищает прежнюю политику | Серверный контракт device credentials/rotation/revocation (`onixus/tunnel#22`), общая ревизия snapshot, mobile capabilities и сквозной VPN-отзыв |
+| #36 | Gate точного artifact/source/evidence, независимые подписи, запрет promotion без принятой матрицы | Новые пакеты и реальные install/update/rollback/boot/sleep/handoff/soak результаты; Apple/Windows издательские credentials и тестовые устройства |
+| #30 | Основа вертикали и перечисленные выше исправления | Принятая вертикаль и пилот с участниками, baseline и обезличенными результатами |
+
+Исторические отчёты из `reports/` сохраняют свои исходные версии и контрольные
+суммы; они не перепривязываются к новому исходному коду. Issues остаются
+открытыми до выполнения собственных критериев. Release promotion и изменения
+живой сети в эту итерацию не выполнялись.

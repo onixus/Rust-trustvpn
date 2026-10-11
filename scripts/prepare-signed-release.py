@@ -15,11 +15,14 @@ build=pathlib.Path('/Users/onixus/jenkins_home/jobs')/a.job/'builds'/str(a.build
 assert ET.parse(build/'build.xml').getroot().findtext('result')=='SUCCESS','Only completed successful builds may be signed'
 archive=build/'archive';manifest=json.loads((archive/'source-manifest.json').read_text())
 # Bind signed release identity to the exact compiled source, before touching output.
-for name in ['crates/update/src/lib.rs','Cargo.toml']:
+for name in ['crates/update/src/lib.rs','crates/control/src/lib.rs','Cargo.toml']:
  assert hashlib.sha256((ROOT/name).read_bytes()).hexdigest()==manifest[name],f'Archived build source differs: {name}'
 sequence=re.search(r'pub const CURRENT_SEQUENCE: u64 = (\d+);',(ROOT/'crates/update/src/lib.rs').read_text())
 assert sequence and int(sequence.group(1))==a.sequence,'Manifest sequence differs from compiled CURRENT_SEQUENCE'
 assert tomllib.loads((ROOT/'Cargo.toml').read_text())['workspace']['package']['version']==a.version,'Manifest version differs from compiled package version'
+ipc=re.search(r'pub const CURRENT_IPC: u32 = (\d+);',(ROOT/'crates/update/src/lib.rs').read_text())
+assert ipc,'Compiled updater transaction version is unavailable'
+ipc_version=int(ipc.group(1))
 
 assert hashlib.sha256((ROOT/'crates/update/src/root.pub').read_bytes()).hexdigest()==manifest['crates/update/src/root.pub'],'Archived build has a different update root'
 source=archive/'dist'/('R-TrustTunnel-Windows-x64-Setup.exe' if a.target=='windows-x86_64' else 'R-TrustTunnel-macOS-arm64-preview.dmg')
@@ -29,7 +32,7 @@ output.mkdir(parents=True,exist_ok=True)
 sha=hashlib.sha256(source.read_bytes()).hexdigest()
 if (output/filename).exists():assert hashlib.sha256((output/filename).read_bytes()).hexdigest()==sha,'Release sequence is immutable'
 shutil.copyfile(source,output/filename);(output/filename).chmod(0o644)
-now=int(time.time());payload=dict(schema=1,sequence=a.sequence,version=a.version,target=a.target,min_ipc=1,max_ipc=1,published=now,expires=now+30*86400,url=f'https://onixus-rf.duckdns.org/rtrust/releases/{a.sequence}/{a.target}/{filename}',size=source.stat().st_size,sha256=sha)
+now=int(time.time());payload=dict(schema=1,sequence=a.sequence,version=a.version,target=a.target,min_ipc=ipc_version,max_ipc=ipc_version,published=now,expires=now+30*86400,url=f'https://onixus-rf.duckdns.org/rtrust/releases/{a.sequence}/{a.target}/{filename}',size=source.stat().st_size,sha256=sha)
 input_file=output/'payload.json';input_file.write_text(json.dumps(payload,separators=(',',':')))
 subprocess.run(['cargo','run','--offline','--quiet','-p','rtrust-update','--example','sign_release','--',str(a.signing_key or ROOT/'.release-secrets/update-signing.pk8'),str(input_file),str(output/'manifest.json')],cwd=ROOT,check=True)
 (output/'manifest.json').chmod(0o644)

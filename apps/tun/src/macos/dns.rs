@@ -19,17 +19,28 @@ pub fn routed_system_resolver(
     Ok(selected_resolver(&config, networks))
 }
 fn selected_resolver(config: &str, networks: &[rtrust_control::Ipv4Net]) -> Option<Ipv4Addr> {
-    let resolver = config
+    let primary: Vec<_> = config
         .lines()
         .take_while(|line| !line.trim().starts_with("resolver #2"))
-        .find_map(|line| {
-            let (key, address) = line.trim().split_once(':')?;
-            let key = key.trim();
-            if !key.starts_with("nameserver[") || !key.ends_with(']') {
-                return None;
-            }
-            address.trim().parse::<Ipv4Addr>().ok()
-        })?;
+        .collect();
+    if primary.iter().any(|line| {
+        let Some((key, value)) = line.trim().split_once(':') else {
+            return false;
+        };
+        key.trim() == "domain"
+            || (key.trim() == "flags" && value.contains("Supplemental"))
+            || (key.trim() == "options" && value.contains("mdns"))
+    }) {
+        return None;
+    }
+    let resolver = primary.into_iter().find_map(|line| {
+        let (key, address) = line.trim().split_once(':')?;
+        let key = key.trim();
+        if !key.starts_with("nameserver[") || !key.ends_with(']') {
+            return None;
+        }
+        address.trim().parse::<Ipv4Addr>().ok()
+    })?;
     (rtrust_control::validate_dns(resolver).is_ok()
         && networks.iter().any(|network| network.contains(&resolver)))
     .then_some(resolver)
@@ -160,6 +171,16 @@ mod tests {
             selected_resolver(config, &["203.0.113.0/24".parse().unwrap()]),
             None
         );
+        for first in [
+            "resolver #1\n domain : corp.example\n nameserver[0] : 8.8.8.8\n",
+            "resolver #1\n nameserver[0] : 8.8.8.8\n flags : Supplemental\n",
+            "resolver #1\n nameserver[0] : 8.8.8.8\n options : mdns\n",
+        ] {
+            assert_eq!(
+                selected_resolver(first, &["0.0.0.0/0".parse().unwrap()]),
+                None
+            );
+        }
         assert_eq!(
             selected_resolver("nameserver[0] : 127.0.0.1", &["0.0.0.0/0".parse().unwrap()]),
             None

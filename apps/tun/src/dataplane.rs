@@ -64,13 +64,7 @@ pub async fn run_with_dns<D: PacketDevice>(
     let (reply_tx, mut reply_rx) = mpsc::channel(64);
     let mut workers = JoinSet::new();
     let direct_reply = reply_tx.clone();
-    workers.spawn(relay_udp(
-        session.clone(),
-        tunnel,
-        udp_rx,
-        reply_tx,
-        routing.as_ref().map(|r| r.0.clone()),
-    ));
+    workers.spawn(relay_udp(session.clone(), tunnel, udp_rx, reply_tx));
     let (icmp_tx, icmp_rx) = mpsc::channel(64);
     let (icmp_reply_tx, mut icmp_reply_rx) = mpsc::channel(64);
     workers.spawn(relay_icmp(session.clone(), icmp_rx, icmp_reply_tx));
@@ -109,12 +103,16 @@ pub async fn run_with_dns<D: PacketDevice>(
                         let dns = dns.clone();
                         let routing = routing.clone();
                         tokio::spawn(async move {
+                            let action = routing.as_ref().map(|r| r.0.route_flow(key.1));
+                            if action.is_some_and(|action| !matches!(action, rtrust_engine::routing::Action::Tunnel | rtrust_engine::routing::Action::Direct)) {
+                                return Err(rtrust_engine::Error::Unsupported("blocked flow policy decision"));
+                            }
                             if key.1.port() == 53 && !dns.is_empty() {
                                 return rtrust_engine::dns::serve_tcp(&dns, &session, &mut remote, routing.as_ref().map(|r| r.0.as_ref())).await;
                             }
                             if let Some((router, protect)) = &routing {
                                 if key.1.port() == 53 { return rtrust_engine::dns::forward_tcp(&session, key.1, &mut remote, router).await; }
-                                if !router.tunneled(key.1) {
+                                if action == Some(rtrust_engine::routing::Action::Direct) {
                                     let mut direct = rtrust_engine::direct_tcp(key.1, protect).await?;
                                     tokio::io::copy_bidirectional(&mut remote, &mut direct).await?;
                                     return Ok(());
@@ -129,6 +127,7 @@ pub async fn run_with_dns<D: PacketDevice>(
                         })
                     }),
                     Some(Packet::Udp(d)) if (d.source.ip() == address || d.source.ip() == crate::ipv6::ADDRESS) => {
+                        let action = routing.as_ref().map(|r| r.0.route_flow(d.destination));
                         if d.destination.port() == 53 && !session.ipv6()
                             && let Some(payload) = rtrust_engine::dns::aaaa_nodata(&d.payload) {
                             if let Some(bytes) = packet::udp_packet(&Datagram { source: d.destination, destination: d.source, payload }) {
@@ -139,14 +138,23 @@ pub async fn run_with_dns<D: PacketDevice>(
                                 let dns = dns.clone(); let session = session.clone();
                                 let router = routing.as_ref().map(|r| r.0.clone());
                                 dns_jobs.spawn(async move {
+                                    let version = router.as_ref().map(|router| router.version());
                                     let payload = rtrust_engine::dns::exchange(&dns, &session, &d.payload).await?;
-                                    if let Some(router) = router { router.learn(&d.payload, &payload); }
+                                    if let (Some(router), Some(version)) = (router, version) { router.learn_for(&version, &d.payload, &payload); }
                                     Ok::<_,rtrust_engine::Error>(Datagram { source: d.destination, destination: d.source, payload })
                                 });
                             }
-                        } else if let Some((router, protect)) = &routing {
-                            if router.tunneled(d.destination) { let _ = udp_tx.try_send(d); }
-                            else {
+                        } else if d.destination.port() == 53 && routing.is_some() {
+                            if dns_jobs.len() < 32 {
+                                let session = session.clone();
+                                let router = routing.as_ref().unwrap().0.clone();
+                                dns_jobs.spawn(async move {
+                                    rtrust_engine::dns::forward_udp(&session, d, &router).await
+                                });
+                            }
+                        } else if let Some((_, protect)) = &routing {
+                            if action == Some(rtrust_engine::routing::Action::Tunnel) { let _ = udp_tx.try_send(d); }
+                            else if action == Some(rtrust_engine::routing::Action::Direct) {
                                 direct_flows.retain(|_, sender| !sender.is_closed());
                                 let key = (d.source, d.destination);
                                 if !direct_flows.contains_key(&key) && direct_flows.len() < 128 {
@@ -160,7 +168,7 @@ pub async fn run_with_dns<D: PacketDevice>(
                         } else { let _ = udp_tx.try_send(d); }
                     },
                     // Android unprivileged direct ICMP is not a supported bypass path.
-                    Some(Packet::Icmp(echo)) if routing.as_ref().is_none_or(|r| r.0.tunneled(std::net::SocketAddr::new(echo.destination,0))) => { let _ = icmp_tx.try_send(echo); },
+                    Some(Packet::Icmp(echo)) if routing.as_ref().is_none_or(|r| r.0.route_flow(std::net::SocketAddr::new(echo.destination,0)) == rtrust_engine::routing::Action::Tunnel) => { let _ = icmp_tx.try_send(echo); },
                     _ => {},
                 }
             }
@@ -206,15 +214,11 @@ async fn relay_udp(
     mut tunnel: rtrust_engine::Tunnel,
     mut input: mpsc::Receiver<Datagram>,
     output: mpsc::Sender<Datagram>,
-    router: Option<std::sync::Arc<rtrust_engine::routing::Router>>,
 ) -> Result<(), rtrust_engine::Error> {
     let mut delay = Duration::from_millis(250);
     loop {
         let started = Instant::now();
-        if udp_stream(tunnel, &mut input, &output, router.as_ref())
-            .await
-            .is_ok()
-        {
+        if udp_stream(tunnel, &mut input, &output).await.is_ok() {
             return Ok(());
         }
         // Endpoint 1.1.0 can close _udp2 on an ICMP port-unreachable from
@@ -241,11 +245,9 @@ async fn udp_stream(
     tunnel: rtrust_engine::Tunnel,
     input: &mut mpsc::Receiver<Datagram>,
     output: &mpsc::Sender<Datagram>,
-    router: Option<&std::sync::Arc<rtrust_engine::routing::Router>>,
 ) -> Result<(), rtrust_engine::Error> {
     let (mut reader, mut writer) = tokio::io::split(tunnel);
     let mut mappings = HashMap::new();
-    let mut queries: HashMap<(packet::Key, u16), Vec<u8>> = HashMap::new();
     // Preserve the partially read frame when an outgoing datagram wins select.
     let mut read = Box::pin(udp::read(&mut reader));
     loop {
@@ -256,21 +258,12 @@ async fn udp_stream(
                 let key = (d.source, d.destination);
                 if !mappings.contains_key(&key) && mappings.len() >= 256 { continue; }
                 mappings.insert(key, Instant::now());
-                queries.retain(|(key, _), _| mappings.contains_key(key));
-                if d.destination.port()==53 && (2..=4096).contains(&d.payload.len()) && queries.len()<512 {
-                    let id=u16::from_be_bytes([d.payload[0],d.payload[1]]);
-                    queries.insert((key,id),d.payload.clone());
-                }
                 let frame = udp::encode(&d, "rtrust-tun")?;
                 tokio::time::timeout(Duration::from_secs(10), writer.write_all(&frame)).await.map_err(|_| rtrust_engine::Error::Protocol)??;
             }
             result = &mut read => {
                 let d = result?;
                 if mappings.get(&(d.destination, d.source)).is_some_and(|seen| seen.elapsed() < Duration::from_secs(60)) {
-                    if d.payload.len()>=2 {
-                        let id=u16::from_be_bytes([d.payload[0],d.payload[1]]);
-                        if let (Some(router), Some(query)) = (router, queries.remove(&((d.destination, d.source),id))) { router.learn(&query, &d.payload); }
-                    }
                     let _ = output.try_send(d);
                 }
                 drop(read);
