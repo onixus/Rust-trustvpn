@@ -1,5 +1,6 @@
 package org.rtrusttunnel.android;
 
+import android.annotation.SuppressLint;
 import android.content.Intent;
 import android.graphics.drawable.Icon;
 import android.os.Build;
@@ -38,6 +39,9 @@ public final class VpnTileService extends TileService {
         super.onStopListening();
     }
 
+    // Below API 34 there is no PendingIntent overload; the deprecated Intent
+    // one is only reached there.
+    @SuppressLint("StartActivityAndCollapseDeprecated")
     @Override public void onClick() {
         super.onClick();
         Runnable launch = () -> {
