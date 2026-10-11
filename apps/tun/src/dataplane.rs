@@ -56,16 +56,31 @@ pub async fn run_with_dns<D: PacketDevice>(
         rtrust_engine::SocketProtector,
     )>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_with_policy(session, tunnel, device, address, dns, routing, None).await
+}
+
+pub async fn run_with_policy<D: PacketDevice>(
+    session: Session,
+    tunnel: rtrust_engine::Tunnel,
+    device: std::sync::Arc<D>,
+    address: Ipv4Addr,
+    dns: Vec<rtrust_engine::dns::Resolver>,
+    routing: Option<(
+        std::sync::Arc<rtrust_engine::routing::Router>,
+        rtrust_engine::SocketProtector,
+    )>,
+    mut updates: Option<&mut crate::policy::Receiver>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dns = std::sync::Arc::new(dns);
     let mut dns_jobs = JoinSet::new();
     let mut direct_jobs = JoinSet::new();
     let mut direct_flows: HashMap<packet::Key, mpsc::Sender<Vec<u8>>> = HashMap::new();
-    let (udp_tx, udp_rx) = mpsc::channel(64);
+    let (mut udp_tx, udp_rx) = mpsc::channel(64);
     let (reply_tx, mut reply_rx) = mpsc::channel(64);
     let mut workers = JoinSet::new();
-    let direct_reply = reply_tx.clone();
+    let mut direct_reply = reply_tx.clone();
     workers.spawn(relay_udp(session.clone(), tunnel, udp_rx, reply_tx));
-    let (icmp_tx, icmp_rx) = mpsc::channel(64);
+    let (mut icmp_tx, icmp_rx) = mpsc::channel(64);
     let (icmp_reply_tx, mut icmp_reply_rx) = mpsc::channel(64);
     workers.spawn(relay_icmp(session.clone(), icmp_rx, icmp_reply_tx));
     let mut assembler = crate::fragments::Reassembler::default();
@@ -84,6 +99,49 @@ pub async fn run_with_dns<D: PacketDevice>(
     });
     loop {
         tokio::select! {
+            update = async { updates.as_mut().unwrap().input.recv().await }, if updates.is_some() => {
+                let Some(update) = update else { updates = None; continue; };
+                let Some((router, _)) = &routing else {
+                    let _ = update.reply.send(Err("Flow policy unavailable for this mode".into())); continue;
+                };
+                let prepared = match update.prepare(router) {
+                    Ok(policy) => policy,
+                    Err(error) => { let _ = update.reply.send(Err(error)); continue; }
+                };
+                // Prepare the replacement upstream stream while the prior policy
+                // remains authoritative. Failure leaves its flows undisturbed.
+                let tunnel = match tokio::time::timeout(Duration::from_secs(5), session.open_udp()).await {
+                    Ok(Ok(tunnel)) => tunnel,
+                    _ => { let _ = update.reply.send(Err("Cannot prepare policy cutover".into())); continue; }
+                };
+                if update.reply.is_closed() { continue; }
+                // Pause packet intake. Abort AND join every old socket owner,
+                // including TCP setup/protection, DNS and both UDP relay paths.
+                stack.drain().await;
+                dns_jobs.shutdown().await;
+                direct_jobs.shutdown().await;
+                workers.shutdown().await;
+                direct_flows.clear();
+                assembler = crate::fragments::Reassembler::default();
+                let result = if update.reply.is_closed() { Err("Policy request cancelled".into()) }
+                    else { router.commit_local(&update.expected, prepared).map_err(|e| e.to_string()) };
+                let (sender, receiver) = mpsc::channel(64); udp_tx = sender;
+                let (reply, incoming_reply) = mpsc::channel(64); reply_rx = incoming_reply;
+                direct_reply = reply.clone();
+                workers.spawn(relay_udp(session.clone(), tunnel, receiver, reply));
+                let (sender, receiver) = mpsc::channel(64); icmp_tx = sender;
+                let (reply, incoming_reply) = mpsc::channel(64); icmp_reply_rx = incoming_reply;
+                workers.spawn(relay_icmp(session.clone(), receiver, reply));
+                let monitor = session.clone();
+                workers.spawn(async move { loop {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::time::timeout(Duration::from_secs(10), monitor.health()).await
+                        .map_err(|_| rtrust_engine::Error::Timeout)??;
+                }});
+                // Even a stale/cancelled commit resumes under its intact old
+                // policy. Only a completed drain + publication receives success.
+                let _ = update.reply.send(result);
+            }
             received = device.recv(&mut incoming) => {
                 let len = received?;
                 if !((len>=20 && incoming[0]>>4==4 && incoming[12..16]==address.octets()) || (len>=40 && incoming[0]>>4==6 && incoming[8..24]==crate::ipv6::ADDRESS.octets())) {continue;}

@@ -2,7 +2,7 @@
 use rtrust_desktop::{Controller, Summary, View};
 use tauri::{Manager, State};
 use tokio::sync::Mutex;
-type Shared = Mutex<Controller>;
+type Shared = std::sync::Arc<Mutex<Controller>>;
 fn note_pending(c: &mut Controller, result: Result<Summary, String>) {
     c.status = match result {
         Ok(p) => format!(
@@ -46,6 +46,153 @@ async fn view(state: State<'_, Shared>) -> Result<View, String> {
     }
     Ok(c.view())
 }
+#[tauri::command]
+async fn diagnostic_cancel(state: State<'_, Shared>) -> Result<(), String> {
+    state.lock().await.diagnostics.cancel();
+    Ok(())
+}
+#[tauri::command]
+async fn diagnostic_start(
+    target: String,
+    action: String,
+    state: State<'_, Shared>,
+) -> Result<(), String> {
+    use rtrust_desktop::diagnostics::{self, Action, FollowUp};
+    let target = diagnostics::Target::parse(&target)?;
+    let shared = state.inner().clone();
+    let mut c = shared.lock().await;
+    let mut session = c.session.clone().ok_or("Connect the system VPN first")?;
+    if !session.is_tun() {
+        return Err("System diagnostics require TUN or whole-device mode".into());
+    }
+    let mut epoch = c.session_epoch;
+    let mut generation = session.observations().generation;
+    let previous =
+        c.diagnostics
+            .current_report(epoch, generation, rtrust_control::observations::now_ms());
+    let follow_action = if action == "reconnect" {
+        Action::Reconnect
+    } else {
+        Action::Recheck
+    };
+    let endpoint = match action.as_str() {
+        "recheck" => false,
+        "reconnect"
+            if previous
+                .as_ref()
+                .is_some_and(|r| r.verdict().actions.contains(&Action::Reconnect)) =>
+        {
+            if let rtrust_desktop::connection::Session::Tun(client) = &session
+                && client.status().always_on == Some(true)
+            {
+                return Err("Disable Always-on explicitly before reconnecting".into());
+            }
+            let index = c
+                .connected_profile
+                .ok_or("Connected profile identity unavailable")?;
+            let revision = c.revision;
+            c.disconnect().await?;
+            c.connect_profile(revision, index).await?;
+            session = c.session.clone().ok_or("Reconnection failed")?;
+            epoch = c.session_epoch;
+            generation = session.observations().generation;
+            false
+        }
+        "check_endpoint"
+            if previous
+                .as_ref()
+                .is_some_and(|r| r.verdict().actions.contains(&Action::CheckEndpoint)) =>
+        {
+            true
+        }
+        _ => return Err("This diagnostic action is unavailable or historical".into()),
+    };
+    let selection = (c.vault.connection.mode == rtrust_store::Mode::Tun)
+        .then(|| c.vault.connection.effective_selection());
+    let context = c
+        .vault
+        .connection
+        .managed_routes
+        .as_ref()
+        .map(|m| rtrust_profile::routing::Context {
+            source: rtrust_profile::routing::Source::ManagedUnknown,
+            revision: Some(m.revision.clone()),
+        })
+        .unwrap_or(rtrust_profile::routing::Context {
+            source: rtrust_profile::routing::Source::Local,
+            revision: None,
+        });
+    let ticket = c.diagnostics.begin(epoch, generation)?;
+    let task_state = shared.clone();
+    let task = tokio::spawn(async move {
+        let mut report = if endpoint {
+            let mut report = previous.expect("checked current report");
+            let check = diagnostics::check_endpoint(session).await;
+            if !report.attach_endpoint(check) {
+                return;
+            }
+            report
+        } else {
+            let mut report = diagnostics::run(target, session, selection, context).await;
+            if let Some(previous) = previous {
+                report.follows = Some(FollowUp {
+                    action: follow_action,
+                    previous_cause: previous.verdict().cause,
+                    previous_finished_at_ms: previous.finished_at_ms,
+                });
+            }
+            report
+        };
+        // No controller lock is held while resolver/route/TLS work runs.
+        let mut c = task_state.lock().await;
+        let Some(current) = c.session.as_ref() else {
+            return;
+        };
+        let current_generation = current.observations().generation;
+        let current_epoch = c.session_epoch;
+        if report.lifecycle.generation != current_generation {
+            report.https = diagnostics::Fact::SessionChanged;
+        }
+        c.diagnostics
+            .finish(ticket, current_epoch, current_generation, report);
+    });
+    c.diagnostics.own(task.abort_handle());
+    Ok(())
+}
+#[tauri::command]
+async fn diagnostic_edit(text: String, state: State<'_, Shared>) -> Result<(), String> {
+    state
+        .lock()
+        .await
+        .diagnostics
+        .edit_export(text)
+        .map_err(str::to_owned)
+}
+#[tauri::command]
+async fn diagnostic_replace(state: State<'_, Shared>) -> Result<(), String> {
+    state.lock().await.diagnostics.replace_export();
+    Ok(())
+}
+#[tauri::command]
+async fn diagnostic_export(state: State<'_, Shared>) -> Result<(), String> {
+    let text = {
+        let c = state.lock().await;
+        c.view()
+            .diagnostics
+            .export
+            .ok_or("Run a diagnostic first")?
+    };
+    if let Some(file) = rfd::AsyncFileDialog::new()
+        .set_title("Save redacted local diagnostic")
+        .set_file_name("vpn-diagnostic.json")
+        .save_file()
+        .await
+    {
+        rtrust_store::write_private(file.path(), text.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn preview(input: String, state: State<'_, Shared>) -> Result<Summary, String> {
     let input = zeroize::Zeroizing::new(input);
@@ -153,49 +300,10 @@ async fn sync_profiles(c: &mut Controller) -> Result<(), String> {
     if next.connection.sync.origin != client.address() {
         return Err("Portal registration changed; enroll again".into());
     }
-    let mut total = 0;
-    for remote in client.list().await? {
-        let old = next
-            .connection
-            .sync
-            .tracked
-            .iter()
-            .find(|p| p.id == remote.id)
-            .cloned();
-        if old.as_ref().is_some_and(|p| p.revision == remote.revision) {
-            continue;
-        }
-        let profile = client.download(&remote).await?;
-        total += profile
-            .export(rtrust_profile::Format::Json)
-            .map_err(|e| e.to_string())?
-            .content
-            .len();
-        if total > 4 * rtrust_profile::MAX_INPUT {
-            return Err("Profile sync exceeds 4 MiB".into());
-        }
-        if let Some(old) = old {
-            if let Some(index) = next.profiles.iter().position(|p| p == &old.baseline) {
-                next.profiles[index] = profile.clone()
-            } else {
-                return Err(
-                    "Local profile changed; resolve the conflict in Native UI before syncing"
-                        .into(),
-                );
-            }
-        } else {
-            next.profiles.push(profile.clone())
-        }
-        next.connection.sync.tracked.retain(|p| p.id != remote.id);
-        next.connection
-            .sync
-            .tracked
-            .push(rtrust_store::TrackedProfile {
-                id: remote.id,
-                revision: remote.revision,
-                baseline: profile,
-            });
-    }
+    let snapshot = tokio::time::timeout(std::time::Duration::from_secs(30), client.snapshot())
+        .await
+        .map_err(|_| "Portal sync exceeded 30 seconds")??;
+    next = rtrust_desktop::sync::prepare(&next, snapshot)?;
     c.save(next)
 }
 #[tauri::command]
@@ -307,9 +415,14 @@ fn main() {
         note_pending(&mut controller, result);
     }
     tauri::Builder::default()
-        .manage(Mutex::new(controller))
+        .manage(std::sync::Arc::new(Mutex::new(controller)))
         .invoke_handler(tauri::generate_handler![
             ui_ready,
+            diagnostic_cancel,
+            diagnostic_start,
+            diagnostic_edit,
+            diagnostic_replace,
+            diagnostic_export,
             view,
             preview,
             pick_import,

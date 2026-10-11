@@ -17,7 +17,8 @@ import org.json.*;
 
 /** Native Android widgets; no WebView and no remote UI code. */
 public class MainActivity extends Activity {
-    private static final int PICK = 10, SAVE = 11, CONSENT = 12, QR_IMAGE = 13;
+    private static final int PICK = 10, SAVE = 11, CONSENT = 12, QR_IMAGE = 13, DIAGNOSTIC_SAVE = 14;
+    private String diagnosticExport;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private LinearLayout rows;
     private String selectedId, pendingConnectId;
@@ -116,10 +117,10 @@ public class MainActivity extends Activity {
         startForegroundService(new Intent(this, TunnelService.class).putExtra(TunnelService.PROFILE_ID, pendingConnectId));
     }
     private void settingsMenu() {
-        new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on), java.util.Locale.getDefault().getLanguage().equals("ru") ? "Наблюдать решения маршрутизации" : "Observe local flow decisions"}, (dialog, which) -> {
+        new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on), java.util.Locale.getDefault().getLanguage().equals("ru") ? "Наблюдать решения маршрутизации" : "Observe local flow decisions", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Проверить путь VPN" : "Check VPN path", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Правила текущего подключения" : "Current connection rules"}, (dialog, which) -> {
             if (which == 0) new PortalDialog(this, vault, this::reload).show();
             else if (which == 1) vpnSettings();
-            else { if (flowCapture != null) flowCapture.dismiss(); flowCapture = FlowCaptureDialog.show(this); }
+            else { if (flowCapture != null) flowCapture.dismiss(); flowCapture = which == 2 ? FlowCaptureDialog.show(this) : which == 3 ? DiagnosticsDialog.show(this) : FlowPolicyDialog.show(this); }
         }).show();
     }
     private int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
@@ -333,8 +334,21 @@ public class MainActivity extends Activity {
         Intent consent = VpnService.prepare(this);
         if (consent != null) startActivityForResult(consent, CONSENT); else startSelectedConnection();
     }
+    void saveDiagnostic(String report) {
+        if (report.getBytes(StandardCharsets.UTF_8).length > 65536) { error("Report exceeds 64 KiB"); return; }
+        diagnosticExport = report;
+        startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/json")
+            .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,"vpn-diagnostic.json"), DIAGNOSTIC_SAVE);
+    }
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == DIAGNOSTIC_SAVE) {
+            String report = diagnosticExport; diagnosticExport = null;
+            if (result == RESULT_OK && data != null && report != null) try (OutputStream out = getContentResolver().openOutputStream(data.getData(), "wt")) {
+                if (out == null) throw new IOException(); out.write(report.getBytes(StandardCharsets.UTF_8));
+            } catch (Exception ignored) { error(getString(R.string.could_not_write_export)); }
+            return;
+        }
         com.google.zxing.integration.android.IntentResult qr = com.google.zxing.integration.android.IntentIntegrator.parseActivityResult(request, result, data);
         if (qr != null) { if (qr.getContents() != null) preview(qr.getContents()); return; }
         if (request == QR_IMAGE && result == RESULT_OK && data != null) {

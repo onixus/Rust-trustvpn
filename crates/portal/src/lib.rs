@@ -88,6 +88,8 @@ struct Capabilities {
     max_profile_bytes: u64,
     #[serde(default)]
     routing: Option<u64>,
+    #[serde(default)]
+    snapshot: Option<u64>,
 }
 impl Capabilities {
     fn validate(&self) -> Result<(), String> {
@@ -96,8 +98,134 @@ impl Capabilities {
             || !self.enrollment.iter().any(|v| v == "one_time_code")
             || self.max_profile_bytes == 0
             || self.routing.is_some_and(|v| v != 1)
+            || self.snapshot.is_some_and(|v| v != 1)
         {
             return Err("Панель не поддерживает совместимый контракт профилей v2".into());
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceAccess {
+    pub schema: u32,
+    pub session_policy: String,
+    pub profiles: Vec<DeviceCredential>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceCredential {
+    pub id: String,
+    pub generation: u64,
+    pub desired: String,
+    pub state: String,
+    pub legacy_shared_access: String,
+    pub receipt: Option<CredentialReceipt>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialReceipt {
+    pub checked_at: u64,
+    pub generation: u64,
+    pub verifier_sha256: String,
+    pub endpoint_generation: u64,
+    pub checks: Vec<CredentialCheck>,
+    pub scope: String,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialCheck {
+    pub protocol: String,
+    pub outcome: String,
+    pub elapsed_ms: Option<u64>,
+}
+impl DeviceAccess {
+    fn validate(&self) -> Result<(), String> {
+        let invalid = || "Некорректное состояние управляемого доступа".to_owned();
+        if self.schema != 1
+            || self.session_policy != "restart_all_endpoint_sessions"
+            || self.profiles.len() > 200
+        {
+            return Err(invalid());
+        }
+        let mut ids = std::collections::HashSet::new();
+        for profile in &self.profiles {
+            identifier(&profile.id)?;
+            if !ids.insert(&profile.id)
+                || profile.generation == 0
+                || !matches!(profile.desired.as_str(), "active" | "revoked")
+                || !matches!(
+                    profile.state.as_str(),
+                    "requested" | "pending" | "applied" | "failed"
+                )
+                || !matches!(
+                    profile.legacy_shared_access.as_str(),
+                    "unmanaged" | "not_issued_by_this_flow"
+                )
+            {
+                return Err(invalid());
+            }
+            if let Some(receipt) = &profile.receipt {
+                if receipt.generation != profile.generation
+                    || receipt.checked_at == 0
+                    || receipt.verifier_sha256.len() != 64
+                    || !receipt
+                        .verifier_sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit())
+                    || receipt.checks.len() > 4
+                    || receipt.scope != "managed_credentials_only_legacy_shared_access_unmanaged"
+                {
+                    return Err(invalid());
+                }
+                for check in &receipt.checks {
+                    if !matches!(check.protocol.as_str(), "http2" | "http3")
+                        || !matches!(
+                            check.outcome.as_str(),
+                            "authenticated" | "rejected" | "unavailable"
+                        )
+                    {
+                        return Err(invalid());
+                    }
+                }
+            }
+            if profile.state == "applied" {
+                let receipt = profile.receipt.as_ref().ok_or_else(invalid)?;
+                for protocol in ["http2", "http3"] {
+                    let checks: Vec<_> = receipt
+                        .checks
+                        .iter()
+                        .filter(|c| c.protocol == protocol)
+                        .collect();
+                    let expected = if profile.desired == "revoked" {
+                        "rejected"
+                    } else {
+                        "authenticated"
+                    };
+                    let exact = if profile.desired == "revoked" {
+                        checks.len() == 1 && checks[0].outcome == "rejected"
+                    } else {
+                        (checks.len() == 1 && checks[0].outcome == "authenticated")
+                            || (checks.len() == 2
+                                && checks
+                                    .iter()
+                                    .filter(|c| c.outcome == "authenticated")
+                                    .count()
+                                    == 1
+                                && checks.iter().filter(|c| c.outcome == "rejected").count() == 1)
+                    };
+                    if !exact
+                        || checks.is_empty()
+                        || checks.len() > 2
+                        || !checks.iter().any(|c| c.outcome == expected)
+                        || checks.iter().any(|c| c.outcome == "unavailable")
+                        || (profile.desired == "revoked"
+                            && checks.iter().any(|c| c.outcome != "rejected"))
+                    {
+                        return Err(invalid());
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -367,6 +495,24 @@ impl Client {
         self.token = token;
         Ok(self)
     }
+    /// Control-plane receipt only, dated by the server. It does not prove that
+    /// the current system VPN or arbitrary destinations are available.
+    pub async fn device_access(&self) -> Result<DeviceAccess, String> {
+        let device = self
+            .device_id
+            .ok_or("Панель не сообщила идентификатор устройства")?;
+        let result: Option<DeviceAccess> = self
+            .exchange(
+                Method::GET,
+                &format!("devices/{device}/credentials"),
+                None,
+                true,
+            )
+            .await?;
+        let access = result.ok_or("Панель не поддерживает состояние managed credentials")?;
+        access.validate()?;
+        Ok(access)
+    }
     pub async fn list(&self) -> Result<Vec<RemoteProfile>, String> {
         #[derive(Deserialize)]
         struct Listed {
@@ -406,7 +552,11 @@ impl Client {
     /// Fetch all data before publishing any local update. Recheck source revisions;
     /// v2 has no server transaction revision, so this detects observed changes only.
     pub async fn snapshot(&self) -> Result<Snapshot, String> {
-        self.check_capabilities().await?;
+        let capabilities: Capabilities = self.request(Method::GET, "capabilities", None).await?;
+        capabilities.validate()?;
+        if capabilities.snapshot == Some(1) {
+            return self.atomic_snapshot().await;
+        }
         let profiles = self.list().await?;
         let routing = self.routing_state().await?;
         let mut downloaded = Vec::with_capacity(profiles.len());
@@ -433,6 +583,66 @@ impl Client {
             profiles: downloaded,
             routing,
         })
+    }
+    async fn atomic_snapshot(&self) -> Result<Snapshot, String> {
+        #[derive(Deserialize, zeroize::ZeroizeOnDrop)]
+        #[serde(deny_unknown_fields)]
+        struct Item {
+            #[zeroize(skip)]
+            metadata: RemoteProfile,
+            content: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Batch {
+            version: u32,
+            revision: String,
+            profiles: Vec<Item>,
+            routing: Routing,
+        }
+        let batch: Batch = self
+            .request(
+                Method::POST,
+                "snapshot",
+                Some(json!({"include_secrets":true})),
+            )
+            .await?;
+        if batch.version != 1
+            || batch.revision.len() != 64
+            || !batch.revision.bytes().all(|b| b.is_ascii_hexdigit())
+            || batch.profiles.len() > 200
+        {
+            return Err("Некорректная атомарная партия панели".into());
+        }
+        let routing = RoutingState::Available(routing_policy(batch.routing)?);
+        let mut profiles = Vec::with_capacity(batch.profiles.len());
+        let mut total = 0usize;
+        let mut ids = std::collections::HashSet::new();
+        for mut item in batch.profiles {
+            let content = Zeroizing::new(std::mem::take(&mut item.content));
+            total = total
+                .checked_add(content.len())
+                .ok_or("Партия профилей слишком большая")?;
+            if content.len() > MAX_INPUT
+                || total > 4 * MAX_INPUT
+                || !ids.insert(item.metadata.id.clone())
+            {
+                return Err("Партия профилей слишком большая или неоднозначная".into());
+            }
+            identifier(&item.metadata.id)?;
+            if item.metadata.revision.is_empty()
+                || item.metadata.revision.len() > 256
+                || !item.metadata.revision.bytes().all(|b| b.is_ascii_graphic())
+                || item.metadata.origin.is_empty()
+                || item.metadata.origin.len() > 80
+                || item.metadata.origin.chars().any(char::is_control)
+            {
+                return Err("Некорректная версия профиля панели".into());
+            }
+            let profile = Profile::import(&content).map_err(|_| "Получен недопустимый профиль")?;
+            profiles.push((item.metadata.clone(), profile));
+        }
+        Ok(Snapshot { profiles, routing })
     }
     pub async fn download(&self, profile: &RemoteProfile) -> Result<Profile, String> {
         #[derive(Deserialize)]

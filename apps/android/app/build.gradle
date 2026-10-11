@@ -4,7 +4,7 @@ android {
     compileSdk 36
     ndkVersion "28.2.13676358"
     defaultConfig {
-        applicationId 'org.rtrusttunnel.android'
+        applicationId (project.findProperty('rtrustApplicationId') ?: 'org.rtrusttunnel.android').toString()
         minSdk 29
         targetSdk 36
         versionCode = (project.findProperty('rtrustVersionCode') ?: '50001').toInteger()

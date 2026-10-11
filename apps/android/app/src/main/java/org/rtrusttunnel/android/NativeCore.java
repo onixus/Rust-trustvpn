@@ -17,4 +17,5 @@ public final class NativeCore {
     /** Redacted local flow decisions; 0 identity, 1 enable, 2 disable, 3 poll. */
     public native String flowCapture(long session, long capture, int operation);
     public native String status();
+    public native String flowPolicy(String request);
 }

@@ -229,3 +229,33 @@ async fn caller_timeout_cancels_snapshot_before_any_batch_is_returned() {
     );
     assert_eq!(fixture.observed.lock().unwrap().len(), 4);
 }
+
+#[tokio::test]
+async fn negotiated_atomic_snapshot_uses_one_body_and_rejects_ambiguous_batches() {
+    let legacy = snapshot_steps();
+    let mut capabilities = legacy[0].body.clone();
+    capabilities["snapshot"] = json!(1);
+    let metadata = profile_list("1")["profiles"][0].clone();
+    let content = legacy[3].body["content"].clone();
+    let batch = json!({"version":1,"revision":"a".repeat(64),"profiles":[{"metadata":metadata,"content":content}],"routing":{"policy":null}});
+    let f = fixture(vec![
+        step("/portal/v2/capabilities", capabilities.clone()),
+        step("/portal/v2/snapshot", batch.clone()),
+    ])
+    .await;
+    let result = authorized(&f.client).snapshot().await.unwrap();
+    assert_eq!(result.profiles.len(), 1);
+    assert_eq!(result.routing, RoutingState::Available(None));
+    assert_eq!(f.observed.lock().unwrap().len(), 2);
+    let mut duplicated = batch.clone();
+    let item = duplicated["profiles"][0].clone();
+    duplicated["profiles"].as_array_mut().unwrap().push(item);
+    let f = fixture(vec![
+        step("/portal/v2/capabilities", capabilities),
+        step("/portal/v2/snapshot", duplicated),
+    ])
+    .await;
+    let error = authorized(&f.client).snapshot().await.err().unwrap();
+    assert!(!error.contains("FIXTURE-SECRET"));
+    assert_eq!(f.observed.lock().unwrap().len(), 2);
+}

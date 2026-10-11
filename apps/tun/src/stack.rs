@@ -231,6 +231,23 @@ impl Stack {
         });
     }
 
+    /// Revoke pending connects as well as established TCP sockets, then wait
+    /// until their socket owners have exited before acknowledging a policy swap.
+    pub async fn drain(&mut self) {
+        let mut tasks = Vec::new();
+        for (_, mut flow) in self.flows.drain() {
+            if let Some(task) = flow.task.take() {
+                task.abort();
+                tasks.push(task);
+            }
+            self.sockets.remove(flow.socket);
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+        self.device.input = None;
+        self.device.output.clear();
+    }
     pub fn output(&mut self) -> Option<Vec<u8>> {
         self.device.output.pop_front()
     }
@@ -242,6 +259,34 @@ impl Stack {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn policy_drain_joins_a_pending_connect_and_removes_old_output() {
+        struct Owned(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        use std::sync::Arc;
+        let owns_socket = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let signalled = entered.clone();
+        let owned = owns_socket.clone();
+        let mut stack = Stack::new();
+        stack.ingest(crate::packet::test_syn(4000), move |_, _| {
+            tokio::spawn(async move {
+                let _socket = Owned(owned);
+                signalled.notify_one();
+                std::future::pending::<Result<(), rtrust_engine::Error>>().await
+            })
+        });
+        entered.notified().await;
+        assert_eq!(stack.connections(), 1);
+        stack.drain().await;
+        assert!(!owns_socket.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(stack.connections(), 0);
+        assert!(stack.output().is_none());
+    }
     #[tokio::test]
     async fn parallel_tcp_downloads_preserve_every_byte() {
         parallel_downloads(false).await;

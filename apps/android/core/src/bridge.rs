@@ -11,12 +11,12 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU8, Ordering},
     },
-    time::Duration,
 };
 use tokio::sync::watch;
 use zeroize::Zeroizing;
 
 struct Runner {
+    policy: rtrust_tun::policy::Controller,
     cancel: watch::Sender<bool>,
     thread: std::thread::JoinHandle<()>,
 }
@@ -132,9 +132,24 @@ fn start<'a>(
     }
     let policy: rtrust_engine::routing::Policy = serde_json::from_value(profile.policy.clone())
         .map_err(|_| jni::errors::Error::NullPtr("Invalid flow policy"))?;
+    let local = env
+        .call_method(
+            &protector,
+            jni_str!("allowPolicyMutation"),
+            jni_sig!("()Z"),
+            &[],
+        )?
+        .z()?;
     let router = Arc::new(
         policy
-            .compile()
+            .compile_with_context(rtrust_profile::routing::Context {
+                source: if local {
+                    rtrust_profile::routing::Source::EmbeddedProfile
+                } else {
+                    rtrust_profile::routing::Source::ManagedUnknown
+                },
+                revision: None,
+            })
             .map_err(|_| jni::errors::Error::NullPtr("Invalid flow policy"))?,
     );
     let protector = env.new_global_ref(protector)?;
@@ -165,6 +180,7 @@ fn start<'a>(
         }
     });
     let (cancel, receiver) = watch::channel(false);
+    let (policy_control, policy_receiver) = rtrust_tun::policy::Controller::new(router.clone());
     let session = FLOWS
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -178,7 +194,15 @@ fn start<'a>(
                     .worker_threads(2)
                     .enable_all()
                     .build()?;
-                runtime.block_on(run(profile, owned, protect, receiver, router, session))
+                runtime.block_on(run(
+                    profile,
+                    owned,
+                    protect,
+                    receiver,
+                    router,
+                    session,
+                    policy_receiver,
+                ))
             }));
             FLOWS
                 .lock()
@@ -193,7 +217,11 @@ fn start<'a>(
         });
     match thread {
         Ok(thread) => {
-            *slot = Some(Runner { cancel, thread });
+            *slot = Some(Runner {
+                policy: policy_control,
+                cancel,
+                thread,
+            });
             Ok(true)
         }
         Err(_) => {
@@ -276,6 +304,110 @@ fn status<'a>(env: &mut Env<'a>, _this: JObject<'a>) -> jni::errors::Result<JStr
         serde_json::json!({"state":STATE.load(Ordering::SeqCst),"message":&*message,"observations":OBSERVATIONS.lock().unwrap_or_else(|p| p.into_inner()).snapshot()}).to_string(),
     )
 }
+
+const _: jni::NativeMethod = native_method! {java_type="org.rtrusttunnel.android.NativeCore",name="flowPolicy",extern fn flow_policy(raw:JString)->JString,};
+fn flow_policy<'a>(
+    env: &mut Env<'a>,
+    _this: JObject<'a>,
+    raw: JString<'a>,
+) -> jni::errors::Result<JString<'a>> {
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+    enum Mutation {
+        Version,
+        Preview {
+            expected: rtrust_engine::routing::PolicyVersion,
+            policy: rtrust_engine::routing::Policy,
+            destination: String,
+        },
+        Apply {
+            expected: rtrust_engine::routing::PolicyVersion,
+            policy: rtrust_engine::routing::Policy,
+        },
+        Rollback {
+            expected: rtrust_engine::routing::PolicyVersion,
+            previous_revision: String,
+        },
+    }
+    let result = (|| {
+        let raw = input(env, &raw).map_err(|_| "Invalid policy request")?;
+        if raw.len() > 40 * 1024 {
+            return Err("Policy request too large");
+        }
+        let mutation: Mutation =
+            serde_json::from_str(&raw).map_err(|_| "Invalid policy request")?;
+        let controller = RUNNER
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|r| r.policy.clone())
+            .ok_or("Policy session unavailable")?;
+        if STATE.load(Ordering::SeqCst) != 2 {
+            return Err("Wait for the connected policy session");
+        }
+        if let Mutation::Preview {
+            expected,
+            policy,
+            destination,
+        } = &mutation
+        {
+            let destination = destination
+                .parse()
+                .map_err(|_| "Preview requires numeric IP:port")?;
+            let decision = controller
+                .preview(expected, policy, destination)
+                .map_err(|_| "Policy preview unavailable or unauthorized")?;
+            return Ok(
+                serde_json::json!({"ok":true,"version":controller.version(),"decision":decision}),
+            );
+        }
+        let version = match mutation {
+            Mutation::Version => controller.version(),
+            mutation => {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .map_err(|_| "Policy executor unavailable")?;
+                let version = runtime
+                    .block_on(async {
+                        match mutation {
+                            Mutation::Apply { expected, policy } => {
+                                controller
+                                    .apply(
+                                        expected,
+                                        policy,
+                                        rtrust_profile::routing::Context::default(),
+                                    )
+                                    .await
+                            }
+                            Mutation::Rollback {
+                                expected,
+                                previous_revision,
+                            } => controller.rollback(expected, previous_revision).await,
+                            Mutation::Version | Mutation::Preview { .. } => unreachable!(),
+                        }
+                    })
+                    .map_err(
+                        |_| "Policy changed, unsupported or unavailable; refresh its version",
+                    )?;
+                OBSERVATIONS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .policy_changed();
+                version
+            }
+        };
+        Ok(
+            serde_json::json!({"ok":true,"version":version,"scope":"flow_policy_only_os_configuration_unchanged"}),
+        )
+    })();
+    let value = match result {
+        Ok(value) => value,
+        Err(message) => serde_json::json!({"ok":false,"message":message}),
+    };
+    JString::new(env, value.to_string())
+}
+
 async fn run(
     profile: Profile,
     fd: OwnedFd,
@@ -283,6 +415,7 @@ async fn run(
     mut cancel: watch::Receiver<bool>,
     router: Arc<rtrust_engine::routing::Router>,
     runner_session: u64,
+    mut policy: rtrust_tun::policy::Receiver,
 ) -> std::io::Result<()> {
     // VpnService configured addresses, DNS and routes before handing over the FD.
     let device = Arc::new(unsafe { tun_rs::AsyncDevice::from_fd(fd.into_raw_fd()) }?);
@@ -290,16 +423,16 @@ async fn run(
         .map_err(std::io::Error::other)?
         .unwrap_or_default();
     let routing = Some((router, protect.clone()));
-    let mut delay = 1;
+    let mut budget = rtrust_mobile::recovery::Budget::default();
     loop {
         let connected = tokio::select! {
             _=cancel.changed()=>break,
-            result=async {
+            result=tokio::time::timeout(rtrust_mobile::recovery::ATTEMPT_TIMEOUT, async {
                 let session=Session::connect_protected(&profile,&protect).await?;
                 session.health().await?;
                 let tunnel=session.open_udp().await?;
                 Ok::<_,rtrust_engine::Error>((session,tunnel))
-            }=>result,
+            })=>result.unwrap_or(Err(rtrust_engine::Error::Timeout)),
         };
         match connected {
             Ok((session, tunnel)) => {
@@ -318,15 +451,13 @@ async fn run(
                 let started = std::time::Instant::now();
                 tokio::select! {
                     _=cancel.changed()=>break,
-                    _=rtrust_tun::run_android(session,tunnel,device.clone(),"169.254.254.2".parse().unwrap(),dns.clone(),routing.clone())=>{},
+                    _=rtrust_tun::run_with_policy(session,tunnel,device.clone(),"169.254.254.2".parse().unwrap(),dns.clone(),routing.clone(),Some(&mut policy))=>{},
                 }
                 FLOWS
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .transport_lost(runner_session);
-                if started.elapsed() > Duration::from_secs(30) {
-                    delay = 1;
-                }
+                budget.disconnected(started.elapsed());
                 state(3, "Connection lost; traffic blocked while reconnecting");
             }
             Err(error) => {
@@ -349,8 +480,8 @@ async fn run(
                 }
             }
         }
-        tokio::select! {_=cancel.changed()=>break,_=tokio::time::sleep(Duration::from_secs(delay))=>{}}
-        delay = (delay * 2).min(30);
+        let delay = budget.next_delay(rand::random());
+        tokio::select! {_=cancel.changed()=>break,_=tokio::time::sleep(delay)=>{}}
     }
     Ok(())
 }

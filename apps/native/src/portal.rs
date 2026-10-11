@@ -11,6 +11,7 @@ pub(super) struct State {
     profiles: Vec<RemoteProfile>,
     preview: Option<Preview>,
     consent: bool,
+    access: Option<rtrust_portal::DeviceAccess>,
 }
 #[derive(Clone)]
 pub(super) enum Action {
@@ -23,6 +24,8 @@ pub(super) enum Action {
     Forget,
     Ready(Result<Client, String>),
     Refresh,
+    Access,
+    AccessReady(Result<rtrust_portal::DeviceAccess, String>),
     Listed(Result<Vec<RemoteProfile>, String>),
     Download(usize),
     Downloaded(Box<Result<Profile, String>>),
@@ -120,6 +123,22 @@ impl App {
                         self.status="Локальная привязка удалена. Для отзыва доступа устройства удалите его в панели.".into();
                     }
                     Err(e) => self.status = e,
+                }
+            }
+            Access if !self.busy => {
+                if let Some(client) = self.portal.client.clone() {
+                    self.busy = true;
+                    return task(async move { client.device_access().await }, AccessReady);
+                }
+            }
+            AccessReady(result) => {
+                self.busy = false;
+                match result {
+                    Ok(access) => self.portal.access = Some(access),
+                    Err(error) => {
+                        self.portal.access = None;
+                        self.status = error;
+                    }
                 }
             }
             Refresh if self.can_change_profiles() => {
@@ -280,6 +299,43 @@ impl App {
                 ]
                 .spacing(8),
             );
+            content = content.push(
+                button("Проверить управляемый доступ")
+                    .on_press_maybe((!self.busy).then_some(Message::Portal(Action::Access))),
+            );
+            if let Some(access) = &self.portal.access {
+                content = content.push(text("Датированное состояние credentials на сервере; доступность текущего VPN и внешних сервисов не проверяется.").size(12));
+                for credential in &access.profiles {
+                    let state = match credential.state.as_str() {
+                        "requested" => "запрошено",
+                        "pending" => "применяется",
+                        "applied" => "подтверждено на endpoint",
+                        _ => "не подтверждено / сбой",
+                    };
+                    let desired = if credential.desired == "revoked" {
+                        "отзыв"
+                    } else {
+                        "выдача / ротация"
+                    };
+                    content = content.push(text(format!(
+                        "{} · {}: {} · поколение {}",
+                        credential.id, desired, state, credential.generation
+                    )));
+                    if credential.legacy_shared_access == "unmanaged" {
+                        content = content
+                            .push(text("Прежний общий пароль вне управляемого отзыва.").size(12));
+                    }
+                    if let Some(receipt) = &credential.receipt {
+                        content = content.push(
+                            text(format!(
+                                "Проверка сервера: {} (Unix), HTTP/2 и HTTP/3",
+                                receipt.checked_at
+                            ))
+                            .size(12),
+                        );
+                    }
+                }
+            }
             if self.portal.profiles.is_empty() {
                 content=content.push(text("Нет доступных профилей. Выдайте этому устройству права в панели и обновите список."));
             }

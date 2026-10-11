@@ -66,7 +66,7 @@ final class PortalDialog {
                 });
             }).show();
     }
-    PortalClient client(JSONObject session) throws Exception { return new PortalClient(session.getString("origin"), session.getString("token")); }
+    PortalClient client(JSONObject session) throws Exception { return new PortalClient(session); }
     void sync(JSONObject session) {
         if (TunnelService.active) { error(activity.getString(R.string.portal_disconnect)); return; }
         new AlertDialog.Builder(activity).setMessage(R.string.portal_sync_warning).setNegativeButton(android.R.string.cancel, null).setPositiveButton(R.string.portal_sync, (d,w) -> background(() -> {

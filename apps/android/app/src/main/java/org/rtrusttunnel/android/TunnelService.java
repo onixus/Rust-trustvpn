@@ -110,9 +110,18 @@ public final class TunnelService extends VpnService {
         }
         return null;
     }
+    private volatile boolean localPolicy;
+    public boolean allowPolicyMutation() { return localPolicy && !stopping; }
     private void connect(String profileId) throws Exception {
         ProfileVault vault = new ProfileVault(this);
         JSONObject profile = profileId == null ? vault.selected() : vault.profile(profileId);
+        String chosen = profileId == null ? vault.read().getString("default") : profileId;
+        localPolicy = false;
+        JSONArray entries = vault.read().getJSONArray("profiles");
+        for (int i = 0; i < entries.length(); i++) {
+            JSONObject entry = entries.getJSONObject(i);
+            if (chosen.equals(entry.getString("id"))) localPolicy = !entry.has("remote_id");
+        }
         JSONObject prepared = new JSONObject(NativeCore.INSTANCE.plan(profile.toString()));
         if (!prepared.getBoolean("ok")) throw new IllegalArgumentException("Unsupported mobile policy");
         profile = prepared.getJSONObject("profile");

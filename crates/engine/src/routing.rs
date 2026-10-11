@@ -59,6 +59,10 @@ pub struct ObservedDecision {
     pub observed_at: Instant,
     pub decision: Decision,
 }
+pub struct PreparedPolicy {
+    compiled: Compiled,
+}
+
 pub struct Router {
     policy: RwLock<RuntimePolicy>,
     learned: Mutex<HashMap<(IpAddr, String), Instant>>,
@@ -194,19 +198,19 @@ impl Router {
     /// Atomic policy replacement for subsequent decisions only. The caller must
     /// coordinate existing flow cancellation and OS routes separately.
     /// Managed policies cannot be changed through this local API.
-    pub fn apply_local(
+    pub fn prepare_local(
         &self,
         expected: &PolicyVersion,
         policy: &Policy,
         context: Context,
-    ) -> Result<PolicyVersion> {
+    ) -> Result<PreparedPolicy> {
         let candidate = policy.compile_with_context(context)?;
         let candidate = candidate
             .policy
             .into_inner()
             .unwrap_or_else(|p| p.into_inner())
             .current;
-        let mut state = self.policy.write().unwrap_or_else(|p| p.into_inner());
+        let state = self.policy.read().unwrap_or_else(|p| p.into_inner());
         if Self::token(&state) != *expected {
             return Err(Error::Unsupported("stale routing policy revision"));
         }
@@ -227,6 +231,43 @@ impl Router {
                 "direct routing requires a new protected session",
             ));
         }
+        Ok(PreparedPolicy {
+            compiled: candidate,
+        })
+    }
+    pub fn apply_local(
+        &self,
+        expected: &PolicyVersion,
+        policy: &Policy,
+        context: Context,
+    ) -> Result<PolicyVersion> {
+        let candidate = self.prepare_local(expected, policy, context)?;
+        self.commit_local(expected, candidate)
+    }
+    /// The dataplane calls this only after old pending/established flows drain.
+    pub fn commit_local(
+        &self,
+        expected: &PolicyVersion,
+        candidate: PreparedPolicy,
+    ) -> Result<PolicyVersion> {
+        let mut state = self.policy.write().unwrap_or_else(|p| p.into_inner());
+        if Self::token(&state) != *expected {
+            return Err(Error::Unsupported("stale routing policy revision"));
+        }
+        let candidate = candidate.compiled;
+        // A prepared policy can be passed across routers. Recheck ownership and
+        // direct-path authority here, not just its caller-supplied version.
+        if matches!(
+            state.current.context.source,
+            rtrust_profile::routing::Source::Admin
+                | rtrust_profile::routing::Source::ManagedUnknown
+                | rtrust_profile::routing::Source::Unknown
+        ) || state.current.context.source != candidate.context.source
+            || candidate.context.revision == state.current.context.revision
+            || (!state.direct_permitted && (candidate.selective || !candidate.rules.is_empty()))
+        {
+            return Err(Error::Unsupported("routing policy authority changed"));
+        }
         let epoch = state
             .epoch
             .checked_add(1)
@@ -238,12 +279,12 @@ impl Router {
         learned.clear();
         Ok(Self::token(&state))
     }
-    pub fn rollback_local(
+    pub fn prepare_rollback(
         &self,
         expected: &PolicyVersion,
         previous_revision: &str,
-    ) -> Result<PolicyVersion> {
-        let mut state = self.policy.write().unwrap_or_else(|p| p.into_inner());
+    ) -> Result<PreparedPolicy> {
+        let state = self.policy.read().unwrap_or_else(|p| p.into_inner());
         if Self::token(&state) != *expected {
             return Err(Error::Unsupported("stale routing rollback revision"));
         }
@@ -262,16 +303,21 @@ impl Router {
         {
             return Err(Error::Unsupported("routing rollback target unavailable"));
         }
-        let epoch = state
-            .epoch
-            .checked_add(1)
-            .ok_or(Error::Unsupported("routing epoch exhausted"))?;
-        let mut learned = self.learned.lock().unwrap_or_else(|p| p.into_inner());
-        let previous = state.previous.take().expect("validated rollback target");
-        state.previous = Some(std::mem::replace(&mut state.current, previous));
-        state.epoch = epoch;
-        learned.clear();
-        Ok(Self::token(&state))
+        Ok(PreparedPolicy {
+            compiled: state
+                .previous
+                .as_ref()
+                .expect("validated rollback target")
+                .clone(),
+        })
+    }
+    pub fn rollback_local(
+        &self,
+        expected: &PolicyVersion,
+        previous_revision: &str,
+    ) -> Result<PolicyVersion> {
+        let candidate = self.prepare_rollback(expected, previous_revision)?;
+        self.commit_local(expected, candidate)
     }
     pub fn needs_direct(&self) -> bool {
         let policy = self.policy.read().unwrap_or_else(|p| p.into_inner());

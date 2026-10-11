@@ -4,7 +4,7 @@
 <body>
 <header class="topbar">
  <div class="brand"><svg class="mark" viewBox="0 0 512 512" aria-hidden="true"><path d="M124 151h108c49 0 88 39 88 88v122" class="mark-a"/><path d="M388 361H280c-49 0-88-39-88-88V151" class="mark-b"/><path d="m288 333 32 40 32-40M160 179l32-40 32 40" class="mark-c"/></svg><strong>R-TrustTunnel</strong></div>
- <nav class="tabs" aria-label="Main navigation"><button data-page="profiles-page" aria-current="page">Profiles</button><button data-page="settings-page">Settings</button><button data-page="sync-page">Sync</button></nav>
+ <nav class="tabs" aria-label="Main navigation"><button data-page="profiles-page" aria-current="page">Profiles</button><button data-page="settings-page">Settings</button><button data-page="sync-page">Sync</button><button data-page="diagnostics-page">Diagnostics</button></nav>
 </header>
 
 <section class="connection-card" aria-label="Connection">
@@ -60,7 +60,20 @@
  </div>
  <div class="row"><button id="enroll" class="secondary">Register device</button><button id="sync" class="ghost">Sync profiles now</button></div>
  <label class="switch"><input id="syncauto" type="checkbox"><span>Background synchronization</span></label>
- <details class="panel quiet"><summary>Registration</summary><div class="panel-body"><p>Unregister this device from the portal.</p><button id="forget" class="danger">Forget registration</button></div></details>
+ <details class="panel quiet"><summary>Registration</summary><div class="panel-body"><p>Forget this local registration. Downloaded VPN credentials have independent access; this does not revoke them on the server.</p><button id="forget" class="danger">Forget registration</button></div></details>
+</section>
+<section id="diagnostics-page" class="page" hidden>
+ <div class="page-head"><div><h2>Why does the service not open?</h2><p>Checks system DNS, the route and one verified HTTPS response through the active VPN interface. Results apply to one destination.</p></div></div>
+ <label>Hostname or IP (no URL or port)<input id="diagnostic-target" value="example.com" autocomplete="off" spellcheck="false"></label>
+ <p>Uses the system resolver and sends one HTTPS HEAD request to this destination. No direct comparison or automatic upload.</p>
+ <div class="row"><button id="diagnostic-run">Check current VPN path</button><button id="diagnostic-cancel">Cancel</button><button id="diagnostic-endpoint">Check VPN endpoint</button><button id="diagnostic-reconnect">Reconnect and check again</button><button id="diagnostic-rules">Review rules</button></div>
+ <p id="diagnostic-result" role="status" aria-live="polite">No check yet.</p>
+ <pre id="diagnostic-policy"></pre>
+ <details class="panel"><summary>Preview and redact report</summary><div class="panel-body">
+ <textarea id="diagnostic-preview" spellcheck="false"></textarea>
+ <p>User additions are saved as entered. Remove sensitive details before export.</p>
+ <div class="row"><button id="diagnostic-replace">Replace edits with latest report</button><button id="diagnostic-export">Save locally…</button></div>
+ </div></details>
 </section>
 </main>
 <script src="app.js"></script></body></html>
