@@ -153,13 +153,18 @@ impl Controller {
         Ok(())
     }
     pub async fn connect(&mut self, revision: u64) -> Result<(), String> {
+        self.connect_profile(revision, 0).await
+    }
+    pub fn connection_profile(&self, revision: u64, index: usize) -> Result<Profile, String> {
         self.check(revision)?;
-        let p = self
-            .vault
+        self.vault
             .profiles
-            .first()
-            .ok_or("Import a default profile first")?
-            .clone();
+            .get(index)
+            .cloned()
+            .ok_or_else(|| "Selected profile no longer exists".into())
+    }
+    pub async fn connect_profile(&mut self, revision: u64, index: usize) -> Result<(), String> {
+        let p = self.connection_profile(revision, index)?;
         let c = &self.vault.connection;
         let mode = match c.mode {
             rtrust_store::Mode::Socks => connection::Mode::Socks,
@@ -167,7 +172,8 @@ impl Controller {
             rtrust_store::Mode::Full => connection::Mode::Full,
         };
         let selection = c.effective_selection();
-        let fallbacks = c.fallbacks(&self.vault.profiles);
+        let mut fallbacks = c.fallbacks(&self.vault.profiles);
+        fallbacks.retain(|candidate| candidate.name != p.name);
         let ipv4_only = mode == connection::Mode::Full && !p.endpoint.has_ipv6;
         self.session = Some(
             connection::Session::start(
@@ -294,6 +300,23 @@ mod tests {
                 .unwrap()
                 .contains("сна")
         );
+    }
+    #[test]
+    fn explicit_profile_selection_checks_revision_and_never_falls_back() {
+        let mut controller = Controller::smoke();
+        let mut first =
+            Profile::import(include_str!("../../../examples/demo.endpoint.toml")).unwrap();
+        first.name = "default".into();
+        let mut second = first.clone();
+        second.name = "selected".into();
+        controller.vault.profiles = vec![first, second];
+        assert_eq!(
+            controller.connection_profile(0, 1).unwrap().name,
+            "selected"
+        );
+        assert_eq!(controller.connection_profile(0, 0).unwrap().name, "default");
+        assert!(controller.connection_profile(1, 1).is_err());
+        assert!(controller.connection_profile(0, 2).is_err());
     }
     #[test]
     fn webview_metadata_never_exposes_profile_or_sync_credentials() {

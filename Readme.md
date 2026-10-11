@@ -146,7 +146,7 @@ Run the GUI as a normal desktop user. System VPN on desktop requires the privile
 
 1. Import a profile file or open/paste a tt://, hy2:// or hysteria2:// link.
 2. Review the parsed profile and add or replace it.
-3. Select the default profile and connection mode.
+3. Select the profile to connect and the connection mode.
 4. For system VPN, install the matching platform service first.
 5. Connect from the main screen. Closing the native window normally keeps the application available in the tray.
 6. Profile changes are written automatically to the encrypted vault.
@@ -164,7 +164,7 @@ See [desktop lifecycle](docs/desktop-lifecycle.md) and [Always-on](docs/always-o
 ### Android
 
 1. Install the APK and import a file, pasted profile/link or QR code.
-2. Select the default profile and tap Connect.
+2. Select a profile and tap Connect. Widgets and automatic connection use the separately assigned default profile.
 3. Accept Android VPN consent.
 4. Optionally configure an app allowlist in VPN apps.
 5. For fail-closed behaviour after process death, enable Android **Always-on VPN** and **Block connections without VPN**.

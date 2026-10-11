@@ -57,13 +57,14 @@ struct RootView: View {
                                     HStack {
                                         Image(systemName: model.vault.selected == profile.id ? "checkmark.circle.fill" : "circle")
                                         VStack(alignment: .leading) {
-                                            Text(profile.name).foregroundStyle(.primary)
+                                            Text(profile.name + (model.vault.defaultProfile?.id == profile.id ? tr(" · Default", " · По умолчанию") : "")).foregroundStyle(.primary)
                                             Text(profile.remoteID == nil ? profile.hostname : tr("Server profile", "Серверный профиль")).font(.caption).foregroundStyle(.secondary)
                                         }
                                     }
                                 }.disabled(!model.canEdit)
                                 Spacer()
                                 Menu {
+                                    Button(tr("Make default for widgets", "По умолчанию для виджетов")) { model.makeDefault(profile.id) }.disabled(!model.canEdit)
                                     Button(tr("Export", "Экспорт")) { exported = profile }
                                     Button(tr("Rename", "Переименовать")) { renaming = profile; name = profile.name }.disabled(!model.canEdit)
                                     Button(tr("Delete", "Удалить"), role: .destructive) { deleting = profile }.disabled(!model.canEdit)

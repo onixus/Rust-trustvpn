@@ -88,8 +88,8 @@ async fn save_settings(
     state.lock().await.settings(revision, settings)
 }
 #[tauri::command]
-async fn connect(revision: u64, state: State<'_, Shared>) -> Result<(), String> {
-    state.lock().await.connect(revision).await
+async fn connect(revision: u64, index: usize, state: State<'_, Shared>) -> Result<(), String> {
+    state.lock().await.connect_profile(revision, index).await
 }
 #[tauri::command]
 async fn disconnect(state: State<'_, Shared>) -> Result<(), String> {

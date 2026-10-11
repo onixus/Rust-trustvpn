@@ -21,6 +21,15 @@ final class AppRoutingAcceptance {
             try { AppRouting.read(new JSONObject("{\"app_routing\":" + invalid + "}")); } catch (Exception expected) { rejected = true; }
             check(rejected, "Malformed routing must not become all apps");
         }
+        JSONObject first = new JSONObject().put("name", "first"), second = new JSONObject().put("name", "second");
+        JSONObject profiles = new JSONObject().put("default", "first").put("profiles", new JSONArray()
+            .put(new JSONObject().put("id", "first").put("profile", first))
+            .put(new JSONObject().put("id", "second").put("profile", second)));
+        check(ProfileVault.resolveProfile(profiles, "second") == second, "App uses explicitly selected profile");
+        check(ProfileVault.resolveProfile(profiles, profiles.getString("default")) == first, "Widget uses default profile");
+        boolean missingProfile = false;
+        try { ProfileVault.resolveProfile(profiles, "removed"); } catch (Exception expected) { missingProfile = true; }
+        check(missingProfile, "Removed selection never falls back to default");
         AppRouting missing = new AppRouting(true, Collections.singletonList("org.rtrusttunnel.nonexistent.fixture"));
         boolean rejected = false; try { missing.validateInstalled(context.getPackageManager()); } catch (PackageManager.NameNotFoundException expected) { rejected = true; }
         check(rejected, "Missing selected package is rejected");
@@ -41,7 +50,7 @@ final class AppRoutingAcceptance {
                 ViewGroup content = activity.findViewById(android.R.id.content);
                 LinearLayout root = (LinearLayout) content.getChildAt(0);
                 View last = root.getChildAt(root.getChildCount() - 1);
-                check(last instanceof Button && ((Button) last).getText().toString().equals(activity.getString(R.string.connect_default_profile)), "Connect button is fixed below profile list");
+                check(last instanceof Button && ((Button) last).getText().toString().equals(activity.getString(R.string.connect_selected_profile)), "Connect button is fixed below profile list");
             });
         } finally { test.runOnMainSync(activity::finish); }
     }

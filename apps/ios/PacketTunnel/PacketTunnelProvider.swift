@@ -16,7 +16,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let token = self.generation
             self.completion = completionHandler
             do {
-                let plan = try ProfilePlan.parse(ProfileVault.load())
+                let plan = try ProfilePlan.parse(ProfileVault.load(profileID: options?["profileID"] as? String))
                 let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
                 settings.mtu = NSNumber(value: plan.mtu ?? 1500)
                 let ipv4 = NEIPv4Settings(addresses: ["169.254.254.2"], subnetMasks: ["255.255.255.255"])

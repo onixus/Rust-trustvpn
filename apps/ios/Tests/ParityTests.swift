@@ -56,6 +56,16 @@ final class ParityTests: XCTestCase {
         vault.profiles.append(profile); XCTAssertThrowsError(try vault.validate())
         vault.profiles = []; vault.repairSelection(); XCTAssertNil(vault.selected); try vault.validate()
     }
+    func testAppSelectionAndWidgetDefaultRemainIndependent() throws {
+        let first = SavedProfile.imported(try ProfilePlan.parse(Data(raw.utf8)), id: "first")
+        let second = SavedProfile.imported(try ProfilePlan.parse(Data(raw.utf8)), id: "second")
+        var vault = VaultData(profiles: [first, second], selected: "second", defaultProfileID: "first")
+        XCTAssertEqual(try vault.connectionProfile(id: vault.selected).id, "second")
+        XCTAssertEqual(try vault.connectionProfile(id: nil).id, "first")
+        vault.profiles.removeLast(); vault.repairSelection()
+        XCTAssertThrowsError(try vault.connectionProfile(id: "second"))
+        XCTAssertEqual(try vault.connectionProfile(id: nil).id, "first")
+    }
     func testOriginRejectsCredentialAndPathConfusion() throws {
         for url in ["http://example.com", "https://user:secret@example.com", "https://example.com/path", "https://example.com?token=secret", "https://example.com#fragment", "https://example.com:0"] {
             XCTAssertThrowsError(try PortalClient.origin(url))
@@ -94,6 +104,7 @@ private final class StartConfigurationFixture: VPNStartConfiguration {
     var isEnabled = false
     var events: [String] = []
     var failure: String?
+    var startedProfileID: String?
     func step(_ event: String) throws {
         events.append(event)
         if failure == event { throw NSError(domain: "Fixture", code: 1) }
@@ -103,7 +114,7 @@ private final class StartConfigurationFixture: VPNStartConfiguration {
         try step("save")
     }
     func loadFromPreferences() async throws { try step("load") }
-    func startTunnel() throws { try step("start") }
+    func startTunnel(profileID: String?) throws { startedProfileID = profileID; try step("start") }
 }
 
 extension ParityTests {
@@ -130,6 +141,15 @@ extension ParityTests {
         XCTAssertEqual(configuration.events, ["save", "load", "start"])
     }
 
+    @MainActor
+    func testAppStartPassesSelectedIDAndWidgetStartOmitsIt() async throws {
+        let app = StartConfigurationFixture()
+        try await VPNController.start(app, profileID: "second")
+        XCTAssertEqual(app.startedProfileID, "second")
+        let widget = StartConfigurationFixture()
+        try await VPNController.start(widget)
+        XCTAssertNil(widget.startedProfileID)
+    }
     @MainActor
     func testStartDoesNotContinueAfterPreferenceFailure() async {
         for failure in ["save", "load"] {

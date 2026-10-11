@@ -20,7 +20,8 @@ public class MainActivity extends Activity {
     private static final int PICK = 10, SAVE = 11, CONSENT = 12, QR_IMAGE = 13;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private LinearLayout rows;
-    private TextView status, defaultProfile, routingLabel, profilesHeader;
+    private String selectedId, pendingConnectId;
+    private TextView status, selectedProfile, routingLabel, profilesHeader;
     private View statusDot;
     private Button connect;
     private int connectionColor;
@@ -36,7 +37,7 @@ public class MainActivity extends Activity {
                 if (nativeState == 2 && TunnelService.problem.isEmpty()) message = ObservationStatus.summary(MainActivity.this, state.optJSONObject("observations"));
                 if (message.isEmpty()) message = TunnelService.active ? getString(R.string.starting_vpn) : getString(R.string.disconnected);
                 if (!status.getText().toString().equals(message)) status.setText(message);
-                String action = TunnelService.active ? getString(R.string.disconnect) : getString(R.string.connect_default_profile);
+                String action = TunnelService.active ? getString(R.string.disconnect) : getString(R.string.connect_selected_profile);
                 connect.setEnabled(!TunnelService.active || !TunnelService.alwaysOn);
                 if (!connect.getText().toString().equals(action)) connect.setText(action);
                 paintConnection(connectionColor(TunnelService.active, state.optInt("state", -1), !TunnelService.problem.isEmpty()), TunnelService.active || !TunnelService.problem.isEmpty());
@@ -48,7 +49,9 @@ public class MainActivity extends Activity {
         }
     };
     @Override public void onCreate(Bundle state) {
-        super.onCreate(state); getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        super.onCreate(state);
+        if (state != null) { selectedId = state.getString("selectedProfile"); pendingConnectId = state.getString("pendingConnectProfile"); }
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         vault = new ProfileVault(this);
         try { PortalSyncWorker.schedule(this); } catch (Exception ignored) { /* Reconcile again on next launch. */ }
         LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
@@ -62,7 +65,7 @@ public class MainActivity extends Activity {
         TextView title = new TextView(this); title.setText("R-TrustTunnel"); title.setTextSize(26); title.setTypeface(null, Typeface.BOLD); title.setTextColor(color(R.color.text)); root.addView(title);
         TextView subtitle = new TextView(this); subtitle.setText(R.string.home_subtitle); subtitle.setTextSize(14); subtitle.setTextColor(color(R.color.text_muted)); subtitle.setPadding(0, dp(2), 0, dp(16)); root.addView(subtitle);
 
-        // Status card: colored dot + state + default profile
+        // Status card: colored dot + state + selected profile
         LinearLayout hero = new LinearLayout(this); hero.setOrientation(LinearLayout.VERTICAL); hero.setBackground(card(color(R.color.surface), dp(20)));
         hero.setPadding(dp(20), dp(18), dp(20), dp(18));
         LinearLayout stateRow = new LinearLayout(this); stateRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -70,8 +73,8 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(12), dp(12)); dotParams.setMarginEnd(dp(10)); stateRow.addView(statusDot, dotParams);
         status = new TextView(this); status.setTextSize(20); status.setTypeface(null, Typeface.BOLD); status.setTextColor(color(R.color.text)); stateRow.addView(status);
         hero.addView(stateRow);
-        TextView label = new TextView(this); label.setText(R.string.default_profile_label); label.setTextSize(11); label.setLetterSpacing(0.08f); label.setTextColor(color(R.color.text_muted)); label.setPadding(0, dp(14), 0, dp(2)); hero.addView(label);
-        defaultProfile = new TextView(this); defaultProfile.setTextSize(16); defaultProfile.setTextColor(color(R.color.text)); defaultProfile.setMaxLines(1); defaultProfile.setEllipsize(android.text.TextUtils.TruncateAt.END); hero.addView(defaultProfile);
+        TextView label = new TextView(this); label.setText(R.string.selected_profile_label); label.setTextSize(11); label.setLetterSpacing(0.08f); label.setTextColor(color(R.color.text_muted)); label.setPadding(0, dp(14), 0, dp(2)); hero.addView(label);
+        selectedProfile = new TextView(this); selectedProfile.setTextSize(16); selectedProfile.setTextColor(color(R.color.text)); selectedProfile.setMaxLines(1); selectedProfile.setEllipsize(android.text.TextUtils.TruncateAt.END); hero.addView(selectedProfile);
         root.addView(hero);
 
         // Quick actions: Add · VPN apps · Settings
@@ -89,7 +92,7 @@ public class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false); rows = new LinearLayout(this); rows.setOrientation(LinearLayout.VERTICAL); scroll.addView(rows); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
         // Connect: fixed at the bottom, colored by connection state
-        connect = button(getString(R.string.connect_default_profile), () -> toggle());
+        connect = button(getString(R.string.connect_selected_profile), () -> toggle());
         connect.setTextSize(16); connect.setCompoundDrawablesRelativeWithIntrinsicBounds(tinted(R.drawable.ic_power, Color.WHITE), null, null, null); connect.setCompoundDrawablePadding(dp(10)); connect.setPadding(dp(20), 0, dp(20), 0);
         LinearLayout.LayoutParams connectParams = new LinearLayout.LayoutParams(-1, dp(58)); connectParams.setMargins(0, dp(12), 0, 0); root.addView(connect, connectParams);
         paintConnection(connectionColor(false, 0, false), false);
@@ -102,6 +105,15 @@ public class MainActivity extends Activity {
             if (which == 0) startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE), PICK);
             else if (which == 1) paste(); else qr();
         }).show();
+    }
+    @Override protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        state.putString("selectedProfile", selectedId);
+        state.putString("pendingConnectProfile", pendingConnectId);
+    }
+    private void startSelectedConnection() {
+        if (pendingConnectId == null || pendingConnectId.isEmpty()) { error(getString(R.string.import_and_select_a_profile)); return; }
+        startForegroundService(new Intent(this, TunnelService.class).putExtra(TunnelService.PROFILE_ID, pendingConnectId));
     }
     private void settingsMenu() {
         new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on), java.util.Locale.getDefault().getLanguage().equals("ru") ? "Наблюдать решения маршрутизации" : "Observe local flow decisions"}, (dialog, which) -> {
@@ -131,20 +143,20 @@ public class MainActivity extends Activity {
         button.setBackground(ripple(card(color(R.color.surface_raised), dp(14)))); button.setStateListAnimator(null);
         button.setOnClickListener(v -> click.run()); return button;
     }
-    /** Profile row: tap selects the default, the trailing menu exports or deletes. */
-    private View profileRow(String id, String name, String detail, boolean isDefault) {
+    /** Tapping selects the app profile; the menu separately assigns the widget default. */
+    private View profileRow(String id, String name, String detail, boolean isDefault, boolean isSelected) {
         LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL); row.setPadding(dp(16), dp(14), dp(6), dp(14));
-        GradientDrawable bg = card(color(isDefault ? R.color.accent_soft : R.color.surface), dp(16)); if (isDefault) bg.setStroke(dp(1), color(R.color.accent));
+        GradientDrawable bg = card(color(isSelected ? R.color.accent_soft : R.color.surface), dp(16)); if (isSelected) bg.setStroke(dp(1), color(R.color.accent));
         row.setBackground(ripple(bg)); row.setClickable(true); row.setFocusable(true);
-        ImageView mark = new ImageView(this); mark.setImageDrawable(tinted(R.drawable.ic_check, color(R.color.accent))); mark.setVisibility(isDefault ? View.VISIBLE : View.INVISIBLE);
+        ImageView mark = new ImageView(this); mark.setImageDrawable(tinted(R.drawable.ic_check, color(R.color.accent))); mark.setVisibility(isSelected ? View.VISIBLE : View.INVISIBLE);
         LinearLayout.LayoutParams markParams = new LinearLayout.LayoutParams(dp(22), dp(22)); markParams.setMarginEnd(dp(12)); row.addView(mark, markParams);
         LinearLayout text = new LinearLayout(this); text.setOrientation(LinearLayout.VERTICAL);
         TextView title = new TextView(this); title.setText(name); title.setTextSize(16); title.setTypeface(null, Typeface.BOLD); title.setTextColor(color(R.color.text)); title.setMaxLines(1); title.setEllipsize(android.text.TextUtils.TruncateAt.END); text.addView(title);
-        TextView sub = new TextView(this); sub.setText(detail); sub.setTextSize(12); sub.setTextColor(color(R.color.text_muted)); sub.setMaxLines(1); sub.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE); text.addView(sub);
+        TextView sub = new TextView(this); sub.setText(detail + (isDefault ? " · " + getString(R.string.default_profile_label) : "")); sub.setTextSize(12); sub.setTextColor(color(R.color.text_muted)); sub.setMaxLines(1); sub.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE); text.addView(sub);
         row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
         ImageButton more = new ImageButton(this); more.setImageDrawable(tinted(R.drawable.ic_more, color(R.color.text_muted))); more.setBackground(ripple(card(Color.TRANSPARENT, dp(20)))); more.setContentDescription(getString(R.string.profile_menu));
         row.addView(more, new LinearLayout.LayoutParams(dp(40), dp(40)));
-        row.setOnClickListener(v -> { if (!isDefault) setDefault(id); });
+        row.setOnClickListener(v -> { selectedId = id; reload(); });
         more.setOnClickListener(v -> profileActions(v, id));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.setMargins(0, 0, 0, dp(8)); row.setLayoutParams(params); return row;
     }
@@ -181,16 +193,19 @@ public class MainActivity extends Activity {
             JSONObject data = vault.read(); JSONArray profiles = data.getJSONArray("profiles");
             AppRouting selection = AppRouting.read(data);
             routingLabel.setText(selection.selectedOnly ? getString(R.string.selected_count, selection.packages.size()) : getString(R.string.all_apps));
-            defaultProfile.setText(R.string.no_default_profile);
+            boolean found = false;
+            for (int i = 0; i < profiles.length(); i++) if (profiles.getJSONObject(i).getString("id").equals(selectedId)) found = true;
+            if (!found) selectedId = data.optString("default");
+            selectedProfile.setText(R.string.no_selected_profile);
             profilesHeader.setText(getString(R.string.profiles_header, profiles.length()));
             for (int i = 0; i < profiles.length(); i++) {
                 JSONObject item = profiles.getJSONObject(i), profile = item.getJSONObject("profile"); String id = item.getString("id");
                 String name = profile.optString("name"); if (name.trim().isEmpty()) name = "Profile " + (i + 1);
                 boolean isDefault = id.equals(data.getString("default"));
-                if (isDefault) defaultProfile.setText(name);
+                if (id.equals(selectedId)) selectedProfile.setText(name);
                 String host = profile.optJSONObject("endpoint") == null ? "" : profile.getJSONObject("endpoint").optString("hostname");
                 String detail = protocolName(profile) + (host.isEmpty() ? "" : " · " + host);
-                rows.addView(profileRow(id, name, detail, isDefault));
+                rows.addView(profileRow(id, name, detail, isDefault, id.equals(selectedId)));
             }
             if (profiles.length() == 0) {
                 LinearLayout empty = new LinearLayout(this); empty.setOrientation(LinearLayout.VERTICAL); empty.setGravity(Gravity.CENTER); empty.setPadding(dp(20), dp(28), dp(20), dp(28));
@@ -212,8 +227,9 @@ public class MainActivity extends Activity {
     }
     private void profileActions(View anchor, String id) {
         PopupMenu menu = new PopupMenu(this, anchor, Gravity.END);
-        menu.getMenu().add(0, 1, 0, R.string.export); menu.getMenu().add(0, 2, 1, R.string.delete);
+        menu.getMenu().add(0, 3, 0, R.string.make_default_profile); menu.getMenu().add(0, 1, 1, R.string.export); menu.getMenu().add(0, 2, 1, R.string.delete);
         menu.setOnMenuItemClickListener(item -> {
+            if (item.getItemId() == 3) { setDefault(id); return true; }
             try {
                 JSONObject data = vault.read(); JSONArray profiles = data.getJSONArray("profiles");
                 if (item.getItemId() == 1) {
@@ -299,20 +315,22 @@ public class MainActivity extends Activity {
                 catch (ActivityNotFoundException e) { startActivity(new Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS)); }
             }).show();
     }
+    protected boolean useDefaultProfile() { return false; }
     protected final void toggle() {
         if (TunnelService.active && TunnelService.alwaysOn) { vpnSettings(); return; }
         if (TunnelService.active) { startService(new Intent(this, TunnelService.class).setAction(TunnelService.STOP)); return; }
         try {
-            JSONObject profile = vault.selected();
+            pendingConnectId = useDefaultProfile() ? vault.read().getString("default") : selectedId;
+            JSONObject profile = vault.profile(pendingConnectId);
             JSONObject prepared = new JSONObject(NativeCore.INSTANCE.plan(profile.toString()));
             if (!prepared.getBoolean("ok")) {
                 error(getString(R.string.desktop_routing_policy_is_not_supported)); return;
             }
-        } catch (Exception e) { error(getString(R.string.import_and_select_a_default_profile)); return; }
+        } catch (Exception e) { error(getString(R.string.import_and_select_a_profile)); return; }
         try { AppRouting.read(vault.read()).validateInstalled(getPackageManager()); }
         catch (Exception error) { error(getString(R.string.check_vpn_apps_select_at_least)); return; }
         Intent consent = VpnService.prepare(this);
-        if (consent != null) startActivityForResult(consent, CONSENT); else startForegroundService(new Intent(this, TunnelService.class));
+        if (consent != null) startActivityForResult(consent, CONSENT); else startSelectedConnection();
     }
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
@@ -327,7 +345,7 @@ public class MainActivity extends Activity {
                 } catch (Exception e) { runOnUiThread(() -> { if (!isDestroyed()) error(getString(R.string.qr_failed)); }); }
             }, "qr-import").start();
         }
-        if (request == CONSENT && result == RESULT_OK) startForegroundService(new Intent(this, TunnelService.class));
+        if (request == CONSENT && result == RESULT_OK) startSelectedConnection();
         if (request == SAVE) {
             String output;
             try { output = vault.takeExport(); }

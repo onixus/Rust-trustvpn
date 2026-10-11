@@ -192,6 +192,13 @@ final class VPNModel: ObservableObject {
         guard canEdit else { return }
         do { try ProfileVault.edit { $0.selected = id }; reloadVault() } catch { report(error) }
     }
+    func makeDefault(_ id: String) {
+        guard canEdit else { return }
+        do { try ProfileVault.edit { vault in
+            guard vault.profiles.contains(where: { $0.id == id }) else { throw AppError.message("Profile no longer exists") }
+            vault.defaultProfileID = id
+        }; reloadVault() } catch { report(error) }
+    }
     func delete(_ id: String) {
         guard canEdit else { return }
         do { try ProfileVault.edit { $0.profiles.removeAll { $0.id == id }; $0.repairSelection() }; reloadVault() } catch { report(error) }
@@ -215,7 +222,8 @@ final class VPNModel: ObservableObject {
                 try await current.saveToPreferences()
                 current.connection.stopVPNTunnel()
             } else {
-                _ = try ProfilePlan.parse(ProfileVault.load())
+                guard let profileID = vault.selected else { throw AppError.message("Select a profile first") }
+                _ = try ProfilePlan.parse(ProfileVault.load(profileID: profileID))
                 let current = current ?? NETunnelProviderManager()
                 let configuration = NETunnelProviderProtocol()
                 configuration.providerBundleIdentifier = VPNController.providerID
@@ -225,7 +233,7 @@ final class VPNModel: ObservableObject {
                 current.localizedDescription = "R-TrustTunnel"
                 let rule = NEOnDemandRuleConnect(); rule.interfaceTypeMatch = .any
                 current.onDemandRules = [rule]; current.isOnDemandEnabled = onDemand
-                try await VPNController.start(current)
+                try await VPNController.start(current, profileID: profileID)
                 manager = current
             }
             error = nil; await refresh()
