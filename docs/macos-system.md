@@ -100,7 +100,9 @@ The Native system package embeds a WidgetKit extension (macOS 14+,
 Edit Widgets → R-TrustTunnel → VPN, in small or medium size. It shows the phase
 (connected, connecting, no link, disconnected), the mode and the connection
 time, and connects or disconnects the default profile the same way as the tray
-menu. When the app is not running, the widget only opens it.
+menu. A running transport is shown in amber with “availability not checked”;
+no green shield or verified-protection claim is derived from the session
+lifecycle, including SOCKS mode. When the app is not running, the widget only opens it.
 
 On macOS 26+ the same extension adds a Control Center toggle: Control Center →
 Edit Controls → R-TrustTunnel VPN. It shows the phase and switches the VPN in

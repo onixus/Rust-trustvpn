@@ -82,7 +82,7 @@ private extension Status {
     var active: Bool { phase != .off }
     var title: LocalizedStringKey {
         switch phase {
-        case .on: return "Подключено"
+        case .on: return "Транспорт запущен"
         case .connecting: return "Подключение…"
         case .disconnecting: return "Отключение…"
         case .problem: return "Нет связи"
@@ -91,7 +91,7 @@ private extension Status {
     }
     var color: Color {
         switch phase {
-        case .on: return .green
+        case .on: return .yellow
         case .connecting, .disconnecting: return .yellow
         case .problem: return .orange
         case .off, .closed: return .secondary
@@ -99,7 +99,7 @@ private extension Status {
     }
     var symbol: String {
         switch phase {
-        case .on: return "lock.shield.fill"
+        case .on: return "network"
         case .problem: return "exclamationmark.shield.fill"
         default: return "shield"
         }
@@ -141,7 +141,10 @@ struct VPNWidgetView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Image(systemName: status.symbol).foregroundStyle(status.color)
-                Text(status.title).font(.headline).lineLimit(1)
+                Text(status.title).font(.headline).lineLimit(2)
+            }
+            if status.phase == .on {
+                Text("Доступность не проверена").font(.caption2).foregroundStyle(.secondary)
             }
             if let mode = status.mode {
                 Text(mode).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -267,11 +270,11 @@ struct RTrustControl: ControlWidget {
                 case .connecting?: Label("Подключение…", systemImage: "shield.lefthalf.filled")
                 case .disconnecting?: Label("Отключение…", systemImage: "shield.lefthalf.filled")
                 case nil: Label("Не запущено", systemImage: "shield")
-                default: Label(isOn ? "Подключено" : "Отключено",
-                               systemImage: isOn ? "lock.shield.fill" : "shield.slash")
+                default: Label(isOn ? "Транспорт запущен" : "Отключено",
+                               systemImage: isOn ? "network" : "shield.slash")
                 }
             }
-            .tint(state.phase == .problem ? .orange : .green)
+            .tint(state.phase == .problem ? .orange : .yellow)
         }
         .displayName("R-TrustTunnel VPN")
         .description("Подключить или отключить профиль по умолчанию.")
