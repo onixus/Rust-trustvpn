@@ -67,8 +67,22 @@ With allowed backup profiles (docs/failover.md), the service also records
 Events are advisory: they do not reconnect, change routes/DNS or the guard
 (automatic recovery is issue #34). Desktop summaries show the latest such event
 for one minute. Capabilities advertise `network_events=true` for the desktop
-services. Android/iOS do not yet collect these events; their lifecycle model is
-unchanged.
+services. Android now invalidates observations when ConnectivityManager
+changes the selected non-VPN underlying Network or reports changed link
+properties for that network. Repeated callbacks for another network or identical
+properties are not events. Android native suspend/resume collection is still
+missing; screen unlock or a delayed poll is not relabelled as a wake event.
+
+iOS PacketTunnel now uses an
+[NWPathMonitor](https://developer.apple.com/documentation/network/nwpathmonitor):
+the first path establishes a baseline and subsequent OS path updates invalidate
+observations. The provider forwards the native
+[wake callback](https://developer.apple.com/documentation/networkextension/neprovider/wake%28%29)
+as `resumed`. The monitor runs on the provider's existing serial queue, is
+cancelled on Stop/start failure, and late callbacks from an old provider
+generation are ignored. These are advisory path events, not independent proof
+of physical-interface traffic or DNS/guard health. No network identifiers cross
+the JNI/C boundary or enter the observation journal.
 No successful DNS/route/guard evidence is invented in their absence.
 
 The local in-memory journal contains at most 64 timestamped event enums and
@@ -84,8 +98,8 @@ not durable across process restart. Observations are advisory and do not change 
 | Windows selected / full / Always-on | Service worker lifecycle; failure/reconnect/gap; polled adapter change, kernel-clock resume | Unknown; no live system probe | Unknown | Native and WebView share the Rust verdict |
 | macOS selected / full | Service worker lifecycle; failure/reconnect/gap; routing-socket network change, kernel-clock resume | Unknown; no live system probe | Unknown | Native and WebView share the Rust verdict |
 | Desktop SOCKS | Proxy lifecycle only | Unsupported for the system path | Unknown | Explicit proxy scope |
-| Android | Shared mobile worker lifecycle; failure/recovery/gap | Unknown; VpnService setup is not a live audit of DNS or lockdown | Unknown | JNI JSON, localized five-part summary, no green lifecycle badge |
-| iOS | Shared mobile worker lifecycle; failure/recovery/gap | Unknown; NetworkExtension status is not a live audit | Unknown | Redacted provider message; generation/age checked; localized summary |
+| Android | Shared mobile worker lifecycle; failure/recovery/gap; selected underlying Network/link-property changes; no native wake collection | Unknown; VpnService setup is not a live audit of DNS or lockdown | Unknown | JNI JSON, localized five-part summary, no green lifecycle badge |
+| iOS | Shared mobile worker lifecycle; failure/recovery/gap; provider path updates and native wake callback | Unknown; NetworkExtension status is not a live audit | Unknown | Redacted provider message; generation/age checked; localized summary |
 
 Capabilities explicitly advertise `system_probes=false`. The adapters retain
 existing platform differences; this change does not make unsupported checks
@@ -107,7 +121,7 @@ Windows target compilation does not prove installed WFP/Wintun behavior. Linux
 container unit tests do not establish a physical-node or installed-package gate.
 Existing historical acceptance reports apply to their own commits and packages.
 
-Issue #31 remains open: mobile network-change/resume events, durable event history if required, installed-package timing/cancellation and
+Issue #31 remains open: Android native resume collection, durable event history if required, installed-package timing/cancellation and
 actual DNS/route/guard/system-connectivity evidence still need acceptance.
 Issue #33 supplies the real-path probe; issue #36 tracks package/device evidence.
 No release is published or promoted by this PR.
@@ -134,3 +148,20 @@ No release is published or promoted by this PR.
 | Linux live netlink: dummy link + address in a `NET_ADMIN` container | Passed: change reported before the 10 s poll; own TUN name ignored | Disposable namespace, not an installed package |
 | Windows x86_64 tun strict clippy | Passed | Cross-compilation only; adapter polling not run on Windows |
 | Real sleep/wake, Wi-Fi handoff on installed packages | Not run | Issue #36 |
+
+### Mobile callback validation — 2026-10-11
+
+- Host Rust tests: mobile adapter, Android codec and iOS core pass. The shared
+  adapter regression checks rapid network-change generation invalidation,
+  rejection of an old result, native resume staleness, unknown DNS/guard and
+  ignored events after Stop. Host Android codec tests do not compile Android JNI.
+- Modified Android NativeCore/TunnelService Java boundary compiles against the
+  existing Android 36 SDK and previously generated app classes/resources in a
+  disposable networkless compiler container. This is not a fresh full APK build,
+  JNI target check, emulator run or physical-device acceptance. No Android Rust
+  target is installed in the inspected local toolchains; none was installed.
+- iOS provider/shared Swift sources typecheck against the installed iPhoneOS
+  27 SDK using the existing Xcode path; the modified Rust core also passes
+  `cargo check --target aarch64-apple-ios`. These checks do not launch an
+  iPhone/simulator or supply signing/install evidence. Native callback timing, cancellation and
+  path/wake behavior still require exact-package/device validation.

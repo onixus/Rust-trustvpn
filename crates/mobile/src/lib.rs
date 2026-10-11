@@ -249,6 +249,16 @@ impl Observations {
             self.monitor.transition(state == 2, now);
         }
     }
+    /// Called only by an OS adapter after the selected underlying network changes.
+    /// Does not reconnect, infer DNS/guard success, or record network identifiers.
+    pub fn network_changed(&mut self) {
+        self.monitor
+            .network_changed(rtrust_control::observations::now_ms());
+    }
+    /// The OS provider reported wake; a polling gap alone is not this event.
+    pub fn resumed(&mut self) {
+        self.monitor.resumed(rtrust_control::observations::now_ms());
+    }
     pub fn snapshot(&mut self) -> rtrust_control::observations::Snapshot {
         self.monitor.sample(rtrust_control::observations::now_ms())
     }
@@ -258,6 +268,35 @@ impl Observations {
 mod observation_tests {
     use super::*;
     use rtrust_control::observations::{EventKind, Outcome};
+    #[test]
+    fn rapid_underlying_network_change_rejects_old_generation_without_green_proof() {
+        let mut observations = Observations::default();
+        observations.transition(2);
+        let before = observations.snapshot();
+        observations.network_changed();
+        let mut after = observations.snapshot();
+        assert!(after.generation > before.generation);
+        assert_eq!(after.events.last().unwrap().kind, EventKind::NetworkChanged);
+        assert_eq!(after.dns.outcome, Outcome::Unknown);
+        assert_eq!(after.guard.outcome, Outcome::Unknown);
+        assert!(!after.verified());
+        let mut old_result = before.connectivity;
+        old_result.outcome = Outcome::Passed;
+        assert!(!after.apply_connectivity(before.generation, old_result));
+        let previous_generation = after.generation;
+        observations.resumed();
+        let resumed = observations.snapshot();
+        assert!(resumed.generation > previous_generation);
+        assert_eq!(resumed.events.last().unwrap().kind, EventKind::Resumed);
+        assert_eq!(resumed.transport.outcome, Outcome::Stale);
+        assert_eq!(resumed.guard.outcome, Outcome::Unknown);
+        assert_eq!(resumed.dns.outcome, Outcome::Unknown);
+        observations.transition(0);
+        let stopped = observations.snapshot();
+        observations.network_changed();
+        observations.resumed();
+        assert_eq!(observations.snapshot(), stopped);
+    }
     #[test]
     fn idle_mobile_adapter_does_not_fabricate_start_or_failure_events() {
         let mut observations = Observations::default();

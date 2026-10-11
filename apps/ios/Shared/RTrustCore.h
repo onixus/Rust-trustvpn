@@ -10,6 +10,8 @@ bool rtrust_ios_start(const uint8_t *bytes, size_t length);
 void rtrust_ios_stop(void);
 uint8_t rtrust_ios_status(void);
 char *rtrust_ios_observations(void);
+void rtrust_ios_network_changed(void);
+void rtrust_ios_resumed(void);
 bool rtrust_ios_push(const uint8_t *bytes, size_t length);
 size_t rtrust_ios_pop(uint8_t *bytes, size_t capacity);
 #endif

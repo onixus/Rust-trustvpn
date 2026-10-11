@@ -196,6 +196,14 @@ fn stop(_env: &mut Env<'_>, _this: JObject<'_>) -> jni::errors::Result<()> {
     state(0, "");
     Ok(())
 }
+const _: jni::NativeMethod = native_method! {java_type="org.rtrusttunnel.android.NativeCore",name="networkChanged",extern fn network_changed(),};
+fn network_changed(_env: &mut Env<'_>, _this: JObject<'_>) -> jni::errors::Result<()> {
+    OBSERVATIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .network_changed();
+    Ok(())
+}
 const _: jni::NativeMethod =
     native_method! {java_type="org.rtrusttunnel.android.NativeCore",extern fn status()->JString,};
 fn status<'a>(env: &mut Env<'a>, _this: JObject<'a>) -> jni::errors::Result<JString<'a>> {

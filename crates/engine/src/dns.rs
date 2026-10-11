@@ -138,9 +138,10 @@ pub async fn serve_tcp<T: AsyncRead + AsyncWrite + Unpin>(
         let query = tokio::time::timeout(Duration::from_secs(30), read_message(stream))
             .await
             .map_err(|_| Error::Timeout)??;
+        let version = router.map(crate::routing::Router::version);
         let answer = exchange(resolvers, session, &query).await?;
-        if let Some(router) = router {
-            router.learn(&query, &answer);
+        if let (Some(router), Some(version)) = (router, version) {
+            router.learn_for(&version, &query, &answer);
         }
         stream.write_u16(answer.len() as u16).await?;
         stream.write_all(&answer).await?;
@@ -195,11 +196,12 @@ pub async fn forward_tcp<T: AsyncRead + AsyncWrite + Unpin>(
     loop {
         tokio::time::timeout(Duration::from_secs(30), async {
             let query = read_message(stream).await?;
+            let version = router.version();
             tunnel.write_u16(query.len() as u16).await?;
             tunnel.write_all(&query).await?;
             let answer = read_message(&mut tunnel).await?;
             validate_answer(&query, &answer)?;
-            router.learn(&query, &answer);
+            router.learn_for(&version, &query, &answer);
             stream.write_u16(answer.len() as u16).await?;
             stream.write_all(&answer).await?;
             Ok::<_, Error>(())

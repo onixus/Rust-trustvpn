@@ -21,7 +21,8 @@ public final class TunnelService extends VpnService {
     private volatile Network underlying;
     private ParcelFileDescriptor tun;
     private ConnectivityManager connectivity;
-    private ConnectivityManager.NetworkCallback callback;
+    private final Object networkEvents = new Object();
+    private volatile ConnectivityManager.NetworkCallback callback;
     private volatile boolean stopping, recovering;
     private boolean cleaned;
     private final Handler widgetHandler = new Handler(Looper.getMainLooper());
@@ -142,11 +143,32 @@ public final class TunnelService extends VpnService {
         // A refusal closes the TUN through cleanup() and reports "cannot start".
         if (plan.getBoolean("require_lockdown") && (!alwaysOn || !lockdown)) throw new IllegalArgumentException("System lockdown required");
         callback = new ConnectivityManager.NetworkCallback() {
+            private LinkProperties selectedProperties;
             @Override public void onAvailable(Network network) { updateUnderlying(); }
             @Override public void onLost(Network network) { updateUnderlying(); }
+            @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) { updateUnderlying(); }
+            @Override public void onLinkPropertiesChanged(Network network, LinkProperties properties) {
+                synchronized (networkEvents) {
+                    if (callback != this || stopping || !network.equals(underlying)) return;
+                    LinkProperties previous = selectedProperties;
+                    selectedProperties = properties;
+                    if (previous != null && !previous.equals(properties)) NativeCore.INSTANCE.networkChanged();
+                }
+            }
             private void updateUnderlying() {
-                Network next = availableNetwork(); underlying = next;
-                if (!stopping) setUnderlyingNetworks(next == null ? new Network[]{} : new Network[]{next});
+                synchronized (networkEvents) {
+                    if (callback != this || stopping) return;
+                    Network previous = underlying;
+                    Network next = availableNetwork();
+                    underlying = next;
+                    setUnderlyingNetworks(next == null ? new Network[]{} : new Network[]{next});
+                    // Repeated callbacks for another network do not describe a change
+                    // to the selected physical path. No address or visited name is logged.
+                    if (!java.util.Objects.equals(previous, next)) {
+                        selectedProperties = next == null ? null : connectivity.getLinkProperties(next);
+                        NativeCore.INSTANCE.networkChanged();
+                    }
+                }
             }
         };
         connectivity.registerNetworkCallback(new NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
@@ -192,8 +214,17 @@ public final class TunnelService extends VpnService {
     private void cleanup() {
         if (cleaned) return;
         cleaned = true;
+        ConnectivityManager.NetworkCallback previousCallback;
+        synchronized (networkEvents) {
+            // Revoke the callback token before Stop: an already queued callback
+            // must not touch a later worker using the process-wide Rust adapter.
+            previousCallback = callback;
+            callback = null;
+        }
+        if (previousCallback != null) try {
+            connectivity.unregisterNetworkCallback(previousCallback);
+        } catch (IllegalArgumentException ignored) { /* Registration failed or was already removed; token is revoked. */ }
         NativeCore.INSTANCE.stop();
-        if (callback != null) { connectivity.unregisterNetworkCallback(callback); callback = null; }
         if (tun != null) { try { tun.close(); } catch (Exception ignored) {} tun = null; }
         underlying = null; active = false; VpnWidget.refresh(this, true);
     }

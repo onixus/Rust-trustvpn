@@ -1,7 +1,9 @@
 import NetworkExtension
+import Network
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {
     private let queue = DispatchQueue(label: "org.rtrusttunnel.packet-flow")
+    private var pathMonitor: NWPathMonitor?
     private var timer: DispatchSourceTimer?
     private var generation: UInt64 = 0
     private var completion: ((Error?) -> Void)?
@@ -47,6 +49,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                             rtrust_ios_start(bytes.bindMemory(to: UInt8.self).baseAddress, data.count)
                         }
                         guard started else { self.failStart(); return }
+                        self.watchNetwork(token)
                         self.deadline = Date().addingTimeInterval(30)
                         self.read(token)
                         let timer = DispatchSource.makeTimerSource(queue: self.queue)
@@ -59,9 +62,31 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             } catch { self.failStart() }
         }
     }
+    private func watchNetwork(_ token: UInt64) {
+        pathMonitor?.cancel()
+        let monitor = NWPathMonitor()
+        var initialPath = true
+        monitor.pathUpdateHandler = { [weak self] _ in
+            guard let self, token == self.generation else { return }
+            // The initial path establishes a baseline. Later OS path updates
+            // invalidate observations without retaining any interface/address data.
+            if initialPath { initialPath = false; return }
+            rtrust_ios_network_changed()
+        }
+        pathMonitor = monitor
+        monitor.start(queue: queue)
+    }
+    override func wake() {
+        queue.async {
+            guard self.timer != nil else { return }
+            // Native wake evidence, distinct from an inferred timer/polling gap.
+            rtrust_ios_resumed()
+        }
+    }
     private func failStart() {
         generation &+= 1
         timer?.cancel(); timer = nil
+        pathMonitor?.cancel(); pathMonitor = nil
         rtrust_ios_stop()
         WidgetState.update(.disconnected)
         let handler = completion; completion = nil
@@ -119,6 +144,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         queue.async {
             self.generation &+= 1
             self.timer?.cancel(); self.timer = nil
+            self.pathMonitor?.cancel(); self.pathMonitor = nil
             rtrust_ios_stop()
             let start = self.completion; self.completion = nil
             start?(AppError.message("Connection cancelled"))

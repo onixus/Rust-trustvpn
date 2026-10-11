@@ -9,6 +9,8 @@ mod flatpak_startup;
 #[cfg(target_os = "macos")]
 #[path = "../../macos/glass.rs"]
 mod glass;
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+mod intent;
 #[cfg(target_os = "macos")]
 mod open_url;
 mod portal;
@@ -210,6 +212,8 @@ struct App {
     portal: portal::State,
     store_recovery: bool,
     sync_state: sync::State,
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    intent: intent::State,
     store_conflict: Option<(rtrust_store::Vault, Option<Vec<u8>>)>,
     autostart: bool,
     startup_busy: bool,
@@ -297,6 +301,8 @@ enum Message {
     Load,
     Loaded(std::result::Result<(rtrust_store::Vault, Option<Vec<u8>>), String>),
     Sync(sync::Action),
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    Intent(intent::Action),
     #[cfg(target_os = "windows")]
     Update(updates::Action),
     Save,
@@ -368,6 +374,8 @@ impl App {
             portal: portal::State::default(),
             store_recovery: false,
             sync_state: sync::State::default(),
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            intent: intent::State::default(),
             store_conflict: None,
             autostart: false,
             startup_busy: false,
@@ -627,6 +635,8 @@ impl App {
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             Message::AlwaysOn(action) => return self.always_update(action),
             Message::Sync(action) => return self.sync_update(action),
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            Message::Intent(action) => return self.intent_update(action),
             Message::ReadBackup if self.can_change_profiles() && !self.dirty => {
                 self.busy = true;
                 return Task::perform(
@@ -1440,31 +1450,7 @@ impl App {
                     Err(_) => Ok(Decision::unknown(context, Reason::SystemPathUnobserved)),
                     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
                     Ok(ip) if self.mode == Mode::Tun => {
-                        // Linux policy-routes only the desktop UID; the root
-                        // service endpoint never matches that rule.
-                        #[cfg(target_os = "linux")]
-                        let endpoints: Option<Vec<std::net::Ipv4Addr>> = Some(vec![]);
-                        #[cfg(not(target_os = "linux"))]
-                        let endpoints = self
-                            .current()
-                            .and_then(|p| {
-                                p.endpoint
-                                    .addresses
-                                    .iter()
-                                    .map(|a| a.parse::<std::net::SocketAddr>().ok().map(|a| a.ip()))
-                                    .collect::<Option<Vec<_>>>()
-                            })
-                            .map(|ips| {
-                                ips.into_iter()
-                                    .filter_map(|ip| {
-                                        if let std::net::IpAddr::V4(ip) = ip {
-                                            Some(ip)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .collect::<Vec<_>>()
-                            });
+                        let endpoints = self.offline_route_endpoints();
                         self.tun_selection().and_then(|selection| {
                             selection.explain(ip, endpoints.as_deref(), None, context)
                         })
@@ -1905,6 +1891,7 @@ impl App {
             panel = column![
                 mode,
                 routes,
+                self.intent_view(),
                 text(
                     if cfg!(target_os = "macos") { "IPv4-сети всего компьютера, кроме исключений. DNS/IPv6 остаются системными. После аварии используйте сброс блокировки." } else if cfg!(target_os = "windows") { "IPv4-сети всего компьютера, кроме исключений. DNS/IPv6 системные. При аварии службы блокировка не гарантируется." } else { "IPv4-сети этого пользователя, кроме исключений. IPv6 и DNS остаются системными." }
                 )

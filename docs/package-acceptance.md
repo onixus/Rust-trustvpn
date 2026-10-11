@@ -128,7 +128,7 @@ bound to their recorded source, package and environment.
 | --- | --- | --- |
 | macOS exact installer + installed test | `not_run` | Release maintainer builds/archive source-bound artifact; lab operator uses a dedicated Mac for install, failure, update/rollback and soak |
 | Apple signing/notarization | `not_run` | Publisher supplies Developer ID/notarization access; local `security find-identity` returned zero valid signing identities in this session, not proof of absence elsewhere |
-| iOS signed IPA / physical device | `not_run` | Apple publisher + iOS lab; current toolchain cannot find `simctl`; simulator alone would not satisfy device VPN acceptance |
+| iOS signed IPA / physical device | `not_run` | Apple publisher + iOS lab; initial default Command Line Tools could not find `simctl`, but installed Xcode/iPhoneOS SDK was subsequently located for typechecking; no device/simulator acceptance run |
 | Windows Authenticode + Wintun/WFP device | `not_run` | Windows publisher + Windows lab; no matching candidate/device result collected |
 | Linux signed package + physical KDE/ARM64 | `not_run` | Linux package maintainer + lab; dated Linux acceptance cannot be reassigned to current commit |
 | Android signed APK + device | `not_run` | Android publisher + lab; `adb` exists but device enumeration failed with sandbox listener denial, so device availability is unknown |
@@ -148,14 +148,24 @@ is accounted for explicitly:
   events and invalidate earlier observations. This is implemented; physical
   sleep/wake, rapid network handoff, installed-package stale-result/cancellation
   behavior and real system corroboration still require acceptance for the exact
-  integrated package. Android/iOS native network/resume event collection and
-  durable history, if required, remain separate gaps. Lifecycle
+  integrated package. Android selected underlying Network/link-property changes
+  and iOS provider path/wake callbacks are now wired to the shared invalidation
+  adapter. Android native resume collection, physical-device callback evidence
+  and durable history, if required, remain separate gaps. Lifecycle
   transport/configuration remains distinct from DNS, route, guard and end-to-end
   proof; unknown/unsupported must never be green.
-- **#32:** intent-rule editor, observed-flow versus prediction comparison,
-  atomic hot policy revision/rollback, explicit managed admin/user provenance,
-  and installed OS/dataplane corroboration. Existing offline explain and
-  CNAME/TTL regression coverage cannot establish those UI/lifecycle features.
+- **#32:** the native IPv4 intent editor now provides validated offline previews,
+  fixed priorities/conflicts and managed source locking, with changes saved for
+  the next disconnected connection. The shared Router core implements atomic
+  conditional local decision-policy revision/rollback with epochs, stale DNS
+  rejection, immutable managed sources and opt-in bounded redacted observations
+  of real flow-policy selections; see [core boundaries](routing-policy.md).
+  Desktop/mobile adapters do not invoke hot revision apply or subscribe to this
+  observation API yet. Established/pending flow revocation, atomic OS-route/
+  guard cutover, explicit managed administrator authentication/provenance and
+  installed observed-flow-versus-prediction corroboration remain incomplete.
+  Core/editor regression tests cannot establish installed hot desktop rollback
+  or real traffic agreement.
 - **#33:** exact installed-package diagnostics compared to kernel routes and
   actual IPv4/IPv6 split/full traffic, unavailable control endpoint and
   repeat-after-action freshness. Native verdicts and endpoint/reconnect/recheck
