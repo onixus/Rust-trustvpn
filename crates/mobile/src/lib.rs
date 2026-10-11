@@ -1,4 +1,5 @@
 //! Explicit mobile adaptation of portable desktop route/DNS policy.
+pub mod flows;
 use ipnet::IpNet;
 use rtrust_profile::Profile;
 use serde::Serialize;

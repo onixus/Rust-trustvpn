@@ -108,8 +108,10 @@ Admin/managed/unknown-source policies reject local mutation. Neither the source
 label nor a flow-policy selection establishes administrator authentication,
 packet delivery or OS guard/route enforcement.
 
-Desktop/mobile adapters do not invoke the new hot revision API or subscribe to
-these core observations yet. Established and pending flows are outside the
+Android/iOS now offer [explicit local flow capture](mobile-flow-observations.md)
+from their active router; desktop explain remains a prediction. No adapter
+invokes the new hot revision API. Capture is bounded, session-fenced and has no
+address correlation or packet-delivery proof. Established and pending flows are outside the
 atomic decision-publication boundary; full hot OS-route/guard cutover, explicit
 managed administrator provenance and installed package/packet-level acceptance
 remain separate work. Existing vault conflict handling remains in force.

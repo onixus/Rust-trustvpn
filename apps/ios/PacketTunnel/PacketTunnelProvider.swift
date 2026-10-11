@@ -107,6 +107,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
+        if messageData.count <= 512,
+           let request = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any],
+           request["type"] as? String == "flow-capture-v1",
+           let operation = request["operation"] as? UInt8, operation <= 3,
+           let session = request["session"] as? UInt64, let capture = request["capture"] as? UInt64 {
+            queue.async {
+                guard let ptr = rtrust_ios_flow_capture(session, capture, operation) else { completionHandler?(nil); return }
+                defer { rtrust_ios_free(ptr) }
+                completionHandler?(Data(String(cString: ptr).utf8))
+            }
+            return
+        }
         guard messageData == Data("observations-v1".utf8) else { completionHandler?(nil); return }
         queue.async {
             guard let ptr = rtrust_ios_observations() else { completionHandler?(nil); return }

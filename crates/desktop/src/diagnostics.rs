@@ -1,6 +1,9 @@
 //! User-initiated, read-only destination diagnostics. No transport is created.
 //! Results are per destination, never global VPN/guard verification.
 use crate::connection::Session;
+#[cfg(any(target_os = "windows", test))]
+#[path = "diagnostics_windows.rs"]
+mod windows;
 use rtrust_control::observations::{Snapshot, now_ms};
 use rtrust_profile::routing::{Context, Decision, Reason};
 use serde::Serialize;
@@ -20,6 +23,7 @@ const STEP: Duration = Duration::from_secs(3);
 #[serde(rename_all = "snake_case")]
 pub enum Fact {
     NotChecked,
+    RateLimited,
     Passed,
     Failed,
     Timeout,
@@ -253,6 +257,7 @@ impl Report {
         fn label(f: Fact) -> &'static str {
             match f {
                 Fact::NotChecked => "не проверено",
+                Fact::RateLimited => "проверка ограничена по частоте; повторите позже",
                 Fact::Passed => "проверено",
                 Fact::Failed => "сбой",
                 Fact::Timeout => "время истекло (причина неизвестна)",
@@ -346,45 +351,52 @@ pub struct EndpointCheck {
     pub finished_at_ms: u64,
     pub independent: bool,
 }
-const ENDPOINT_LIMIT: Duration = Duration::from_secs(10);
-/// One authenticated session and health exchange with the profile's endpoint,
-/// like the transport test: no destination is contacted and nothing is routed.
-pub async fn check_endpoint(profile: rtrust_profile::Profile) -> EndpointCheck {
+/// One explicit check by the service that owns the current VPN lease.
+/// No caller-selected profile, destination or alternate desktop transport is used.
+pub async fn check_endpoint(session: Session) -> EndpointCheck {
     let started_at_ms = now_ms();
-    let fact = match tokio::time::timeout(ENDPOINT_LIMIT, async {
-        rtrust_engine::Session::connect(&profile)
-            .await?
-            .health()
-            .await
-    })
-    .await
-    {
-        Err(_) => Fact::Timeout,
-        Ok(Ok(())) => Fact::Passed,
-        Ok(Err(error)) => endpoint_fact(&error),
+    let mut result = EndpointCheck {
+        fact: Fact::Unsupported,
+        started_at_ms,
+        finished_at_ms: started_at_ms,
+        independent: false,
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    if let Session::Tun(client) = &session {
+        let initial = client.status();
+        if initial.capabilities.endpoint_probes {
+            result.fact = Fact::NotChecked;
+            match client.probe_endpoint().await {
+                Ok(probe) => result = service_endpoint_check(probe),
+                Err(_) => result.fact = Fact::SessionChanged,
+            }
+        }
+    }
+    let _ = session;
+    result.finished_at_ms = now_ms();
+    result
+}
+fn service_endpoint_check(probe: rtrust_control::endpoint::Result) -> EndpointCheck {
+    use rtrust_control::endpoint::{Outcome, Reason};
+    let fact = match probe.outcome {
+        Outcome::Passed => Fact::Passed,
+        Outcome::Failed => match probe.reason {
+            Reason::TlsFailed => Fact::TlsFailed,
+            Reason::AuthenticationFailed | Reason::EndpointRejected => Fact::Rejected,
+            Reason::Timeout => Fact::Timeout,
+            Reason::ConnectionFailed => Fact::ConnectionFailed,
+            _ => Fact::Failed,
+        },
+        Outcome::Unsupported => Fact::Unsupported,
+        Outcome::Inconclusive => Fact::NotChecked,
+        Outcome::RateLimited => Fact::RateLimited,
     };
     EndpointCheck {
         fact,
-        started_at_ms,
-        finished_at_ms: now_ms(),
-        // The desktop process has no guaranteed physical endpoint path:
-        // Linux can route it into the tunnel; PF/WFP full guards permit
-        // only the service. A local refusal/timeout is not endpoint evidence.
-        independent: desktop_endpoint_independent(),
-    }
-}
-fn desktop_endpoint_independent() -> bool {
-    false
-}
-fn endpoint_fact(error: &rtrust_engine::Error) -> Fact {
-    use rtrust_engine::Error;
-    match error {
-        Error::Tls | Error::Trust => Fact::TlsFailed,
-        Error::Authentication | Error::Rejected(_) => Fact::Rejected,
-        Error::Timeout => Fact::Timeout,
-        Error::Connect | Error::ConnectIo(_) => Fact::ConnectionFailed,
-        Error::Unsupported(_) => Fact::Unsupported,
-        _ => Fact::Failed,
+        started_at_ms: probe.started_at_ms,
+        finished_at_ms: probe.completed_at_ms,
+        independent: probe.independent
+            && matches!(probe.outcome, Outcome::Passed | Outcome::Failed),
     }
 }
 
@@ -452,7 +464,11 @@ impl Backend for System {
         {
             parse_answers(&bytes)
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        {
+            windows::resolve(&target.host).await
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             Err(Fact::Unsupported)
         }
@@ -486,7 +502,11 @@ impl Backend for System {
             .await?;
             linux_route(&bytes)
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        {
+            windows::route(ip)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             let _ = ip;
             Err(Fact::Unsupported)
@@ -513,7 +533,14 @@ impl Backend for System {
                 .map_err(classify_http_error)?;
             Ok(response.status().as_u16())
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        {
+            if !self.active() {
+                return Err(Fact::SessionChanged);
+            }
+            windows::https(&target.host, ip).await
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             let _ = (target, ip);
             Err(Fact::Unsupported)
@@ -852,8 +879,54 @@ mod tests {
         assert_eq!(r.verdict().cause, Cause::EndpointRejected);
     }
     #[test]
+    fn service_endpoint_results_preserve_facts_and_never_export_lease_tokens() {
+        use rtrust_control::endpoint::{Outcome, Reason, Result as Probe, Token};
+        let make = |outcome, reason, independent| Probe {
+            token: Token {
+                lease: [77; 16],
+                generation: 19,
+            },
+            active_profile: Some(2),
+            started_at_ms: 7,
+            completed_at_ms: 9,
+            outcome,
+            reason,
+            independent,
+        };
+        let rejected =
+            service_endpoint_check(make(Outcome::Failed, Reason::AuthenticationFailed, true));
+        assert_eq!(rejected.fact, Fact::Rejected);
+        assert!(rejected.independent);
+        assert_eq!(
+            service_endpoint_check(make(Outcome::Failed, Reason::TlsFailed, true)).fact,
+            Fact::TlsFailed
+        );
+        assert_eq!(
+            service_endpoint_check(make(Outcome::Failed, Reason::Timeout, true)).fact,
+            Fact::Timeout
+        );
+        assert_eq!(
+            service_endpoint_check(make(Outcome::RateLimited, Reason::Cooldown, false)).fact,
+            Fact::RateLimited
+        );
+        let unknown = service_endpoint_check(make(
+            Outcome::Inconclusive,
+            Reason::PhysicalPathUnproven,
+            true,
+        ));
+        assert_eq!(unknown.fact, Fact::NotChecked);
+        assert!(!unknown.independent);
+        let mut report = report(Fact::Passed, Fact::Passed, Fact::Timeout);
+        let mut rejected = rejected;
+        rejected.started_at_ms = report.started_at_ms;
+        rejected.finished_at_ms = report.started_at_ms + 1;
+        assert!(report.attach_endpoint(rejected));
+        let export = report.redacted_json();
+        assert!(!export.contains("lease") && !export.contains("active_profile"));
+        assert!(export.contains("rejected"));
+    }
+    #[test]
     fn local_guard_refusal_is_not_evidence_that_the_endpoint_is_down() {
-        assert!(!desktop_endpoint_independent());
         for fact in [
             Fact::ConnectionFailed,
             Fact::Timeout,
@@ -861,11 +934,7 @@ mod tests {
             Fact::TlsFailed,
         ] {
             let mut r = report(Fact::Passed, Fact::Passed, Fact::Timeout);
-            r.attach_endpoint(endpoint(
-                fact,
-                r.started_at_ms,
-                desktop_endpoint_independent(),
-            ));
+            r.attach_endpoint(endpoint(fact, r.started_at_ms, false));
             assert_eq!(r.verdict().cause, Cause::Undetermined);
         }
         let mut r = report(Fact::Passed, Fact::Passed, Fact::Timeout);

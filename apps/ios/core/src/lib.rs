@@ -16,6 +16,8 @@ const QUEUE: usize = 64;
 static RUNNER: Mutex<Option<Runner>> = Mutex::new(None);
 static OBSERVATIONS: std::sync::LazyLock<Mutex<rtrust_mobile::Observations>> =
     std::sync::LazyLock::new(|| Mutex::new(rtrust_mobile::Observations::default()));
+static FLOWS: std::sync::LazyLock<Mutex<rtrust_mobile::flows::Capture>> =
+    std::sync::LazyLock::new(|| Mutex::new(rtrust_mobile::flows::Capture::default()));
 static STATE: AtomicU8 = AtomicU8::new(0); // idle, connecting, connected, reconnecting, failed
 fn set_state(state: u8) {
     OBSERVATIONS
@@ -49,6 +51,31 @@ pub extern "C" fn rtrust_ios_resumed() {
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .resumed();
+}
+/// Redacted local capture JSON; release with rtrust_ios_free. Operations: identity,
+/// enable, disable, poll. Only explicit UI requests can enable or renew.
+#[unsafe(no_mangle)]
+pub extern "C" fn rtrust_ios_flow_capture(
+    session: u64,
+    capture: u64,
+    operation: u8,
+) -> *mut c_char {
+    let mut flows = FLOWS.lock().unwrap_or_else(|p| p.into_inner());
+    let token = rtrust_mobile::flows::Token { session, capture };
+    let result = match operation {
+        0 => Ok(flows.snapshot()),
+        1 => flows.observe(token, true),
+        2 => flows.observe(token, false),
+        3 => flows.poll(token),
+        _ => Err("Invalid flow capture operation"),
+    };
+    let value = match result {
+        Ok(snapshot) => serde_json::to_value(snapshot).unwrap_or_default(),
+        Err(message) => serde_json::json!({"error":message}),
+    };
+    CString::new(value.to_string())
+        .map(CString::into_raw)
+        .unwrap_or(std::ptr::null_mut())
 }
 struct Runner {
     input: mpsc::Sender<Vec<u8>>,
@@ -182,6 +209,19 @@ pub unsafe extern "C" fn rtrust_ios_start(ptr: *const u8, len: usize) -> bool {
         let Ok((profile, _)) = rtrust_mobile::prepare(original) else {
             return false;
         };
+        let policy: rtrust_engine::routing::Policy =
+            match serde_json::from_value(profile.policy.clone()) {
+                Ok(p) => p,
+                Err(_) => return false,
+            };
+        let router = match policy.compile() {
+            Ok(r) => Arc::new(r),
+            Err(_) => return false,
+        };
+        let session = FLOWS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .attach(router.clone());
         let (input, incoming) = mpsc::channel(QUEUE);
         let (outgoing, output) = mpsc::channel(QUEUE);
         let device = Arc::new(Device {
@@ -198,9 +238,13 @@ pub unsafe extern "C" fn rtrust_ios_start(ptr: *const u8, len: usize) -> bool {
                         .worker_threads(2)
                         .enable_all()
                         .build()?;
-                    runtime.block_on(run(profile, device, receiver));
+                    runtime.block_on(run(profile, device, receiver, router, session));
                     Ok::<_, std::io::Error>(())
                 }));
+                FLOWS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .detach_session(session);
                 if !matches!(result, Ok(Ok(()))) {
                     set_state(4);
                 }
@@ -216,6 +260,10 @@ pub unsafe extern "C" fn rtrust_ios_start(ptr: *const u8, len: usize) -> bool {
                 true
             }
             Err(_) => {
+                FLOWS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .detach_session(session);
                 set_state(4);
                 false
             }
@@ -223,24 +271,15 @@ pub unsafe extern "C" fn rtrust_ios_start(ptr: *const u8, len: usize) -> bool {
     })
     .unwrap_or(false)
 }
-async fn run(profile: Profile, device: Arc<Device>, mut cancel: watch::Receiver<bool>) {
+async fn run(
+    profile: Profile,
+    device: Arc<Device>,
+    mut cancel: watch::Receiver<bool>,
+    router: Arc<rtrust_engine::routing::Router>,
+    runner_session: u64,
+) {
     let dns = match rtrust_engine::dns::encrypted(&profile.endpoint.dns_upstreams) {
         Ok(dns) => dns.unwrap_or_default(),
-        Err(_) => {
-            set_state(4);
-            return;
-        }
-    };
-    let policy: rtrust_engine::routing::Policy =
-        match serde_json::from_value(profile.policy.clone()) {
-            Ok(p) => p,
-            Err(_) => {
-                set_state(4);
-                return;
-            }
-        };
-    let router = match policy.compile() {
-        Ok(r) => Arc::new(r),
         Err(_) => {
             set_state(4);
             return;
@@ -263,12 +302,20 @@ async fn run(profile: Profile, device: Arc<Device>, mut cancel: watch::Receiver<
         };
         match attempt {
             Ok((session, tunnel)) => {
+                FLOWS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .transport_ready(runner_session);
                 set_state(2);
                 let started = std::time::Instant::now();
                 tokio::select! {
                     _ = cancel.changed() => return,
                     _ = rtrust_tun::run_packet_flow(session,tunnel,device.clone(),"169.254.254.2".parse().unwrap(),dns.clone(),routing.clone()) => {}
                 }
+                FLOWS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .transport_lost(runner_session);
                 if started.elapsed() > Duration::from_secs(30) {
                     delay = 1;
                 }
@@ -280,11 +327,20 @@ async fn run(profile: Profile, device: Arc<Device>, mut cancel: watch::Receiver<
                 | rtrust_engine::Error::Profile
                 | rtrust_engine::Error::Unsupported(_),
             ) => {
+                FLOWS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .transport_lost(runner_session);
                 set_state(4);
                 let _ = cancel.changed().await;
                 return;
             }
-            Err(_) => {}
+            Err(_) => {
+                FLOWS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .transport_lost(runner_session);
+            }
         }
         set_state(3);
         tokio::select! { _ = cancel.changed() => return, _ = tokio::time::sleep(Duration::from_secs(delay)) => {} }
@@ -293,12 +349,14 @@ async fn run(profile: Profile, device: Arc<Device>, mut cancel: watch::Receiver<
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn rtrust_ios_status() -> u8 {
+    FLOWS.lock().unwrap_or_else(|p| p.into_inner()).expire();
     STATE.load(Ordering::Acquire)
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn rtrust_ios_stop() {
     // Serialize start with shutdown so a previous worker cannot overwrite new state.
     let mut slot = RUNNER.lock().unwrap_or_else(|p| p.into_inner());
+    FLOWS.lock().unwrap_or_else(|p| p.into_inner()).detach();
     if let Some(runner) = slot.take() {
         let _ = runner.cancel.send(true);
         let _ = runner.thread.join();

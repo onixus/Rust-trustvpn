@@ -76,6 +76,17 @@ async fn negotiate() -> Result<Capabilities, String> {
     }
     Ok(response.capabilities)
 }
+fn current_endpoint_result(
+    result: &endpoint::Result,
+    captured: &Response,
+    current: &Response,
+) -> bool {
+    captured.endpoint_probe_token == Some(result.token)
+        && current.endpoint_probe_token == captured.endpoint_probe_token
+        && result.active_profile == captured.active_profile
+        && current.active_profile == captured.active_profile
+        && matches!(current.state, State::Connected)
+}
 fn validate_fallbacks(fallbacks: &[rtrust_profile::Profile]) -> Result<(), String> {
     if fallbacks.len() > MAX_FALLBACKS {
         return Err(format!("Не больше {MAX_FALLBACKS} резервных профилей"));
@@ -116,6 +127,30 @@ impl Client {
         }
         let mut pipe = socket().await?;
         exchange(&mut pipe, command, 60).await
+    }
+
+    /// Check only the profile currently owned by this authenticated service lease.
+    /// Dropping this future closes its independent IPC channel and cancels the check.
+    pub async fn probe_endpoint(&self) -> Result<endpoint::Result, String> {
+        let status = self.status();
+        if !status.capabilities.endpoint_probes {
+            return Err(
+                "Независимая проверка endpoint службой не поддерживается на этой платформе".into(),
+            );
+        }
+        let token = status
+            .endpoint_probe_token
+            .ok_or("Активный профиль службы не подтверждён")?;
+        let mut pipe = socket().await?;
+        let response = exchange(&mut pipe, Command::ProbeEndpoint { token }, 15).await?;
+        let result = response
+            .endpoint_probe
+            .ok_or("Служба не вернула результат проверки endpoint")?;
+        let current = self.status();
+        if !current_endpoint_result(&result, &status, &current) {
+            return Err("Устаревший результат проверки endpoint".into());
+        }
+        Ok(result)
     }
 
     pub async fn prepare_update() -> Result<MaintenancePermit, String> {
@@ -275,6 +310,49 @@ mod tests {
             )
             .await
             .unwrap();
+        });
+        assert!(
+            exchange(&mut client, Command::Capabilities, 1)
+                .await
+                .is_err()
+        );
+        task.await.unwrap();
+    }
+    #[test]
+    fn valid_backup_cooldown_is_a_current_reply_instead_of_a_stale_session() {
+        let token = endpoint::Token {
+            lease: [7; 16],
+            generation: 3,
+        };
+        let mut status = Response::new(State::Connected, "backup active");
+        status.active_profile = Some(2);
+        status.endpoint_probe_token = Some(token);
+        let mut result = endpoint::Result::unknown(
+            token,
+            endpoint::Outcome::RateLimited,
+            endpoint::Reason::Cooldown,
+        );
+        result.active_profile = Some(2);
+        assert!(current_endpoint_result(&result, &status, &status));
+        result.active_profile = None;
+        assert!(!current_endpoint_result(&result, &status, &status));
+        result.active_profile = Some(2);
+        let mut changed = status.clone();
+        changed.active_profile = Some(1);
+        assert!(!current_endpoint_result(&result, &status, &changed));
+        changed = status.clone();
+        changed.endpoint_probe_token.as_mut().unwrap().generation += 1;
+        assert!(!current_endpoint_result(&result, &status, &changed));
+    }
+    #[tokio::test]
+    async fn ipc_three_service_is_rejected_during_capability_negotiation() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(async move {
+            let request: Request = read(&mut server).await.unwrap();
+            assert!(matches!(request.command, Command::Capabilities));
+            let mut response = Response::new(State::Idle, "old service");
+            response.version = 3;
+            write(&mut server, &response).await.unwrap();
         });
         assert!(
             exchange(&mut client, Command::Capabilities, 1)

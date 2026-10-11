@@ -49,6 +49,95 @@ final class VPNModel: ObservableObject {
             }
         }
     }
+    @Published var flowWanted = false
+    @Published var flowSummary = ""
+    private var flowEpoch: UInt64 = 0
+    private var flowToken: [String: Any]?
+    private func flowMessage(_ operation: UInt8, _ token: [String: Any]?, completion: @escaping ([String: Any]?) -> Void) {
+        guard let session = manager?.connection as? NETunnelProviderSession,
+              let data = try? JSONSerialization.data(withJSONObject: ["type":"flow-capture-v1", "operation":operation,
+                "session":token?["session"] ?? 0, "capture":token?["capture"] ?? 0]) else { completion(nil); return }
+        do { try session.sendProviderMessage(data) { data in
+            Task { @MainActor in
+                guard let data, data.count <= 65536,
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { completion(nil); return }
+                completion(object)
+            }
+        } } catch { completion(nil) }
+    }
+    func startFlowCapture() {
+        guard active, !flowWanted else { return }
+        flowWanted = true; flowEpoch &+= 1; let epoch = flowEpoch
+        flowSummary = tr("Starting local observation", "Запуск локального наблюдения")
+        flowMessage(0, nil) { [weak self] identity in
+            guard let self, epoch == self.flowEpoch, self.flowWanted else { return }
+            guard self.active, let token = identity?["token"] as? [String: Any] else {
+                self.stopFlowCapture(); self.error = tr("Flow observation unavailable", "Наблюдение потоков недоступно"); return
+            }
+            self.flowMessage(1, token) { [weak self] result in
+                guard let self else { return }
+                guard let accepted = result?["token"] as? [String: Any] else {
+                    if epoch == self.flowEpoch { self.stopFlowCapture() }
+                    return
+                }
+                guard epoch == self.flowEpoch, self.flowWanted, self.active else {
+                    self.flowMessage(2, accepted) { _ in }; return
+                }
+                self.flowToken = accepted; self.refreshFlowCapture()
+            }
+        }
+    }
+    func stopFlowCapture() {
+        flowEpoch &+= 1; flowWanted = false; flowSummary = ""
+        let token = flowToken; flowToken = nil
+        if let token { flowMessage(2, token) { _ in } }
+    }
+    private func refreshFlowCapture() {
+        guard flowWanted else { return }
+        guard active else { stopFlowCapture(); return }
+        guard let token = flowToken else { return }
+        let epoch = flowEpoch
+        flowMessage(3, token) { [weak self] result in
+            guard let self, epoch == self.flowEpoch, self.flowWanted else { return }
+            guard let result, result["error"] == nil, result["enabled"] as? Bool == true else { self.stopFlowCapture(); return }
+            var lines = [tr("Actual flow policy selections, not delivery or OS protection. Addresses are not recorded.", "Реальные решения политики, а не доставка или системная защита. Адреса не записываются.")]
+            let lagged = result["lagged"] as? UInt64 ?? 0, stale = result["discarded_stale"] as? UInt64 ?? 0
+            if lagged > 0 { lines.append(tr("Events lost: ", "Событий потеряно: ") + String(lagged)) }
+            if stale > 0 { lines.append(tr("Old policy events discarded: ", "События прежней политики отброшены: ") + String(stale)) }
+            let oversized = result["discarded_oversize"] as? UInt64 ?? 0
+            if oversized > 0 { lines.append(tr("Events omitted for size: ", "События пропущены по размеру: ") + String(oversized)) }
+            let events = result["events"] as? [[String: Any]] ?? []
+            if events.isEmpty { lines.append(tr("No new observed decisions", "Новых решений нет")) }
+            for event in events.prefix(32) {
+                guard let decision = event["decision"] as? [String: Any], decision["prediction"] as? Bool == false else { continue }
+                let action: String
+                switch decision["action"] as? String {
+                case "tunnel": action = "VPN"
+                case "direct": action = tr("Direct", "Напрямую")
+                case "block": action = tr("Blocked", "Заблокировано")
+                default: action = tr("Unknown", "Неизвестно")
+                }
+                let reason: String
+                switch decision["reason"] as? String {
+                case "dns_always_tunneled": reason = tr("DNS uses VPN", "DNS через VPN")
+                case "matched_rule": reason = tr("matching rule", "совпало правило")
+                case "default_tunnel": reason = tr("default VPN policy", "VPN по умолчанию")
+                case "default_direct": reason = tr("default direct policy", "напрямую по умолчанию")
+                case "unknown_name_protected": reason = tr("unknown name stays protected", "неизвестное имя защищено")
+                case "shared_ip_conflict_protected": reason = tr("conflicting names stay protected", "конфликт имён защищён")
+                default: reason = tr("other policy reason", "другая причина политики")
+                }
+                let source = (decision["context"] as? [String: Any])?["source"] as? String
+                let sourceText = source == "embedded_profile" ? tr("profile policy", "политика профиля") : tr("other policy source", "другой источник политики")
+                let epoch = (event["version"] as? [String: Any])?["epoch"] as? UInt64 ?? 0
+                let age = event["age_ms"] as? UInt64 ?? 0
+                let revision = (event["version"] as? [String: Any])?["revision"] as? String ?? ""
+                let opaque = revision.count == 64 && revision.allSatisfy({ "0123456789abcdef".contains($0) }) ? String(revision.prefix(12)) : tr("opaque revision", "непрозрачная ревизия")
+                lines.append(action + " · " + reason + " · " + sourceText + " · " + tr("policy ", "политика ") + opaque + " / " + String(epoch) + " · " + String(age) + " ms")
+            }
+            self.flowSummary = lines.joined(separator:"\n")
+        }
+    }
     var active: Bool { VPNController.isActive(state) }
     var canEdit: Bool { !busy && !active && !onDemand }
     var status: String {
@@ -68,7 +157,7 @@ final class VPNModel: ObservableObject {
             Task { @MainActor in await self?.refresh() }
         }
         observationTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshObservations() }
+            Task { @MainActor in self?.refreshObservations(); self?.refreshFlowCapture() }
         }
         Task { await refresh(); busy = false }
     }
