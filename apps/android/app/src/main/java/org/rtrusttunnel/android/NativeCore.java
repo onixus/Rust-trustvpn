@@ -10,5 +10,11 @@ public final class NativeCore {
     public native String plan(String raw);
     public native boolean start(String raw, int fd, Object protector);
     public native void stop();
+    /** OS-selected underlying network changed; no address/name crosses JNI. */
+    public native void networkChanged();
+    /** Kernel clocks report deep sleep while this native session is active. */
+    public native void resumed();
+    /** Redacted local flow decisions; 0 identity, 1 enable, 2 disable, 3 poll. */
+    public native String flowCapture(long session, long capture, int operation);
     public native String status();
 }

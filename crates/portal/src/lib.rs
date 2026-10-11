@@ -6,12 +6,12 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 const LIMIT: usize = 8 * MAX_INPUT;
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct Summary {
     pub name: String,
     pub hostname: String,
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct RemoteProfile {
     pub id: String,
     pub revision: String,
@@ -35,6 +35,7 @@ pub struct RoutingPolicy {
     pub exclude_lan: bool,
 }
 /// An older API is distinct from an explicit removal of the device's group.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RoutingState {
     Unsupported,
     Available(Option<RoutingPolicy>),
@@ -71,11 +72,70 @@ pub struct Client {
     http: Http,
     origin: Url,
     token: Zeroizing<String>,
+    expires_at: Option<u64>,
+    device_id: Option<u64>,
 }
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PortalClient([REDACTED])")
     }
+}
+#[derive(Deserialize)]
+struct Capabilities {
+    version: u64,
+    formats: Vec<String>,
+    enrollment: Vec<String>,
+    max_profile_bytes: u64,
+    #[serde(default)]
+    routing: Option<u64>,
+}
+impl Capabilities {
+    fn validate(&self) -> Result<(), String> {
+        if self.version != 2
+            || !self.formats.iter().any(|v| v == "profile_json")
+            || !self.enrollment.iter().any(|v| v == "one_time_code")
+            || self.max_profile_bytes == 0
+            || self.routing.is_some_and(|v| v != 1)
+        {
+            return Err("Панель не поддерживает совместимый контракт профилей v2".into());
+        }
+        Ok(())
+    }
+}
+/// Downloaded secrets are deliberately excluded from Debug and serialization.
+pub struct Snapshot {
+    pub profiles: Vec<(RemoteProfile, Profile)>,
+    pub routing: RoutingState,
+}
+fn same_revisions(before: &[RemoteProfile], after: &[RemoteProfile]) -> bool {
+    before.len() == after.len()
+        && before
+            .iter()
+            .all(|item| after.iter().any(|other| other == item))
+}
+fn now() -> Result<u64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| "Системное время недоступно".into())
+}
+fn valid_token(token: &str) -> bool {
+    (40..=128).contains(&token.len())
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+fn token_deadline(requested_at: u64, expires_in: Option<u64>) -> Result<Option<u64>, String> {
+    expires_in
+        .map(|ttl| {
+            if ttl == 0 {
+                return Err("Некорректный срок токена панели".into());
+            }
+            requested_at
+                .checked_add(ttl)
+                .ok_or_else(|| "Некорректный срок токена панели".into())
+        })
+        .transpose()
 }
 fn origin(value: &str) -> Result<Url, String> {
     let url = Url::parse(value.trim()).map_err(|_| "Некорректный адрес панели")?;
@@ -103,12 +163,23 @@ fn identifier(value: &str) -> Result<&str, String> {
     Ok(value)
 }
 impl Client {
+    /// Only portal API expiry is known. Endpoint credentials have independent lifetimes.
+    pub fn access_expired(&self, unix_seconds: u64) -> bool {
+        self.expires_at
+            .is_some_and(|deadline| unix_seconds >= deadline)
+    }
+    pub fn expires_at(&self) -> Option<u64> {
+        self.expires_at
+    }
+    pub fn device_id(&self) -> Option<u64> {
+        self.device_id
+    }
     pub fn address(&self) -> &str {
         self.origin.as_str()
     }
     pub fn remember(&self) -> Result<(), String> {
         let bytes = Zeroizing::new(
-            serde_json::to_vec(&json!({"origin":self.origin.as_str(),"token":self.token.as_str()}))
+            serde_json::to_vec(&json!({"origin":self.origin.as_str(),"token":self.token.as_str(),"expires_at":self.expires_at,"device_id":self.device_id}))
                 .map_err(|_| "Ошибка сохранения привязки")?,
         );
         keyring::Entry::new("org.rtrusttunnel.desktop", "portal-device-v2")
@@ -126,14 +197,21 @@ impl Client {
         struct Saved {
             origin: String,
             token: String,
+            #[serde(default)]
+            expires_at: Option<u64>,
+            #[serde(default)]
+            device_id: Option<u64>,
         }
         let saved: Saved =
             serde_json::from_slice(&bytes).map_err(|_| "Повреждена сохранённая привязка")?;
+        let token = Zeroizing::new(saved.token);
         let mut client = Self::new(&saved.origin)?;
-        if !(40..=128).contains(&saved.token.len()) {
+        if !valid_token(&token) || saved.device_id == Some(0) {
             return Err("Повреждена сохранённая привязка".into());
         }
-        client.token = Zeroizing::new(saved.token);
+        client.token = token;
+        client.expires_at = saved.expires_at;
+        client.device_id = saved.device_id;
         Ok(client)
     }
     pub fn forget() -> Result<(), String> {
@@ -166,6 +244,8 @@ impl Client {
             http: builder.build().map_err(|_| "HTTPS недоступен")?,
             origin: origin(address)?,
             token: Zeroizing::new(String::new()),
+            expires_at: None,
+            device_id: None,
         })
     }
     async fn request<T: DeserializeOwned>(
@@ -186,6 +266,9 @@ impl Client {
         body: Option<Value>,
         missing_ok: bool,
     ) -> Result<Option<T>, String> {
+        if !self.token.is_empty() && self.access_expired(now()?) {
+            return Err("Срок токена панели истёк. Привяжите устройство заново.".into());
+        }
         let url = self
             .origin
             .join(&format!("portal/v2/{path}"))
@@ -232,15 +315,31 @@ impl Client {
             .map_err(|_| "Некорректный ответ панели".into())
     }
     pub async fn enroll(mut self, code: &str, name: &str) -> Result<Self, String> {
-        if !(20..=128).contains(&code.len()) || name.trim().is_empty() || name.len() > 80 {
+        if !(20..=128).contains(&code.len())
+            || !code
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            || name.trim().is_empty()
+            || name.len() > 80
+            || name.chars().any(char::is_control)
+        {
             return Err("Укажите код панели и имя устройства (до 80 байт)".into());
         }
         #[derive(Deserialize)]
         struct Enrolled {
             token: String,
+            #[serde(default)]
+            device_id: Option<u64>,
+            #[serde(default)]
+            expires_in: Option<u64>,
         }
+        let requested_at = now()?;
         let platform = if cfg!(target_os = "macos") {
             "macos"
+        } else if cfg!(target_os = "android") {
+            "android"
+        } else if cfg!(target_os = "ios") {
+            "ios"
         } else if cfg!(target_os = "windows") {
             "windows"
         } else {
@@ -253,15 +352,19 @@ impl Client {
                 Some(json!({"code":code,"name":name,"platform":platform})),
             )
             .await?;
-        if !(40..=128).contains(&value.token.len())
-            || !value
-                .token
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
+        let token = Zeroizing::new(value.token);
+        if !valid_token(&token) || value.device_id == Some(0) {
             return Err("Некорректный токен панели".into());
         }
-        self.token = Zeroizing::new(value.token);
+        self.expires_at = token_deadline(requested_at, value.expires_in)?;
+        if self
+            .expires_at
+            .is_some_and(|deadline| deadline <= now().unwrap_or(u64::MAX))
+        {
+            return Err("Срок токена панели истёк. Привяжите устройство заново.".into());
+        }
+        self.device_id = value.device_id;
+        self.token = token;
         Ok(self)
     }
     pub async fn list(&self) -> Result<Vec<RemoteProfile>, String> {
@@ -279,11 +382,57 @@ impl Client {
                 return Err("Повторяющийся идентификатор профиля".into());
             }
             identifier(&p.id)?;
-            if p.revision.is_empty() || p.revision.len() > 256 {
+            if p.revision.is_empty()
+                || p.revision.len() > 256
+                || !p.revision.bytes().all(|b| b.is_ascii_graphic())
+                || p.origin.is_empty()
+                || p.origin.len() > 80
+                || p.origin.chars().any(char::is_control)
+                || p.summary.name.len() > 1024
+                || p.summary.hostname.len() > 1024
+                || p.summary.name.chars().any(char::is_control)
+                || p.summary.hostname.chars().any(char::is_control)
+            {
                 return Err("Некорректная версия профиля".into());
             }
         }
         Ok(result.profiles)
+    }
+    /// Validate the existing v2 profile contract. This is not an endpoint-revocation capability.
+    pub async fn check_capabilities(&self) -> Result<(), String> {
+        let capabilities: Capabilities = self.request(Method::GET, "capabilities", None).await?;
+        capabilities.validate()
+    }
+    /// Fetch all data before publishing any local update. Recheck source revisions;
+    /// v2 has no server transaction revision, so this detects observed changes only.
+    pub async fn snapshot(&self) -> Result<Snapshot, String> {
+        self.check_capabilities().await?;
+        let profiles = self.list().await?;
+        let routing = self.routing_state().await?;
+        let mut downloaded = Vec::with_capacity(profiles.len());
+        let mut bytes = 0usize;
+        for meta in &profiles {
+            let profile = self.download(meta).await?;
+            // Export zeroizes its content on drop.
+            bytes += profile
+                .export(Format::Json)
+                .map_err(|_| "Получен недопустимый профиль")?
+                .content
+                .len();
+            if bytes > 4 * MAX_INPUT {
+                return Err("Партия профилей слишком большая".into());
+            }
+            downloaded.push((meta.clone(), profile));
+        }
+        if !same_revisions(&profiles, &self.list().await?)
+            || routing != self.routing_state().await?
+        {
+            return Err("Данные панели изменились. Повторите синхронизацию.".into());
+        }
+        Ok(Snapshot {
+            profiles: downloaded,
+            routing,
+        })
     }
     pub async fn download(&self, profile: &RemoteProfile) -> Result<Profile, String> {
         #[derive(Deserialize)]
@@ -344,6 +493,85 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expiry_is_conservative_and_legacy_expiry_stays_unknown() {
+        assert_eq!(token_deadline(100, Some(30)).unwrap(), Some(130));
+        assert_eq!(token_deadline(100, None).unwrap(), None);
+        assert!(token_deadline(100, Some(0)).is_err());
+        assert!(token_deadline(u64::MAX, Some(1)).is_err());
+        let mut client = Client::new("https://example.com").unwrap();
+        assert!(!client.access_expired(u64::MAX));
+        client.expires_at = Some(130);
+        assert!(!client.access_expired(129));
+        assert!(client.access_expired(130));
+        assert!(client.access_expired(131));
+    }
+    #[tokio::test]
+    async fn expired_token_never_contacts_the_portal() {
+        let mut client = Client::new("https://127.0.0.1:1").unwrap();
+        client.token = Zeroizing::new("x".repeat(43));
+        client.expires_at = Some(1);
+        assert_eq!(
+            client.list().await.err().unwrap(),
+            "Срок токена панели истёк. Привяжите устройство заново."
+        );
+        assert_eq!(format!("{client:?}"), "PortalClient([REDACTED])");
+    }
+    #[test]
+    fn token_characters_are_validated_on_restore_too() {
+        assert!(valid_token(&"x".repeat(43)));
+        assert!(!valid_token(&format!("{}\n", "x".repeat(43))));
+        assert!(!valid_token(&"x".repeat(129)));
+    }
+    #[test]
+    fn snapshot_recheck_detects_rotation_removal_and_origin_change() {
+        let profile = RemoteProfile {
+            id: "managed-1".into(),
+            revision: "1".into(),
+            summary: Summary {
+                name: "Office".into(),
+                hostname: "vpn.example".into(),
+            },
+            origin: "portal_managed".into(),
+        };
+        let mut changed = profile.clone();
+        assert!(same_revisions(
+            std::slice::from_ref(&profile),
+            std::slice::from_ref(&changed)
+        ));
+        changed.revision = "2".into();
+        assert!(!same_revisions(std::slice::from_ref(&profile), &[changed]));
+        assert!(!same_revisions(std::slice::from_ref(&profile), &[]));
+        changed = profile.clone();
+        changed.origin = "external_stored".into();
+        assert!(!same_revisions(&[profile], &[changed]));
+    }
+    #[test]
+    fn capabilities_fail_closed_for_unsupported_contracts() {
+        let baseline = json!({"version":2,"formats":["profile_json"],"enrollment":["one_time_code"],"max_profile_bytes":MAX_INPUT,"routing":1,"future":true});
+        assert!(
+            serde_json::from_value::<Capabilities>(baseline.clone())
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+        for (field, value) in [
+            ("version", json!(3)),
+            ("formats", json!([])),
+            ("enrollment", json!([])),
+            ("max_profile_bytes", json!(0)),
+            ("routing", json!(2)),
+        ] {
+            let mut bad = baseline.clone();
+            bad[field] = value;
+            assert!(
+                serde_json::from_value::<Capabilities>(bad)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
+    }
     #[test]
     fn rejects_credential_or_redirect_origins() {
         for url in [
@@ -424,3 +652,6 @@ mod tests {
         assert!(parse(json!({ "policy": value })).is_err());
     }
 }
+
+#[cfg(test)]
+mod snapshot_tests;

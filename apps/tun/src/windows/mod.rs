@@ -139,27 +139,6 @@ async fn reply(
     .await
     .map_err(|_| "IPC write timed out")?
 }
-async fn pinned(profile: &rtrust_profile::Profile) -> Result<rtrust_profile::Profile, String> {
-    let mut result = profile.clone();
-    let mut addresses = Vec::new();
-    for address in &profile.endpoint.addresses {
-        for addr in tokio::net::lookup_host(address)
-            .await
-            .map_err(|_| "Cannot resolve endpoint")?
-        {
-            if addresses.len() >= 64 {
-                return Err("Too many endpoint addresses".into());
-            }
-            addresses.push(addr.to_string());
-        }
-    }
-    if addresses.is_empty() {
-        return Err("Endpoint has no addresses".into());
-    }
-    // Freeze DNS answers for this lease so reconnect cannot route into itself.
-    result.endpoint.addresses = addresses;
-    Ok(result)
-}
 /// Selected routes minus the pinned endpoint (and LAN on request), checked
 /// against the current table.
 fn selected_routes(
@@ -221,8 +200,10 @@ async fn reply_observed(
     state: State,
     message: &str,
     monitor: &mut rtrust_control::observations::Monitor,
+    active_profile: Option<u8>,
 ) -> Result<(), String> {
     let mut response = Response::new(state, message);
+    response.active_profile = active_profile;
     response.observations = monitor.sample(rtrust_control::observations::now_ms());
     tokio::time::timeout(Duration::from_secs(5), write(stream, &response))
         .await
@@ -243,10 +224,13 @@ async fn serve(
     if matches!(request.command, Command::Capabilities) {
         return write(pipe, &Response::new(State::Idle, "Capabilities")).await;
     }
-    if let Some(supervisor) = supervisor {
+    if let Some(ref supervisor) = supervisor {
+        if matches!(request.command, Command::Stop) {
+            supervisor.cancel_pending_enable();
+        }
         match request.command {
             Command::AlwaysOnStatus=>return write(pipe,&supervisor.state()).await,
-            command @ (Command::EnableAlwaysOn{..}|Command::DisableAlwaysOn)=>return write(pipe,&supervisor.command(command).await).await,
+            command @ (Command::EnableAlwaysOn{..}|Command::EnableRecovery{..}|Command::DisableAlwaysOn)=>return write(pipe,&supervisor.command(command).await).await,
             _ if supervisor.enabled()=>return reply(pipe,State::Error,"Always-on управляется системной службой. Для обслуживания сначала выключите always-on.").await,
             _=>{},
         }
@@ -254,7 +238,7 @@ async fn serve(
     let Ok(_lease) = lease.try_lock_owned() else {
         return reply(pipe, State::Error, "Служба уже обслуживает подключение").await;
     };
-    let (profile, selection, dns, split_dns) = match request.command {
+    let (profile, selection, dns, split_dns, fallbacks) = match request.command {
         Command::PrepareUpdate => {
             if full::pending()? {
                 return reply(
@@ -275,6 +259,7 @@ async fn serve(
             exclude,
             exclude_lan,
             dns,
+            fallbacks,
         } => {
             let selection = rtrust_control::Selection {
                 include: networks,
@@ -284,11 +269,15 @@ async fn serve(
             if let Err(error) = selection.validate() {
                 return reply(pipe, State::Error, &error).await;
             }
-            (profile, selection, None, dns)
+            (profile, selection, None, dns, fallbacks)
         }
-        Command::StartFull { profile, dns } => {
+        Command::StartFull {
+            profile,
+            dns,
+            fallbacks,
+        } => {
             rtrust_control::validate_dns(dns)?;
-            (profile, Default::default(), Some(dns), None)
+            (profile, Default::default(), Some(dns), None, fallbacks)
         }
         Command::Recover => {
             full::recover()?;
@@ -306,20 +295,34 @@ async fn serve(
     }
     routes::settled_adapter()?;
     let setup = async {
-        let profile = pinned(&profile).await?;
+        // Every allowed candidate is pinned now: the guard covers them all.
+        // WFP full mode pins IPv4 endpoint exceptions: an IPv6 answer of any
+        // candidate would otherwise reject the whole start.
+        let mut failover = crate::failover::Failover::pin(
+            *profile,
+            fallbacks,
+            if dns.is_some() {
+                crate::failover::Pin::Ipv4
+            } else {
+                crate::failover::Pin::All
+            },
+        )
+        .await?;
         let networks = if dns.is_none() {
-            selected_routes(&profile, &selection)?
+            selected_routes(&failover.guard_profile(), &selection)?
         } else {
             vec![]
         };
-        let (session, udp) = transport(&profile).await?;
-        Ok::<_, String>((profile, networks, session, udp))
+        let (session, udp) = failover
+            .connect_initial(|profile| async move { transport(&profile).await })
+            .await?;
+        Ok::<_, String>((failover, networks, session, udp))
     };
-    let (profile, networks, session, udp) = {
+    let (mut failover, networks, session, udp) = {
         use tokio::io::AsyncReadExt;
         let mut unexpected = [0];
         tokio::select! {
-            r = tokio::time::timeout(Duration::from_secs(35), setup) => match r {
+            r = tokio::time::timeout(Duration::from_secs(42), setup) => match r {
                 Ok(Ok(v)) => v,
                 Ok(Err(error)) => return reply(pipe, State::Error, &error).await,
                 Err(_) => return reply(pipe, State::Error, "Endpoint connection timed out").await,
@@ -363,10 +366,9 @@ async fn serve(
             .map_err(|_| "Wintun interface index unavailable")?;
         full::install(
             index,
-            &full::endpoints(&profile)?,
+            &full::endpoints(&failover.guard_profile())?,
             dns,
-            profile.udp_transport(),
-            &profile.hop_port_ranges(),
+            &failover.permits()?,
         )?;
         vec!["0.0.0.0/1".parse().unwrap(), "128.0.0.0/1".parse().unwrap()]
     } else {
@@ -415,11 +417,12 @@ async fn serve(
     )));
     let result = lease_loop(
         pipe,
-        &profile,
+        &mut failover,
         device.clone(),
         &mut worker,
         &mut stop,
         dns.is_some(),
+        supervisor.as_deref(),
     )
     .await;
     worker.stop().await;
@@ -448,11 +451,12 @@ async fn serve(
 }
 async fn lease_loop(
     pipe: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
-    profile: &rtrust_profile::Profile,
+    failover: &mut crate::failover::Failover,
     device: Arc<tun_rs::AsyncDevice>,
     worker: &mut Worker,
     stop: &mut watch::Receiver<bool>,
     full: bool,
+    supervisor: Option<&crate::always_on::Supervisor>,
 ) -> Result<Option<rtrust_control::observations::Snapshot>, String> {
     let mut monitor = rtrust_control::observations::Monitor::new(
         if full {
@@ -463,21 +467,30 @@ async fn lease_loop(
         rtrust_control::observations::Source::ServiceLifecycle,
         rtrust_control::observations::now_ms(),
     );
+    if failover.active().is_some_and(|index| index > 0) {
+        monitor.failed_over(rtrust_control::observations::now_ms());
+    }
     reply_observed(
         pipe,
         State::Connected,
-        if full {
-            "Весь компьютер: IPv4, IPv6 и DNS через Wintun"
-        } else {
-            "Выбранные IPv4-сети подключены через Wintun"
-        },
+        &format!(
+            "{}{}",
+            if full {
+                "Весь компьютер: IPv4, IPv6 и DNS через Wintun"
+            } else {
+                "Выбранные IPv4-сети подключены через Wintun"
+            },
+            failover.note()
+        ),
         &mut monitor,
+        failover.active(),
     )
     .await?;
     let mut state = State::Connected;
     monitor.transition(true, rtrust_control::observations::now_ms());
+    let mut netwatch = crate::netwatch::Watch::new(DEVICE);
     let mut retry = Box::pin(tokio::time::sleep(Duration::from_secs(2)));
-    let mut retry_budget = rtrust_control::recovery::Budget::default();
+    let mut budget = rtrust_control::recovery::Budget::default();
     let mut connected_since = std::time::Instant::now();
     let mut connecting = Box::pin(std::future::pending::<
         Result<(Session, rtrust_engine::Tunnel), String>,
@@ -495,19 +508,27 @@ async fn lease_loop(
         let request = loop {
             tokio::select! {
                 r = &mut pending => break r?,
+                change = netwatch.next() => match change {
+                    crate::netwatch::Change::Network => monitor.network_changed(rtrust_control::observations::now_ms()),
+                    crate::netwatch::Change::Resumed => monitor.resumed(rtrust_control::observations::now_ms()),
+                },
                 _ = stop.changed() => return Ok(None),
                 _ = worker.finished(), if state == State::Connected => {
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
-                    retry_budget.disconnected(connected_since.elapsed());
-                    retry.as_mut().reset(tokio::time::Instant::now()+retry_budget.next_delay(rand::random()));
+                    budget.disconnected(connected_since.elapsed());
+                    if failover.ended(connected_since.elapsed(), std::time::Instant::now()) {
+                        monitor.failed_over(rtrust_control::observations::now_ms());
+                    }
+                    retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                 },
                 _ = &mut retry, if state == State::Blocked && !reconnecting => {
-                    if full && full::refresh(device.if_index().map_err(|_| "Missing Wintun interface")?, &full::endpoints(profile)?).is_err() {
-                        retry.as_mut().reset(tokio::time::Instant::now()+retry_budget.next_delay(rand::random()));
+                    if full && full::refresh(device.if_index().map_err(|_| "Missing Wintun interface")?, &full::endpoints(&failover.guard_profile())?).is_err() {
+                        retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                         continue;
                     }
-                    connecting = Box::pin(async {
-                        tokio::time::timeout(rtrust_control::recovery::ATTEMPT_TIMEOUT, transport(profile))
+                    let profile = failover.current().clone();
+                    connecting = Box::pin(async move {
+                        tokio::time::timeout(rtrust_control::recovery::ATTEMPT_TIMEOUT, transport(&profile))
                             .await.map_err(|_| "Reconnect timed out".to_owned())?
                     }); reconnecting=true;
                 },
@@ -518,7 +539,13 @@ async fn lease_loop(
                             *worker=Worker::new(tokio::spawn(crate::dataplane::run(session,udp,device.clone(),ADDRESS)));
                             state=State::Connected; monitor.transition(true, rtrust_control::observations::now_ms()); connected_since=std::time::Instant::now();
                         },
-                        Err(_) => { retry.as_mut().reset(tokio::time::Instant::now()+retry_budget.next_delay(rand::random())); },
+                        Err(_) => {
+                            // The guard already covers every candidate.
+                            if failover.failed(std::time::Instant::now()) {
+                                monitor.failed_over(rtrust_control::observations::now_ms());
+                            }
+                            retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
+                        },
                     }
                 },
             }
@@ -534,16 +561,18 @@ async fn lease_loop(
                     state.clone(),
                     if state == State::Connected {
                         "Wintun подключён"
-                    } else if retry_budget.cooling() {
-                        "Связь потеряна; пауза между попытками. Защита сохранена."
                     } else {
                         "Переподключение; выбранные IPv4-сети удерживаются на Wintun"
                     },
                     &mut monitor,
+                    failover.active(),
                 )
                 .await?
             }
             Command::Stop => {
+                if let Some(supervisor) = supervisor {
+                    supervisor.cancel_pending_enable();
+                }
                 monitor.stop(rtrust_control::observations::now_ms());
                 return Ok(Some(monitor.sample(rtrust_control::observations::now_ms())));
             }
@@ -602,7 +631,9 @@ mod tests {
         ))
         .unwrap();
         profile.endpoint.addresses = vec!["198.18.0.2:443".into()];
-        let p = pinned(&profile).await.unwrap();
+        let p = crate::failover::pin_endpoint(profile.clone(), crate::failover::Pin::All)
+            .await
+            .unwrap();
         let endpoint: Ipv4Addr = "198.18.0.2".parse().unwrap();
         let selection = rtrust_control::Selection::parse("198.18.0.0/24", "", false).unwrap();
         let routes = selection.routes(&[endpoint], &[]).unwrap();
@@ -616,7 +647,9 @@ mod tests {
         assert_eq!(p.endpoint.hostname, profile.endpoint.hostname);
         // HTTP/3 is pinned the same way; only the WFP permit switches to UDP.
         profile.endpoint.upstream_protocol = "http3".into();
-        let p = pinned(&profile).await.unwrap();
+        let p = crate::failover::pin_endpoint(profile.clone(), crate::failover::Pin::All)
+            .await
+            .unwrap();
         assert_eq!(p.endpoint.addresses, ["198.18.0.2:443"]);
         assert!(p.udp_transport());
     }

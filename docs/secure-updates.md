@@ -118,12 +118,21 @@ https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9
 
 ## Версия IPC и gate приёмки (issues #31/#36)
 
-`CURRENT_IPC` теперь ссылается на `rtrust_control::VERSION`; подготовка
-метаданных проверяет хэш исходника control в архиве сборки и берёт ту же
-версию для `min_ipc`/`max_ipc`. Исторические IPC-1 манифесты не являются
-совместимыми с IPC-2 клиентом. Для новой поставки нужны новые подписанные
-метаданные и проверенный совместимый rollback; уже опубликованные sequence
-не перезаписываются. Изменение исходников само по себе ничего не подписывает.
+`CURRENT_IPC = 1` — совместимость транзакции обновления в исторических полях
+`min_ipc`/`max_ipc` подписанного манифеста. Она независима от версии IPC GUI/службы:
+установщик заменяет оба компонента согласованным комплектом. Строгая проверка
+`rtrust_control::VERSION` в службе сохраняется. Подготовка релиза проверяет хеши
+архивированных исходников и берёт границы совместимости из скомпилированного
+updater. Старый updater принимает новый пакет с границами 1..1; исторический
+подписанный пакет установленной версии остаётся доступен для отката.
+
+Перед первым SSH publisher проверяет Ed25519 по закреплённому корню тем же Rust
+верификатором, что клиент: схему, платформу, совместимость, срок действия, точный
+номер релиза, канонический versioned URL, размер и SHA256 установщика. Загрузка
+использует приватную копию проверенных файлов. Gate приёмки сопоставляет версию
+и `update_manifest_sha256` с проверенным подписанным envelope; каждый отчёт для
+пакета с обновлениями тоже содержит этот хеш. После изменения или повторного
+подписания манифеста прежние отчёты не разрешают продвижение latest.
 
 `python3 scripts/release-acceptance.py MATRIX.json` проверяет матрицу,
 сохраняя различие passed/failed/not_run/unsupported.
@@ -135,7 +144,8 @@ https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9
 
 Матрица schema 1 содержит массив `packages`. Запись пакета имеет полный
 40-символьный `commit`, `version`, `target`, `os`, `device`, `artifact` и
-`artifact_sha256`, `source_manifest` и `source_manifest_sha256`, boolean
+`artifact_sha256`, `source_manifest` и `source_manifest_sha256`, а для targets
+с update_metadata — `update_manifest` и `update_manifest_sha256`; boolean
 `preview`, массив `claims` и массив `checks`. Пути файлов разрешаются относительно
 матрицы. Claim содержит `protocol` (trusttunnel/http3/hysteria2/amneziawg),
 `mode` (split/full/proxy) и boolean `always_on`. Нельзя переносить результат

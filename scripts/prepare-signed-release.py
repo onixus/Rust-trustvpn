@@ -20,9 +20,8 @@ for name in ['crates/update/src/lib.rs','crates/control/src/lib.rs','Cargo.toml'
 sequence=re.search(r'pub const CURRENT_SEQUENCE: u64 = (\d+);',(ROOT/'crates/update/src/lib.rs').read_text())
 assert sequence and int(sequence.group(1))==a.sequence,'Manifest sequence differs from compiled CURRENT_SEQUENCE'
 assert tomllib.loads((ROOT/'Cargo.toml').read_text())['workspace']['package']['version']==a.version,'Manifest version differs from compiled package version'
-ipc=re.search(r'pub const VERSION: u32 = (\d+);',(ROOT/'crates/control/src/lib.rs').read_text())
-assert ipc,'Compiled control IPC version is unavailable'
-assert 'pub const CURRENT_IPC: u32 = rtrust_control::VERSION;' in (ROOT/'crates/update/src/lib.rs').read_text(),'Update IPC is not bound to control IPC'
+ipc=re.search(r'pub const CURRENT_IPC: u32 = (\d+);',(ROOT/'crates/update/src/lib.rs').read_text())
+assert ipc,'Compiled updater transaction version is unavailable'
 ipc_version=int(ipc.group(1))
 
 assert hashlib.sha256((ROOT/'crates/update/src/root.pub').read_bytes()).hexdigest()==manifest['crates/update/src/root.pub'],'Archived build has a different update root'

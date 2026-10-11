@@ -68,11 +68,28 @@ async fn exchange(stream: &mut Pipe, command: Command, seconds: u64) -> Result<R
     .map_err(|_| "Служба не отвечает")?
 }
 // Negotiate on a separate authenticated connection before sending credentials or mutating.
-async fn negotiate() -> Result<(), String> {
+async fn negotiate() -> Result<Capabilities, String> {
     let mut pipe = socket().await?;
     let response = exchange(&mut pipe, Command::Capabilities, 5).await?;
     if !response.capabilities.lifecycle_observations || response.state != State::Idle {
         return Err("IPC capabilities unavailable; update the UI and service together".into());
+    }
+    Ok(response.capabilities)
+}
+fn current_endpoint_result(
+    result: &endpoint::Result,
+    captured: &Response,
+    current: &Response,
+) -> bool {
+    captured.endpoint_probe_token == Some(result.token)
+        && current.endpoint_probe_token == captured.endpoint_probe_token
+        && result.active_profile == captured.active_profile
+        && current.active_profile == captured.active_profile
+        && matches!(current.state, State::Connected)
+}
+fn validate_fallbacks(fallbacks: &[rtrust_profile::Profile]) -> Result<(), String> {
+    if fallbacks.len() > MAX_FALLBACKS {
+        return Err(format!("Не больше {MAX_FALLBACKS} резервных профилей"));
     }
     Ok(())
 }
@@ -81,16 +98,59 @@ pub struct MaintenancePermit {
     _pipe: Pipe,
 }
 impl Client {
-    pub async fn always_on(command: Command) -> Result<Response, String> {
+    pub async fn always_on(mut command: Command) -> Result<Response, String> {
         if !matches!(
             command,
-            Command::EnableAlwaysOn { .. } | Command::DisableAlwaysOn | Command::AlwaysOnStatus
+            Command::EnableAlwaysOn { .. }
+                | Command::EnableRecovery { .. }
+                | Command::DisableAlwaysOn
+                | Command::AlwaysOnStatus
         ) {
             return Err("Invalid always-on operation".into());
         }
-        negotiate().await?;
+        let capabilities = negotiate().await?;
+        if matches!(command, Command::EnableRecovery { .. }) && !capabilities.automatic_recovery {
+            return Err(
+                "Служба не поддерживает автоматическое восстановление на этой платформе".into(),
+            );
+        }
+        if let Command::EnableAlwaysOn { generation, .. }
+        | Command::EnableRecovery { generation, .. } = &mut command
+        {
+            // Receive the fence before opening the mutation connection. An aborted
+            // caller cannot leave a complete old Enable carrying a post-Disable fence.
+            let mut status_pipe = socket().await?;
+            let status = exchange(&mut status_pipe, Command::AlwaysOnStatus, 5).await?;
+            *generation = Some(status.always_on_generation.ok_or(
+                "Always-on cancellation fence unavailable; update UI and service together",
+            )?);
+        }
         let mut pipe = socket().await?;
         exchange(&mut pipe, command, 60).await
+    }
+
+    /// Check only the profile currently owned by this authenticated service lease.
+    /// Dropping this future closes its independent IPC channel and cancels the check.
+    pub async fn probe_endpoint(&self) -> Result<endpoint::Result, String> {
+        let status = self.status();
+        if !status.capabilities.endpoint_probes {
+            return Err(
+                "Независимая проверка endpoint службой не поддерживается на этой платформе".into(),
+            );
+        }
+        let token = status
+            .endpoint_probe_token
+            .ok_or("Активный профиль службы не подтверждён")?;
+        let mut pipe = socket().await?;
+        let response = exchange(&mut pipe, Command::ProbeEndpoint { token }, 15).await?;
+        let result = response
+            .endpoint_probe
+            .ok_or("Служба не вернула результат проверки endpoint")?;
+        let current = self.status();
+        if !current_endpoint_result(&result, &status, &current) {
+            return Err("Устаревший результат проверки endpoint".into());
+        }
+        Ok(result)
     }
 
     pub async fn prepare_update() -> Result<MaintenancePermit, String> {
@@ -105,10 +165,12 @@ impl Client {
 
     pub async fn start(
         profile: rtrust_profile::Profile,
+        fallbacks: Vec<rtrust_profile::Profile>,
         selection: Selection,
         dns: Option<std::net::Ipv4Addr>,
     ) -> Result<Self, String> {
         selection.validate()?;
+        validate_fallbacks(&fallbacks)?;
         if let Some(dns) = dns {
             validate_dns(dns)?;
         }
@@ -118,22 +180,32 @@ impl Client {
             exclude: selection.exclude,
             exclude_lan: selection.exclude_lan,
             dns,
+            fallbacks,
         })
         .await
     }
     pub async fn start_full(
         profile: rtrust_profile::Profile,
+        fallbacks: Vec<rtrust_profile::Profile>,
         dns: std::net::Ipv4Addr,
     ) -> Result<Self, String> {
         validate_dns(dns)?;
+        validate_fallbacks(&fallbacks)?;
         Self::start_command(Command::StartFull {
             profile: Box::new(profile),
             dns,
+            fallbacks,
         })
         .await
     }
     async fn start_command(command: Command) -> Result<Self, String> {
-        negotiate().await?;
+        let capabilities = negotiate().await?;
+        if let Command::Start { fallbacks, .. } | Command::StartFull { fallbacks, .. } = &command
+            && !fallbacks.is_empty()
+            && !capabilities.failover
+        {
+            return Err("Служба не поддерживает резервные профили; обновите службу".into());
+        }
         let mut stream = socket().await?;
         let response = exchange(&mut stream, command, 45).await?;
         if response.state != State::Connected {
@@ -238,6 +310,49 @@ mod tests {
             )
             .await
             .unwrap();
+        });
+        assert!(
+            exchange(&mut client, Command::Capabilities, 1)
+                .await
+                .is_err()
+        );
+        task.await.unwrap();
+    }
+    #[test]
+    fn valid_backup_cooldown_is_a_current_reply_instead_of_a_stale_session() {
+        let token = endpoint::Token {
+            lease: [7; 16],
+            generation: 3,
+        };
+        let mut status = Response::new(State::Connected, "backup active");
+        status.active_profile = Some(2);
+        status.endpoint_probe_token = Some(token);
+        let mut result = endpoint::Result::unknown(
+            token,
+            endpoint::Outcome::RateLimited,
+            endpoint::Reason::Cooldown,
+        );
+        result.active_profile = Some(2);
+        assert!(current_endpoint_result(&result, &status, &status));
+        result.active_profile = None;
+        assert!(!current_endpoint_result(&result, &status, &status));
+        result.active_profile = Some(2);
+        let mut changed = status.clone();
+        changed.active_profile = Some(1);
+        assert!(!current_endpoint_result(&result, &status, &changed));
+        changed = status.clone();
+        changed.endpoint_probe_token.as_mut().unwrap().generation += 1;
+        assert!(!current_endpoint_result(&result, &status, &changed));
+    }
+    #[tokio::test]
+    async fn ipc_three_service_is_rejected_during_capability_negotiation() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(async move {
+            let request: Request = read(&mut server).await.unwrap();
+            assert!(matches!(request.command, Command::Capabilities));
+            let mut response = Response::new(State::Idle, "old service");
+            response.version = 3;
+            write(&mut server, &response).await.unwrap();
         });
         assert!(
             exchange(&mut client, Command::Capabilities, 1)

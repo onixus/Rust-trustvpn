@@ -5,8 +5,11 @@ use zeroize::Zeroizing;
 pub const SOCKET: &str = "/run/rtrust/control.sock";
 #[cfg(target_os = "macos")]
 pub const SOCKET: &str = "/private/var/run/rtrust/control.sock";
-pub const LIMIT: usize = 2 * rtrust_profile::MAX_INPUT;
-pub const VERSION: u32 = 2;
+/// Opt-in automatic recovery: at most this many user-allowed backup profiles.
+pub const MAX_FALLBACKS: usize = 3;
+pub const LIMIT: usize = (2 + MAX_FALLBACKS) * rtrust_profile::MAX_INPUT;
+pub const VERSION: u32 = 4;
+pub mod endpoint;
 pub mod observations;
 pub mod recovery;
 pub use ipnet::Ipv4Net;
@@ -33,10 +36,19 @@ pub enum Command {
         /// selection routes it through the VPN.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dns: Option<std::net::Ipv4Addr>,
+        /// Backup profiles the user allowed, in preference order. Empty keeps
+        /// the fixed-profile behavior: no transport is ever substituted.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fallbacks: Vec<rtrust_profile::Profile>,
     },
     StartFull {
         profile: Box<rtrust_profile::Profile>,
         dns: std::net::Ipv4Addr,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fallbacks: Vec<rtrust_profile::Profile>,
+    },
+    ProbeEndpoint {
+        token: endpoint::Token,
     },
     Capabilities,
     Status,
@@ -44,6 +56,16 @@ pub enum Command {
     EnableAlwaysOn {
         profile: Box<rtrust_profile::Profile>,
         dns: std::net::Ipv4Addr,
+        /// Fence obtained from AlwaysOnStatus before sending this mutation.
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    EnableRecovery {
+        profile: Box<rtrust_profile::Profile>,
+        dns: std::net::Ipv4Addr,
+        backups: Vec<rtrust_profile::Profile>,
+        #[serde(default)]
+        generation: Option<u64>,
     },
     DisableAlwaysOn,
     AlwaysOnStatus,
@@ -65,6 +87,19 @@ pub struct Response {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_on: Option<bool>,
+    /// Service-issued cancellation fence; absence forbids enabling always-on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_on_generation: Option<u64>,
+    /// Index of the active candidate when backups were allowed: 0 is the
+    /// requested profile, 1.. the backups in the order sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_profile: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<recovery::Status>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_probe_token: Option<endpoint::Token>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_probe: Option<endpoint::Result>,
     pub observations: observations::Snapshot,
     pub capabilities: Capabilities,
 }
@@ -74,6 +109,13 @@ pub struct Capabilities {
     pub observations_schema: u32,
     pub lifecycle_observations: bool,
     pub system_probes: bool,
+    pub endpoint_probes: bool,
+    /// Native link/address change and resume events invalidate observations.
+    pub network_events: bool,
+    /// The service accepts allowed backup profiles with Start.
+    pub failover: bool,
+    #[serde(default)]
+    pub automatic_recovery: bool,
 }
 impl Capabilities {
     pub fn current() -> Self {
@@ -81,6 +123,10 @@ impl Capabilities {
             observations_schema: observations::SCHEMA,
             lifecycle_observations: true,
             system_probes: false,
+            endpoint_probes: cfg!(target_os = "linux"),
+            network_events: true,
+            failover: true,
+            automatic_recovery: cfg!(any(target_os = "linux", target_os = "windows")),
         }
     }
 }
@@ -91,6 +137,11 @@ impl Response {
             state,
             message: message.into(),
             always_on: None,
+            always_on_generation: None,
+            active_profile: None,
+            recovery: None,
+            endpoint_probe_token: None,
+            endpoint_probe: None,
             observations: observations::Snapshot::unknown(observations::Mode::Unknown),
             capabilities: Capabilities::current(),
         }
@@ -641,6 +692,7 @@ mod tests {
                 exclude,
                 exclude_lan,
                 dns,
+                fallbacks: vec![],
             })
             .unwrap()
         };

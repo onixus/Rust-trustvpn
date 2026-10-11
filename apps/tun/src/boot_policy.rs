@@ -9,6 +9,8 @@ pub struct Policy {
     pub owner: String,
     pub profile: rtrust_profile::Profile,
     pub dns: Ipv4Addr,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backups: Vec<rtrust_profile::Profile>,
 }
 impl Policy {
     pub fn validate(&self, owner: &str) -> Result<(), String> {
@@ -30,9 +32,31 @@ impl Policy {
                 return Err("Invalid always-on endpoint".into());
             }
         }
+        if self.backups.len() > rtrust_control::recovery::MAX_BACKUPS {
+            return Err("Too many backup profiles".into());
+        }
+        for profile in &self.backups {
+            let candidate = Policy {
+                version: self.version,
+                owner: self.owner.clone(),
+                profile: profile.clone(),
+                dns: self.dns,
+                backups: vec![],
+            };
+            candidate.validate(owner)?;
+            if profile == &self.profile {
+                return Err("Backup duplicates primary profile".into());
+            }
+        }
+        for (i, profile) in self.backups.iter().enumerate() {
+            if self.backups[..i].contains(profile) {
+                return Err("Duplicate backup profile".into());
+            }
+        }
         Ok(())
     }
 }
+const POLICY_LIMIT: usize = rtrust_control::LIMIT;
 const AAD: &[u8] = b"rtrust-service-always-on-v1";
 fn seal(policy: &Policy, key: &[u8; 32]) -> Result<Vec<u8>, String> {
     use chacha20poly1305::{
@@ -41,6 +65,9 @@ fn seal(policy: &Policy, key: &[u8; 32]) -> Result<Vec<u8>, String> {
     };
     let plain =
         Zeroizing::new(serde_json::to_vec(policy).map_err(|_| "Cannot encode boot policy")?);
+    if plain.len() + 40 > POLICY_LIMIT {
+        return Err("Combined recovery policy exceeds service frame limit".into());
+    }
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let mut result = nonce.to_vec();
     result.extend(
@@ -61,7 +88,7 @@ fn unseal(data: &[u8], key: &[u8; 32], owner: &str) -> Result<Policy, String> {
         XChaCha20Poly1305,
         aead::{Aead, KeyInit, Payload},
     };
-    if data.len() < 40 || data.len() > 2 * rtrust_profile::MAX_INPUT {
+    if data.len() < 40 || data.len() > POLICY_LIMIT {
         return Err("Invalid boot policy size".into());
     }
     let plain = Zeroizing::new(
@@ -149,6 +176,7 @@ pub fn save(policy: &Policy) -> Result<(), String> {
         .map_err(|_| "Cannot save protected boot policy")?;
     sync_directory()
 }
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn sync_directory() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     std::fs::File::open(directory()?)
@@ -162,8 +190,8 @@ pub fn load(owner: &str) -> Result<Option<Policy>, String> {
     if !path.exists() {
         return Ok(None);
     }
-    let data = rtrust_store::read_bounded(&path, 2 * rtrust_profile::MAX_INPUT)
-        .map_err(|_| "Cannot read boot policy")?;
+    let data =
+        rtrust_store::read_bounded(&path, POLICY_LIMIT).map_err(|_| "Cannot read boot policy")?;
     unseal(&data, &*machine_key(false)?, owner).map(Some)
 }
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -227,7 +255,7 @@ mod tests {
     use super::*;
     #[test]
     fn boot_policy_is_authenticated_owner_bound_and_has_no_plaintext_credentials() {
-        let policy=Policy{version:1,owner:"1000".into(),profile:rtrust_profile::Profile::import("hostname='boot.example'\naddresses=['192.0.2.1:443']\nusername='boot-user'\npassword='boot-secret-canary'\n").unwrap(),dns:"1.1.1.1".parse().unwrap()};
+        let policy=Policy{version:1,owner:"1000".into(),profile:rtrust_profile::Profile::import("hostname='boot.example'\naddresses=['192.0.2.1:443']\nusername='boot-user'\npassword='boot-secret-canary'\n").unwrap(),backups:vec![],dns:"1.1.1.1".parse().unwrap()};
         let key = [7; 32];
         let encrypted = seal(&policy, &key).unwrap();
         assert!(!encrypted.windows(18).any(|w| w == b"boot-secret-canary"));
@@ -240,5 +268,61 @@ mod tests {
         let mut corrupt = encrypted;
         corrupt[30] ^= 1;
         assert!(unseal(&corrupt, &key, "1000").is_err());
+    }
+    #[test]
+    fn large_recovery_policy_round_trips_with_the_shared_persistence_bound() {
+        let profiles: Vec<_> = (1..=3).map(|n| {
+            let mut p = rtrust_profile::Profile::import(&format!(
+                "hostname='boot{n}.example'\naddresses=['192.0.2.{n}:443']\nusername='u'\npassword='p'\n"
+            )).unwrap();
+            p.extensions.insert("padding".into(), serde_json::json!("x".repeat(750 * 1024)));
+            let export = p.export(rtrust_profile::Format::Json).unwrap();
+            assert!(export.content.len() < rtrust_profile::MAX_INPUT);
+            rtrust_profile::Profile::import(&export.content).unwrap()
+        }).collect();
+        let policy = Policy {
+            version: 1,
+            owner: "1000".into(),
+            profile: profiles[0].clone(),
+            dns: "1.1.1.1".parse().unwrap(),
+            backups: profiles[1..].to_vec(),
+        };
+        policy.validate("1000").unwrap();
+        let data = seal(&policy, &[7; 32]).unwrap();
+        assert!(data.len() > 2 * rtrust_profile::MAX_INPUT);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("boot-policy");
+        std::fs::write(&path, &data).unwrap();
+        let loaded = rtrust_store::read_bounded(&path, POLICY_LIMIT).unwrap();
+        let restored = unseal(&loaded, &[7; 32], "1000").unwrap();
+        assert_eq!(restored.profile, policy.profile);
+        assert_eq!(restored.backups, policy.backups);
+        assert!(unseal(&vec![0; POLICY_LIMIT + 1], &[7; 32], "1000").is_err());
+    }
+    #[test]
+    fn backups_remain_authenticated_and_duplicate_or_oversized_policies_are_rejected() {
+        let profile = |host: &str| {
+            rtrust_profile::Profile::import(&format!(
+                "hostname='{host}'\naddresses=['192.0.2.1:443']\nusername='u'\npassword='p'\n"
+            ))
+            .unwrap()
+        };
+        let mut policy = Policy {
+            version: 1,
+            owner: "1000".into(),
+            profile: profile("primary.example"),
+            dns: "1.1.1.1".parse().unwrap(),
+            backups: vec![profile("backup.example")],
+        };
+        let bytes = seal(&policy, &[7; 32]).unwrap();
+        let restored = unseal(&bytes, &[7; 32], "1000").unwrap();
+        assert_eq!(restored.backups, policy.backups);
+        policy.backups.push(policy.backups[0].clone());
+        assert!(policy.validate("1000").is_err());
+        policy.backups = vec![policy.profile.clone()];
+        assert!(policy.validate("1000").is_err());
+        policy.backups.clear();
+        policy.profile.name = "x".repeat(rtrust_control::LIMIT);
+        assert!(seal(&policy, &[7; 32]).is_err());
     }
 }

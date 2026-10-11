@@ -37,7 +37,7 @@ def digest(path):
     return result.hexdigest()
 
 
-def validate(matrix, base, production=False, artifact_sha256=None, target=None):
+def validate(matrix, base, production=False, artifact_sha256=None, target=None, update_manifest_sha256=None, version=None):
     if not isinstance(matrix, dict):
         raise ValueError("Matrix must be an object")
     if matrix.get("schema") != 1 or not isinstance(matrix.get("packages"), list):
@@ -86,6 +86,19 @@ def validate(matrix, base, production=False, artifact_sha256=None, target=None):
         if signing is None:
             reject("unsupported target")
             continue
+        if "update_metadata" in signing:
+            envelope_hash = package.get("update_manifest_sha256", "")
+            if not isinstance(envelope_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", envelope_hash):
+                reject("missing or invalid signed update manifest identity")
+            if update_manifest_sha256 is not None and envelope_hash != update_manifest_sha256:
+                reject("acceptance belongs to a different signed update manifest")
+            if version is not None and package["version"] != version:
+                reject("acceptance version differs from signed update manifest")
+            try:
+                if digest(base / package["update_manifest"]) != envelope_hash:
+                    reject("signed update manifest checksum mismatch")
+            except (OSError, KeyError, TypeError):
+                reject("signed update manifest unavailable")
         claims = package.get("claims")
         if not isinstance(claims, list) or not claims:
             reject("no protocol/mode/Always-on claims")
@@ -142,6 +155,8 @@ def validate(matrix, base, production=False, artifact_sha256=None, target=None):
                     reject(f"{key[0]}: report must be an object")
                     continue
                 expected = {k: package[k] for k in IDENTITY}
+                if "update_metadata" in signing:
+                    expected["update_manifest_sha256"] = package.get("update_manifest_sha256")
                 expected.update(zip(("scenario", "protocol", "mode", "always_on"), key))
                 expected["status"] = "passed"
                 if any(report.get(k) != v or type(report.get(k)) is not type(v) for k, v in expected.items()):
@@ -179,10 +194,12 @@ def main():
     parser.add_argument("--production", action="store_true", help="require passed evidence for every claim")
     parser.add_argument("--target", choices=SIGNING, help="require the publication target")
     parser.add_argument("--artifact-sha256", help="validate one exact artifact in the matrix")
+    parser.add_argument("--update-manifest-sha256", help="require the exact verified signed envelope")
+    parser.add_argument("--version", help="require the signed package version")
     args = parser.parse_args()
     try:
         failures = validate(json.loads(args.matrix.read_text()), args.matrix.resolve().parent,
-                            args.production, args.artifact_sha256, args.target)
+                            args.production, args.artifact_sha256, args.target, args.update_manifest_sha256, args.version)
     except (OSError, ValueError, TypeError) as error:
         print(f"Acceptance rejected: {error}", file=sys.stderr)
         return 1

@@ -56,6 +56,27 @@ Their actual revision is displayed. The current portal contract does not attest
 to admin versus user ownership, so that role is marked unknown rather than
 invented. The source enum is descriptive metadata, not an authorization grant.
 
+Native selected-IPv4 settings now provide **Намерения и предпросмотр правил**.
+“Work through VPN” takes explicit IPv4 CIDRs, “networks directly” takes explicit
+exclusion CIDRs, and “LAN directly” uses the local networks discovered at the
+next connection. These labels edit the existing Selection fields without
+changing embedded profile data or inventing a domain/per-app policy adapter.
+The preview shows fixed precedence, zero-based rule references, overlaps where
+the direct exclusion wins, source, and a deterministic policy revision. It uses
+the same Selection evaluator and endpoint inputs as Diagnostics offline explain;
+unknown endpoint/LAN inputs stay unknown. Domain, port and IPv6 inputs are
+rejected by this editor rather than silently reduced to an IPv4 rule.
+
+Preview does not modify the vault, call the portal, resolve DNS or install routes.
+A successful preview is required before accepting the entire local draft for the
+next connection. Changing the draft invalidates that preview; changes to its
+base settings, endpoint inputs or managed source require opening it again.
+Accept is disabled while connecting, connected or under always-on control.
+Existing vault conflict/save handling remains authoritative. A managed group's
+policy is read-only here, retains its actual revision and unknown admin/user
+role, and cannot be overridden by accepting local intentions. This editor does
+not replace an active desktop policy or claim hot system-route rollback.
+
 The CLI can inspect the mobile flow policy without a resolver/socket request:
 
 ```
@@ -79,9 +100,20 @@ rule references and a policy revision, never the visited address/name.
 | Android OS excluded apps | Existing VpnService capability | Not this evaluator | Existing platform exclusion | No cross-platform guarantee |
 
 No history is transmitted, no policy is changed by explain, and no direct
-comparison request is made. This PR supplies the decision contract/evaluator
-and offline preview. It does not implement hot system-policy replacement or
-rollback, flow telemetry, an intent-rule editor, a managed admin/user ownership
-extension, or installed package/packet-level acceptance. Existing immutable
-policy installation and vault conflict handling remain in force. Issue #32
-stays open for those acceptance items and the actual-system diagnostics in #33.
+comparison request is made. The native editor and CLI remain offline previews.
+The shared core now also provides conditional atomic local policy revision/
+rollback and explicitly subscribed, bounded redacted observations of actual
+flow-policy selections; see [runtime routing revisions](routing-policy.md).
+Admin/managed/unknown-source policies reject local mutation. Neither the source
+label nor a flow-policy selection establishes administrator authentication,
+packet delivery or OS guard/route enforcement.
+
+Android/iOS now offer [explicit local flow capture](mobile-flow-observations.md)
+from their active router; desktop explain remains a prediction. No adapter
+invokes the new hot revision API. Capture is bounded, session-fenced and has no
+address correlation or packet-delivery proof. Established and pending flows are outside the
+atomic decision-publication boundary; full hot OS-route/guard cutover, explicit
+managed administrator provenance and installed package/packet-level acceptance
+remain separate work. Existing vault conflict handling remains in force.
+Issue #32 stays open for these acceptance items and actual-system corroboration
+in #33.

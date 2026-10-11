@@ -197,14 +197,9 @@ pub fn lock_dns(mut luid: u64) -> Result<DnsLock, String> {
     })?;
     Ok(DnsLock(engine))
 }
-/// `ports` replaces each endpoint's own port with these ranges (Hysteria port hopping).
-pub fn install(
-    luid: u64,
-    endpoints: &[SocketAddrV4],
-    udp: bool,
-    ports: &[(u16, u16)],
-) -> Result<(), String> {
-    install_in(luid, endpoints, FULL, false, udp, ports)
+/// Preserve each candidate's own protocol and port set in the guard.
+pub fn install(luid: u64, permits: &[crate::failover::Permit]) -> Result<(), String> {
+    install_in(luid, permits, FULL, false)
 }
 pub fn install_boot(
     luid: u64,
@@ -212,17 +207,26 @@ pub fn install_boot(
     udp: bool,
     ports: &[(u16, u16)],
 ) -> Result<(), String> {
-    install_in(luid, endpoints, BOOT, true, udp, ports)
+    let permits: Vec<_> = endpoints
+        .iter()
+        .map(|&address| crate::failover::Permit {
+            address,
+            udp,
+            ports: ports.to_vec(),
+        })
+        .collect();
+    install_boot_permits(luid, &permits)
+}
+pub fn install_boot_permits(luid: u64, permits: &[crate::failover::Permit]) -> Result<(), String> {
+    install_in(luid, permits, BOOT, true)
 }
 fn install_in(
     mut luid: u64,
-    endpoints: &[SocketAddrV4],
+    permits: &[crate::failover::Permit],
     space: Space,
     boot: bool,
-    udp: bool,
-    ports: &[(u16, u16)],
 ) -> Result<(), String> {
-    if ports.len() > 64 {
+    if permits.iter().any(|p| p.ports.len() > 64) {
         return Err("Too many endpoint port ranges".into());
     }
     let existed = active_in(space)?;
@@ -307,7 +311,9 @@ fn install_in(
                 )?;
             }
             if v4 {
-                for endpoint in endpoints {
+                for permit in permits {
+                    let endpoint = &permit.address;
+                    let ports = &permit.ports;
                     let mut conditions = vec![u32_condition(
                         FWPM_CONDITION_IP_REMOTE_ADDRESS,
                         u32::from(*endpoint.ip()),
@@ -323,7 +329,7 @@ fn install_in(
                             FWP_UINT8,
                             FWP_CONDITION_VALUE0_0 {
                                 // QUIC (HTTP/3, Hysteria 2) and AmneziaWG use UDP.
-                                uint8: if udp { 17 } else { 6 },
+                                uint8: if permit.udp { 17 } else { 6 },
                             },
                         ));
                         if !ports.is_empty() {

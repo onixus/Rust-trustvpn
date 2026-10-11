@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 pub const MAX_EVENTS: usize = 64;
 pub const FRESH_MS: u64 = 6_000;
 pub fn now_ms() -> u64 {
@@ -52,6 +52,10 @@ pub enum Reason {
     SessionChanged,
     ControlLost,
     SessionStopped,
+    /// The OS reported a link/address change outside the VPN interface.
+    NetworkChanged,
+    /// The kernel suspend clock advanced: the system slept and resumed.
+    SystemResumed,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,6 +98,10 @@ pub enum EventKind {
     LifecycleGap,
     ControlLost,
     Stopped,
+    NetworkChanged,
+    Resumed,
+    /// Opt-in recovery moved to another user-allowed profile.
+    FailedOver,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,6 +256,29 @@ impl Monitor {
             self.gap = false;
         }
     }
+    /// A native OS notification, unlike a polling gap. Earlier proof is stale
+    /// and probes started before it are rejected by the new generation.
+    pub fn network_changed(&mut self, now: u64) {
+        if !self.stopped {
+            self.snapshot
+                .invalidate(Reason::NetworkChanged, EventKind::NetworkChanged, now);
+        }
+    }
+    /// The worker may not have noticed a dead session yet: like a polling gap,
+    /// transport stays stale until a real worker transition.
+    pub fn resumed(&mut self, now: u64) {
+        if !self.stopped {
+            self.snapshot
+                .invalidate(Reason::SystemResumed, EventKind::Resumed, now);
+            self.gap = true;
+        }
+    }
+    /// Recorded before the new transport starts; its own transition follows.
+    pub fn failed_over(&mut self, now: u64) {
+        if !self.stopped {
+            self.snapshot.event(EventKind::FailedOver, now);
+        }
+    }
     pub fn stop(&mut self, now: u64) {
         if self.stopped {
             return;
@@ -348,6 +379,36 @@ mod tests {
         s.expire(99);
         assert_eq!(s.transport.outcome, Outcome::Stale);
         assert!(!s.verified());
+    }
+    #[test]
+    fn native_network_change_and_resume_invalidate_old_proof() {
+        let mut monitor = Monitor::new(Mode::Split, Source::ServiceLifecycle, 100);
+        let before = monitor.sample(101);
+        monitor.network_changed(102);
+        let after = monitor.sample(103);
+        assert!(after.generation > before.generation);
+        assert_eq!(after.events.last().unwrap().kind, EventKind::NetworkChanged);
+        let mut late = after.clone();
+        let mut probe = before.connectivity.clone();
+        probe.outcome = Outcome::Passed;
+        assert!(!late.apply_connectivity(before.generation, probe));
+        // The worker still runs: lifecycle configuration is not proof either way.
+        assert_eq!(after.transport.outcome, Outcome::Configured);
+        monitor.resumed(104);
+        let resumed = monitor.sample(105);
+        assert_eq!(resumed.events.last().unwrap().kind, EventKind::Resumed);
+        assert_eq!(resumed.transport.outcome, Outcome::Stale);
+        assert_eq!(resumed.transport.reason, Reason::SystemResumed);
+        monitor.transition(false, 106);
+        monitor.transition(true, 107);
+        assert_eq!(monitor.sample(108).transport.outcome, Outcome::Configured);
+        monitor.stop(109);
+        monitor.network_changed(110);
+        monitor.resumed(111);
+        assert_eq!(
+            monitor.sample(112).events.last().unwrap().kind,
+            EventKind::Stopped
+        );
     }
     #[test]
     fn journal_is_bounded_and_has_no_free_text_or_destination_fields() {

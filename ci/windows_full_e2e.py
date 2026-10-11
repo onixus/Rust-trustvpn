@@ -147,6 +147,8 @@ def main():
     assert fixture.routes()==before,'Stop failed to restore original routes'
     print('PASS Stop restores routes and DNS adapter removed',flush=True)
     def ipc(op,**values):
+        if op in ('EnableAlwaysOn', 'EnableRecovery'):
+            values['generation'] = ipc('AlwaysOnStatus')['always_on_generation']
         p=fixture.Pipe()
         try:return p.request(dict(op=op,**values))
         finally:p.close()

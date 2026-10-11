@@ -19,11 +19,14 @@ class AcceptanceGate(unittest.TestCase):
         self.base = pathlib.Path(self.temp.name)
         (self.base / "package").write_bytes(b"synthetic installer")
         (self.base / "sources").write_text("{}")
+        (self.base / "envelope").write_text("synthetic envelope")
         self.package = {
             "commit": "a" * 40,
             "source_manifest_sha256": acceptance.digest(self.base / "sources"),
             "artifact_sha256": acceptance.digest(self.base / "package"),
             "source_manifest": "sources", "artifact": "package",
+            "update_manifest": "envelope",
+            "update_manifest_sha256": acceptance.digest(self.base / "envelope"),
             "version": "test", "target": "windows-x86_64",
             "os": "synthetic", "device": "synthetic", "preview": False,
             "claims": [{"protocol": "trusttunnel", "mode": "full", "always_on": False}],
@@ -41,6 +44,7 @@ class AcceptanceGate(unittest.TestCase):
 
     def report(self, check, mutate=lambda report: None):
         report = {k: self.package[k] for k in acceptance.IDENTITY}
+        report["update_manifest_sha256"] = self.package["update_manifest_sha256"]
         report.update({k: check.get(k) for k in ("scenario", "protocol", "mode", "always_on", "status")})
         report["recorded_at"] = "2026-10-11T00:00:00Z"
         report["metrics"] = {"limits": {"recovery_ms": 1000}, "measured": {"recovery_ms": 900}}
@@ -79,7 +83,7 @@ class AcceptanceGate(unittest.TestCase):
             self.assertEqual(self.errors(False), [])
 
     def test_package_source_and_evidence_checksums_are_required(self):
-        for filename in ["package", "sources", "clean_install.json"]:
+        for filename in ["package", "sources", "envelope", "clean_install.json"]:
             path = self.base / filename
             original = path.read_bytes()
             path.write_bytes(b"changed")
@@ -95,6 +99,13 @@ class AcceptanceGate(unittest.TestCase):
         for value in [1001, -1, float("inf"), float("nan"), True]:
             self.report(check, lambda r: r["metrics"]["measured"].update(recovery_ms=value))
             self.assertTrue(self.errors(), value)
+
+    def test_different_signed_metadata_and_version_cannot_reuse_acceptance(self):
+        self.assertTrue(acceptance.validate(self.matrix, self.base, True, update_manifest_sha256="0" * 64))
+        self.assertTrue(acceptance.validate(self.matrix, self.base, True, version="other"))
+        check = next(c for c in self.package["checks"] if c["scenario"] == "update_metadata")
+        self.report(check, lambda report: report.update(update_manifest_sha256="0" * 64))
+        self.assertTrue(self.errors())
 
     def test_always_on_claim_requires_its_own_failure_evidence(self):
         claim = dict(self.package["claims"][0], always_on=True)
