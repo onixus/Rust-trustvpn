@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var model: VPNModel
+    @Environment(\.scenePhase) private var scenePhase
     @State private var origin = ""
     @State private var code = ""
     @State private var deviceName = "iPhone"
@@ -13,6 +14,13 @@ struct SettingsView: View {
                 Toggle("On Demand", isOn: Binding(get: { model.onDemand }, set: { enabled in Task { await model.setOnDemand(enabled) } }))
                     .disabled(model.busy || !VPNController.supportsVPN)
                 Text(tr("Connect once to authorize VPN. On Demand reconnects when needed; it is not Android lockdown. Disconnect also disables On Demand.", "Сначала подключитесь и разрешите VPN. On Demand подключает VPN по необходимости, но не заменяет Android lockdown. Отключение VPN также выключает On Demand.")).font(.footnote)
+            }
+            Section(tr("Local flow decisions", "Локальные решения маршрутизации")) {
+                Button(model.flowWanted ? tr("Stop observing", "Завершить наблюдение") : tr("Observe current flows", "Наблюдать текущие потоки")) {
+                    if model.flowWanted { model.stopFlowCapture() } else { model.startFlowCapture() }
+                }.disabled(!model.active && !model.flowWanted)
+                Text(tr("Explicit local capture only. No addresses, traffic or profile credentials are recorded or sent. Shows decisions for up to 32 recent events, not a destination history or packet-delivery audit.", "Только явное локальное наблюдение. Адреса, трафик и пароли не записываются и не отправляются. До 32 текущих решений, а не история адресов или проверка доставки пакетов.")).font(.footnote)
+                if model.flowWanted { Text(model.flowSummary).font(.caption) }
             }
             Section(tr("Server profiles", "Серверные профили")) {
                 if let portal = model.vault.portal {
@@ -54,6 +62,8 @@ struct SettingsView: View {
             if model.busy { ProgressView() }
             if let error = model.error { Text(error).foregroundStyle(.red) }
         }.navigationTitle(tr("Settings", "Настройки"))
+            .onDisappear { model.stopFlowCapture() }
+            .onChange(of: scenePhase) { phase in if phase != .active { model.stopFlowCapture() } }
             .alert(tr("Upload credentials?", "Передать учётные данные?"), isPresented: $upload) {
                 Button(tr("Upload", "Передать")) {
                     guard let session = model.vault.portal, let profile = model.vault.active else { return }

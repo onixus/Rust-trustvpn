@@ -8,7 +8,8 @@ pub const SOCKET: &str = "/private/var/run/rtrust/control.sock";
 /// Opt-in automatic recovery: at most this many user-allowed backup profiles.
 pub const MAX_FALLBACKS: usize = 3;
 pub const LIMIT: usize = (2 + MAX_FALLBACKS) * rtrust_profile::MAX_INPUT;
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
+pub mod endpoint;
 pub mod observations;
 pub mod recovery;
 pub use ipnet::Ipv4Net;
@@ -45,6 +46,9 @@ pub enum Command {
         dns: std::net::Ipv4Addr,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         fallbacks: Vec<rtrust_profile::Profile>,
+    },
+    ProbeEndpoint {
+        token: endpoint::Token,
     },
     Capabilities,
     Status,
@@ -92,6 +96,10 @@ pub struct Response {
     pub active_profile: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<recovery::Status>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_probe_token: Option<endpoint::Token>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_probe: Option<endpoint::Result>,
     pub observations: observations::Snapshot,
     pub capabilities: Capabilities,
 }
@@ -101,6 +109,7 @@ pub struct Capabilities {
     pub observations_schema: u32,
     pub lifecycle_observations: bool,
     pub system_probes: bool,
+    pub endpoint_probes: bool,
     /// Native link/address change and resume events invalidate observations.
     pub network_events: bool,
     /// The service accepts allowed backup profiles with Start.
@@ -114,6 +123,7 @@ impl Capabilities {
             observations_schema: observations::SCHEMA,
             lifecycle_observations: true,
             system_probes: false,
+            endpoint_probes: cfg!(target_os = "linux"),
             network_events: true,
             failover: true,
             automatic_recovery: cfg!(any(target_os = "linux", target_os = "windows")),
@@ -130,6 +140,8 @@ impl Response {
             always_on_generation: None,
             active_profile: None,
             recovery: None,
+            endpoint_probe_token: None,
+            endpoint_probe: None,
             observations: observations::Snapshot::unknown(observations::Mode::Unknown),
             capabilities: Capabilities::current(),
         }

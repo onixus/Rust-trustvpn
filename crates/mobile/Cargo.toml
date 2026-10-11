@@ -11,3 +11,5 @@ rtrust-engine.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ipnet = "2"
+tokio.workspace = true
+sha2 = "0.10"

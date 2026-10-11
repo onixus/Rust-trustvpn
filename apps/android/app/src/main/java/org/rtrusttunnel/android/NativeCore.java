@@ -14,5 +14,7 @@ public final class NativeCore {
     public native void networkChanged();
     /** Kernel clocks report deep sleep while this native session is active. */
     public native void resumed();
+    /** Redacted local flow decisions; 0 identity, 1 enable, 2 disable, 3 poll. */
+    public native String flowCapture(long session, long capture, int operation);
     public native String status();
 }

@@ -1,5 +1,6 @@
 mod boot;
 mod broker;
+mod endpoint;
 mod full;
 mod routes;
 use full::FullRoutes;
@@ -187,6 +188,7 @@ async fn reply_observed(
 ) -> Result<(), String> {
     let mut response = Response::new(state, message);
     response.active_profile = active_profile;
+    response.endpoint_probe_token = endpoint::registry().current_token();
     response.observations = monitor.sample(rtrust_control::observations::now_ms());
     tokio::time::timeout(Duration::from_secs(5), write(stream, &response))
         .await
@@ -206,6 +208,9 @@ async fn serve(
     }
     if matches!(request.command, Command::Capabilities) {
         return write(&mut stream, &Response::new(State::Idle, "Capabilities")).await;
+    }
+    if let Command::ProbeEndpoint { token } = request.command {
+        return endpoint::serve(&mut stream, token, uid).await;
     }
     if let Some(ref supervisor) = supervisor {
         if matches!(request.command, Command::Stop) {
@@ -357,6 +362,15 @@ async fn serve(
     if failover.active().is_some_and(|index| index > 0) {
         monitor.failed_over(rtrust_control::observations::now_ms());
     }
+    let endpoint_lease = endpoint::registry().publish(
+        failover.current(),
+        uid,
+        full,
+        monitor
+            .sample(rtrust_control::observations::now_ms())
+            .generation,
+        failover.active(),
+    );
     reply_observed(
         &mut stream,
         State::Connected,
@@ -382,16 +396,25 @@ async fn serve(
             tokio::select! {
                 request = &mut pending => break request?,
                 change = netwatch.next() => match change {
-                    crate::netwatch::Change::Network => monitor.network_changed(rtrust_control::observations::now_ms()),
-                    crate::netwatch::Change::Resumed => monitor.resumed(rtrust_control::observations::now_ms()),
+                    crate::netwatch::Change::Network => {
+                        monitor.network_changed(rtrust_control::observations::now_ms());
+                        endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
+                    },
+                    crate::netwatch::Change::Resumed => {
+                        monitor.resumed(rtrust_control::observations::now_ms());
+                        endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
+                    },
                 },
                 _ = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() => {
+                    endpoint_lease.suspend();
                     workers.tunnel = None;
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
+                    endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     // A flapping endpoint must not reset the backoff indefinitely.
                     if connected_since.elapsed() >= Duration::from_secs(30) { retry_delay = 2; }
                     if failover.ended(connected_since.elapsed(), Instant::now()) {
                         monitor.failed_over(rtrust_control::observations::now_ms());
+                        endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                         retry_delay = 2;
                     }
                     workers.retry(failover.current(), &mut retry_delay, full);
@@ -406,14 +429,17 @@ async fn serve(
                         if let Err(error)=&reattached { eprintln!("VPN route reattach failed: {error}"); }
                         if reattached.is_ok() {
                             workers.tunnel = Some(tokio::spawn(prepared.run()));
+                            endpoint_lease.resume();
                             connected_since = Instant::now();
                             state = State::Connected; monitor.transition(true, rtrust_control::observations::now_ms());
+                            endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                             continue;
                         }
                     }
                     // The guard already covers every candidate.
                     if failover.failed(Instant::now()) {
                         monitor.failed_over(rtrust_control::observations::now_ms());
+                        endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                         retry_delay = 2;
                     }
                     workers.retry(failover.current(), &mut retry_delay, full);
@@ -425,7 +451,15 @@ async fn serve(
             return Err("IPC version mismatch".into());
         }
         match request.command {
-            Command::Status => reply_observed(
+            Command::Status => {
+                endpoint_lease.update(
+                    failover.current(),
+                    monitor
+                        .sample(rtrust_control::observations::now_ms())
+                        .generation,
+                    failover.active(),
+                );
+                reply_observed(
                 &mut stream,
                 state.clone(),
                 if state == State::Connected {
@@ -444,11 +478,13 @@ async fn serve(
                 &mut monitor,
                 failover.active(),
             )
-            .await?,
+            .await?
+            }
             Command::Stop => {
                 if let Some(ref supervisor) = supervisor {
                     supervisor.cancel_pending_enable();
                 }
+                drop(endpoint_lease);
                 workers.stop().await;
                 return match routes.release() {
                     Ok(()) => {

@@ -152,8 +152,7 @@ is accounted for explicitly:
   and iOS provider path/wake callbacks are now wired to the shared invalidation
   adapter. Android deep-sleep clock differences also invalidate active-session
   observations when existing polling resumes; injected clock/session tests do
-  not establish native callback/device latency. Physical-device event evidence
-  and durable history, if required, remain separate gaps. Lifecycle
+  not establish native callback/device latency. Physical-device event evidence remains a separate gate. Lifecycle
   transport/configuration remains distinct from DNS, route, guard and end-to-end
   proof; unknown/unsupported must never be green.
 - **#32:** the native IPv4 intent editor now provides validated offline previews,
@@ -162,8 +161,10 @@ is accounted for explicitly:
   conditional local decision-policy revision/rollback with epochs, stale DNS
   rejection, immutable managed sources and opt-in bounded redacted observations
   of real flow-policy selections; see [core boundaries](routing-policy.md).
-  Desktop/mobile adapters do not invoke hot revision apply or subscribe to this
-  observation API yet. Established/pending flow revocation, atomic OS-route/
+  Mobile adapters now expose an explicit, bounded local capture of actual flow
+  policy decisions from their active router, with session/capture fences, expiry,
+  queue-loss counts and no destination history. Desktop adapters do not
+  subscribe, and no adapter invokes hot revision apply. Established/pending flow revocation, atomic OS-route/
   guard cutover, explicit managed administrator authentication/provenance and
   installed observed-flow-versus-prediction corroboration remain incomplete.
   Core/editor regression tests cannot establish installed hot desktop rollback
@@ -173,10 +174,13 @@ is accounted for explicitly:
   repeat-after-action freshness. Native verdicts and endpoint/reconnect/recheck
   actions are now implemented and unit-tested; live outage/control-loss and
   reconnect-then-recheck evidence for the integrated package remains required.
-  Desktop endpoint checks lack a verified independent service-owned path, so
-  failures remain non-attributable without that evidence. Windows currently
-  refuses system-path probes; mobile/WebView system-diagnostics UI remains
-  unsupported. A timeout cannot distinguish every cause and must not be
+  Linux IPC v4 adds a service-owned check of the active pinned HTTP/2 endpoint;
+  physical route/interface proof is required for attributable failure.
+  Unproven virtual paths, inactive leases and other transports remain
+  unsupported/inconclusive. Windows now implements bounded resolver, exact
+  live-adapter route and interface-bound verified HTTPS checks. These changes
+  require installed traffic evidence; mobile/WebView system-diagnostics UI
+  remains unsupported. A timeout cannot distinguish every cause and must not be
   reported as proven blocking.
 
 Ordinary-session permitted failover from upstream and the additional

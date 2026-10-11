@@ -1,7 +1,7 @@
 use jni::{
     Env, JValue, JavaVM, jni_sig, jni_str, native_method,
     objects::{JObject, JString},
-    sys::{jboolean, jint},
+    sys::{jboolean, jint, jlong},
 };
 use rtrust_engine::{Session, SocketProtector};
 use rtrust_profile::Profile;
@@ -21,6 +21,8 @@ struct Runner {
     thread: std::thread::JoinHandle<()>,
 }
 static RUNNER: Mutex<Option<Runner>> = Mutex::new(None);
+static FLOWS: std::sync::LazyLock<Mutex<rtrust_mobile::flows::Capture>> =
+    std::sync::LazyLock::new(|| Mutex::new(rtrust_mobile::flows::Capture::default()));
 static STATE: AtomicU8 = AtomicU8::new(0);
 static MESSAGE: Mutex<String> = Mutex::new(String::new());
 static OBSERVATIONS: std::sync::LazyLock<Mutex<rtrust_mobile::Observations>> =
@@ -128,6 +130,13 @@ fn start<'a>(
         state(4, &error.to_string());
         return Ok(false);
     }
+    let policy: rtrust_engine::routing::Policy = serde_json::from_value(profile.policy.clone())
+        .map_err(|_| jni::errors::Error::NullPtr("Invalid flow policy"))?;
+    let router = Arc::new(
+        policy
+            .compile()
+            .map_err(|_| jni::errors::Error::NullPtr("Invalid flow policy"))?,
+    );
     let protector = env.new_global_ref(protector)?;
     // Java retains its own ParcelFileDescriptor. Rust owns only this duplicate.
     let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
@@ -156,6 +165,10 @@ fn start<'a>(
         }
     });
     let (cancel, receiver) = watch::channel(false);
+    let session = FLOWS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .attach(router.clone());
     state(1, "Connecting securely");
     let thread = std::thread::Builder::new()
         .name("rtrust-android".into())
@@ -165,8 +178,12 @@ fn start<'a>(
                     .worker_threads(2)
                     .enable_all()
                     .build()?;
-                runtime.block_on(run(profile, owned, protect, receiver))
+                runtime.block_on(run(profile, owned, protect, receiver, router, session))
             }));
+            FLOWS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .detach_session(session);
             if !matches!(result, Ok(Ok(()))) {
                 state(
                     4,
@@ -180,6 +197,10 @@ fn start<'a>(
             Ok(true)
         }
         Err(_) => {
+            FLOWS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .detach_session(session);
             state(4, "Cannot start VPN worker");
             Ok(false)
         }
@@ -189,6 +210,7 @@ const _: jni::NativeMethod =
     native_method! {java_type="org.rtrusttunnel.android.NativeCore",extern fn stop(),};
 fn stop(_env: &mut Env<'_>, _this: JObject<'_>) -> jni::errors::Result<()> {
     let mut slot = RUNNER.lock().unwrap_or_else(|p| p.into_inner());
+    FLOWS.lock().unwrap_or_else(|p| p.into_inner()).detach();
     if let Some(runner) = slot.take() {
         let _ = runner.cancel.send(true);
         let _ = runner.thread.join();
@@ -213,9 +235,41 @@ fn resumed(_env: &mut Env<'_>, _this: JObject<'_>) -> jni::errors::Result<()> {
         .resumed();
     Ok(())
 }
+const _: jni::NativeMethod = native_method! {java_type="org.rtrusttunnel.android.NativeCore",name="flowCapture",extern fn flow_capture(session:jlong,capture:jlong,operation:jint)->JString,};
+fn flow_capture<'a>(
+    env: &mut Env<'a>,
+    _this: JObject<'a>,
+    session: jlong,
+    capture: jlong,
+    operation: jint,
+) -> jni::errors::Result<JString<'a>> {
+    let mut flows = FLOWS.lock().unwrap_or_else(|p| p.into_inner());
+    let token = rtrust_mobile::flows::Token {
+        session: session as u64,
+        capture: capture as u64,
+    };
+    let result = if operation == 0 {
+        Ok(flows.snapshot())
+    } else if session < 0 || capture < 0 {
+        Err("Invalid flow capture token")
+    } else {
+        match operation {
+            1 => flows.observe(token, true),
+            2 => flows.observe(token, false),
+            3 => flows.poll(token),
+            _ => Err("Invalid flow capture operation"),
+        }
+    };
+    let value = match result {
+        Ok(snapshot) => serde_json::to_value(snapshot).unwrap_or_default(),
+        Err(message) => serde_json::json!({"error":message}),
+    };
+    JString::new(env, value.to_string())
+}
 const _: jni::NativeMethod =
     native_method! {java_type="org.rtrusttunnel.android.NativeCore",extern fn status()->JString,};
 fn status<'a>(env: &mut Env<'a>, _this: JObject<'a>) -> jni::errors::Result<JString<'a>> {
+    FLOWS.lock().unwrap_or_else(|p| p.into_inner()).expire();
     let message = MESSAGE.lock().unwrap_or_else(|p| p.into_inner());
     JString::new(
         env,
@@ -227,18 +281,15 @@ async fn run(
     fd: OwnedFd,
     protect: SocketProtector,
     mut cancel: watch::Receiver<bool>,
+    router: Arc<rtrust_engine::routing::Router>,
+    runner_session: u64,
 ) -> std::io::Result<()> {
     // VpnService configured addresses, DNS and routes before handing over the FD.
     let device = Arc::new(unsafe { tun_rs::AsyncDevice::from_fd(fd.into_raw_fd()) }?);
     let dns = rtrust_engine::dns::encrypted(&profile.endpoint.dns_upstreams)
         .map_err(std::io::Error::other)?
         .unwrap_or_default();
-    let policy: rtrust_engine::routing::Policy =
-        serde_json::from_value(profile.policy.clone()).map_err(std::io::Error::other)?;
-    let routing = Some((
-        Arc::new(policy.compile().map_err(std::io::Error::other)?),
-        protect.clone(),
-    ));
+    let routing = Some((router, protect.clone()));
     let mut delay = 1;
     loop {
         let connected = tokio::select! {
@@ -252,6 +303,10 @@ async fn run(
         };
         match connected {
             Ok((session, tunnel)) => {
+                FLOWS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .transport_ready(runner_session);
                 state(
                     2,
                     if profile.endpoint.has_ipv6 {
@@ -265,12 +320,20 @@ async fn run(
                     _=cancel.changed()=>break,
                     _=rtrust_tun::run_android(session,tunnel,device.clone(),"169.254.254.2".parse().unwrap(),dns.clone(),routing.clone())=>{},
                 }
+                FLOWS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .transport_lost(runner_session);
                 if started.elapsed() > Duration::from_secs(30) {
                     delay = 1;
                 }
                 state(3, "Connection lost; traffic blocked while reconnecting");
             }
             Err(error) => {
+                FLOWS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .transport_lost(runner_session);
                 state(3, &error.to_string());
                 if matches!(
                     error,

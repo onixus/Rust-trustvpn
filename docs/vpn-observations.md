@@ -7,20 +7,21 @@ profile content or free-text error. Nothing is sent to a server.
 
 ## Contract and compatibility
 
-IPC version 3 requires observation schema 2 and an explicit capability response.
+IPC version 4 requires observation schema 2 and an explicit capability response.
 Schema 2 adds native network-change/resume events; schema 1 peers are rejected
 during capability negotiation, and the Android/iOS adapters accept only schema 2.
 Version 3 also adds opt-in persistent Linux/Windows recovery; observation schema remains 2.
 The desktop client negotiates through a separate authenticated, read-only
 `Capabilities` connection **before** sending a profile or issuing a mutation.
 Negotiation is available while another lease or Always-on owns the service.
-Version 1 and 2 clients/services are incompatible with version 3: upgrade the UI and service
+Version 1, 2 and 3 clients/services are incompatible with version 4: upgrade the UI and service
 together. A mismatch fails before a new Start, Recover or update reservation;
 an existing service-owned VPN/guard is not disabled to achieve compatibility.
 Profile, routing-journal and boot-policy schema versions are unchanged.
 The Python IPC acceptance clients must use the same negotiated IPC version.
 Legacy evidence produced with IPC v2 remains evidence for that earlier build.
-See [recovery.md](recovery.md) for version 3 recovery semantics.
+See [recovery.md](recovery.md) for recovery semantics and
+[system-diagnostics.md](system-diagnostics.md) for the IPC v4 endpoint probe.
 
 Every observation carries outcome, source, applicable mode, timestamp,
 freshness interval and stable reason. Results are `passed`, `failed`,
@@ -179,3 +180,30 @@ No release is published or promoted by this PR.
   `cargo check --target aarch64-apple-ios`. These checks do not launch an
   iPhone/simulator or supply signing/install evidence. Native callback timing, cancellation and
   path/wake behavior still require exact-package/device validation.
+
+## Service-owned endpoint checks (Linux)
+
+IPC4 adds `endpoint_probes`, `ProbeEndpoint { token }` and a structured timed
+endpoint result. The token contains a random per-lease identity and a worker
+observation generation; no caller-selected profile, destination or URL is
+accepted. A separate channel retains the active connection's authenticated UID
+boundary and cancels its check on EOF. Stop, lease retirement, network changes,
+resume and profile switching invalidate pending work. A failed worker exposes
+no active probe token. Only one check can run, with a 30-second cooldown and
+10-second overall budget.
+
+The current implementation checks the first numeric address of the active
+TrustTunnel HTTP/2 profile. It requires a hardware-backed physical interface,
+TCP destination-port route evidence for the service UID and existing full-mode
+mark where applicable, and verifies interface identity before/after binding and
+again after the check. Every diagnostic socket uses that interface; neither the
+active transport nor routes, DNS or firewall rules are changed. A successful
+result proves this independent endpoint TLS/authenticated `_check` attempt,
+not tunneled egress or OS guard enforcement. Typed connection/TLS/authentication,
+protocol and timeout failures describe this one address attempt only. Missing
+pins, virtual interfaces, unsupported transports and stale/cancelled work stay
+unsupported/inconclusive; they do not establish endpoint unavailability.
+Interface identifiers and secrets are excluded from returned facts. macOS and
+Windows advertise this endpoint capability as unavailable until equivalent
+socket-path proof exists. These unit/compile gates do not replace installed
+service/device acceptance.
