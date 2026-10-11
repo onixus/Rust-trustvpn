@@ -159,6 +159,39 @@ fn main() -> iced::Result {
     })
     .run()
 }
+/// Shared by offline explain and the diagnostic verdict; prediction, not proof.
+fn describe_decision(d: &rtrust_profile::routing::Decision) -> String {
+    use rtrust_profile::routing::{Action, Reason, Source};
+    let path = match d.action {
+        Action::Tunnel => "через VPN",
+        Action::Direct => "напрямую",
+        Action::Block => "заблокировано",
+        Action::Unknown => "неизвестно",
+    };
+    let reason = match d.reason {
+        Reason::SelectedPrefix => "адрес входит в выбранные сети",
+        Reason::ExcludedPrefix => "явное исключение имеет приоритет",
+        Reason::ReservedAddress => "зарезервированный системный адрес",
+        Reason::OutsideSelection => "адрес вне выбранных сетей",
+        Reason::EndpointBypass => "адрес самого VPN endpoint",
+        Reason::LocalNetworkBypass => "локальная сеть исключена",
+        Reason::EndpointUnresolved => "адреса endpoint не подтверждены",
+        Reason::LocalNetworksUnobserved => "текущие LAN-маршруты не наблюдались",
+        Reason::UnsupportedFamily => "выбранный режим поддерживает только IPv4",
+        Reason::ProxyScope => "SOCKS не задаёт системный маршрут",
+        _ => "системный путь или DNS-происхождение имени не наблюдались",
+    };
+    let source = if d.context.source == Source::ManagedUnknown {
+        "серверная политика; роль admin/user не указана"
+    } else {
+        "локальные настройки"
+    };
+    format!(
+        "Прогноз: {path}. Причина: {reason}. Источник: {source}. Ревизия: {}. Правила: {:?}. Защита и фактический трафик не проверялись.",
+        d.context.revision.as_deref().unwrap_or("неизвестна"),
+        d.rules
+    )
+}
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
     Profiles,
@@ -202,6 +235,10 @@ struct App {
     diagnostic_report: Option<(u64, rtrust_desktop::diagnostics::Report)>,
     diagnostic_preview: text_editor::Content,
     last_diagnostic: Option<std::time::Instant>,
+    /// Set by a proposed action; attached to the next completed report.
+    follow_up: Option<rtrust_desktop::diagnostics::FollowUp>,
+    /// Reconnect action in progress: Stop, then Start, then repeat the check.
+    reconnect_then_check: bool,
     probe: Option<iced::task::Handle>,
     generation: u64,
     connection_epoch: u64,
@@ -271,6 +308,8 @@ enum Message {
     SystemTarget(String),
     Diagnose,
     Diagnosed(u64, u64, rtrust_desktop::diagnostics::Report),
+    DiagnosticAction(rtrust_desktop::diagnostics::Action),
+    EndpointChecked(u64, u64, rtrust_desktop::diagnostics::EndpointCheck),
     DiagnosticEdit(text_editor::Action),
     ExportDiagnostic,
     ExplainRoute,
@@ -350,6 +389,8 @@ impl App {
             diagnostic_report: None,
             diagnostic_preview: text_editor::Content::new(),
             last_diagnostic: None,
+            follow_up: None,
+            reconnect_then_check: false,
             probe: None,
             generation: 0,
             connection_epoch: 0,
@@ -843,7 +884,18 @@ impl App {
                     .map(|()| "Отключено; маршруты восстановлены.".into())
                     .unwrap_or_else(|e| e);
                 if failed {
+                    self.reconnect_then_check = false;
+                    self.follow_up = None;
                     return Self::show_window();
+                }
+                if std::mem::take(&mut self.reconnect_then_check) {
+                    // Start through the ordinary path; the check follows Connected.
+                    let start = self.update(Message::ToggleConnection);
+                    self.reconnect_then_check = self.connecting;
+                    if !self.connecting {
+                        self.follow_up = None;
+                    }
+                    return start;
                 }
             }
             Message::ProxyPort(value) if self.can_change_profiles() => {
@@ -930,6 +982,8 @@ impl App {
                     return task;
                 }
                 if self.connecting || self.session.is_some() {
+                    self.reconnect_then_check = false;
+                    self.follow_up = None;
                     self.disconnect();
                     self.status = if self.saved_connection.mode == rtrust_store::Mode::Full {
                         "Подключение отменено. Если сеть заблокирована, используйте сброс блокировки.".into()
@@ -996,10 +1050,17 @@ impl App {
                 match result {
                     Ok(session) => {
                         self.session = Some(session);
+                        if std::mem::take(&mut self.reconnect_then_check) {
+                            self.last_diagnostic = None;
+                            let monitor = self.monitor_connection();
+                            return Task::batch([monitor, self.update(Message::Diagnose)]);
+                        }
                         self.status = if self.mode == Mode::Socks { "Прокси SOCKS5/HTTP включён. Его можно указать и как системный прокси Windows. Для DNS выберите разрешение имён через прокси." } else if self.saved_connection.mode == rtrust_store::Mode::Full && self.connection_ipv6 { "IPv4, IPv6 и DNS всего компьютера через VPN. Пересылка между интерфейсами заблокирована." } else if self.saved_connection.mode == rtrust_store::Mode::Full { "IPv4 и DNS всего компьютера через VPN. Сервер без IPv6: IPv6 заблокирован, приложения переходят на IPv4. Пересылка между интерфейсами заблокирована." } else { "Выбранные IPv4-сети подключены через службу. Исключения, остальной трафик и системный DNS идут напрямую." }.into();
                         return self.monitor_connection();
                     }
                     Err(error) => {
+                        self.reconnect_then_check = false;
+                        self.follow_up = None;
                         self.connection_name.clear();
                         self.status = error;
                         self.pending_close = None;
@@ -1301,7 +1362,7 @@ impl App {
             }
             Message::Target(s) if !self.busy => self.target = s,
             Message::ExplainRoute if !self.busy => {
-                use rtrust_profile::routing::{Action, Context, Decision, Reason, Source};
+                use rtrust_profile::routing::{Context, Decision, Reason, Source};
                 let context = match &self.saved_connection.managed_routes {
                     Some(managed) => Context {
                         source: Source::ManagedUnknown,
@@ -1360,39 +1421,7 @@ impl App {
                     )),
                 };
                 self.status = match decision {
-                    Ok(d) => {
-                        let path = match d.action {
-                            Action::Tunnel => "через VPN",
-                            Action::Direct => "напрямую",
-                            Action::Block => "заблокировано",
-                            Action::Unknown => "неизвестно",
-                        };
-                        let reason = match d.reason {
-                            Reason::SelectedPrefix => "адрес входит в выбранные сети",
-                            Reason::ExcludedPrefix => "явное исключение имеет приоритет",
-                            Reason::ReservedAddress => "зарезервированный системный адрес",
-                            Reason::OutsideSelection => "адрес вне выбранных сетей",
-                            Reason::EndpointBypass => "адрес самого VPN endpoint",
-                            Reason::LocalNetworkBypass => "локальная сеть исключена",
-                            Reason::EndpointUnresolved => "адреса endpoint не подтверждены",
-                            Reason::LocalNetworksUnobserved => {
-                                "текущие LAN-маршруты не наблюдались"
-                            }
-                            Reason::UnsupportedFamily => "выбранный режим поддерживает только IPv4",
-                            Reason::ProxyScope => "SOCKS не задаёт системный маршрут",
-                            _ => "системный путь или DNS-происхождение имени не наблюдались",
-                        };
-                        let source = if d.context.source == Source::ManagedUnknown {
-                            "серверная политика; роль admin/user не указана"
-                        } else {
-                            "локальные настройки"
-                        };
-                        format!(
-                            "Прогноз: {path}. Причина: {reason}. Источник: {source}. Ревизия: {}. Правила: {:?}. Защита и фактический трафик не проверялись.",
-                            d.context.revision.as_deref().unwrap_or("неизвестна"),
-                            d.rules
-                        )
-                    }
+                    Ok(d) => describe_decision(&d),
                     Err(e) => format!("Предпросмотр отклонён: {e}"),
                 };
             }
@@ -1401,6 +1430,8 @@ impl App {
                 self.diagnostic_preview.perform(action)
             }
             Message::Diagnose if !self.busy => {
+                // A follow-up belongs only to a check that actually starts.
+                let follow_up = self.follow_up.take();
                 let Some(session) = self.session.clone().filter(Session::is_tun) else {
                     self.status = "Для системной проверки подключите TUN; отдельный proxy-тест не заменяет её.".into();
                     return Task::none();
@@ -1420,6 +1451,7 @@ impl App {
                     }
                 };
                 self.last_diagnostic = Some(std::time::Instant::now());
+                self.follow_up = follow_up;
                 self.busy = true;
                 self.generation += 1;
                 let generation = self.generation;
@@ -1453,9 +1485,86 @@ impl App {
             {
                 self.probe = None;
                 self.busy = false;
-                self.status = report.summary();
+                let mut report = report;
+                report.follows = self.follow_up.take();
+                self.status = format!("{} {}", report.verdict_text(), report.summary());
                 self.diagnostic_preview = text_editor::Content::with_text(&report.redacted_json());
                 self.diagnostic_report = Some((epoch, report));
+            }
+            Message::DiagnosticAction(action) if !self.busy => {
+                use rtrust_desktop::diagnostics::{Action, FollowUp};
+                let Some((epoch, report)) = &self.diagnostic_report else {
+                    return Task::none();
+                };
+                let follow_up = FollowUp {
+                    action,
+                    previous_cause: report.verdict().cause,
+                    previous_finished_at_ms: report.finished_at_ms,
+                };
+                let current = *epoch == self.connection_epoch;
+                match action {
+                    Action::Recheck => {
+                        self.follow_up = Some(follow_up);
+                        return self.update(Message::Diagnose);
+                    }
+                    Action::ReviewRules => {
+                        self.status = match &report.policy {
+                            Some(decision) => format!(
+                                "{} Измените выбор сетей или исключения в настройках подключения, затем повторите проверку.",
+                                describe_decision(decision)
+                            ),
+                            None => "Прогноз политики для этого адреса не получен.".into(),
+                        };
+                    }
+                    Action::CheckEndpoint if current => {
+                        let Some(profile) = self.profiles.first().cloned() else {
+                            return Task::none();
+                        };
+                        self.busy = true;
+                        self.generation += 1;
+                        let generation = self.generation;
+                        let epoch = self.connection_epoch;
+                        self.status = "Отдельный сеанс к VPN endpoint: TLS → аутентификация → проверка связи. Сайт не запрашивается, маршруты не меняются. До 10 секунд.".into();
+                        let (task, handle) = Task::perform(
+                            rtrust_desktop::diagnostics::check_endpoint(profile),
+                            move |check| Message::EndpointChecked(generation, epoch, check),
+                        )
+                        .abortable();
+                        self.probe = Some(handle);
+                        return task;
+                    }
+                    Action::Reconnect
+                        if current && self.session.as_ref().is_some_and(Session::is_tun) =>
+                    {
+                        #[cfg(any(target_os = "linux", target_os = "windows"))]
+                        if self.always_on.enabled {
+                            self.status = "Always-on управляет подключением; переподключение из диагностики недоступно.".into();
+                            return Task::none();
+                        }
+                        self.follow_up = Some(follow_up);
+                        self.reconnect_then_check = true;
+                        return self.update(Message::ToggleConnection);
+                    }
+                    _ => {
+                        self.status =
+                            "Результат относится к прошлому подключению; повторите проверку."
+                                .into();
+                    }
+                }
+            }
+            Message::EndpointChecked(g, epoch, check)
+                if g == self.generation && epoch == self.connection_epoch =>
+            {
+                self.probe = None;
+                self.busy = false;
+                if let Some((report_epoch, report)) = &mut self.diagnostic_report
+                    && *report_epoch == epoch
+                    && report.attach_endpoint(check)
+                {
+                    self.status = format!("{} {}", report.verdict_text(), report.summary());
+                    self.diagnostic_preview =
+                        text_editor::Content::with_text(&report.redacted_json());
+                }
             }
             Message::ExportDiagnostic if !self.busy && self.diagnostic_report.is_some() => {
                 let preview = self.diagnostic_preview.text();
@@ -2081,7 +2190,14 @@ impl App {
                             .saturating_sub(report.finished_at_ms)
                             > 6000;
                     content = content.push(text(if stale { "Исторический результат; повторите проверку для текущего состояния." } else { "Результат для одного адреса; защита и общий доступ в интернет не подтверждены." }))
+                        .push(text(report.verdict_text()))
                         .push(text(report.summary()))
+                        .push(report.verdict().actions.into_iter().fold(row![].spacing(8), |actions, action| {
+                            use rtrust_desktop::diagnostics::Action;
+                            // Old results may still be repeated, never acted upon.
+                            let allowed = !self.busy && (action == Action::Recheck || !stale);
+                            actions.push(button(action.label()).on_press_maybe(allowed.then_some(Message::DiagnosticAction(action))))
+                        }))
                         .push(text("Предпросмотр экспорта: адреса, имя сайта, URL, credentials и сырые ошибки исключены. При необходимости отредактируйте перед сохранением."))
                         .push(text_editor(&self.diagnostic_preview).on_action(Message::DiagnosticEdit).height(160))
                         .push(button("Сохранить показанный отчёт…").on_press_maybe((!self.busy).then_some(Message::ExportDiagnostic)));
@@ -2299,6 +2415,68 @@ mod tests {
         assert!(!app.busy && app.probe.is_none() && app.session.is_none());
         let _ = app.update(Message::ExportDiagnostic);
         assert!(!app.busy && app.diagnostic_report.is_none());
+    }
+    #[test]
+    fn diagnostic_actions_need_a_current_report_and_follow_ups_attach_once() {
+        use rtrust_desktop::diagnostics::{Action, Cause, FollowUp, Report};
+        let mut app = app();
+        let snapshot = rtrust_control::observations::Snapshot::unknown(
+            rtrust_control::observations::Mode::Full,
+        );
+        // A report from an earlier connection cannot drive an action.
+        app.diagnostic_report = Some((app.connection_epoch + 1, Report::new(snapshot.clone())));
+        let _ = app.update(Message::DiagnosticAction(Action::CheckEndpoint));
+        assert!(!app.busy && app.probe.is_none());
+        let _ = app.update(Message::DiagnosticAction(Action::Reconnect));
+        assert!(!app.reconnect_then_check && app.follow_up.is_none());
+        // A repeat that cannot start leaves no dangling follow-up.
+        let _ = app.update(Message::DiagnosticAction(Action::Recheck));
+        assert!(app.status.contains("подключите TUN") && app.follow_up.is_none());
+        // A completed check consumes the follow-up exactly once.
+        app.follow_up = Some(FollowUp {
+            action: Action::Reconnect,
+            previous_cause: Cause::Undetermined,
+            previous_finished_at_ms: 7,
+        });
+        app.busy = true;
+        let _ = app.update(Message::Diagnosed(
+            app.generation,
+            app.connection_epoch,
+            Report::new(snapshot.clone()),
+        ));
+        let (_, report) = app.diagnostic_report.as_ref().unwrap();
+        assert_eq!(report.follows.as_ref().unwrap().previous_finished_at_ms, 7);
+        assert!(app.follow_up.is_none() && app.status.contains("Повторная проверка"));
+        // An endpoint result for this connection refines the shown report.
+        app.busy = true;
+        let started = report.started_at_ms;
+        let _ = app.update(Message::EndpointChecked(
+            app.generation,
+            app.connection_epoch,
+            rtrust_desktop::diagnostics::EndpointCheck {
+                fact: rtrust_desktop::diagnostics::Fact::Passed,
+                started_at_ms: started,
+                finished_at_ms: started + 1,
+                independent: true,
+            },
+        ));
+        let (_, report) = app.diagnostic_report.as_ref().unwrap();
+        assert_eq!(report.endpoint, rtrust_desktop::diagnostics::Fact::Passed);
+        assert!(!app.busy);
+    }
+    #[test]
+    fn a_failed_reconnect_action_drops_its_planned_repeat_check() {
+        let mut app = app();
+        app.reconnect_then_check = true;
+        app.follow_up = Some(rtrust_desktop::diagnostics::FollowUp {
+            action: rtrust_desktop::diagnostics::Action::Reconnect,
+            previous_cause: rtrust_desktop::diagnostics::Cause::Undetermined,
+            previous_finished_at_ms: 1,
+        });
+        app.connecting = true;
+        let epoch = app.connection_epoch;
+        let _ = app.update(Message::Connected(epoch, Err("endpoint refused".into())));
+        assert!(!app.reconnect_then_check && app.follow_up.is_none());
     }
     #[test]
     fn startup_settings_do_not_connect_or_dirty_profiles() {
