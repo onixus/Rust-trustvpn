@@ -46,7 +46,13 @@ sys.argv[1]=str(a.fixture)
 import windows_service_e2e as fixture
 permit=fixture.Pipe()
 try:
-    response=permit.request(dict(op='PrepareUpdate'));assert response['state']=='Idle',response
+    response=permit.request(dict(op='PrepareUpdate'))
+    # Older installed services reject v4 before dispatch. Retry only that explicit
+    # rejection using the supported older wire version; never bypass the lease.
+    if response['state']=='Error' and response.get('message')=='IPC version mismatch' and response.get('version') in (2, 3):
+        permit.close(); permit=fixture.Pipe()
+        response=permit.request(dict(op='PrepareUpdate'),version=response['version'])
+    assert response['state']=='Idle',response
 finally:permit.close()
 ps(f"New-Item '{WORK}' -ItemType Directory | Out-Null; $acl=New-Object Security.AccessControl.DirectorySecurity; $acl.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'); Set-Acl '{WORK}' $acl")
 backup=WORK/'before';backup.mkdir()
