@@ -7,14 +7,14 @@ struct Step {
     path: &'static str,
     status: u16,
     body: Value,
-    delay: std::time::Duration,
+    stalled: Option<tokio::sync::oneshot::Sender<()>>,
 }
 fn step(path: &'static str, body: Value) -> Step {
     Step {
         path,
         status: 200,
         body,
-        delay: std::time::Duration::ZERO,
+        stalled: None,
     }
 }
 struct Fixture {
@@ -92,7 +92,13 @@ async fn fixture(steps: Vec<Step>) -> Fixture {
                 assert_eq!(body["include_secrets"], true);
             }
             recorded.lock().unwrap().push(step.path.into());
-            tokio::time::sleep(step.delay).await;
+            if let Some(stalled) = step.stalled {
+                stalled
+                    .send(())
+                    .expect("timeout test must await stalled export");
+                // Keep this response blocked until Fixture::drop aborts the server.
+                std::future::pending::<()>().await;
+            }
             let body = step.body.to_string();
             let response = format!(
                 "HTTP/1.1 {} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -204,11 +210,20 @@ async fn access_denied_during_export_does_not_return_partial_profiles_or_server_
 #[tokio::test]
 async fn caller_timeout_cancels_snapshot_before_any_batch_is_returned() {
     let mut steps = snapshot_steps();
-    steps[3].delay = std::time::Duration::from_secs(1);
+    let (stalled, reached_export) = tokio::sync::oneshot::channel();
+    steps[3].stalled = Some(stalled);
     let fixture = fixture(steps).await;
     let client = authorized(&fixture.client);
+    let snapshot = client.snapshot();
+    tokio::pin!(snapshot);
+    // Poll the real snapshot through TLS setup and earlier API requests. The
+    // short cancellation deadline starts only once the fixture blocks export.
+    tokio::select! {
+        _ = &mut snapshot => panic!("snapshot completed before the fixture stalled export"),
+        reached = reached_export => reached.expect("fixture must receive the export request"),
+    }
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(250), client.snapshot())
+        tokio::time::timeout(std::time::Duration::from_millis(250), &mut snapshot)
             .await
             .is_err()
     );
