@@ -13,6 +13,8 @@ pub mod stack;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+mod netwatch;
 #[cfg(target_os = "linux")]
 pub mod service;
 

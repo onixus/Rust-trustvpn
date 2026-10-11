@@ -73,6 +73,8 @@ pub struct Capabilities {
     pub observations_schema: u32,
     pub lifecycle_observations: bool,
     pub system_probes: bool,
+    /// Native link/address change and resume events invalidate observations.
+    pub network_events: bool,
 }
 impl Capabilities {
     pub fn current() -> Self {
@@ -80,6 +82,7 @@ impl Capabilities {
             observations_schema: observations::SCHEMA,
             lifecycle_observations: true,
             system_probes: false,
+            network_events: true,
         }
     }
 }

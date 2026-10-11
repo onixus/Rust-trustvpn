@@ -476,6 +476,7 @@ async fn lease_loop(
     .await?;
     let mut state = State::Connected;
     monitor.transition(true, rtrust_control::observations::now_ms());
+    let mut netwatch = crate::netwatch::Watch::new(DEVICE);
     let mut retry = Box::pin(tokio::time::sleep(Duration::from_secs(2)));
     let mut delay = 2;
     let mut connected_since = std::time::Instant::now();
@@ -495,6 +496,10 @@ async fn lease_loop(
         let request = loop {
             tokio::select! {
                 r = &mut pending => break r?,
+                change = netwatch.next() => match change {
+                    crate::netwatch::Change::Network => monitor.network_changed(rtrust_control::observations::now_ms()),
+                    crate::netwatch::Change::Resumed => monitor.resumed(rtrust_control::observations::now_ms()),
+                },
                 _ = stop.changed() => return Ok(None),
                 _ = worker.finished(), if state == State::Connected => {
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
