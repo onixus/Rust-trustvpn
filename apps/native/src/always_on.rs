@@ -10,6 +10,8 @@ pub(super) struct State {
     confirm: bool,
     backups: Vec<Profile>,
     recovery_confirm: bool,
+    enabling: bool,
+    enable_task: Option<iced::task::Handle>,
 }
 #[derive(Clone)]
 pub(super) enum Action {
@@ -18,7 +20,7 @@ pub(super) enum Action {
     Disable,
     Backup(usize, bool),
     EnableRecovery,
-    Done(Result<rtrust_control::Response, String>),
+    Done(u64, Result<rtrust_control::Response, String>),
     Observed(u64, Result<rtrust_control::Response, String>),
 }
 impl App {
@@ -84,7 +86,12 @@ impl App {
                 }
                 return Task::none();
             }
-            Action::Done(result) => {
+            Action::Done(generation, result) => {
+                if generation != self.always_on.generation {
+                    return Task::none();
+                }
+                self.always_on.enabling = false;
+                self.always_on.enable_task = None;
                 self.busy = false;
                 self.always_on.confirm = false;
                 self.always_on.recovery_confirm = false;
@@ -96,7 +103,14 @@ impl App {
                 return Task::none();
             }
             Action::Check if !self.busy => rtrust_control::Command::AlwaysOnStatus,
-            Action::Disable if !self.busy => rtrust_control::Command::DisableAlwaysOn,
+            Action::Disable if !self.busy || self.always_on.enabling => {
+                // Abort capability negotiation / pending enable send too. A
+                // late enable request must not arrive after Disable completed.
+                if let Some(handle) = self.always_on.enable_task.take() {
+                    handle.abort();
+                }
+                rtrust_control::Command::DisableAlwaysOn
+            }
             Action::Enable if self.can_change_profiles() && !self.dirty => {
                 if !self.always_on.confirm {
                     self.always_on.confirm = true;
@@ -117,10 +131,23 @@ impl App {
             _ => return Task::none(),
         };
         self.always_on.generation = self.always_on.generation.wrapping_add(1);
+        let generation = self.always_on.generation;
+        self.always_on.enabling = matches!(
+            command,
+            rtrust_control::Command::EnableAlwaysOn { .. }
+                | rtrust_control::Command::EnableRecovery { .. }
+        );
         self.busy = true;
-        Task::perform(rtrust_control::Client::always_on(command), |r| {
-            Message::AlwaysOn(Action::Done(r))
-        })
+        let task = Task::perform(rtrust_control::Client::always_on(command), move |r| {
+            Message::AlwaysOn(Action::Done(generation, r))
+        });
+        if self.always_on.enabling {
+            let (task, handle) = task.abortable();
+            self.always_on.enable_task = Some(handle);
+            task
+        } else {
+            task
+        }
     }
     fn always_observed(&mut self, response: rtrust_control::Response) {
         if let Some(enabled) = response.always_on {
@@ -182,7 +209,7 @@ impl App {
             text("Служба хранит отдельную зашифрованную копию профиля по умолчанию и подключается без открытого приложения. При недоступности VPN сеть остаётся заблокированной. Изменение профиля в приложении не меняет эту копию.").size(12),
             button("Проверить состояние службы").on_press_maybe((!self.busy).then_some(Message::AlwaysOn(Action::Check))),
             button(if self.always_on.confirm {"Подтвердить постоянный VPN"}else{"Включить always-on…"}).on_press_maybe((self.can_change_profiles() && !self.dirty && !self.profiles.is_empty()).then_some(Message::AlwaysOn(Action::Enable))),
-            button("Выключить always-on и восстановить сеть").on_press_maybe((!self.busy).then_some(Message::AlwaysOn(Action::Disable)))
+            button("Выключить always-on и восстановить сеть").on_press_maybe((!self.busy || self.always_on.enabling).then_some(Message::AlwaysOn(Action::Disable)))
         ].spacing(8);
         if !self.always_on.enabled {
             panel = panel.push(text("Резервные подключения: отметьте в порядке предпочтения (до трёх). Основной — профиль по умолчанию. Автоматический режим применяет полный туннель и сохраняет защиту; это preview до проверки на вашем устройстве.").size(12));
@@ -232,7 +259,7 @@ mod tests {
             "Guard setup needs recovery",
         );
         enabled.always_on = Some(true);
-        let _ = app.always_update(Action::Done(Ok(enabled)));
+        let _ = app.always_update(Action::Done(app.always_on.generation, Ok(enabled)));
         assert!(app.always_on.enabled);
         let _ = app.always_update(Action::Observed(
             old,
@@ -286,5 +313,47 @@ mod tests {
         assert!(!app.busy);
         assert!(!app.always_on.recovery_confirm);
         assert!(app.always_on.backups.is_empty());
+    }
+    #[test]
+    fn disable_cancels_pending_enable_and_stale_completion_cannot_release_busy_or_restore_state() {
+        let mut app = crate::tests::app();
+        app.profiles = vec![
+            profile("primary", "192.0.2.1"),
+            profile("backup", "192.0.2.2"),
+        ];
+        app.dns = "1.1.1.1".into();
+        let _ = app.always_update(Action::Backup(1, true));
+        let _ = app.always_update(Action::EnableRecovery);
+        let _ = app.always_update(Action::EnableRecovery);
+        assert!(app.busy && app.always_on.enabling);
+        assert!(app.always_on.enable_task.is_some());
+        let enable_generation = app.always_on.generation;
+        let _ = app.always_update(Action::Disable);
+        let disable_generation = app.always_on.generation;
+        assert_ne!(enable_generation, disable_generation);
+        assert!(app.busy);
+        assert!(!app.always_on.enabling);
+        assert!(app.always_on.enable_task.is_none());
+        let mut old =
+            rtrust_control::Response::new(rtrust_control::State::Connected, "late enable");
+        old.always_on = Some(true);
+        let _ = app.always_update(Action::Done(enable_generation, Ok(old.clone())));
+        assert!(app.busy);
+        assert!(!app.always_on.enabled);
+        // A second disable or other UI action cannot overtake pending cleanup.
+        let _ = app.always_update(Action::Disable);
+        assert_eq!(app.always_on.generation, disable_generation);
+        let _ = app.always_update(Action::Backup(1, true));
+        assert!(app.busy);
+        let mut off = rtrust_control::Response::new(rtrust_control::State::Idle, "disabled");
+        off.always_on = Some(false);
+        let _ = app.always_update(Action::Done(disable_generation, Ok(off)));
+        assert!(!app.busy);
+        assert!(!app.always_on.enabled);
+        let status = app.always_on.status.clone();
+        let _ = app.always_update(Action::Done(enable_generation, Ok(old)));
+        assert!(!app.busy);
+        assert!(!app.always_on.enabled);
+        assert_eq!(app.always_on.status, status);
     }
 }
