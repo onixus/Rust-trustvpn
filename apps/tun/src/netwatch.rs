@@ -36,6 +36,10 @@ pub struct Watch {
     tick: tokio::time::Interval,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     notify: Option<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>>,
+    /// Kept here, not in the future: a `select!` that drops `next()` during
+    /// the settle window resumes it instead of losing the notification.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    settle_until: Option<tokio::time::Instant>,
 }
 
 impl Watch {
@@ -53,37 +57,48 @@ impl Watch {
             notify: notify_socket()
                 .inspect_err(|error| eprintln!("Network change notifications unavailable: {error}"))
                 .ok(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            settle_until: None,
         }
     }
 
-    /// Resolves at the next detected change; cancel-safe for `select!`.
+    /// Resolves at the next detected change. Cancel-safe for `select!`: state
+    /// lives in `self`, and an interrupted check is repeated on the next call.
     pub async fn next(&mut self) -> Change {
         loop {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
-                let notify = &self.notify;
-                let notified = async move {
-                    match notify {
-                        Some(fd) => fd.readable().await.map(|mut guard| {
-                            drain(guard.get_inner());
-                            guard.clear_ready();
-                        }),
-                        None => std::future::pending().await,
+                if let Some(deadline) = self.settle_until {
+                    tokio::time::sleep_until(deadline).await;
+                    self.settle_until = None;
+                    if let Some(fd) = &self.notify {
+                        drain(fd.get_ref());
                     }
-                };
-                let woken = tokio::select! {
-                    _ = self.tick.tick() => None,
-                    result = notified => Some(result.is_ok()),
-                };
-                match woken {
-                    Some(false) => self.notify = None,
-                    Some(true) => {
-                        tokio::time::sleep(SETTLE).await;
-                        if let Some(fd) = &self.notify {
-                            drain(fd.get_ref());
+                } else {
+                    let notify = &self.notify;
+                    let notified = async move {
+                        match notify {
+                            Some(fd) => fd.readable().await.map(|mut guard| {
+                                // Keep readiness while messages remain queued.
+                                if drain(guard.get_inner()) {
+                                    guard.clear_ready();
+                                }
+                            }),
+                            None => std::future::pending().await,
                         }
+                    };
+                    let woken = tokio::select! {
+                        _ = self.tick.tick() => None,
+                        result = notified => Some(result.is_ok()),
+                    };
+                    match woken {
+                        Some(false) => self.notify = None,
+                        Some(true) => {
+                            self.settle_until = Some(tokio::time::Instant::now() + SETTLE);
+                            continue;
+                        }
+                        None => {}
                     }
-                    None => {}
                 }
             }
             #[cfg(target_os = "windows")]
@@ -209,6 +224,7 @@ fn signature(exclude: &str) -> Option<u64> {
     let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
     let mut size = 16 * 1024u32;
     let mut buffer = Vec::<u64>::new();
+    let mut filled = false;
     for _ in 0..3 {
         buffer.resize((size as usize).div_ceil(8), 0);
         match unsafe {
@@ -220,10 +236,17 @@ fn signature(exclude: &str) -> Option<u64> {
                 &mut size,
             )
         } {
-            ERROR_SUCCESS => break,
+            ERROR_SUCCESS => {
+                filled = true;
+                break;
+            }
             ERROR_BUFFER_OVERFLOW => continue,
             _ => return None,
         }
+    }
+    // The list kept growing: an unfilled buffer is not an adapter list.
+    if !filled {
+        return None;
     }
     let mut rows = Vec::new();
     let mut adapter = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
@@ -334,16 +357,18 @@ fn notify_socket() -> std::io::Result<tokio::io::unix::AsyncFd<std::os::fd::Owne
     tokio::io::unix::AsyncFd::new(fd)
 }
 
+/// True when the queue is empty. Bounded: a flood of route messages must not
+/// starve the lease loop; the rest is read on the next wakeup.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn drain(fd: &std::os::fd::OwnedFd) {
+fn drain(fd: &std::os::fd::OwnedFd) -> bool {
     use std::os::fd::AsRawFd;
     let mut buffer = [0u8; 8192];
-    // Bounded: a flood of route messages must not starve the lease loop.
     for _ in 0..64 {
         if unsafe { libc::recv(fd.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len(), 0) } <= 0 {
-            break;
+            return true;
         }
     }
+    false
 }
 
 #[cfg(test)]
@@ -432,6 +457,7 @@ mod tests {
         runtime.block_on(async {
             let _ = std::process::Command::new("ip")
                 .args(["link", "del", "rtwatch0"])
+                .stderr(std::process::Stdio::null())
                 .status();
             let mut watch = Watch::new("rtrust-test-none");
             assert!(watch.notify.is_some());
@@ -439,6 +465,14 @@ mod tests {
             let started = std::time::Instant::now();
             ip(&["link", "add", "rtwatch0", "type", "dummy"]);
             ip(&["addr", "add", "198.51.100.7/32", "dev", "rtwatch0"]);
+            // A select! that drops next() inside the settle window must not
+            // lose the notification.
+            assert!(
+                tokio::time::timeout(SETTLE / 5, watch.next())
+                    .await
+                    .is_err()
+            );
+            assert!(watch.settle_until.is_some());
             let change = tokio::time::timeout(Duration::from_secs(5), watch.next()).await;
             assert_eq!(change.unwrap(), Change::Network);
             assert!(started.elapsed() < POLL);
