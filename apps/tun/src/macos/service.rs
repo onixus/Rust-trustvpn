@@ -165,28 +165,6 @@ async fn reply_observed(
         .await
         .map_err(|_| "IPC write timed out")?
 }
-async fn pin(mut profile: rtrust_profile::Profile) -> Result<rtrust_profile::Profile, String> {
-    let mut addresses = Vec::new();
-    for address in &profile.endpoint.addresses {
-        for address in tokio::net::lookup_host(address)
-            .await
-            .map_err(|_| "Cannot resolve endpoint")?
-        {
-            if !address.is_ipv4() {
-                continue;
-            }
-            if addresses.len() >= 64 {
-                return Err("Too many endpoint addresses".into());
-            }
-            addresses.push(address.to_string());
-        }
-    }
-    if addresses.is_empty() {
-        return Err("Endpoint has no addresses".into());
-    }
-    profile.endpoint.addresses = addresses;
-    Ok(profile)
-}
 async fn serve(
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
     uid: u32,
@@ -272,22 +250,19 @@ async fn serve(
     // Both modes pin IPv4 endpoint addresses: PF blocks selected networks
     // outside the tunnel, so the endpoint must be known and left out of them.
     // Every allowed backup is pinned now: the guard covers all candidates.
-    let mut failover = match tokio::time::timeout(
-        Duration::from_secs(10),
-        crate::failover::Failover::pin(*profile, fallbacks, pin),
-    )
-    .await
-    {
-        Ok(Ok(failover)) => failover,
-        _ => {
-            return reply(
-                &mut stream,
-                State::Error,
-                "Не удалось разрешить адрес VPN-сервера",
-            )
-            .await;
-        }
-    };
+    let mut failover =
+        match crate::failover::Failover::pin(*profile, fallbacks, crate::failover::Pin::Ipv4).await
+        {
+            Ok(failover) => failover,
+            _ => {
+                return reply(
+                    &mut stream,
+                    State::Error,
+                    "Не удалось разрешить адрес VPN-сервера",
+                )
+                .await;
+            }
+        };
     let profile = failover.guard_profile();
     let endpoints = match state::endpoints(&profile) {
         Ok(e) => e,

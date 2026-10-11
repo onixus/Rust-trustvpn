@@ -15,6 +15,51 @@ pub const COOLDOWN: Duration = Duration::from_secs(20);
 /// A session shorter than this counts as a failed attempt, like the backoff reset.
 pub const STABLE: Duration = Duration::from_secs(30);
 
+/// How a platform's guard needs endpoint addresses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// macOS pins IPv4 only; the other modes serve Linux and Windows.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub enum Pin {
+    /// The guard has no endpoint exception (Linux selected mode).
+    Unresolved,
+    /// Every resolved address.
+    All,
+    /// IPv4 answers only, for guards that pin IPv4 endpoint exceptions.
+    Ipv4,
+}
+/// Per candidate; candidates resolve concurrently.
+pub const PIN_LIMIT: Duration = Duration::from_secs(10);
+
+/// Freeze DNS answers for this lease so reconnect cannot route into itself.
+pub async fn pin_endpoint(mut profile: Profile, mode: Pin) -> Result<Profile, String> {
+    if mode == Pin::Unresolved {
+        return Ok(profile);
+    }
+    let mut addresses = Vec::new();
+    for address in &profile.endpoint.addresses {
+        for address in tokio::net::lookup_host(address)
+            .await
+            .map_err(|_| "Cannot resolve endpoint")?
+        {
+            if mode == Pin::Ipv4 && !address.is_ipv4() {
+                continue;
+            }
+            if addresses.len() >= 64 {
+                return Err("Too many endpoint addresses".into());
+            }
+            let address = address.to_string();
+            if !addresses.contains(&address) {
+                addresses.push(address);
+            }
+        }
+    }
+    if addresses.is_empty() {
+        return Err("Endpoint has no addresses".into());
+    }
+    profile.endpoint.addresses = addresses;
+    Ok(profile)
+}
+
 pub struct Failover {
     candidates: Vec<Profile>,
     active: usize,
@@ -27,23 +72,23 @@ pub struct Failover {
 impl Failover {
     /// `pin` resolves a candidate's endpoint the way the platform guard needs.
     /// The requested profile must pin; a backup that cannot is left out.
-    pub async fn pin<F, Fut>(
-        primary: Profile,
-        fallbacks: Vec<Profile>,
-        pin: F,
-    ) -> Result<Self, String>
-    where
-        F: FnMut(Profile) -> Fut,
-        Fut: std::future::Future<Output = Result<Profile, String>>,
-    {
+    /// Pins every candidate concurrently, each within its own limit. The
+    /// requested profile must pin; a backup that cannot is left out, so a
+    /// slow or broken backup never prevents the requested connection.
+    pub async fn pin(primary: Profile, fallbacks: Vec<Profile>, mode: Pin) -> Result<Self, String> {
         if fallbacks.len() > rtrust_control::MAX_FALLBACKS {
             return Err("Too many backup profiles".into());
         }
-        // Concurrently, so backups do not stretch the Start deadline.
         let mut results =
-            futures_util::future::join_all(std::iter::once(primary).chain(fallbacks).map(pin))
-                .await
-                .into_iter();
+            futures_util::future::join_all(std::iter::once(primary).chain(fallbacks).map(
+                |profile| async move {
+                    tokio::time::timeout(PIN_LIMIT, pin_endpoint(profile, mode))
+                        .await
+                        .unwrap_or_else(|_| Err("Endpoint resolution timed out".into()))
+                },
+            ))
+            .await
+            .into_iter();
         let mut candidates = vec![results.next().expect("primary")?];
         let mut skipped = 0;
         for result in results {
@@ -229,39 +274,53 @@ mod tests {
     #[test]
     fn an_unpinnable_backup_is_dropped_but_the_requested_profile_is_required() {
         let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
             .build()
             .unwrap();
         runtime.block_on(async {
-            let pin = |p: Profile| async move {
-                if p.endpoint.hostname == "bad.example" {
-                    Err("unresolved".to_string())
-                } else {
-                    Ok(p)
-                }
-            };
+            let good = profile("good.example", "192.0.2.1:443");
+            let bad = profile("bad.example", "rtrust-unresolvable.invalid:443");
             let f = Failover::pin(
-                profile("good.example", "192.0.2.1:443"),
-                vec![
-                    profile("bad.example", "192.0.2.2:443"),
-                    profile("other.example", "192.0.2.3:443"),
-                ],
-                pin,
+                good.clone(),
+                vec![bad.clone(), profile("other.example", "192.0.2.3:443")],
+                Pin::All,
             )
             .await
             .unwrap();
             assert_eq!((f.candidates.len(), f.skipped), (2, 1));
             assert!(f.note().contains("пропущено: 1"));
-            assert!(
-                Failover::pin(profile("bad.example", "192.0.2.2:443"), vec![], pin)
-                    .await
-                    .is_err()
-            );
+            assert!(Failover::pin(bad, vec![], Pin::All).await.is_err());
             let many =
                 vec![profile("x.example", "192.0.2.9:443"); rtrust_control::MAX_FALLBACKS + 1];
-            assert!(
-                Failover::pin(profile("good.example", "192.0.2.1:443"), many, pin)
+            assert!(Failover::pin(good, many, Pin::All).await.is_err());
+        });
+    }
+
+    #[test]
+    fn ipv4_pinning_drops_ipv6_answers_and_unresolved_keeps_names() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut dual = profile("dual.example", "192.0.2.1:443");
+            dual.endpoint.addresses.push("[2001:db8::1]:443".into());
+            dual.endpoint.addresses.push("192.0.2.1:443".into());
+            let v4 = pin_endpoint(dual.clone(), Pin::Ipv4).await.unwrap();
+            assert_eq!(v4.endpoint.addresses, ["192.0.2.1:443"]);
+            let all = pin_endpoint(dual.clone(), Pin::All).await.unwrap();
+            assert_eq!(all.endpoint.addresses.len(), 2);
+            let mut v6 = profile("v6.example", "[2001:db8::1]:443");
+            v6.endpoint.addresses.truncate(1);
+            assert!(pin_endpoint(v6, Pin::Ipv4).await.is_err());
+            let named = profile("n.example", "vpn.invalid:443");
+            assert_eq!(
+                pin_endpoint(named, Pin::Unresolved)
                     .await
-                    .is_err()
+                    .unwrap()
+                    .endpoint
+                    .addresses,
+                ["vpn.invalid:443"]
             );
         });
     }

@@ -139,27 +139,6 @@ async fn reply(
     .await
     .map_err(|_| "IPC write timed out")?
 }
-async fn pinned(profile: &rtrust_profile::Profile) -> Result<rtrust_profile::Profile, String> {
-    let mut result = profile.clone();
-    let mut addresses = Vec::new();
-    for address in &profile.endpoint.addresses {
-        for addr in tokio::net::lookup_host(address)
-            .await
-            .map_err(|_| "Cannot resolve endpoint")?
-        {
-            if addresses.len() >= 64 {
-                return Err("Too many endpoint addresses".into());
-            }
-            addresses.push(addr.to_string());
-        }
-    }
-    if addresses.is_empty() {
-        return Err("Endpoint has no addresses".into());
-    }
-    // Freeze DNS answers for this lease so reconnect cannot route into itself.
-    result.endpoint.addresses = addresses;
-    Ok(result)
-}
 /// Selected routes minus the pinned endpoint (and LAN on request), checked
 /// against the current table.
 fn selected_routes(
@@ -314,16 +293,18 @@ async fn serve(
     routes::settled_adapter()?;
     let setup = async {
         // Every allowed candidate is pinned now: the guard covers them all.
-        let failover = tokio::time::timeout(
-            Duration::from_secs(10),
-            crate::failover::Failover::pin(
-                *profile,
-                fallbacks,
-                |p| async move { pinned(&p).await },
-            ),
+        // WFP full mode pins IPv4 endpoint exceptions: an IPv6 answer of any
+        // candidate would otherwise reject the whole start.
+        let failover = crate::failover::Failover::pin(
+            *profile,
+            fallbacks,
+            if dns.is_some() {
+                crate::failover::Pin::Ipv4
+            } else {
+                crate::failover::Pin::All
+            },
         )
-        .await
-        .map_err(|_| "Cannot resolve endpoint")??;
+        .await?;
         let networks = if dns.is_none() {
             selected_routes(&failover.guard_profile(), &selection)?
         } else {
@@ -639,7 +620,9 @@ mod tests {
         ))
         .unwrap();
         profile.endpoint.addresses = vec!["198.18.0.2:443".into()];
-        let p = pinned(&profile).await.unwrap();
+        let p = crate::failover::pin_endpoint(profile.clone(), crate::failover::Pin::All)
+            .await
+            .unwrap();
         let endpoint: Ipv4Addr = "198.18.0.2".parse().unwrap();
         let selection = rtrust_control::Selection::parse("198.18.0.0/24", "", false).unwrap();
         let routes = selection.routes(&[endpoint], &[]).unwrap();
@@ -653,7 +636,9 @@ mod tests {
         assert_eq!(p.endpoint.hostname, profile.endpoint.hostname);
         // HTTP/3 is pinned the same way; only the WFP permit switches to UDP.
         profile.endpoint.upstream_protocol = "http3".into();
-        let p = pinned(&profile).await.unwrap();
+        let p = crate::failover::pin_endpoint(profile.clone(), crate::failover::Pin::All)
+            .await
+            .unwrap();
         assert_eq!(p.endpoint.addresses, ["198.18.0.2:443"]);
         assert!(p.udp_transport());
     }

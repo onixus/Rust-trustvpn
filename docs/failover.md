@@ -22,9 +22,12 @@ The client sends the allowed backups with `Start` / `StartFull` (IPC field
 backups to a service that does not advertise the capability.
 
 1. **Pinning.** At Start the service resolves the endpoint of the requested
-   profile and of every backup, concurrently and within the existing 10 s
-   limit. The requested profile must resolve. A backup that does not is left
-   out and the start message says how many were skipped.
+   profile and of every backup concurrently, each within its own 10 s limit
+   (`failover::pin_endpoint`, shared by all three services). The requested
+   profile must resolve; a backup that fails or is slow is left out and the
+   start message says how many were skipped. macOS and Windows whole-host mode
+   pin IPv4 answers only, because their guards pin IPv4 endpoint exceptions;
+   an IPv6-only endpoint is therefore unusable there.
 2. **One guard for all candidates.** The firewall, routes and DNS are installed
    once with the union of all pinned endpoint addresses, UDP use and Hysteria
    hop ports. Switching between candidates therefore never touches the guard:

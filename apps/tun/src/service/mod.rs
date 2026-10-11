@@ -192,25 +192,6 @@ async fn reply_observed(
         .await
         .map_err(|_| "IPC write timed out")?
 }
-async fn pin(mut profile: rtrust_profile::Profile) -> Result<rtrust_profile::Profile, String> {
-    let mut addresses = Vec::new();
-    for address in &profile.endpoint.addresses {
-        for address in tokio::net::lookup_host(address)
-            .await
-            .map_err(|_| "Cannot resolve endpoint")?
-        {
-            if addresses.len() >= 64 {
-                return Err("Too many endpoint addresses".into());
-            }
-            addresses.push(address.to_string());
-        }
-    }
-    if addresses.is_empty() {
-        return Err("Endpoint has no addresses".into());
-    }
-    profile.endpoint.addresses = addresses;
-    Ok(profile)
-}
 async fn serve(
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
     uid: u32,
@@ -316,20 +297,19 @@ async fn serve(
     let full = dns.is_some();
     // Full mode pins every allowed candidate: the guard covers them all.
     // Selected mode routes only this user's traffic, so nothing is pinned.
-    let pinned = tokio::time::timeout(
-        Duration::from_secs(10),
-        crate::failover::Failover::pin(*profile, fallbacks, |profile| async move {
-            if full {
-                pin(profile).await
-            } else {
-                Ok(profile)
-            }
-        }),
+    let mut failover = match crate::failover::Failover::pin(
+        *profile,
+        fallbacks,
+        if full {
+            crate::failover::Pin::All
+        } else {
+            crate::failover::Pin::Unresolved
+        },
     )
-    .await;
-    let mut failover = match pinned {
-        Ok(Ok(failover)) => failover,
-        _ => {
+    .await
+    {
+        Ok(failover) => failover,
+        Err(_) => {
             return reply(
                 &mut stream,
                 State::Error,

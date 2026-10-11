@@ -569,6 +569,19 @@ impl App {
             }
         }
     }
+    /// The profile the service is using now: after a failover, a backup.
+    fn active_profile(&self) -> Option<Profile> {
+        let index = self
+            .session
+            .as_ref()
+            .and_then(Session::active_profile)
+            .unwrap_or(0) as usize;
+        self.connection_candidates
+            .get(index)
+            .and_then(|name| self.profiles.iter().find(|p| &p.name == name))
+            .or_else(|| self.profiles.first())
+            .cloned()
+    }
     fn current(&self) -> Option<&Profile> {
         self.profiles.get(self.selected)
     }
@@ -1557,7 +1570,7 @@ impl App {
                         };
                     }
                     Action::CheckEndpoint if current => {
-                        let Some(profile) = self.profiles.first().cloned() else {
+                        let Some(profile) = self.active_profile() else {
                             return Task::none();
                         };
                         self.busy = true;
@@ -2489,6 +2502,16 @@ mod tests {
         assert!(!app.busy && app.probe.is_none() && app.session.is_none());
         let _ = app.update(Message::ExportDiagnostic);
         assert!(!app.busy && app.diagnostic_report.is_none());
+    }
+    #[test]
+    fn endpoint_checks_follow_the_candidates_of_the_running_connection() {
+        let mut app = app();
+        assert_eq!(app.active_profile().unwrap().name, app.profiles[0].name);
+        // Candidates are named at Start; index 0 is whichever profile was requested.
+        app.connection_candidates = vec![app.profiles[1].name.clone()];
+        assert_eq!(app.active_profile().unwrap().name, app.profiles[1].name);
+        app.connection_candidates = vec!["deleted since".into()];
+        assert_eq!(app.active_profile().unwrap().name, app.profiles[0].name);
     }
     #[test]
     fn diagnostic_actions_need_a_current_report_and_follow_ups_attach_once() {
