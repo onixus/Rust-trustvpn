@@ -1,7 +1,7 @@
 use jni::{
     Env, JValue, JavaVM, jni_sig, jni_str, native_method,
     objects::{JObject, JString},
-    sys::{jboolean, jint},
+    sys::{jboolean, jint, jlong},
 };
 use rtrust_engine::{Session, SocketProtector};
 use rtrust_profile::Profile;
@@ -235,12 +235,12 @@ fn resumed(_env: &mut Env<'_>, _this: JObject<'_>) -> jni::errors::Result<()> {
         .resumed();
     Ok(())
 }
-const _: jni::NativeMethod = native_method! {java_type="org.rtrusttunnel.android.NativeCore",name="flowCapture",extern fn flow_capture(session:jni::sys::jlong,capture:jni::sys::jlong,operation:jint)->JString,};
+const _: jni::NativeMethod = native_method! {java_type="org.rtrusttunnel.android.NativeCore",name="flowCapture",extern fn flow_capture(session:jlong,capture:jlong,operation:jint)->JString,};
 fn flow_capture<'a>(
     env: &mut Env<'a>,
     _this: JObject<'a>,
-    session: jni::sys::jlong,
-    capture: jni::sys::jlong,
+    session: jlong,
+    capture: jlong,
     operation: jint,
 ) -> jni::errors::Result<JString<'a>> {
     let mut flows = FLOWS.lock().unwrap_or_else(|p| p.into_inner());
