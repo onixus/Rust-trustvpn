@@ -350,6 +350,7 @@ enum Message {
     Delete,
     Replace,
     ToggleConnection,
+    ToggleDefaultConnection,
     Connected(u64, Result<Session, String>),
     Health(u64, Result<(), String>),
 }
@@ -524,7 +525,7 @@ impl App {
         if self.connecting || self.session.is_some() || self.disconnecting {
             return Task::none();
         }
-        self.update(Message::ToggleConnection)
+        self.update(Message::ToggleDefaultConnection)
     }
     fn connection_settings(&self) -> Result<rtrust_store::ConnectionSettings, String> {
         let socks_port = self
@@ -795,7 +796,7 @@ impl App {
                         self.tray_ready = false;
                         Self::show_window()
                     }
-                    tray::Action::Toggle => self.update(Message::ToggleConnection),
+                    tray::Action::Toggle => self.update(Message::ToggleDefaultConnection),
                     tray::Action::Exit => self.update(Message::ExitRequested),
                 }));
             }
@@ -994,6 +995,13 @@ impl App {
                     self.status = "Профиль по умолчанию выбран. Автоматическое сохранение…".into();
                 }
             }
+            Message::ToggleDefaultConnection => {
+                let selected = self.selected;
+                self.selected = 0;
+                let task = self.update(Message::ToggleConnection);
+                self.selected = selected;
+                return task;
+            }
             Message::ToggleConnection => {
                 self.cancel_diagnostic();
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -1029,7 +1037,7 @@ impl App {
                         "Отключено.".into()
                     };
                 } else if !self.busy
-                    && let Some(profile) = self.profiles.first().cloned()
+                    && let Some(profile) = self.current().cloned()
                 {
                     let port = if self.mode == Mode::Socks {
                         match self.proxy_port.parse::<u16>() {
@@ -1056,7 +1064,9 @@ impl App {
                     };
                     let mode = self.mode;
                     let dns = self.dns.clone();
-                    let fallbacks = self.saved_connection.fallbacks(&self.profiles);
+                    let fallbacks = self
+                        .saved_connection
+                        .fallbacks_for(&self.profiles, Some(&profile));
                     self.connection_candidates = std::iter::once(profile.name.clone())
                         .chain(fallbacks.iter().map(|p| p.name.clone()))
                         .collect();
@@ -1931,8 +1941,7 @@ impl App {
         let name = if active {
             self.connection_name.as_str()
         } else {
-            self.profiles
-                .first()
+            self.current()
                 .map(|p| p.name.as_str())
                 .unwrap_or("Добавьте профиль")
         };
@@ -2666,7 +2675,39 @@ mod tests {
         assert_eq!(app.selected, 0);
         let _ = app.update(Message::Select(1));
         let task = app.update(Message::ToggleConnection);
-        assert_eq!(app.connection_name, "second.example");
+        assert_eq!(app.connection_name, "first.example");
+        assert!(app.connecting);
+        drop(task);
+    }
+    #[test]
+    fn selected_fallback_is_not_sent_twice_as_a_connection_candidate() {
+        let mut app = app();
+        let _ = app.update(Message::Select(1));
+        app.saved_connection.fallback_profiles = vec!["second.example".into()];
+        let task = app.update(Message::ToggleConnection);
+        assert_eq!(app.connection_candidates, vec!["second.example"]);
+        drop(task);
+    }
+    #[test]
+    fn selected_connection_retains_a_permitted_default_backup() {
+        let mut app = app();
+        let _ = app.update(Message::Select(1));
+        app.saved_connection.fallback_profiles =
+            vec!["first.example".into(), "second.example".into()];
+        let task = app.update(Message::ToggleConnection);
+        assert_eq!(
+            app.connection_candidates,
+            vec!["second.example", "first.example"]
+        );
+        drop(task);
+    }
+    #[test]
+    fn background_connect_uses_default_without_changing_selection() {
+        let mut app = app();
+        let _ = app.update(Message::Select(1));
+        let task = app.update(Message::ToggleDefaultConnection);
+        assert_eq!(app.connection_name, "first.example");
+        assert_eq!(app.selected, 1);
         assert!(app.connecting);
         drop(task);
     }

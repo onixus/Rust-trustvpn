@@ -8,11 +8,11 @@ protocol VPNStartConfiguration: AnyObject {
     var isEnabled: Bool { get set }
     func saveToPreferences() async throws
     func loadFromPreferences() async throws
-    func startTunnel() throws
+    func startTunnel(profileID: String?) throws
 }
 
 extension NETunnelProviderManager: VPNStartConfiguration {
-    func startTunnel() throws { try connection.startVPNTunnel() }
+    func startTunnel(profileID: String?) throws { try connection.startVPNTunnel(options: profileID.map { ["profileID": $0 as NSString] }) }
 }
 
 @MainActor
@@ -21,12 +21,12 @@ enum VPNController {
         supported && !busy && (active || hasProfile)
     }
 
-    static func start(_ manager: any VPNStartConfiguration) async throws {
+    static func start(_ manager: any VPNStartConfiguration, profileID: String? = nil) async throws {
         // Selecting another VPN disables this configuration. Persist and reload before starting.
         manager.isEnabled = true
         try await manager.saveToPreferences()
         try await manager.loadFromPreferences()
-        try manager.startTunnel()
+        try manager.startTunnel(profileID: profileID)
     }
 
     static var supportsVPN: Bool {

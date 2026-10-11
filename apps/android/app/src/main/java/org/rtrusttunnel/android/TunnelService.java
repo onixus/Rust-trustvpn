@@ -78,6 +78,7 @@ public final class TunnelService extends VpnService {
         if (!isAlwaysOn()) notification.addAction(new Notification.Action.Builder(null, getString(R.string.disconnect), stop).build());
         return notification.build();
     }
+    static final String PROFILE_ID = "org.rtrusttunnel.android.PROFILE_ID";
     @Override public int onStartCommand(Intent intent, int flags, int id) {
         alwaysOn = isAlwaysOn(); lockdown = isLockdownEnabled();
         if (intent != null && STOP.equals(intent.getAction()) && !alwaysOn) { rememberAlwaysOn(this, false); disconnect(); return START_NOT_STICKY; }
@@ -87,8 +88,9 @@ public final class TunnelService extends VpnService {
         if (Build.VERSION.SDK_INT >= 34) startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED);
         else startForeground(1, notification());
         active = true; problem = "";
+        String profileId = intent == null ? null : intent.getStringExtra(PROFILE_ID);
         worker.execute(() -> {
-            try { connect(); }
+            try { connect(profileId); }
             catch (Exception error) {
                 // Never include config, addresses or exception payloads in UI/logs.
                 problem = getString(R.string.cannot_start_vpn_check_the_profile);
@@ -108,8 +110,9 @@ public final class TunnelService extends VpnService {
         }
         return null;
     }
-    private void connect() throws Exception {
-        JSONObject profile = new ProfileVault(this).selected();
+    private void connect(String profileId) throws Exception {
+        ProfileVault vault = new ProfileVault(this);
+        JSONObject profile = profileId == null ? vault.selected() : vault.profile(profileId);
         JSONObject prepared = new JSONObject(NativeCore.INSTANCE.plan(profile.toString()));
         if (!prepared.getBoolean("ok")) throw new IllegalArgumentException("Unsupported mobile policy");
         profile = prepared.getJSONObject("profile");

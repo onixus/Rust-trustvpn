@@ -20,7 +20,7 @@ public final class WidgetActivity extends MainActivity {
         super.onResume();
         if (pending) {
             pending = false;
-            if (!recoveryRequested) { TunnelService.refreshPolicy(); toggle(); }
+            if (!recoveryRequested) { TunnelService.refreshPolicy(); toggleDefaultProfile(); }
         }
     }
 }

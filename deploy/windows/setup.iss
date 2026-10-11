@@ -47,7 +47,7 @@ Root: HKLM; Subkey: "Software\Classes\hysteria2"; ValueType: string; ValueName: 
 Root: HKLM; Subkey: "Software\Classes\hysteria2"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Tasks: ttprotocol; Check: CanRegisterScheme('hysteria2')
 Root: HKLM; Subkey: "Software\Classes\hysteria2\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{code:GetUiExe}"" ""%1"""; Tasks: ttprotocol; Check: CanRegisterScheme('hysteria2')
 [Files]
-Source: "..\..\packaging\branding\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\packaging\branding\icon.ico"; DestDir: "{app}"; DestName: "rtrust.ico"; Flags: ignoreversion
 Source: "..\..\dist\native-preview-windows\rtrust-update.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\dist\native-preview-windows\R-TrustTunnel.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: native
 Source: "..\..\dist\native-preview-windows\R-TrustTunnel-WebView.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: webview
