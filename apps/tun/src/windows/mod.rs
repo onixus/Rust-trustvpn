@@ -477,7 +477,7 @@ async fn lease_loop(
     let mut state = State::Connected;
     monitor.transition(true, rtrust_control::observations::now_ms());
     let mut retry = Box::pin(tokio::time::sleep(Duration::from_secs(2)));
-    let mut delay = 2;
+    let mut retry_budget = rtrust_control::recovery::Budget::default();
     let mut connected_since = std::time::Instant::now();
     let mut connecting = Box::pin(std::future::pending::<
         Result<(Session, rtrust_engine::Tunnel), String>,
@@ -498,16 +498,18 @@ async fn lease_loop(
                 _ = stop.changed() => return Ok(None),
                 _ = worker.finished(), if state == State::Connected => {
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
-                    if connected_since.elapsed() >= Duration::from_secs(30) { delay=2; }
-                    retry.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(delay));
+                    retry_budget.disconnected(connected_since.elapsed());
+                    retry.as_mut().reset(tokio::time::Instant::now()+retry_budget.next_delay(rand::random()));
                 },
                 _ = &mut retry, if state == State::Blocked && !reconnecting => {
                     if full && full::refresh(device.if_index().map_err(|_| "Missing Wintun interface")?, &full::endpoints(profile)?).is_err() {
-                        delay=(delay*2).min(30);
-                        retry.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(delay));
+                        retry.as_mut().reset(tokio::time::Instant::now()+retry_budget.next_delay(rand::random()));
                         continue;
                     }
-                    connecting = Box::pin(transport(profile)); reconnecting=true;
+                    connecting = Box::pin(async {
+                        tokio::time::timeout(rtrust_control::recovery::ATTEMPT_TIMEOUT, transport(profile))
+                            .await.map_err(|_| "Reconnect timed out".to_owned())?
+                    }); reconnecting=true;
                 },
                 result = &mut connecting, if reconnecting => {
                     reconnecting=false;
@@ -516,7 +518,7 @@ async fn lease_loop(
                             *worker=Worker::new(tokio::spawn(crate::dataplane::run(session,udp,device.clone(),ADDRESS)));
                             state=State::Connected; monitor.transition(true, rtrust_control::observations::now_ms()); connected_since=std::time::Instant::now();
                         },
-                        Err(_) => { delay=(delay*2).min(30); retry.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(delay)); },
+                        Err(_) => { retry.as_mut().reset(tokio::time::Instant::now()+retry_budget.next_delay(rand::random())); },
                     }
                 },
             }
@@ -532,6 +534,8 @@ async fn lease_loop(
                     state.clone(),
                     if state == State::Connected {
                         "Wintun подключён"
+                    } else if retry_budget.cooling() {
+                        "Связь потеряна; пауза между попытками. Защита сохранена."
                     } else {
                         "Переподключение; выбранные IPv4-сети удерживаются на Wintun"
                     },

@@ -8,7 +8,7 @@ use std::{
 };
 pub const ORIGIN: &str = "https://onixus-rf.duckdns.org";
 pub const CURRENT_SEQUENCE: u64 = 9;
-pub const CURRENT_IPC: u32 = 1;
+pub const CURRENT_IPC: u32 = rtrust_control::VERSION;
 const ROOT: &[u8] = include_bytes!("root.pub");
 const MAX_PACKAGE: u64 = 256 * 1024 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
@@ -321,8 +321,8 @@ mod tests {
             sequence: 5,
             version: "0.2.0".into(),
             target: "windows-x86_64".into(),
-            min_ipc: 1,
-            max_ipc: 1,
+            min_ipc: CURRENT_IPC,
+            max_ipc: CURRENT_IPC,
             published: 1000,
             expires: 2000,
             url: format!("{ORIGIN}/rtrust/releases/5/setup.exe"),
@@ -370,7 +370,10 @@ mod tests {
         assert!(verify_key(&data, key, "windows-x86_64", 1500, 6).is_err());
         assert!(verify_key(&data, key, "windows-x86_64", 2000, 5).is_err());
         assert!(verify_key(&data, &[0u8; 32], "windows-x86_64", 1500, 5).is_err());
-        m.min_ipc = 2;
+        m.min_ipc = CURRENT_IPC + 1;
+        assert!(verify_key(&signed(&pair, &m), key, "windows-x86_64", 1500, 5).is_err());
+        m.min_ipc = CURRENT_IPC - 1;
+        m.max_ipc = CURRENT_IPC - 1;
         assert!(verify_key(&signed(&pair, &m), key, "windows-x86_64", 1500, 5).is_err());
     }
     #[test]

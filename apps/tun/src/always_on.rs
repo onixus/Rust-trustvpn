@@ -187,6 +187,7 @@ type Active = (watch::Sender<bool>, tokio::task::JoinHandle<()>);
 fn launch(policy: Policy, lease: Arc<Mutex<()>>, state: watch::Sender<Response>) -> Active {
     let (stop, mut stopped) = watch::channel(false);
     let task = tokio::spawn(async move {
+        let mut retry_budget = rtrust_control::recovery::Budget::default();
         loop {
             if *stopped.borrow() {
                 break;
@@ -239,14 +240,20 @@ fn launch(policy: Policy, lease: Arc<Mutex<()>>, state: watch::Sender<Response>)
             if *stopped.borrow() {
                 break;
             }
+            let wait = retry_budget.next_delay(rand::random());
             state.send_replace(Response::new(
                 State::Blocked,
                 &format!(
-                    "Always-on: {}; повторное подключение",
-                    failure.as_deref().unwrap_or("сеть защищена")
+                    "Always-on: {}; {}",
+                    failure.as_deref().unwrap_or("сеть защищена"),
+                    if retry_budget.cooling() {
+                        "пауза между попытками; защита сохранена"
+                    } else {
+                        "повторное подключение"
+                    }
                 ),
             ));
-            tokio::select! {_=stopped.changed()=>{},_=tokio::time::sleep(Duration::from_secs(3))=>{}}
+            tokio::select! {_=stopped.changed()=>{},_=tokio::time::sleep(wait)=>{}}
         }
     });
     (stop, task)

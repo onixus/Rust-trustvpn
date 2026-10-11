@@ -22,7 +22,7 @@ pub(super) struct Batch {
     client: Client,
     changed: Vec<(RemoteProfile, Profile)>,
     available: Vec<String>,
-    /// Err keeps the previous policy; profile updates still apply.
+    /// The profiles and policy form one transaction; any error rejects it.
     routing: Result<Option<rtrust_store::ManagedRoutes>, String>,
 }
 /// The device group's TUN route policy, checked before it can replace the
@@ -45,6 +45,18 @@ fn managed(policy: rtrust_portal::RoutingPolicy) -> Result<rtrust_store::Managed
         .validate()
         .map_err(|_| "Сервер прислал недопустимую группу маршрутов".to_owned())?;
     Ok(routes)
+}
+fn managed_update(
+    state: rtrust_portal::RoutingState,
+    previously_managed: bool,
+) -> Result<Option<rtrust_store::ManagedRoutes>, String> {
+    match state {
+        rtrust_portal::RoutingState::Unsupported if previously_managed => {
+            Err("Панель больше не поддерживает ранее выданную политику маршрутов".into())
+        }
+        rtrust_portal::RoutingState::Unsupported => Ok(None),
+        rtrust_portal::RoutingState::Available(policy) => policy.map(managed).transpose(),
+    }
 }
 fn track(tracked: &mut Vec<TrackedProfile>, meta: &RemoteProfile, profile: Profile) {
     let item = TrackedProfile {
@@ -105,6 +117,7 @@ impl App {
                 self.busy = true;
                 let existing = self.portal.client.clone();
                 let settings = self.saved_connection.sync.clone();
+                let previously_managed = self.saved_connection.managed_routes.is_some();
                 let fetch = async move {
                     let client = match existing {
                         Some(c) => c,
@@ -140,9 +153,9 @@ impl App {
                         }
                     }
                     let routing = client
-                        .routing()
+                        .routing_state()
                         .await
-                        .and_then(|policy| policy.map(managed).transpose());
+                        .and_then(|state| managed_update(state, previously_managed));
                     Ok(Box::new(Batch {
                         origin: settings.origin,
                         client,
@@ -167,6 +180,12 @@ impl App {
                         if self.saved_connection.sync.enabled
                             && batch.origin == self.saved_connection.sync.origin =>
                     {
+                        if let Err(error) = &batch.routing {
+                            self.sync_state.status = format!(
+                                "Синхронизация отменена: {error}. Профили и маршруты не изменены."
+                            );
+                            return Task::none();
+                        }
                         self.portal.url = batch.origin.clone();
                         self.portal.client = Some(batch.client);
                         let previous_profiles = self.profiles.clone();
@@ -293,6 +312,21 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn older_api_cannot_silently_clear_an_existing_managed_policy() {
+        use rtrust_portal::RoutingState;
+        assert!(managed_update(RoutingState::Unsupported, true).is_err());
+        assert!(
+            managed_update(RoutingState::Unsupported, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            managed_update(RoutingState::Available(None), true)
+                .unwrap()
+                .is_none()
+        );
+    }
     fn meta() -> RemoteProfile {
         RemoteProfile {
             id: "remote-1".into(),
@@ -389,8 +423,8 @@ mod tests {
         assert!(applied.selection.exclude_lan && app.dirty);
         assert_eq!(app.tun_selection().unwrap(), applied.selection);
         assert!(app.sync_state.status.contains("группа «office»"));
-        // A policy that leaves nothing to route is refused, keeps the previous
-        // policy and does not stop profile updates.
+        // A policy that leaves nothing to route rejects the whole
+        // transaction, including credential/profile updates.
         let refused = managed(policy("10.0.0.0/8", "10.0.0.0/8"));
         assert!(refused.is_err());
         let mut remote = app.profiles[0].clone();
@@ -400,8 +434,9 @@ mod tests {
         app.busy = false;
         let _ = app.sync_update(Action::Received(Ok(Box::new(result))));
         assert_eq!(app.saved_connection.managed_routes.as_ref(), Some(&applied));
-        assert_eq!(app.profiles[0], remote);
-        assert!(app.sync_state.status.contains("не обновлены"));
+        assert_ne!(app.profiles[0], remote);
+        assert_eq!(app.saved_connection.sync.tracked[0].revision, "1");
+        assert!(app.sync_state.status.contains("Синхронизация отменена"));
         let mut result = batch(app.profiles[0].clone());
         result.changed.clear();
         let _ = app.sync_update(Action::Received(Ok(Box::new(result))));

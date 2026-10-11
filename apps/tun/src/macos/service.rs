@@ -36,16 +36,15 @@ impl Workers {
     fn retry(
         &mut self,
         profile: &rtrust_profile::Profile,
-        delay: &mut u64,
+        budget: &mut rtrust_control::recovery::Budget,
         device: Arc<tun_rs::AsyncDevice>,
     ) {
         let profile = profile.clone();
-        let wait = *delay;
-        *delay = (*delay * 2).min(30);
+        let wait = budget.next_delay(rand::random());
         self.reconnect = Some(tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(wait)).await;
+            tokio::time::sleep(wait).await;
             tokio::time::timeout(
-                Duration::from_secs(30),
+                rtrust_control::recovery::ATTEMPT_TIMEOUT,
                 device::Prepared::reconnect(&profile, device),
             )
             .await
@@ -331,7 +330,7 @@ async fn serve(
         tunnel: Some(tokio::spawn(prepared.run())),
         reconnect: None,
     };
-    let mut retry_delay = 2;
+    let mut retry_budget = rtrust_control::recovery::Budget::default();
     let mut connected_since = Instant::now();
     let mut monitor = rtrust_control::observations::Monitor::new(
         if full {
@@ -370,8 +369,8 @@ async fn serve(
                     workers.tunnel = None;
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
                     // A flapping endpoint must not reset the backoff indefinitely.
-                    if connected_since.elapsed() >= Duration::from_secs(30) { retry_delay = 2; }
-                    workers.retry(&profile, &mut retry_delay, device.clone());
+                    retry_budget.disconnected(connected_since.elapsed());
+                    workers.retry(&profile, &mut retry_budget, device.clone());
                 }
                 result = async { workers.reconnect.as_mut().unwrap().await }, if workers.reconnect.is_some() => {
                     workers.reconnect = None;
@@ -382,7 +381,7 @@ async fn serve(
                             state = State::Connected; monitor.transition(true, rtrust_control::observations::now_ms());
                             continue;
                     }
-                    workers.retry(&profile, &mut retry_delay, device.clone());
+                    workers.retry(&profile, &mut retry_budget, device.clone());
                 }
             }
         };
@@ -401,6 +400,8 @@ async fn serve(
                         } else {
                             "Выбранные IPv4-сети подключены"
                         }
+                    } else if retry_budget.cooling() {
+                        "Связь потеряна; пауза между попытками. Защита сохранена."
                     } else {
                         &last_failure
                     },

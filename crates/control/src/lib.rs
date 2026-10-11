@@ -8,6 +8,7 @@ pub const SOCKET: &str = "/private/var/run/rtrust/control.sock";
 pub const LIMIT: usize = 2 * rtrust_profile::MAX_INPUT;
 pub const VERSION: u32 = 2;
 pub mod observations;
+pub mod recovery;
 pub use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
 

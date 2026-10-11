@@ -115,3 +115,52 @@ already current.
 Windows latest is sequence 9. macOS automatic-update promotion remains withheld.
 The rebuild release is:
 https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9
+
+## Версия IPC и gate приёмки (issues #31/#36)
+
+`CURRENT_IPC` теперь ссылается на `rtrust_control::VERSION`; подготовка
+метаданных проверяет хэш исходника control в архиве сборки и берёт ту же
+версию для `min_ipc`/`max_ipc`. Исторические IPC-1 манифесты не являются
+совместимыми с IPC-2 клиентом. Для новой поставки нужны новые подписанные
+метаданные и проверенный совместимый rollback; уже опубликованные sequence
+не перезаписываются. Изменение исходников само по себе ничего не подписывает.
+
+`python3 scripts/release-acceptance.py MATRIX.json` проверяет матрицу,
+сохраняя различие passed/failed/not_run/unsupported.
+`--production` требует passed для каждого заявленного protocol/mode/Always-on
+и каждой обязательной проверки. `publish-signed-release.py --promote` требует
+`--acceptance MATRIX.json` и проверяет точный SHA256 устанавливаемого пакета
+**до первого обращения к серверу**. Preview не проходит этот gate. Это
+не заменяет отдельного решения о публикации и не авторизует публикацию.
+
+Матрица schema 1 содержит массив `packages`. Запись пакета имеет полный
+40-символьный `commit`, `version`, `target`, `os`, `device`, `artifact` и
+`artifact_sha256`, `source_manifest` и `source_manifest_sha256`, boolean
+`preview`, массив `claims` и массив `checks`. Пути файлов разрешаются относительно
+матрицы. Claim содержит `protocol` (trusttunnel/http3/hysteria2/amneziawg),
+`mode` (split/full/proxy) и boolean `always_on`. Нельзя переносить результат
+обычного подключения на Always-on или с одного протокола на другой.
+
+Каждый check содержит `scenario`, те же protocol/mode/always_on и `status`.
+Список обязательных сценариев находится в `SCENARIOS` проверяющего скрипта:
+установка/права/удаление, update/rollback/vault, загрузка/сон/смена сети, аварии,
+outage, DNS/HTTPS/egress, отсутствие прямых утечек, восстановление своего
+состояния, бюджет и soak. Для непроверенных/неподдерживаемых/проваленных
+проверок обязательны `owner` и `dependency`; они не проходят production gate.
+
+Passed содержит `evidence: {"path": "report.json", "sha256": "..."}`.
+JSON-отчёт повторяет все поля идентичности пакета, scenario/protocol/mode/always_on,
+status и непустой `recorded_at`. Хэш отчёта проверяется; отчёт другого commit,
+пакета, ОС или устройства отклоняется. Для recovery_budget/soak нужны
+`metrics.limits` и `metrics.measured`: именованные конечные неотрицательные
+числа, измерения не превышают заранее определённые верхние пределы. Само
+время soak и минимально нужная длительность описываются в исходном отчёте.
+
+Подписи проверяются отдельными scenarios с protocol/mode/always_on=null:
+Windows — authenticode/update_metadata; macOS — developer_id/notarization/
+update_metadata; Linux — repository_signature/update_metadata; Android —
+apk_signature; iOS — apple_distribution. Подпись обновления не доказывает
+подпись издателя. Этот скрипт проверяет привязку и полноту записанных evidence,
+а не самостоятельно подтверждает истинность сетевых измерений или подписи.
+Синтетические fixtures в `ci/test_release_acceptance.py` проверяют отказ gate
+и не считаются приёмкой реального пакета.

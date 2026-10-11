@@ -1,11 +1,14 @@
 """Publish immutable signed release files; promote latest only after maintenance evidence.
 Private signing keys never leave this workstation.
 """
-import argparse, hashlib, pathlib, subprocess
-p=argparse.ArgumentParser();p.add_argument('--sequence',type=int,required=True);p.add_argument('--target',choices=['windows-x86_64','macos-aarch64'],required=True);p.add_argument('--promote',action='store_true');a=p.parse_args()
+import argparse, hashlib, pathlib, subprocess, sys
+p=argparse.ArgumentParser();p.add_argument('--sequence',type=int,required=True);p.add_argument('--target',choices=['windows-x86_64','macos-aarch64'],required=True);p.add_argument('--promote',action='store_true');p.add_argument('--acceptance',type=pathlib.Path);a=p.parse_args()
 assert a.sequence>0
 root=pathlib.Path(__file__).resolve().parents[1]/'dist/signed-releases'/str(a.sequence)/a.target
 files=['manifest.json','setup.exe' if a.target=='windows-x86_64' else 'client.dmg']
+if a.promote:
+ if a.acceptance is None:p.error('--promote requires --acceptance with exact-package production evidence')
+ subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('release-acceptance.py')),str(a.acceptance),'--production','--target',a.target,'--artifact-sha256',hashlib.sha256((root/files[1]).read_bytes()).hexdigest()],check=True)
 host='onixus-rf.duckdns.org';remote=f'/opt/rtrust-updates/{a.sequence}/{a.target}'
 subprocess.run(['ssh','-o','BatchMode=yes',host,f'install -d -m 755 {remote}'],check=True)
 for name in files:
