@@ -26,8 +26,10 @@ do not disable that protection or publish real profiles to create documentation.
 
 ## Implemented
 
-- A bottom-anchored Connect/Disconnect button: gray when off, green when connected,
-  amber while connecting/reconnecting and red on error. Status text remains visible.
+- A bottom-anchored Connect/Disconnect button: blue when off, amber while the tunnel
+  is starting or running (lifecycle is not verified availability, so never green) and
+  red on error. Status text remains visible. The home-screen widget button uses the
+  same colours, so the state is visible on a 1×1 widget without text.
 - Device-local app routing: all apps (default), or only selected installed apps,
   with searchable selection stored in the encrypted vault. Unselected apps use
   their normal network, or lose connectivity under system lockdown. Disconnect before editing the selection; reconnect to apply.
