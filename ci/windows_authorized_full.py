@@ -4,9 +4,10 @@ Never called by ordinary CI. Preserves GUI, vault, SCM identity and original ser
 import argparse, hashlib, json, os, pathlib, shutil, subprocess, sys, time, uuid
 p=argparse.ArgumentParser();p.add_argument('fixture',type=pathlib.Path);p.add_argument('--allow-existing-installation',action='store_true');p.add_argument('--service-sha256',required=True);p.add_argument('--crash-cycles',type=int,choices=range(1,4),default=1)
 # windows_production_e2e.py runs the same rollback-guarded flow with production profiles.
-p.add_argument('--worker',choices=['windows_full_e2e.py','windows_production_e2e.py','windows_sleep_e2e.py'],default='windows_full_e2e.py')
+p.add_argument('--worker',choices=['windows_full_e2e.py','windows_selected_e2e.py','windows_production_e2e.py','windows_sleep_e2e.py'],default='windows_full_e2e.py')
 # windows_sleep_e2e.py suspends the host; worker and rollback deadlines include the sleep.
 p.add_argument('--sleep-minutes',type=int,choices=range(1,121),default=None)
+p.add_argument('--network-handoff',action='store_true',help='Explicitly permit temporary loss of the active physical network; never enable on the sole remote management path')
 p.add_argument('--always-on',action='store_true',help='Sleep with the service always-on tunnel instead of a client session');a=p.parse_args()
 assert not a.always_on or a.sleep_minutes,'--always-on applies to the sleep worker'
 assert (a.worker=='windows_sleep_e2e.py')==(a.sleep_minutes is not None),'--sleep-minutes is required by, and only valid for, the sleep worker'
@@ -46,7 +47,13 @@ sys.argv[1]=str(a.fixture)
 import windows_service_e2e as fixture
 permit=fixture.Pipe()
 try:
-    response=permit.request(dict(op='PrepareUpdate'));assert response['state']=='Idle',response
+    response=permit.request(dict(op='PrepareUpdate'))
+    # Older installed services reject v4 before dispatch. Retry only that explicit
+    # rejection using the supported older wire version; never bypass the lease.
+    if response['state']=='Error' and response.get('message')=='IPC version mismatch' and response.get('version') in (2, 3):
+        permit.close(); permit=fixture.Pipe()
+        response=permit.request(dict(op='PrepareUpdate'),version=response['version'])
+    assert response['state']=='Idle',response
 finally:permit.close()
 ps(f"New-Item '{WORK}' -ItemType Directory | Out-Null; $acl=New-Object Security.AccessControl.DirectorySecurity; $acl.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'); Set-Acl '{WORK}' $acl")
 backup=WORK/'before';backup.mkdir()
@@ -60,15 +67,24 @@ for name in ['Lib','DLLs']:
 for name in [a.worker,'windows_service_e2e.py']:shutil.copy2(ROOT/'ci'/name,WORK/name)
 fixture_data=json.loads(a.fixture.read_text())
 physical=json.loads(ps("ConvertTo-Json -Compress -InputObject @(Get-NetAdapter -Physical | Where-Object Status -eq Up | Select-Object -ExpandProperty Name)"))
-assert len(physical)==1,'Handoff test requires one known active physical adapter'
-fixture_data['network_handoff_alias']=physical[0]
+def configure_handoff(data, adapters, enabled):
+    data = dict(data)
+    data.pop('network_handoff_alias', None)
+    if not enabled:
+        return data, ''
+    if len(adapters) != 1:
+        raise ValueError('Handoff test requires one known active physical adapter')
+    data['network_handoff_alias'] = adapters[0]
+    alias = adapters[0].replace("'", "''")
+    return data, f"Enable-NetAdapter -Name '{alias}' -Confirm:$false"
+
+fixture_data, enable_adapter = configure_handoff(fixture_data, physical, a.network_handoff)
 fixture_data['always_on_crash_cycles']=a.crash_cycles
 if a.sleep_minutes:fixture_data['sleep_minutes']=a.sleep_minutes;fixture_data['sleep_always_on']=a.always_on
 (WORK/'fixture.json').write_text(json.dumps(fixture_data))
-adapter=physical[0].replace("'","''")
 # Recovery is independent of Python/Jenkins and survives network loss.
 recovery=f"""$ErrorActionPreference='Stop'
-Enable-NetAdapter -Name '{adapter}' -Confirm:$false
+{enable_adapter}
 Stop-Service RTrustTunnel -ErrorAction SilentlyContinue
 (Get-Service RTrustTunnel).WaitForStatus('Stopped',[TimeSpan]::FromSeconds(30))
 for ($attempt=0; $attempt -lt 4; $attempt++) {{
