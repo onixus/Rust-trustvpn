@@ -256,6 +256,8 @@ def main():
             # Each command uses a short-lived authenticated GUI connection. The
             # supervisor must keep the VPN alive after that connection closes.
             def ipc(op, **values):
+                if op in ('EnableAlwaysOn', 'EnableRecovery'):
+                    values['generation'] = ipc('AlwaysOnStatus')['always_on_generation']
                 request=json.dumps(dict(version=3,command=dict(op=op,**values)))
                 program="""import socket,struct,json,sys
 c=socket.socket(socket.AF_UNIX);c.settimeout(60);c.connect('/run/rtrust/control.sock')

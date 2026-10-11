@@ -224,7 +224,10 @@ async fn serve(
     if matches!(request.command, Command::Capabilities) {
         return write(pipe, &Response::new(State::Idle, "Capabilities")).await;
     }
-    if let Some(supervisor) = supervisor {
+    if let Some(ref supervisor) = supervisor {
+        if matches!(request.command, Command::Stop) {
+            supervisor.cancel_pending_enable();
+        }
         match request.command {
             Command::AlwaysOnStatus=>return write(pipe,&supervisor.state()).await,
             command @ (Command::EnableAlwaysOn{..}|Command::EnableRecovery{..}|Command::DisableAlwaysOn)=>return write(pipe,&supervisor.command(command).await).await,
@@ -419,6 +422,7 @@ async fn serve(
         &mut worker,
         &mut stop,
         dns.is_some(),
+        supervisor.as_deref(),
     )
     .await;
     worker.stop().await;
@@ -452,6 +456,7 @@ async fn lease_loop(
     worker: &mut Worker,
     stop: &mut watch::Receiver<bool>,
     full: bool,
+    supervisor: Option<&crate::always_on::Supervisor>,
 ) -> Result<Option<rtrust_control::observations::Snapshot>, String> {
     let mut monitor = rtrust_control::observations::Monitor::new(
         if full {
@@ -566,6 +571,9 @@ async fn lease_loop(
                 .await?
             }
             Command::Stop => {
+                if let Some(supervisor) = supervisor {
+                    supervisor.cancel_pending_enable();
+                }
                 monitor.stop(rtrust_control::observations::now_ms());
                 return Ok(Some(monitor.sample(rtrust_control::observations::now_ms())));
             }

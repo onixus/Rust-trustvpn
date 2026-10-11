@@ -62,6 +62,18 @@ compatibility helper for immediate evidence; asynchronous callers must capture
 the version before sending the query. Matching question/ID, CNAME-chain TTL,
 shared-IP ambiguity and protected unknown-name behavior remain unchanged.
 
+
+Forwarded UDP DNS uses at most 512 query identities per upstream UDP stream.
+A repeated tuple/ID, consumed reply or expired query becomes a payload-free
+identity tombstone for that stream's lifetime: neither an identical question
+nor an idle delivery mapping proves which policy epoch a queued reply belongs
+to. Query payload evidence expires after 60 seconds. Reused identities and new
+identities after capacity exhaustion continue to be forwarded but do not add
+DNS routing evidence; unknown names retain the protected routing default. A
+replacement upstream stream creates a fresh correlation table. This bounded,
+conservative suppression can reduce domain-based direct selections on a
+long-lived stream; it does not allow old answers to acquire a new policy epoch.
+
 ## Prediction and a real dataplane selection
 
 `decide(destination)` remains an offline prediction. The dataplane uses

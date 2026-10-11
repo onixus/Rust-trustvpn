@@ -87,7 +87,7 @@ pub struct MaintenancePermit {
     _pipe: Pipe,
 }
 impl Client {
-    pub async fn always_on(command: Command) -> Result<Response, String> {
+    pub async fn always_on(mut command: Command) -> Result<Response, String> {
         if !matches!(
             command,
             Command::EnableAlwaysOn { .. }
@@ -102,6 +102,17 @@ impl Client {
             return Err(
                 "Служба не поддерживает автоматическое восстановление на этой платформе".into(),
             );
+        }
+        if let Command::EnableAlwaysOn { generation, .. }
+        | Command::EnableRecovery { generation, .. } = &mut command
+        {
+            // Receive the fence before opening the mutation connection. An aborted
+            // caller cannot leave a complete old Enable carrying a post-Disable fence.
+            let mut status_pipe = socket().await?;
+            let status = exchange(&mut status_pipe, Command::AlwaysOnStatus, 5).await?;
+            *generation = Some(status.always_on_generation.ok_or(
+                "Always-on cancellation fence unavailable; update UI and service together",
+            )?);
         }
         let mut pipe = socket().await?;
         exchange(&mut pipe, command, 60).await

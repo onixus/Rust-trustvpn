@@ -71,6 +71,7 @@ impl App {
                     profile: Box::new(profile),
                     dns,
                     backups,
+                    generation: None,
                 }
             }
             Action::Observed(generation, result) => {
@@ -126,6 +127,7 @@ impl App {
                 rtrust_control::Command::EnableAlwaysOn {
                     profile: Box::new(profile),
                     dns,
+                    generation: None,
                 }
             }
             _ => return Task::none(),

@@ -52,11 +52,16 @@ pub enum Command {
     EnableAlwaysOn {
         profile: Box<rtrust_profile::Profile>,
         dns: std::net::Ipv4Addr,
+        /// Fence obtained from AlwaysOnStatus before sending this mutation.
+        #[serde(default)]
+        generation: Option<u64>,
     },
     EnableRecovery {
         profile: Box<rtrust_profile::Profile>,
         dns: std::net::Ipv4Addr,
         backups: Vec<rtrust_profile::Profile>,
+        #[serde(default)]
+        generation: Option<u64>,
     },
     DisableAlwaysOn,
     AlwaysOnStatus,
@@ -78,6 +83,9 @@ pub struct Response {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_on: Option<bool>,
+    /// Service-issued cancellation fence; absence forbids enabling always-on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_on_generation: Option<u64>,
     /// Index of the active candidate when backups were allowed: 0 is the
     /// requested profile, 1.. the backups in the order sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,6 +127,7 @@ impl Response {
             state,
             message: message.into(),
             always_on: None,
+            always_on_generation: None,
             active_profile: None,
             recovery: None,
             observations: observations::Snapshot::unknown(observations::Mode::Unknown),

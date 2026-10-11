@@ -207,7 +207,10 @@ async fn serve(
     if matches!(request.command, Command::Capabilities) {
         return write(&mut stream, &Response::new(State::Idle, "Capabilities")).await;
     }
-    if let Some(supervisor) = supervisor {
+    if let Some(ref supervisor) = supervisor {
+        if matches!(request.command, Command::Stop) {
+            supervisor.cancel_pending_enable();
+        }
         match request.command {
             Command::AlwaysOnStatus=>return write(&mut stream,&supervisor.state()).await,
             command @ (Command::EnableAlwaysOn{..}|Command::EnableRecovery{..}|Command::DisableAlwaysOn)=>return write(&mut stream,&supervisor.command(command).await).await,
@@ -443,6 +446,9 @@ async fn serve(
             )
             .await?,
             Command::Stop => {
+                if let Some(ref supervisor) = supervisor {
+                    supervisor.cancel_pending_enable();
+                }
                 workers.stop().await;
                 return match routes.release() {
                     Ok(()) => {

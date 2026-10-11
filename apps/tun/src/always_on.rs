@@ -30,12 +30,29 @@ impl Supervisor {
             .observations
             .expire(rtrust_control::observations::now_ms());
         response.always_on = Some(self.enabled());
+        response.always_on_generation = Some(self.generation.load(Ordering::Acquire));
         response
+    }
+    /// Cancel pending setup only. Running/persisted always-on intent is unchanged.
+    pub fn cancel_pending_enable(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
     pub async fn command(&self, command: Command) -> Response {
         let (tx, rx) = oneshot::channel();
         let generation = if matches!(command, Command::DisableAlwaysOn) {
             self.generation.fetch_add(1, Ordering::AcqRel) + 1
+        } else if let Command::EnableAlwaysOn { generation, .. }
+        | Command::EnableRecovery { generation, .. } = &command
+        {
+            match generation {
+                Some(expected) if *expected == self.generation.load(Ordering::Acquire) => *expected,
+                _ => {
+                    return Response::new(
+                        State::Error,
+                        "Always-on setup cancelled; refresh status before enabling",
+                    );
+                }
+            }
         } else {
             self.generation.load(Ordering::Acquire)
         };
@@ -88,11 +105,19 @@ impl Supervisor {
                         profile,
                         dns,
                         backups,
-                    } => (Command::EnableAlwaysOn { profile, dns }, Some(backups)),
+                        generation,
+                    } => (
+                        Command::EnableAlwaysOn {
+                            profile,
+                            dns,
+                            generation,
+                        },
+                        Some(backups),
+                    ),
                     command => (command, None),
                 };
                 let result = match command {
-                    Command::EnableAlwaysOn { profile, dns } => {
+                    Command::EnableAlwaysOn { profile, dns, .. } => {
                         if generation != task.generation.load(Ordering::Acquire) {
                             Err("Настройка отменена отключением".into())
                         } else if backups.as_ref().is_some_and(|p| {
@@ -528,5 +553,106 @@ mod tests {
         assert_eq!(generation, supervisor.generation.load(Ordering::Acquire));
         reply.send(Response::new(State::Idle, "off")).unwrap();
         pending.await.unwrap();
+    }
+    type QueuedCommand = (Command, u64, oneshot::Sender<Response>);
+    fn queued_supervisor() -> (Arc<Supervisor>, mpsc::Receiver<QueuedCommand>) {
+        let (_, state) = watch::channel(Response::new(State::Idle, "off"));
+        let (events, requests) = mpsc::channel(8);
+        (
+            Arc::new(Supervisor {
+                owner: "1000".into(),
+                enabled: AtomicBool::new(false),
+                generation: AtomicU64::new(0),
+                observation_epochs: Arc::new(AtomicU64::new(0)),
+                state,
+                events,
+            }),
+            requests,
+        )
+    }
+    fn enable(generation: Option<u64>, recovery: bool) -> Command {
+        let profile = Box::new(profile("primary.example", "192.0.2.1"));
+        let dns = "1.1.1.1".parse().unwrap();
+        if recovery {
+            Command::EnableRecovery {
+                profile,
+                dns,
+                generation,
+                backups: vec![profile_for_backup()],
+            }
+        } else {
+            Command::EnableAlwaysOn {
+                profile,
+                dns,
+                generation,
+            }
+        }
+    }
+    fn profile(host: &str, ip: &str) -> rtrust_profile::Profile {
+        rtrust_profile::Profile::import(&format!(
+            "hostname='{host}'\naddresses=['{ip}:443']\nusername='u'\npassword='p'\n"
+        ))
+        .unwrap()
+    }
+    fn profile_for_backup() -> rtrust_profile::Profile {
+        profile("backup.example", "192.0.2.2")
+    }
+    #[tokio::test]
+    async fn buffered_enable_after_completed_disable_cannot_acquire_new_generation() {
+        for recovery in [false, true] {
+            let (supervisor, mut requests) = queued_supervisor();
+            let old = supervisor.state().always_on_generation;
+            // A complete Enable frame already in the pipe before UI cancellation.
+            let buffered = serde_json::to_vec(&Request {
+                version: VERSION,
+                command: enable(old, recovery),
+            })
+            .unwrap();
+            let task = supervisor.clone();
+            let disable = tokio::spawn(async move { task.command(Command::DisableAlwaysOn).await });
+            let (_, _, reply) = requests.recv().await.unwrap();
+            reply.send(Response::new(State::Idle, "off")).unwrap();
+            disable.await.unwrap();
+            let delayed: Request = serde_json::from_slice(&buffered).unwrap();
+            assert_eq!(
+                supervisor.command(delayed.command).await.state,
+                State::Error
+            );
+            assert!(
+                requests.try_recv().is_err(),
+                "stale enable must never enter the actor"
+            );
+            assert_eq!(
+                supervisor.command(enable(None, recovery)).await.state,
+                State::Error
+            );
+            // A new deliberate request obtains the new fence and can be queued.
+            let fresh = supervisor.state().always_on_generation;
+            let task = supervisor.clone();
+            let pending = tokio::spawn(async move { task.command(enable(fresh, recovery)).await });
+            let (_, captured, reply) = requests.recv().await.unwrap();
+            assert_eq!(Some(captured), fresh);
+            supervisor.cancel_pending_enable();
+            assert_ne!(captured, supervisor.generation.load(Ordering::Acquire));
+            // This is the captured token used by both actor preparation checks.
+            reply
+                .send(Response::new(State::Error, "cancelled"))
+                .unwrap();
+            pending.await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn stop_cancels_pending_fence_without_disabling_persisted_intent() {
+        let (supervisor, mut requests) = queued_supervisor();
+        let old = supervisor.state().always_on_generation;
+        supervisor.enabled.store(true, Ordering::Release);
+        supervisor.cancel_pending_enable();
+        assert!(supervisor.enabled());
+        assert_ne!(old, supervisor.state().always_on_generation);
+        assert_eq!(
+            supervisor.command(enable(old, true)).await.state,
+            State::Error
+        );
+        assert!(requests.try_recv().is_err());
     }
 }

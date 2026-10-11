@@ -16,7 +16,8 @@ struct Base {
     exclude: String,
     lan: bool,
     managed: Option<rtrust_store::ManagedRoutes>,
-    endpoints: Option<Vec<String>>,
+    endpoints: Option<Vec<(String, Vec<String>)>>,
+    permitted_backups: Vec<String>,
     mode: Mode,
 }
 struct Draft {
@@ -59,9 +60,8 @@ impl App {
             exclude: self.exclude.clone(),
             lan: self.exclude_lan,
             managed: self.saved_connection.managed_routes.clone(),
-            endpoints: self
-                .current()
-                .map(|profile| profile.endpoint.addresses.clone()),
+            endpoints: self.next_connection_endpoints(),
+            permitted_backups: self.saved_connection.fallback_profiles.clone(),
             mode: self.mode,
         }
     }
@@ -201,25 +201,35 @@ impl App {
         }
         Task::none()
     }
+    // Match ToggleConnection: the default profile, then explicitly permitted
+    // backups. Merely selecting a row in the profile editor changes neither.
+    fn next_connection_endpoints(&self) -> Option<Vec<(String, Vec<String>)>> {
+        let primary = self.profiles.first()?;
+        let backups = self.saved_connection.fallbacks(&self.profiles);
+        Some(
+            std::iter::once(primary)
+                .chain(backups.iter())
+                .map(|profile| (profile.name.clone(), profile.endpoint.addresses.clone()))
+                .collect(),
+        )
+    }
     /// Inputs are shared with Diagnostics offline explain; no resolver is called.
     pub(super) fn offline_route_endpoints(&self) -> Option<Vec<std::net::Ipv4Addr>> {
+        // Linux routes only the desktop UID; root-owned endpoint sockets don't
+        // require the default/backup endpoint exceptions of macOS and Windows.
         if cfg!(target_os = "linux") {
             return Some(vec![]);
         }
-        self.current()
-            .and_then(|profile| {
-                profile
-                    .endpoint
-                    .addresses
-                    .iter()
-                    .map(|address| {
-                        address
-                            .parse::<std::net::SocketAddr>()
-                            .ok()
-                            .map(|socket| socket.ip())
-                    })
-                    .collect::<Option<Vec<_>>>()
+        self.next_connection_endpoints()?
+            .into_iter()
+            .flat_map(|(_, addresses)| addresses)
+            .map(|address| {
+                address
+                    .parse::<std::net::SocketAddr>()
+                    .ok()
+                    .map(|socket| socket.ip())
             })
+            .collect::<Option<Vec<_>>>()
             .map(|addresses| {
                 addresses
                     .into_iter()
@@ -363,17 +373,99 @@ mod tests {
         assert!(!app.dirty && app.intent.preview.is_none());
     }
     #[test]
-    fn selecting_another_endpoint_invalidates_an_existing_prediction() {
+    fn changing_the_default_endpoint_invalidates_an_existing_prediction() {
         let mut app = configured();
         open(&mut app);
         preview(&mut app);
-        assert!(app.intent.preview.is_some());
-        app.profiles[1].endpoint.addresses = vec!["198.18.0.1:443".into()];
-        app.selected = 1;
+        app.profiles[0].endpoint.addresses = vec!["198.18.0.1:443".into()];
         let _ = app.intent_update(Action::Apply);
         assert!(app.intent.preview.is_none());
         assert!(app.intent.report.contains("после предпросмотра"));
         assert!(!app.dirty && !app.busy);
+    }
+    #[test]
+    fn changing_permitted_backups_or_their_endpoint_invalidates_preview() {
+        let mut app = configured();
+        open(&mut app);
+        preview(&mut app);
+        app.saved_connection
+            .fallback_profiles
+            .push(app.profiles[1].name.clone());
+        let _ = app.intent_update(Action::Apply);
+        assert!(app.intent.preview.is_none() && !app.dirty);
+        open(&mut app);
+        preview(&mut app);
+        app.profiles[1].endpoint.addresses = vec!["198.18.0.1:443".into()];
+        let _ = app.intent_update(Action::Apply);
+        assert!(app.intent.preview.is_none() && !app.dirty);
+    }
+    #[test]
+    fn endpoint_inputs_follow_default_and_permitted_backups_not_editor_selection() {
+        let mut app = configured();
+        app.profiles[0].endpoint.addresses = vec!["198.18.0.10:443".into()];
+        app.profiles[1].endpoint.addresses = vec!["198.18.0.20:443".into()];
+        let default_only = app.next_connection_endpoints().unwrap();
+        assert_eq!(default_only.len(), 1);
+        assert_eq!(default_only[0].1, ["198.18.0.10:443"]);
+        let base = app.intent_base();
+        app.selected = 1;
+        assert!(app.intent_base() == base);
+        app.saved_connection
+            .fallback_profiles
+            .push(app.profiles[1].name.clone());
+        let candidates = app.next_connection_endpoints().unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[1].1, ["198.18.0.20:443"]);
+        let endpoints = app.offline_route_endpoints().unwrap();
+        if cfg!(target_os = "linux") {
+            assert!(endpoints.is_empty());
+        } else {
+            assert_eq!(
+                endpoints,
+                [
+                    "198.18.0.10".parse::<std::net::Ipv4Addr>().unwrap(),
+                    "198.18.0.20".parse().unwrap()
+                ]
+            );
+        }
+        let decision = app
+            .tun_selection()
+            .unwrap()
+            .explain(
+                "198.18.0.20".parse().unwrap(),
+                Some(&endpoints),
+                None,
+                Context::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            decision.reason,
+            if cfg!(target_os = "linux") {
+                rtrust_profile::routing::Reason::SelectedPrefix
+            } else {
+                rtrust_profile::routing::Reason::EndpointBypass
+            }
+        );
+    }
+    #[test]
+    fn unresolved_permitted_backup_is_unknown_without_offline_dns() {
+        let mut app = configured();
+        app.saved_connection
+            .fallback_profiles
+            .push(app.profiles[1].name.clone());
+        app.profiles[1].endpoint.addresses = vec!["backup.example:443".into()];
+        if cfg!(target_os = "linux") {
+            assert_eq!(app.offline_route_endpoints(), Some(vec![]));
+        } else {
+            assert!(app.offline_route_endpoints().is_none());
+            open(&mut app);
+            preview(&mut app);
+            assert!(
+                app.intent
+                    .report
+                    .contains("адреса endpoint не подтверждены")
+            );
+        }
     }
     #[test]
     fn apply_preserves_embedded_profile_data_and_only_updates_next_connection_settings() {

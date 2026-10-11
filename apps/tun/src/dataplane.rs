@@ -241,6 +241,73 @@ async fn relay_udp(
     }
 }
 
+const DNS_QUERY_LIMIT: usize = 512;
+const DNS_QUERY_LIFETIME: Duration = Duration::from_secs(60);
+struct DnsQuery {
+    deadline: Instant,
+    // None is a stream-lifetime tombstone: a reused id cannot identify a reply epoch.
+    // Mapping expiry does not retire frames already queued on the upstream stream.
+    evidence: Option<(Vec<u8>, rtrust_engine::routing::PolicyVersion)>,
+}
+#[derive(Default)]
+struct DnsQueries(HashMap<(packet::Key, u16), DnsQuery>);
+impl DnsQueries {
+    fn expire(&mut self, now: Instant) {
+        for query in self.0.values_mut() {
+            if now >= query.deadline {
+                query.evidence = None;
+            }
+        }
+    }
+    fn remember(
+        &mut self,
+        key: packet::Key,
+        query: &[u8],
+        version: rtrust_engine::routing::PolicyVersion,
+        now: Instant,
+    ) {
+        self.expire(now);
+        if key.1.port() != 53 || !(2..=4096).contains(&query.len()) {
+            return;
+        }
+        let id = u16::from_be_bytes([query[0], query[1]]);
+        if let Some(pending) = self.0.get_mut(&(key, id)) {
+            // Even identical questions are ambiguous after a retransmission:
+            // the transport carries no policy epoch that identifies its reply.
+            pending.evidence = None;
+            pending.deadline = now + DNS_QUERY_LIFETIME;
+        } else if self.0.len() < DNS_QUERY_LIMIT {
+            self.0.insert(
+                (key, id),
+                DnsQuery {
+                    deadline: now + DNS_QUERY_LIFETIME,
+                    evidence: Some((query.to_vec(), version)),
+                },
+            );
+        }
+    }
+    fn response(
+        &mut self,
+        key: packet::Key,
+        answer: &[u8],
+        now: Instant,
+    ) -> Option<(Vec<u8>, rtrust_engine::routing::PolicyVersion)> {
+        self.expire(now);
+        if answer.len() < 2 {
+            return None;
+        }
+        let id = u16::from_be_bytes([answer[0], answer[1]]);
+        let pending = self.0.get_mut(&(key, id))?;
+        let evidence = pending.evidence.take();
+        if evidence.is_some() {
+            // Keep a payload-free tombstone after consumption too. A duplicate
+            // old reply must not match a new query reusing this tuple and id.
+            pending.deadline = now + DNS_QUERY_LIFETIME;
+        }
+        evidence
+    }
+}
+
 async fn udp_stream(
     tunnel: rtrust_engine::Tunnel,
     input: &mut mpsc::Receiver<Datagram>,
@@ -249,10 +316,7 @@ async fn udp_stream(
 ) -> Result<(), rtrust_engine::Error> {
     let (mut reader, mut writer) = tokio::io::split(tunnel);
     let mut mappings = HashMap::new();
-    let mut queries: HashMap<
-        (packet::Key, u16),
-        (Vec<u8>, Option<rtrust_engine::routing::PolicyVersion>),
-    > = HashMap::new();
+    let mut queries = DnsQueries::default();
     // Preserve the partially read frame when an outgoing datagram wins select.
     let mut read = Box::pin(udp::read(&mut reader));
     loop {
@@ -263,10 +327,8 @@ async fn udp_stream(
                 let key = (d.source, d.destination);
                 if !mappings.contains_key(&key) && mappings.len() >= 256 { continue; }
                 mappings.insert(key, Instant::now());
-                queries.retain(|(key, _), _| mappings.contains_key(key));
-                if d.destination.port()==53 && (2..=4096).contains(&d.payload.len()) && queries.len()<512 {
-                    let id=u16::from_be_bytes([d.payload[0],d.payload[1]]);
-                    queries.insert((key,id),(d.payload.clone(),router.map(|router| router.version())));
+                if let Some(router) = router {
+                    queries.remember(key, &d.payload, router.version(), Instant::now());
                 }
                 let frame = udp::encode(&d, "rtrust-tun")?;
                 tokio::time::timeout(Duration::from_secs(10), writer.write_all(&frame)).await.map_err(|_| rtrust_engine::Error::Protocol)??;
@@ -274,9 +336,9 @@ async fn udp_stream(
             result = &mut read => {
                 let d = result?;
                 if mappings.get(&(d.destination, d.source)).is_some_and(|seen| seen.elapsed() < Duration::from_secs(60)) {
-                    if d.payload.len()>=2 {
-                        let id=u16::from_be_bytes([d.payload[0],d.payload[1]]);
-                        if let (Some(router), Some((query, Some(version)))) = (router, queries.remove(&((d.destination, d.source),id))) { router.learn_for(&version, &query, &d.payload); }
+                    if let Some(router) = router
+                        && let Some((query, version)) = queries.response((d.destination, d.source), &d.payload, Instant::now()) {
+                        router.learn_for(&version, &query, &d.payload);
                     }
                     let _ = output.try_send(d);
                 }
@@ -347,5 +409,209 @@ async fn direct_udp_flow(
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => return Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod dns_query_tests {
+    use super::*;
+    fn key() -> packet::Key {
+        (
+            "169.254.254.2:12345".parse().unwrap(),
+            "1.1.1.1:53".parse().unwrap(),
+        )
+    }
+    fn messages(id: u16) -> (Vec<u8>, Vec<u8>) {
+        let [hi, lo] = id.to_be_bytes();
+        let mut query = vec![hi, lo, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        query.extend_from_slice(b"\x07allowed\x07example\x00\x00\x01\x00\x01");
+        let mut answer = query.clone();
+        answer[2] = 0x81;
+        answer[3] = 0x80;
+        answer[7] = 1;
+        answer.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 1]);
+        (query, answer)
+    }
+    fn router() -> rtrust_engine::routing::Router {
+        rtrust_engine::routing::Policy {
+            mode: "general".into(),
+            exclusions: vec!["allowed.example".into()],
+        }
+        .compile_with_context(rtrust_profile::routing::Context {
+            revision: Some("r1".into()),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+    #[test]
+    fn old_answer_after_revision_change_and_identical_retransmit_never_acquires_new_epoch() {
+        let router = router();
+        let now = Instant::now();
+        let mut pending = DnsQueries::default();
+        let (query, old_answer) = messages(42);
+        let before = router.version();
+        pending.remember(key(), &query, before.clone(), now);
+        let current = router
+            .apply_local(
+                &before,
+                &rtrust_engine::routing::Policy {
+                    mode: "general".into(),
+                    exclusions: vec!["allowed.example".into()],
+                },
+                rtrust_profile::routing::Context {
+                    revision: Some("r2".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        pending.remember(key(), &query, current.clone(), now + Duration::from_secs(1));
+        assert!(
+            pending
+                .response(key(), &old_answer, now + Duration::from_secs(2))
+                .is_none()
+        );
+        assert_eq!(
+            router.decide("192.0.2.1:443".parse().unwrap()).action,
+            rtrust_profile::routing::Action::Tunnel
+        );
+        // Further identical retries remain ambiguous; they never restore evidence.
+        pending.remember(key(), &query, current.clone(), now + Duration::from_secs(3));
+        assert!(
+            pending
+                .response(key(), &old_answer, now + Duration::from_secs(4))
+                .is_none()
+        );
+        // The transport mapping is kept alive by other datagrams: a delayed
+        // answer after 60s must not be upgraded to the current epoch on id reuse.
+        pending.remember(key(), &query, current, now + Duration::from_secs(70));
+        assert!(
+            pending
+                .response(key(), &old_answer, now + Duration::from_secs(71))
+                .is_none()
+        );
+    }
+    #[test]
+    fn idle_mapping_retirement_cannot_relabel_a_queued_old_answer() {
+        let router = router();
+        let now = Instant::now();
+        let mut pending = DnsQueries::default();
+        let (query, answer) = messages(23);
+        let before = router.version();
+        pending.remember(key(), &query, before.clone(), now);
+        // udp_stream can remove its idle delivery mapping, but the upstream
+        // stream remains open and may still contain the original response.
+        let mut mappings = HashMap::from([(key(), now)]);
+        mappings.retain(|_, seen| now + Duration::from_secs(61) < *seen + Duration::from_secs(60));
+        assert!(mappings.is_empty());
+        pending.expire(now + Duration::from_secs(61));
+        let current = router
+            .apply_local(
+                &before,
+                &rtrust_engine::routing::Policy {
+                    mode: "general".into(),
+                    exclusions: vec!["allowed.example".into()],
+                },
+                rtrust_profile::routing::Context {
+                    revision: Some("r2".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        mappings.insert(key(), now + Duration::from_secs(62));
+        pending.remember(key(), &query, current, now + Duration::from_secs(62));
+        assert!(
+            pending
+                .response(key(), &answer, now + Duration::from_secs(63))
+                .is_none()
+        );
+        assert_eq!(
+            router.decide("192.0.2.1:443".parse().unwrap()).action,
+            rtrust_profile::routing::Action::Tunnel
+        );
+    }
+    #[test]
+    fn unique_response_learns_once_and_id_reuse_is_quarantined_for_stream_lifetime() {
+        let router = router();
+        let now = Instant::now();
+        let mut pending = DnsQueries::default();
+        let (query, answer) = messages(7);
+        pending.remember(key(), &query, router.version(), now);
+        let (learned_query, version) = pending
+            .response(key(), &answer, now + Duration::from_secs(1))
+            .unwrap();
+        assert!(router.learn_for(&version, &learned_query, &answer));
+        assert_eq!(
+            router.decide("192.0.2.1:443".parse().unwrap()).action,
+            rtrust_profile::routing::Action::Direct
+        );
+        pending.remember(
+            key(),
+            &query,
+            router.version(),
+            now + Duration::from_secs(2),
+        );
+        assert!(
+            pending
+                .response(key(), &answer, now + Duration::from_secs(3))
+                .is_none()
+        );
+        pending.remember(
+            key(),
+            &query,
+            router.version(),
+            now + Duration::from_secs(63),
+        );
+        assert!(
+            pending
+                .response(key(), &answer, now + Duration::from_secs(64))
+                .is_none()
+        );
+    }
+    #[test]
+    fn correlation_capacity_expiration_and_full_table_collision_are_bounded() {
+        let router = router();
+        let now = Instant::now();
+        let mut pending = DnsQueries::default();
+        for id in 0..=DNS_QUERY_LIMIT as u16 {
+            pending.remember(key(), &messages(id).0, router.version(), now);
+        }
+        assert_eq!(pending.0.len(), DNS_QUERY_LIMIT);
+        // Capacity exhaustion cannot skip collision invalidation for an existing key.
+        pending.remember(
+            key(),
+            &messages(0).0,
+            router.version(),
+            now + Duration::from_secs(1),
+        );
+        assert!(
+            pending
+                .response(key(), &messages(0).1, now + Duration::from_secs(2))
+                .is_none()
+        );
+        assert!(
+            pending
+                .response(
+                    key(),
+                    &messages(DNS_QUERY_LIMIT as u16).1,
+                    now + Duration::from_secs(2)
+                )
+                .is_none()
+        );
+        pending.expire(now + Duration::from_secs(62));
+        assert_eq!(pending.0.len(), DNS_QUERY_LIMIT);
+        assert!(pending.0.values().all(|entry| entry.evidence.is_none()));
+        // Expired flow mappings cannot prove that old frames left the shared stream.
+        pending.remember(
+            key(),
+            &messages(0).0,
+            router.version(),
+            now + Duration::from_secs(120),
+        );
+        assert!(
+            pending
+                .response(key(), &messages(0).1, now + Duration::from_secs(121))
+                .is_none()
+        );
+        assert_eq!(pending.0.len(), DNS_QUERY_LIMIT);
     }
 }
