@@ -7,6 +7,7 @@ p=argparse.ArgumentParser();p.add_argument('fixture',type=pathlib.Path);p.add_ar
 p.add_argument('--worker',choices=['windows_full_e2e.py','windows_selected_e2e.py','windows_production_e2e.py','windows_sleep_e2e.py'],default='windows_full_e2e.py')
 # windows_sleep_e2e.py suspends the host; worker and rollback deadlines include the sleep.
 p.add_argument('--sleep-minutes',type=int,choices=range(1,121),default=None)
+p.add_argument('--network-handoff',action='store_true',help='Explicitly permit temporary loss of the active physical network; never enable on the sole remote management path')
 p.add_argument('--always-on',action='store_true',help='Sleep with the service always-on tunnel instead of a client session');a=p.parse_args()
 assert not a.always_on or a.sleep_minutes,'--always-on applies to the sleep worker'
 assert (a.worker=='windows_sleep_e2e.py')==(a.sleep_minutes is not None),'--sleep-minutes is required by, and only valid for, the sleep worker'
@@ -66,15 +67,24 @@ for name in ['Lib','DLLs']:
 for name in [a.worker,'windows_service_e2e.py']:shutil.copy2(ROOT/'ci'/name,WORK/name)
 fixture_data=json.loads(a.fixture.read_text())
 physical=json.loads(ps("ConvertTo-Json -Compress -InputObject @(Get-NetAdapter -Physical | Where-Object Status -eq Up | Select-Object -ExpandProperty Name)"))
-assert len(physical)==1,'Handoff test requires one known active physical adapter'
-fixture_data['network_handoff_alias']=physical[0]
+def configure_handoff(data, adapters, enabled):
+    data = dict(data)
+    data.pop('network_handoff_alias', None)
+    if not enabled:
+        return data, ''
+    if len(adapters) != 1:
+        raise ValueError('Handoff test requires one known active physical adapter')
+    data['network_handoff_alias'] = adapters[0]
+    alias = adapters[0].replace("'", "''")
+    return data, f"Enable-NetAdapter -Name '{alias}' -Confirm:$false"
+
+fixture_data, enable_adapter = configure_handoff(fixture_data, physical, a.network_handoff)
 fixture_data['always_on_crash_cycles']=a.crash_cycles
 if a.sleep_minutes:fixture_data['sleep_minutes']=a.sleep_minutes;fixture_data['sleep_always_on']=a.always_on
 (WORK/'fixture.json').write_text(json.dumps(fixture_data))
-adapter=physical[0].replace("'","''")
 # Recovery is independent of Python/Jenkins and survives network loss.
 recovery=f"""$ErrorActionPreference='Stop'
-Enable-NetAdapter -Name '{adapter}' -Confirm:$false
+{enable_adapter}
 Stop-Service RTrustTunnel -ErrorAction SilentlyContinue
 (Get-Service RTrustTunnel).WaitForStatus('Stopped',[TimeSpan]::FromSeconds(30))
 for ($attempt=0; $attempt -lt 4; $attempt++) {{
