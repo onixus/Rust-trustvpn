@@ -138,10 +138,10 @@ cancelled; it cannot create a late tunnel after its caller disappears.
 A fresh authenticated Status request observes the current session once and
 does not acquire mutation rights. The original Start connection keeps its
 particular session sender, so a late Stop cannot affect a replacement session.
-There is no automatic GUI adoption without a wire session token. A GUI which
-loses IPC reports ControlLost; reopening it does not prove control was recovered.
+There is no automatic GUI adoption. A GUI which loses IPC reports
+ControlLost; reopening it does not prove control was recovered.
 Use explicit Recover to stop and drain the current service-owned session,
-release its guard, then Start again. Recover and Stop acknowledge Idle only
+release its guard, then Start again (owner rules below). Recover and Stop acknowledge Idle only
 after session cleanup and lease release. Start and PrepareUpdate cannot run
 concurrently with the current tunnel. If the session supervisor ends
 unexpectedly (including a panic or cancellation), its registration and lease
@@ -165,3 +165,45 @@ fixture traffic after dropping IPC in full and selected IPv4 split mode,
 with route checks, fresh read-only Status and explicit Recover cleanup.
 This issue's installed-package/device acceptance has NOT RUN; earlier #61
 evidence does not validate the new binary.
+
+## Session owner for Recover (IPC v6)
+
+Peer-uid authentication alone let any process of the desktop user stop a live
+session with Recover and drop the guard. Since IPC v6 an admitted Start gets a
+256-bit service-generated owner (`OsRng`; Start is refused if it is
+unavailable). It is returned once, in the Connected reply to that Start, and
+lives only in the service registry and the caller.
+
+- Recover from a new connection while a session is live must carry the matching
+  `owner` (constant-time comparison). A missing or wrong owner gets `Blocked`;
+  the session, lease, workers and guard stay. A new connection cannot Stop: the
+  live session holds the lease. Status remains read-only and needs no owner.
+- The original Start connection keeps Stop fenced to its own actor, as before.
+- With no live session (ended, panicked or cancelled actor, or after a service
+  crash/restart) Recover takes the unchanged journal path without an owner.
+- The desktop client keeps the owner in the login Keychain
+  (`org.rtrusttunnel.desktop` / `service-session-owner-v1`, the same keyring
+  mechanism as the vault master key), so a restarted GUI can still Recover its
+  session; it clears the item after a confirmed Stop or Recover. `rtrust-inspect
+  --recover-service` reads the same item (macOS may ask to allow access).
+  The GUI uses the owner of its own live session from memory first; if its
+  Stop is not confirmed (e.g. IPC lost), it keeps that owner in memory until
+  Recover succeeds or a new session starts. If the
+  service refuses the owner, the GUI explains the exit (disconnect in the
+  starting app, or restart the Mac / have an administrator restart the
+  service, then Recover). A failed Keychain write is shown as a warning while
+  connected. The owner is redacted in `Debug`, is
+  never logged, never in events, diagnostics or errors, and is dropped from the
+  client status snapshot.
+- Version 5 clients get `IPC version mismatch` before any action, so an old GUI
+  cannot release a live session's guard.
+
+Residual limits: if the GUI exits after the service sent Connected but before
+the owner reached the Keychain (or the Keychain write failed), only the original
+connection can Stop that session; otherwise an administrator restart of the
+service (journal path) is required. A same-uid process able to read the GUI's
+memory or approved for its Keychain item is outside this boundary. Linux and
+Windows services accept the v6 wire format and ignore `owner`: their Recover
+runs only when no session holds the lease, so it never stops a live session.
+Deterministic synthetic tests cover rejection, owner Recover and the journal
+path; installed-package/device acceptance of this change has NOT RUN.

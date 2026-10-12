@@ -10,10 +10,12 @@ pub const SOCKET: &str = "/private/var/run/rtrust/control.sock";
 /// Opt-in automatic recovery: at most this many user-allowed backup profiles.
 pub const MAX_FALLBACKS: usize = 3;
 pub const LIMIT: usize = (2 + MAX_FALLBACKS) * rtrust_profile::MAX_INPUT;
-pub const VERSION: u32 = 5;
+/// v6: Start returns a session owner; Recover of a live session requires it.
+pub const VERSION: u32 = 6;
 pub mod endpoint;
 pub mod freshness;
 pub mod observations;
+pub mod owner;
 pub mod recovery;
 pub use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
@@ -77,7 +79,12 @@ pub enum Command {
     DisableAlwaysOn,
     AlwaysOnStatus,
     Stop,
-    Recover,
+    /// Stops a live session (owner required) or releases a retained guard
+    /// from the journal after the session ended (no owner needed).
+    Recover {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<owner::Owner>,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum State {
@@ -107,6 +114,9 @@ pub struct Response {
     pub endpoint_probe_token: Option<endpoint::Token>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_probe: Option<endpoint::Result>,
+    /// Returned only with the Connected reply to the admitted Start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<owner::Owner>,
     pub observations: observations::Snapshot,
     pub capabilities: Capabilities,
 }
@@ -152,6 +162,7 @@ impl Response {
             recovery: None,
             endpoint_probe_token: None,
             endpoint_probe: None,
+            owner: None,
             observations: observations::Snapshot::unknown(observations::Mode::Unknown),
             capabilities: Capabilities::current(),
         }

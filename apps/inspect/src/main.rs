@@ -9,7 +9,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     if args.first().is_some_and(|s| s == "--recover-service") {
-        rtrust_control::Client::recover().await?;
+        // A live session needs the owner a desktop client stored; without
+        // it only a guard retained after the session ended is released.
+        #[cfg(target_os = "macos")]
+        let owner = tokio::task::spawn_blocking(rtrust_store::load_session_owner).await?;
+        #[cfg(not(target_os = "macos"))]
+        let owner = None;
+        rtrust_control::Client::recover(owner).await?;
         println!("SERVICE recovered");
         return Ok(());
     }

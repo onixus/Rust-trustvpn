@@ -280,7 +280,7 @@ async fn serve(
             rtrust_control::validate_dns(dns)?;
             (profile, Default::default(), Some(dns), None, fallbacks)
         }
-        Command::Recover => {
+        Command::Recover { .. } => {
             full::recover()?;
             return reply(pipe, State::Idle, "Защита сброшена; маршруты восстановлены").await;
         }

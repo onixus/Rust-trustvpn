@@ -211,6 +211,9 @@ struct App {
     updates: updates::State,
     portal: portal::State,
     store_recovery: bool,
+    // Owner of a session this GUI started whose Stop was not confirmed; kept
+    // in memory (never shown) until Recover succeeds or a new session starts.
+    pending_owner: Option<rtrust_control::owner::Owner>,
     sync_state: sync::State,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     intent: intent::State,
@@ -346,6 +349,7 @@ enum Message {
     Dns(String),
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     RecoverService,
+    Recovered(Result<String, String>),
     Stopped(u64, Result<(), String>),
     CopyProxy,
     Tick,
@@ -380,6 +384,7 @@ impl App {
             updates: updates::State::default(),
             portal: portal::State::default(),
             store_recovery: false,
+            pending_owner: None,
             sync_state: sync::State::default(),
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             intent: intent::State::default(),
@@ -910,21 +915,34 @@ impl App {
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             Message::RecoverService if self.can_change_profiles() => {
                 self.busy = true;
+                let current = self.recover_owner();
                 return Task::perform(
-                    async {
-                        rtrust_control::Client::recover().await.map(|()| {
-                            if cfg!(target_os = "windows") {
-                                "Windows-служба доступна.".into()
-                            } else {
-                                "Блокировка выбранных сетей снята.".into()
-                            }
-                        })
+                    async move {
+                        rtrust_desktop::connection::recover_service(current, true)
+                            .await
+                            .map(|()| {
+                                if cfg!(target_os = "windows") {
+                                    "Windows-служба доступна.".into()
+                                } else {
+                                    "Блокировка выбранных сетей снята.".into()
+                                }
+                            })
                     },
-                    Message::Done,
+                    Message::Recovered,
                 );
+            }
+            Message::Recovered(result) => {
+                if result.is_ok() {
+                    self.pending_owner = None;
+                }
+                return self.update(Message::Done(result));
             }
             Message::Stopped(epoch, result) if epoch == self.connection_epoch => {
                 let failed = result.is_err();
+                if !failed {
+                    // The service confirmed Idle; the owner is spent.
+                    self.pending_owner = None;
+                }
                 let exit = std::mem::take(&mut self.exit_after_stop) && result.is_ok();
                 self.disconnect();
                 if exit {
@@ -1028,7 +1046,7 @@ impl App {
                     if let Some(handle) = self.connection_task.take() {
                         handle.abort();
                     }
-                    let session = self.session.take().unwrap();
+                    let session = self.take_session().unwrap();
                     self.connecting = true;
                     self.disconnecting = true;
                     self.status = "Отключение службы и восстановление маршрутов…".into();
@@ -1129,6 +1147,8 @@ impl App {
                 match result {
                     Ok(session) => {
                         self.session = Some(session);
+                        // A new admitted session supersedes any lost one.
+                        self.pending_owner = None;
                         if let Some(index) = self.session.as_ref().and_then(Session::active_profile)
                             && let Some(name) = self.connection_candidates.get(index as usize)
                         {
@@ -1142,6 +1162,11 @@ impl App {
                         self.last_diagnostic = None;
                         self.diagnostic_report = None;
                         self.status = if self.mode == Mode::Socks { "Прокси SOCKS5/HTTP включён. Его можно указать и как системный прокси Windows. Для DNS выберите разрешение имён через прокси." } else if self.saved_connection.mode == rtrust_store::Mode::Full && self.connection_ipv6 { "IPv4, IPv6 и DNS всего компьютера через VPN. Пересылка между интерфейсами заблокирована." } else if self.saved_connection.mode == rtrust_store::Mode::Full { "IPv4 и DNS всего компьютера через VPN. Сервер без IPv6: IPv6 заблокирован, приложения переходят на IPv4. Пересылка между интерфейсами заблокирована." } else { "Выбранные IPv4-сети подключены через службу. Исключения, остальной трафик и системный DNS идут напрямую." }.into();
+                        if let Some(warning) =
+                            self.session.as_ref().and_then(|s| s.owner_warning(true))
+                        {
+                            self.status = format!("{} {warning}", self.status);
+                        }
                         return Task::batch([self.monitor_connection(), self.start_diagnostic()]);
                     }
                     Err(error) => {
@@ -1787,6 +1812,14 @@ impl App {
                 }))
     }
     fn connection_check_summary(&self) -> String {
+        let summary = self.connection_check_text();
+        // Repeated while connected: a crash would otherwise need a restart.
+        match self.session.as_ref().and_then(|s| s.owner_warning(true)) {
+            Some(warning) => format!("{summary} {warning}"),
+            None => summary,
+        }
+    }
+    fn connection_check_text(&self) -> String {
         if self.diagnostic_task.is_some() {
             return format!(
                 "Проверяем {}: DNS → маршрут VPN → HTTPS…",
@@ -1873,13 +1906,28 @@ impl App {
             self.busy = false;
         }
     }
+    // Every exit of a session from the App keeps its owner until the service
+    // confirms Stop or Recover: a failed Stop must not strand the guard.
+    fn take_session(&mut self) -> Option<Session> {
+        let session = self.session.take()?;
+        if let Some(owner) = session.owner() {
+            self.pending_owner = Some(owner);
+        }
+        Some(session)
+    }
+    fn recover_owner(&self) -> Option<rtrust_control::owner::Owner> {
+        self.session
+            .as_ref()
+            .and_then(Session::owner)
+            .or_else(|| self.pending_owner.clone())
+    }
     fn disconnect(&mut self) {
         self.cancel_diagnostic();
         self.connection_epoch += 1;
         if let Some(handle) = self.connection_task.take() {
             handle.abort();
         }
-        if let Some(proxy) = self.session.take() {
+        if let Some(proxy) = self.take_session() {
             proxy.cancel();
         }
         self.connecting = false;
@@ -3057,6 +3105,33 @@ mod tests {
         let _ = app.update(Message::Networks(String::new()));
         let _ = app.update(Message::Exclude(String::new()));
         assert!(app.connection_settings().unwrap().managed_routes == Some(managed));
+    }
+    #[test]
+    fn failed_stop_keeps_the_owner_for_recover_until_it_succeeds() {
+        use rtrust_control::owner::{LEN, Owner};
+        let owner = Owner::from_bytes([9; LEN]);
+        let mut app = app();
+        // As captured by take_session when Disconnect removed the session.
+        app.pending_owner = Some(owner.clone());
+        app.connecting = true;
+        app.disconnecting = true;
+        app.connection_epoch = 4;
+        let _ = app.update(Message::Stopped(4, Err("IPC lost".into())));
+        assert!(app.session.is_none());
+        assert!(app.can_change_profiles());
+        assert!(app.recover_owner().unwrap().matches(&owner));
+        let _ = app.update(Message::Recovered(Err("refused".into())));
+        assert!(app.recover_owner().unwrap().matches(&owner));
+        assert_eq!(app.status, "refused");
+        let _ = app.update(Message::Recovered(Ok("done".into())));
+        assert!(app.pending_owner.is_none());
+        assert!(app.recover_owner().is_none());
+        // A confirmed Stop also spends the owner.
+        app.pending_owner = Some(owner);
+        app.connection_epoch = 5;
+        let _ = app.update(Message::Stopped(5, Ok(())));
+        assert!(app.pending_owner.is_none());
+        assert!(!format!("{:?}", app.recover_owner()).contains("0909"));
     }
     #[test]
     fn disconnect_waits_for_current_ack_and_preserves_failure() {

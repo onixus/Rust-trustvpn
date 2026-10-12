@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 struct Inner {
     stop: mpsc::Sender<oneshot::Sender<Result<(), String>>>,
     status: Arc<Mutex<Response>>,
+    owner: Option<owner::Owner>,
     abort: tokio::task::AbortHandle,
 }
 impl Drop for Inner {
@@ -279,10 +280,12 @@ impl Client {
             return Err("Служба не поддерживает резервные профили; обновите службу".into());
         }
         let mut stream = socket().await?;
-        let response = exchange(&mut stream, command, 45).await?;
+        let mut response = exchange(&mut stream, command, 45).await?;
         if response.state != State::Connected {
             return Err(response.message);
         }
+        // Kept apart from the shared status so snapshots never carry it.
+        let owner = response.owner.take();
         let status = Arc::new(Mutex::new(response));
         let shared = status.clone();
         let (stop, mut receiver) = mpsc::channel::<oneshot::Sender<Result<(), String>>>(1);
@@ -326,11 +329,13 @@ impl Client {
         Ok(Self(Arc::new(Inner {
             stop,
             status,
+            owner,
             abort: task.abort_handle(),
         })))
     }
     pub fn status(&self) -> Response {
         let mut response = self.0.status.lock().unwrap().clone();
+        response.owner = None;
         response.observations.expire(observations::now_ms());
         response
     }
@@ -343,10 +348,17 @@ impl Client {
             .map_err(|_| "Связь со службой потеряна; используйте сброс блокировки")?;
         rx.await.map_err(|_| "Отключение службы не подтверждено")?
     }
-    pub async fn recover() -> Result<(), String> {
+    /// Capability to Recover this session from a new connection after the
+    /// GUI restarts. Persist it only in the OS credential store.
+    pub fn owner(&self) -> Option<owner::Owner> {
+        self.0.owner.clone()
+    }
+    /// A live session is stopped only with its `owner`; without a live
+    /// session the service releases a retained guard from its journal.
+    pub async fn recover(owner: Option<owner::Owner>) -> Result<(), String> {
         negotiate().await?;
         let mut stream = socket().await?;
-        let response = exchange(&mut stream, Command::Recover, 45).await?;
+        let response = exchange(&mut stream, Command::Recover { owner }, 45).await?;
         if response.state == State::Idle {
             Ok(())
         } else {

@@ -83,7 +83,7 @@ async fn diagnostic_start(
                 .as_ref()
                 .is_some_and(|r| r.verdict().actions.contains(&Action::Reconnect)) =>
         {
-            if let rtrust_desktop::connection::Session::Tun(client) = &session
+            if let rtrust_desktop::connection::Session::Tun(client, _) = &session
                 && client.status().always_on == Some(true)
             {
                 return Err("Disable Always-on explicitly before reconnecting".into());

@@ -26,7 +26,21 @@ struct Session {
     actor: Actor,
     finished: tokio::sync::watch::Receiver<bool>,
     shutdown: tokio::sync::watch::Sender<bool>,
+    // Capability returned to the Start caller. Recover of this live session
+    // from a new connection must present it; Status never needs it.
+    owner: Owner,
 }
+use rtrust_control::owner::Owner;
+// Fail closed: without a CSPRNG value no session is admitted.
+fn new_owner() -> Result<Owner, String> {
+    use rand::TryRngCore;
+    let mut bytes = zeroize::Zeroizing::new([0; rtrust_control::owner::LEN]);
+    rand::rngs::OsRng
+        .try_fill_bytes(bytes.as_mut())
+        .map_err(|_| "Session owner unavailable")?;
+    Ok(Owner::from_bytes(*bytes))
+}
+use rtrust_control::owner::NOT_OWNER;
 // Synchronous lock: the actor drop guard must clear it during unwind or
 // cancellation, where it cannot await. Never held across an await.
 type Registry = Arc<std::sync::Mutex<Option<Session>>>;
@@ -348,35 +362,50 @@ async fn serve(
         return reply(&mut stream, State::Idle, "Capabilities").await;
     }
     let current = registry_slot(&registry).clone();
-    if matches!(request.command, Command::Status | Command::Recover)
+    if matches!(request.command, Command::Status | Command::Recover { .. })
         && let Some(session) = current
     {
-        let stopping = matches!(request.command, Command::Recover);
-        let command = if stopping {
-            Command::Stop
+        let stopping = matches!(request.command, Command::Recover { .. });
+        if let Command::Recover { owner } = &request.command
+            && !owner
+                .as_ref()
+                .is_some_and(|owner| session.owner.matches(owner))
+        {
+            if !*session.finished.borrow() {
+                // Missing or wrong owner: the live session and its guard stay.
+                events::record("recover_rejected reason=not_owner");
+                return reply(&mut stream, State::Blocked, NOT_OWNER).await;
+            }
+            // The actor already ended; its guard is released only through
+            // the journal path below, which needs no owner.
+            forget(&registry, &session.actor);
         } else {
-            Command::Status
-        };
-        match ask(&session.actor, command).await {
-            Ok(response) => {
-                if stopping && let Err(error) = wait_finished(session.finished).await {
+            let command = if stopping {
+                Command::Stop
+            } else {
+                Command::Status
+            };
+            match ask(&session.actor, command).await {
+                Ok(response) => {
+                    if stopping && let Err(error) = wait_finished(session.finished).await {
+                        return reply(&mut stream, State::Error, &error).await;
+                    }
+                    // Status is read-only and does not adopt the active session.
+                    return write_response(&mut stream, &response).await;
+                }
+                // A live but unresponsive actor keeps its lease and guard.
+                Err(error) if error != SESSION_ENDED => {
                     return reply(&mut stream, State::Error, &error).await;
                 }
-                // Status is read-only and does not adopt the active session.
-                return write_response(&mut stream, &response).await;
-            }
-            // A live but unresponsive actor keeps its lease and guard.
-            Err(error) if error != SESSION_ENDED => {
-                return reply(&mut stream, State::Error, &error).await;
-            }
-            // The actor ended (returned, panicked or was cancelled) before it
-            // answered. Wait for its cleanup, then answer like no session is
-            // registered: the lease still serialises any recovery below.
-            Err(_) => {
-                if let Err(error) = wait_finished(session.finished).await {
-                    return reply(&mut stream, State::Error, &error).await;
+                // The actor ended (returned, panicked or was cancelled) before it
+                // answered. Wait for its cleanup, then answer like no session is
+                // registered: the lease still serialises any recovery below.
+                Err(_) => {
+                    if let Err(error) = wait_finished(session.finished).await {
+                        return reply(&mut stream, State::Error, &error).await;
+                    }
+                    forget(&registry, &session.actor);
                 }
-                forget(&registry, &session.actor);
             }
         }
     }
@@ -401,7 +430,7 @@ async fn serve(
             )
             .await;
         }
-        Command::Recover => {
+        Command::Recover { .. } => {
             return match state::recover(uid) {
                 Ok(()) => reply(&mut stream, State::Idle, "Блокировка снята").await,
                 Err(e) => reply(&mut stream, State::Blocked, &e).await,
@@ -428,6 +457,10 @@ async fn serve(
         Command::Start { .. } | Command::StartFull { .. } => {}
         _ => return reply(&mut stream, State::Error, "Start or Recover required").await,
     }
+    let owner = match new_owner() {
+        Ok(owner) => owner,
+        Err(error) => return reply(&mut stream, State::Error, &error).await,
+    };
     let held_lease = Arc::new(held);
     let (actor, commands) = mpsc::channel(16);
     let (shutdown_signal, shutdown_events) = tokio::sync::watch::channel(false);
@@ -437,6 +470,7 @@ async fn serve(
         actor: actor.clone(),
         finished: completion.clone(),
         shutdown: shutdown_signal,
+        owner: owner.clone(),
     });
     let finish = Finish {
         registry: registry.clone(),
@@ -467,12 +501,20 @@ async fn serve(
         response = response => response.map_err(|_| "Tunnel startup stopped")?,
         _ = stream.read(&mut unexpected) => return Err("IPC closed during connect".into()),
     };
+    let initial = admitted_reply(initial, owner);
     let active = initial.state == State::Connected;
     write_response(&mut stream, &initial).await?;
     if !active {
         return Ok(());
     }
     bridge(stream, actor, Some(completion)).await
+}
+
+// Only the admitted caller learns the owner, and only once the session is
+// Connected; it is never logged or included in later replies.
+fn admitted_reply(mut initial: Response, owner: Owner) -> Response {
+    initial.owner = (initial.state == State::Connected).then_some(owner);
+    initial
 }
 
 async fn wait_finished(mut completion: tokio::sync::watch::Receiver<bool>) -> Result<(), String> {
@@ -912,6 +954,9 @@ async fn connected(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn test_owner() -> Owner {
+        Owner::from_bytes([0x3c; rtrust_control::owner::LEN])
+    }
     use tokio::io::AsyncWriteExt;
 
     async fn connected(
@@ -1087,7 +1132,7 @@ mod tests {
                     &mut client,
                     &Request {
                         version: VERSION,
-                        command: Command::Recover,
+                        command: Command::Recover { owner: None },
                     },
                 )
                 .await
@@ -1136,6 +1181,7 @@ mod tests {
             actor: fixture.actor.clone(),
             finished: completion,
             shutdown: fixture.shutdown.clone(),
+            owner: test_owner(),
         })));
         let (spawn, _spawned) = mpsc::channel(16);
         let (mut observer, server) = tokio::io::duplex(4096);
@@ -1307,6 +1353,7 @@ mod tests {
             actor: fixture.actor.clone(),
             finished: completion,
             shutdown: fixture.shutdown.clone(),
+            owner: test_owner(),
         })));
         let profile = rtrust_profile::Profile::import("hostname='test.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='synthetic'\n").unwrap();
         for command in [
@@ -2051,7 +2098,7 @@ mod tests {
             &mut client,
             &Request {
                 version: VERSION + 1,
-                command: Command::Recover,
+                command: Command::Recover { owner: None },
             },
         )
         .await
@@ -2076,7 +2123,7 @@ mod tests {
             &mut client,
             &Request {
                 version: VERSION,
-                command: Command::Recover,
+                command: Command::Recover { owner: None },
             },
         )
         .await
@@ -2124,6 +2171,7 @@ mod tests {
             actor: fixture.actor.clone(),
             finished: completion,
             shutdown: fixture.shutdown.clone(),
+            owner: test_owner(),
         })));
         let task = fixture.task;
         let supervisor = tokio::spawn(supervise(
@@ -2135,7 +2183,14 @@ mod tests {
             },
             async move { task.await.unwrap().unwrap() },
         ));
-        let (response, result) = serve_once(&registry, &fixture.lease, Command::Recover).await;
+        let (response, result) = serve_once(
+            &registry,
+            &fixture.lease,
+            Command::Recover {
+                owner: Some(test_owner()),
+            },
+        )
+        .await;
         assert_eq!(response.unwrap().state, State::Idle);
         result.unwrap();
         // Idle is acknowledged only after Stop released the guard and drained workers.
@@ -2146,7 +2201,8 @@ mod tests {
         // The next Recover takes the no-session path, which needs the lease
         // before state::recover; hold it so the test never touches host state.
         let held = fixture.lease.clone().try_lock_owned().unwrap();
-        let (response, result) = serve_once(&registry, &fixture.lease, Command::Recover).await;
+        let (response, result) =
+            serve_once(&registry, &fixture.lease, Command::Recover { owner: None }).await;
         let response = response.unwrap();
         assert_eq!(response.state, State::Error);
         assert_eq!(response.message, "Служба уже обслуживает подключение");
@@ -2165,6 +2221,7 @@ mod tests {
             actor: actor.clone(),
             finished: completion,
             shutdown,
+            owner: test_owner(),
         };
         let registry: Registry = Arc::new(std::sync::Mutex::new(Some(session.clone())));
         let (trigger, fired) = oneshot::channel::<()>();
@@ -2188,7 +2245,7 @@ mod tests {
         assert!(lease.try_lock().is_ok());
         // Recreate the window between actor exit and registry cleanup: a dead
         // registration must still produce an answer, never an IPC EOF.
-        for command in [Command::Recover, Command::Status] {
+        for command in [Command::Recover { owner: None }, Command::Status] {
             *registry_slot(&registry) = Some(session.clone());
             let held = lease.clone().try_lock_owned().unwrap();
             let (response, result) = serve_once(&registry, &lease, command).await;
@@ -2239,5 +2296,146 @@ mod tests {
         assert!(serving.await.unwrap().is_err());
         assert!(registry_slot(&registry).is_none());
         assert!(lease.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn recover_of_live_session_requires_its_owner() {
+        let fixture = test_actor().await;
+        fixture.initial.await.unwrap();
+        let (finished, completion) = tokio::sync::watch::channel(false);
+        let registry: Registry = Arc::new(std::sync::Mutex::new(Some(Session {
+            actor: fixture.actor.clone(),
+            finished: completion,
+            shutdown: fixture.shutdown.clone(),
+            owner: test_owner(),
+        })));
+        let task = fixture.task;
+        let supervisor = tokio::spawn(supervise(
+            Finish {
+                registry: registry.clone(),
+                identity: fixture.actor.clone(),
+                lease: None,
+                finished,
+            },
+            async move { task.await.unwrap().unwrap() },
+        ));
+        let canary = test_owner().to_hex();
+        let mut wrong = [0x3c; rtrust_control::owner::LEN];
+        wrong[7] ^= 0x80;
+        let presented = Owner::from_bytes(wrong);
+        let presented_hex = presented.to_hex();
+        for command in [
+            Command::Recover { owner: None },
+            Command::Recover {
+                owner: Some(presented),
+            },
+            // A new connection cannot Stop: the live session holds the lease.
+            Command::Stop,
+        ] {
+            let stop = matches!(command, Command::Stop);
+            let (response, result) = serve_once(&registry, &fixture.lease, command).await;
+            let response = response.expect("rejection must be answered");
+            result.unwrap();
+            if stop {
+                assert_eq!(response.state, State::Error);
+            } else {
+                assert_eq!(response.state, State::Blocked);
+                assert_eq!(response.message, NOT_OWNER);
+            }
+            assert!(response.owner.is_none());
+            let wire = serde_json::to_string(&response).unwrap();
+            assert!(!wire.contains(canary.as_str()));
+            assert!(!wire.contains(presented_hex.as_str()));
+            assert!(!format!("{response:?}").contains(canary.as_str()));
+            // Session, workers, lease and guard all stay.
+            assert!(registry_slot(&registry).is_some());
+            assert!(!fixture.released.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(!fixture.dropped.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(fixture.lease.try_lock().is_err());
+            assert_eq!(
+                ask(&fixture.actor, Command::Status).await.unwrap().state,
+                State::Connected
+            );
+        }
+        // Read-only Status from a new connection needs no owner.
+        let (response, result) = serve_once(&registry, &fixture.lease, Command::Status).await;
+        let response = response.unwrap();
+        assert_eq!(response.state, State::Connected);
+        assert!(response.owner.is_none());
+        result.unwrap();
+        // The owner stops the session; Idle only after the guard is released.
+        let (response, result) = serve_once(
+            &registry,
+            &fixture.lease,
+            Command::Recover {
+                owner: Some(test_owner()),
+            },
+        )
+        .await;
+        assert_eq!(response.unwrap().state, State::Idle);
+        result.unwrap();
+        assert!(fixture.released.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(fixture.dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(registry_slot(&registry).is_none());
+        supervisor.await.unwrap();
+        // With no live session, Recover reaches the journal path without an
+        // owner (stopped at the lease here so host state is never touched).
+        let held = fixture.lease.clone().try_lock_owned().unwrap();
+        let (response, result) =
+            serve_once(&registry, &fixture.lease, Command::Recover { owner: None }).await;
+        assert_eq!(
+            response.unwrap().message,
+            "Служба уже обслуживает подключение"
+        );
+        result.unwrap();
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn dead_actor_recover_ignores_a_wrong_owner_and_uses_the_journal_path() {
+        let lease = Arc::new(Mutex::new(()));
+        let (actor, commands) = mpsc::channel::<Envelope>(16);
+        drop(commands);
+        let (finished, completion) = tokio::sync::watch::channel(false);
+        finished.send_replace(true);
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let registry: Registry = Arc::new(std::sync::Mutex::new(Some(Session {
+            actor,
+            finished: completion,
+            shutdown,
+            owner: test_owner(),
+        })));
+        let held = lease.clone().try_lock_owned().unwrap();
+        let (response, result) = serve_once(
+            &registry,
+            &lease,
+            Command::Recover {
+                owner: Some(Owner::from_bytes([1; rtrust_control::owner::LEN])),
+            },
+        )
+        .await;
+        assert_eq!(
+            response.unwrap().message,
+            "Служба уже обслуживает подключение"
+        );
+        result.unwrap();
+        assert!(registry_slot(&registry).is_none());
+        drop(held);
+    }
+
+    #[test]
+    fn owner_is_returned_only_with_a_connected_start_reply() {
+        let connected = admitted_reply(Response::new(State::Connected, "ok"), test_owner());
+        assert!(connected.owner.as_ref().unwrap().matches(&test_owner()));
+        for state in [State::Error, State::Blocked, State::Idle] {
+            assert!(
+                admitted_reply(Response::new(state, "no"), test_owner())
+                    .owner
+                    .is_none()
+            );
+        }
+        let first = new_owner().unwrap();
+        assert!(!first.matches(&new_owner().unwrap()));
+        assert!(!format!("{first:?}").contains(first.to_hex().as_str()));
     }
 }
