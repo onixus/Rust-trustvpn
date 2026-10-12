@@ -128,6 +128,7 @@ final class NetworkAcceptance {
             check(android.net.VpnService.prepare(context) == null, "Emulator VPN consent prerequisite");
             activity = test.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             connect(context);
+            long connectedAt = SystemClock.elapsedRealtime();
             check(vault.selected().getJSONObject("endpoint").getString("upstream_protocol").equals(profile.getJSONObject("endpoint").getString("upstream_protocol")), "Stored transport retained");
             String v4 = fixture.getString("target"), v6 = fixture.getString("target6");
             tcp(v4); tcp(v6); udp(v4); udp(v6);
@@ -147,6 +148,7 @@ final class NetworkAcceptance {
                 catch (IOException expected) { }
                 Thread.sleep(500);
             }
+            long connectedFor = SystemClock.elapsedRealtime() - connectedAt;
             check(TunnelService.active, "TUN retained during reconnect");
             // The endpoint may return between the state check and this connection. A
             // connection that succeeds must then arrive through the tunnel, never
@@ -158,7 +160,12 @@ final class NetworkAcceptance {
                 if (body >= 0) during = response.substring(body + 4).trim();
             } catch (IOException expected) { }
             check(during == null || during.isEmpty() || !during.equals(direct), "No direct fallback during outage");
-            await(2, fixture.optInt("recovery_ms", 45000)); tcp(v4); tcp(v6);
+            // Recovery holds a connection that dropped within 60 s off for the rest of
+            // that minute plus 0-3 s jitter (docs/recovery.md), even when the endpoint
+            // is already back. connectedFor starts after awaitVpn, so it never
+            // overstates the product's own measure by more than the detection poll.
+            long cooldown = Math.max(0, 60000 - connectedFor) + 3000 + 15000;
+            await(2, Math.max(fixture.optInt("recovery_ms", 45000), cooldown)); tcp(v4); tcp(v6);
             Activity finished = activity; test.runOnMainSync(finished::finish); activity = null;
             Thread.sleep(1500); check(TunnelService.active && state() == 2, "Activity close retains VPN"); tcp(v4);
             context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP));
