@@ -117,16 +117,35 @@ def worker(path, original_vpn, service_crash=False):
         print('PASS transport outage, reconnect and explicit Stop',flush=True)
         direct()
         pipe.close();pipe=Pipe()
-        result=pipe.request(dict(op='StartFull',profile=profile,dns=data['target']))
-        assert result['state']=='Connected',result
-        pipe.close() # Same lease loss as a crashed GUI process.
-        time.sleep(.5)
-        try:direct()
-        except OSError:pass
-        else:raise AssertionError('GUI crash released the network guard')
-        recover();direct()
-        assert subprocess.run(['/sbin/ifconfig','utun5254'],capture_output=True).returncode!=0
-        print('PASS GUI/IPC crash retains guard; explicit recovery restores direct access and removes utun',flush=True)
+        def tunnel_route():
+            route=subprocess.check_output(['/sbin/route','-n','get',data['target']],text=True,timeout=5)
+            assert any(line.strip()=='interface: utun5254' for line in route.splitlines()), 'Fixture route does not use owned utun'
+        for mode in ('full','split'):
+            command=dict(op='StartFull',profile=profile,dns=data['target']) if mode=='full' else dict(op='Start',profile=profile,networks=[data['target']+'/32'])
+            result=pipe.request(command);assert result['state']=='Connected',result
+            tunnel_route()
+            pipe.close() # Same attachment loss as a crashed GUI process.
+            started=time.monotonic();deadline=started+65;observations=0
+            # No IPC polling keeps the tunnel alive during this interval.
+            while True:
+                with opener.open('http://'+data['target']+':8080/',timeout=3) as response:
+                    assert response.read()==BODY
+                observations+=1
+                if time.monotonic()>=deadline:break
+                time.sleep(min(2,max(0,deadline-time.monotonic())))
+            assert observations>=2 and time.monotonic()-started>=65
+            tunnel_route()
+            if mode=='full':
+                try:direct()
+                except OSError:pass
+                else:raise AssertionError('GUI crash released the network guard')
+            observer=Pipe()
+            try:assert observer.request(dict(op='Status'))['state']=='Connected'
+            finally:observer.close()
+            recover();direct()
+            assert subprocess.run(['/sbin/ifconfig','utun5254'],capture_output=True).returncode!=0
+            print('PASS '+mode+' detached fixture traffic >=65s, owned route, fresh Status and explicit Recover cleanup',flush=True)
+            pipe=Pipe()
         if service_crash:
             pipe=Pipe()
             result=pipe.request(dict(op='StartFull',profile=profile,dns=data['target']))
@@ -159,7 +178,7 @@ def main():
     parser=argparse.ArgumentParser();parser.add_argument('fixture');parser.add_argument('--original-vpn',required=True);parser.add_argument('--worker',action='store_true');parser.add_argument('--service-crash',action='store_true',help='Wait for a separately authorized launchctl SIGKILL during the active tunnel');args=parser.parse_args()
     if args.worker:return worker(args.fixture,args.original_vpn,args.service_crash)
     fixture=json.loads(pathlib.Path(args.fixture).read_text())
-    if 'expires_at' in fixture and fixture['expires_at']<time.time()+180:
+    if 'expires_at' in fixture and fixture['expires_at']<time.time()+600:
         raise RuntimeError('Refresh the disposable endpoint before disconnecting the original VPN')
     # The independent driver survives child timeout/failure and restores VPN.
     try:
@@ -172,7 +191,7 @@ def main():
             if status=='Disconnected' and not vpn_default:break
             if time.monotonic()>=deadline:raise RuntimeError('Original VPN did not disconnect: '+status)
             time.sleep(.25)
-        subprocess.run([sys.executable,__file__,args.fixture,'--original-vpn',args.original_vpn,'--worker']+(['--service-crash'] if args.service_crash else []),check=True,timeout=220 if args.service_crash else 160)
+        subprocess.run([sys.executable,__file__,args.fixture,'--original-vpn',args.original_vpn,'--worker']+(['--service-crash'] if args.service_crash else []),check=True,timeout=480 if args.service_crash else 400)
     finally:
         try:recover()
         finally:
