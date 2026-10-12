@@ -492,9 +492,13 @@ pub enum Reply {
         message: String,
     },
 }
+/// Wire version whose replies use [`Reply::V1`]. Every entry of
+/// [`RELEASED_UPDATER_VERSIONS`] must map to its own legacy shape here; a test
+/// fails if a listed version would fall back to the current `Response`.
+const V1_REPLY_VERSION: u32 = 1;
 impl Reply {
     pub fn new(version: u32, state: State, message: &str) -> Self {
-        if version == 1 {
+        if version == V1_REPLY_VERSION {
             return Self::V1 {
                 version,
                 state,
@@ -649,6 +653,12 @@ mod tests {
     fn released_sequence_9_updater_may_only_reserve_and_reads_the_reply() {
         assert!(!RELEASED_UPDATER_VERSIONS.contains(&VERSION));
         assert!(!RELEASED_UPDATER_VERSIONS.contains(&(VERSION - 1)));
+        for &version in RELEASED_UPDATER_VERSIONS {
+            assert!(
+                matches!(Reply::new(version, State::Idle, ""), Reply::V1 { .. }),
+                "released updater v{version} needs an explicit legacy reply shape"
+            );
+        }
         let send = |command| {
             let json = serde_json::to_string(&v1::Request {
                 version: 1,

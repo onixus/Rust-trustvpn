@@ -114,5 +114,46 @@ class LockedReleaseTools(unittest.TestCase):
                 self.assertIn("--offline", command, name)
 
 
+class PackagingVersions(unittest.TestCase):
+    """Packaged version metadata must follow the workspace, never a stale literal."""
+
+    def setUp(self):
+        import re
+        self.re = re
+        self.root = pathlib.Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("package_preview", self.root / "scripts/package-preview.py")
+        self.preview = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.preview)
+        self.version = self.preview.workspace_version(self.root)
+        self.sequence = self.preview.update_sequence(self.root)
+
+    def test_macos_preview_bundle_uses_workspace_version_and_update_sequence(self):
+        info = self.preview.preview_info(self.root)
+        self.assertEqual(info["CFBundleShortVersionString"], self.version)
+        self.assertEqual(info["CFBundleVersion"], self.sequence)
+
+    def test_packaging_scripts_do_not_hardcode_bundle_versions(self):
+        literal = self.re.compile(r"""CFBundle(ShortVersionString|Version)\s*=\s*['"]""")
+        for path in sorted((self.root / "scripts").glob("*.py")) + sorted((self.root / "ci").glob("*.py")):
+            if path.name.startswith("test"):
+                continue
+            self.assertIsNone(literal.search(path.read_text()), path.name)
+
+    def test_platform_manifests_match_workspace_version(self):
+        import plistlib
+        codes = set()
+        for target in ("App", "PacketTunnel", "Widget"):
+            with (self.root / "apps/ios" / target / "Info.plist").open("rb") as f:
+                info = plistlib.load(f)
+            self.assertEqual(info["CFBundleShortVersionString"], self.version, target)
+            codes.add(info["CFBundleVersion"])
+        gradle = (self.root / "apps/android/app/build.gradle").read_text()
+        self.assertIn(f"versionName '{self.version}-", gradle)
+        android_code = self.re.search(r"rtrustVersionCode'\) \?: '(\d+)'", gradle).group(1)
+        self.assertEqual(codes, {android_code})
+        self.assertIn(f'#define AppVersion "{self.version}"', (self.root / "deploy/windows/setup.iss").read_text())
+        self.assertEqual(json.loads((self.root / "apps/webview/tauri.conf.json").read_text())["version"], self.version)
+
+
 if __name__ == "__main__":
     unittest.main()
