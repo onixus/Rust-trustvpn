@@ -173,20 +173,26 @@ class ProvenanceTests(unittest.TestCase):
         (self.repo / 'ignored-ok').write_text('synthetic ignored\n')
         verify(self.repo, self.dest, self.sha)
         (self.repo / 'untracked.rs').write_text('synthetic untracked\n')
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, 'tracked changes|untracked'):
             verify(self.repo, self.dest, self.sha)
         (self.repo / 'untracked.rs').unlink()
         (self.repo / '.cargo').mkdir()
         (self.repo / '.cargo' / 'config.toml').write_text('[build]\n')
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, 'build override'):
             verify(self.repo, self.dest, self.sha)
         (self.repo / '.cargo' / 'config.toml').unlink()
         (self.repo / '.cargo').rmdir()
+        verify(self.repo, self.dest, self.sha)
+        for name in ['rust-toolchain.toml', 'Rust-Toolchain']:
+            (self.repo / name).write_text('[toolchain]\n')
+            (self.repo / '.git' / 'info' / 'exclude').write_text(f'/target/\n/ignored-ok\n/{name}\n')
+            with self.assertRaisesRegex(ValueError, 'build override'):
+                verify(self.repo, self.dest, self.sha)
+            (self.repo / name).unlink()
         (self.repo / 'nested' / '.cargo').mkdir(parents=True)
         (self.repo / 'nested' / '.cargo' / 'config').write_text('[build]\n')
-        (self.repo / '.git' / 'info' / 'exclude').write_text('/target/\n/nested/\n')
-        with self.assertRaises(ValueError):
-            verify(self.repo, self.dest, self.sha)
+        (self.repo / '.git' / 'info' / 'exclude').write_text('/target/\n/ignored-ok\n/nested/\n')
+        verify(self.repo, self.dest, self.sha)
 
     def test_jenkinsfiles_validate_parameters_before_git(self):
         for name in ['Jenkinsfile', 'Jenkinsfile.android', 'Jenkinsfile.linux']:

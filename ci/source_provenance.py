@@ -9,9 +9,8 @@ import tarfile
 import unicodedata
 
 RESERVED = ('source-manifest.json', 'source-identity.json')
-# Ignored paths that may alter what Cargo builds in the signing checkout.
+# Checkout-root entries (tracked or ignored) that may alter what Cargo or rustup builds.
 BUILD_OVERRIDES = ('.cargo', 'rust-toolchain', 'rust-toolchain.toml')
-ALLOWED_IGNORED_ROOTS = ('target', 'dist')
 
 
 def git(source, *args):
@@ -111,17 +110,14 @@ def read_back(root):
 
 
 def reject_build_overrides(source):
-    if (source / '.cargo').exists() or (source / '.cargo').is_symlink():
-        raise ValueError('Signing checkout contains a .cargo override')
-    ignored = git(source, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching')
-    for entry in ignored.split(b'\0'):
-        if not entry.startswith(b'!! '):
-            continue
-        parts = entry[3:].decode(errors='replace').rstrip('/').split('/')
-        if parts[0] in ALLOWED_IGNORED_ROOTS:
-            continue
-        if any(part in BUILD_OVERRIDES for part in parts):
-            raise ValueError('Signing checkout contains an ignored build override')
+    """Reject Cargo/rustup overrides in the signing checkout root, tracked or ignored.
+
+    Cargo and rustup read these from the working directory and its ancestors only,
+    so nested copies cannot affect `cargo run` from the checkout root.
+    """
+    for entry in source.iterdir():
+        if entry.name.casefold() in BUILD_OVERRIDES:
+            raise ValueError('Signing checkout contains a build override')
 
 
 def verify(source, archive, sha):
