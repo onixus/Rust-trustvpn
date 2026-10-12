@@ -83,6 +83,7 @@ fn changed_profiles(
 }
 fn track(tracked: &mut Vec<TrackedProfile>, meta: &RemoteProfile, profile: Profile) {
     let item = TrackedProfile {
+        available: true,
         id: meta.id.clone(),
         revision: meta.revision.clone(),
         baseline: profile,
@@ -283,6 +284,12 @@ impl App {
                             track(&mut self.saved_connection.sync.tracked, &meta, profile);
                             updated += 1;
                         }
+                        let mut availability_changed = false;
+                        for tracked in &mut self.saved_connection.sync.tracked {
+                            let available = batch.available.contains(&tracked.id);
+                            availability_changed |= tracked.available != available;
+                            tracked.available = available;
+                        }
                         let candidate = rtrust_store::Vault {
                             profiles: self.profiles.clone(),
                             connection: self.saved_connection.clone(),
@@ -314,7 +321,7 @@ impl App {
                         if updated > 0 {
                             self.reset_editor();
                         }
-                        if updated > 0 || routes_changed || lease_changed {
+                        if updated > 0 || routes_changed || lease_changed || availability_changed {
                             self.dirty = true;
                             return self.update(Message::Save);
                         }
@@ -408,6 +415,7 @@ mod tests {
             enabled: true,
             origin: "https://example.test/".into(),
             tracked: vec![TrackedProfile {
+                available: true,
                 id: "remote-1".into(),
                 revision: "1".into(),
                 baseline: app.profiles[0].clone(),
@@ -450,6 +458,7 @@ mod tests {
         let mut app = configured();
         let old = app.profiles[0].clone();
         app.saved_connection.sync.tracked.push(TrackedProfile {
+            available: true,
             id: "remote-2".into(),
             revision: "1".into(),
             baseline: old.clone(),
@@ -508,11 +517,15 @@ mod tests {
         let _ = app.sync_update(Action::Received(Ok(Box::new(result))));
         assert_eq!(app.profiles, before);
         assert!(app.sync_state.status.contains("Недоступно на сервере: 1"));
+        assert!(!app.saved_connection.sync.tracked[0].available);
+        let dirty = app.dirty;
+        let sync = app.saved_connection.sync.clone();
         let mut result = batch(before[0].clone());
         result.origin = "https://different.test/".into();
         let _ = app.sync_update(Action::Received(Ok(Box::new(result))));
         assert_eq!(app.profiles, before);
-        assert!(!app.dirty);
+        assert_eq!(app.dirty, dirty);
+        assert!(app.saved_connection.sync == sync);
     }
     #[test]
     fn group_route_policy_is_applied_replaced_and_cleared() {
@@ -611,6 +624,7 @@ mod tests {
         let mut app = configured();
         let second = app.profiles[1].clone();
         app.saved_connection.sync.tracked.push(TrackedProfile {
+            available: true,
             id: "remote-2".into(),
             revision: "1".into(),
             baseline: second.clone(),

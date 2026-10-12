@@ -11,9 +11,18 @@ pub struct SyncSettings {
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrackedProfile {
+    #[serde(default = "available")]
+    pub available: bool,
     pub id: String,
     pub revision: String,
     pub baseline: Profile,
+}
+fn available() -> bool {
+    true
+}
+fn same_access(left: &Profile, right: &Profile) -> bool {
+    left.endpoint.username == right.endpoint.username
+        && left.endpoint.password == right.endpoint.password
 }
 impl SyncSettings {
     pub fn lease_for(
@@ -21,11 +30,24 @@ impl SyncSettings {
         assigned_routes: bool,
         profiles: &[Profile],
     ) -> std::result::Result<Option<rtrust_control::freshness::Lease>, String> {
-        if !assigned_routes
-            && !profiles
+        let mut managed = assigned_routes;
+        for profile in profiles {
+            let mut matching = self
+                .tracked
                 .iter()
-                .any(|p| self.tracked.iter().any(|t| t.baseline == *p))
-        {
+                .filter(|entry| same_access(&entry.baseline, profile))
+                .peekable();
+            if matching.peek().is_none() {
+                continue;
+            }
+            managed = true;
+            if !matching.any(|entry| entry.available) {
+                return Err(
+                    "Cached managed access is no longer granted; resolve the portal profile".into(),
+                );
+            }
+        }
+        if !managed {
             return Ok(None);
         }
         let lease = self
@@ -76,6 +98,7 @@ mod tests {
             enabled: false,
             origin: "https://portal.example".into(),
             tracked: vec![TrackedProfile {
+                available: true,
                 id: "device".into(),
                 revision: "1".into(),
                 baseline: remote.clone(),
@@ -95,5 +118,36 @@ mod tests {
         );
         assert!(settings.lease_for(false, &[local.clone(), remote]).is_err());
         assert!(settings.lease_for(true, &[local]).is_err());
+        let mut edited = settings.tracked[0].baseline.clone();
+        edited.name = "My custom name".into();
+        edited.policy = serde_json::json!({});
+        assert!(
+            settings
+                .lease_for(false, std::slice::from_ref(&edited))
+                .is_err()
+        );
+        let mut fresh = settings.clone();
+        let now = rtrust_control::freshness::now();
+        fresh.access_lease = Some(rtrust_control::freshness::Lease {
+            issued_at_ms: now,
+            expires_at_ms: now + 60000,
+        });
+        assert!(
+            fresh
+                .lease_for(false, std::slice::from_ref(&edited))
+                .unwrap()
+                .is_some()
+        );
+        fresh.tracked[0].available = false;
+        assert!(
+            fresh
+                .lease_for(false, std::slice::from_ref(&edited))
+                .is_err()
+        );
+        let mut alias = fresh.tracked[0].clone();
+        alias.id = "still-granted".into();
+        alias.available = true;
+        fresh.tracked.push(alias);
+        assert!(fresh.lease_for(false, &[edited]).unwrap().is_some());
     }
 }

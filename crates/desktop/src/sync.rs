@@ -78,17 +78,20 @@ pub fn prepare(vault: &Vault, snapshot: Snapshot) -> Result<Vault, String> {
         }
         next.connection.sync.tracked.retain(|p| p.id != meta.id);
         next.connection.sync.tracked.push(TrackedProfile {
+            available: true,
             id: meta.id.clone(),
             revision: meta.revision.clone(),
             baseline: profile.clone(),
         });
     }
-    // No longer delivered does not prove endpoint revocation. Retain independent
-    // local copies, but stop tracking unavailable remote profiles.
-    next.connection
-        .sync
-        .tracked
-        .retain(|p| snapshot.profiles.iter().any(|(meta, _)| meta.id == p.id));
+    // Retain local data and its managed provenance. A newer receipt cannot
+    // re-authorize a credential the authenticated snapshot no longer grants.
+    for tracked in &mut next.connection.sync.tracked {
+        tracked.available = snapshot
+            .profiles
+            .iter()
+            .any(|(meta, _)| meta.id == tracked.id);
+    }
     next.connection.managed_routes = managed;
     next.connection
         .validate()
@@ -133,6 +136,7 @@ mod tests {
             ..Default::default()
         };
         v.connection.sync.tracked.push(TrackedProfile {
+            available: true,
             id: "one".into(),
             revision: "1".into(),
             baseline: profile("one"),
@@ -232,5 +236,42 @@ mod tests {
         .unwrap();
         assert!(v.connection.managed_routes.is_none());
         assert_eq!(v.profiles.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    #[test]
+    fn missing_grant_retains_data_but_a_new_receipt_cannot_authorize_it() {
+        let profile =
+            rtrust_profile::Profile::import(include_str!("../../../examples/demo.endpoint.toml"))
+                .unwrap();
+        let mut vault = Vault {
+            profiles: vec![profile.clone()],
+            ..Default::default()
+        };
+        vault.connection.sync.tracked.push(TrackedProfile {
+            available: true,
+            id: "removed".into(),
+            revision: "1".into(),
+            baseline: profile.clone(),
+        });
+        let now = rtrust_control::freshness::now();
+        let next = prepare(
+            &vault,
+            Snapshot {
+                freshness: Some(rtrust_control::freshness::Lease {
+                    issued_at_ms: now,
+                    expires_at_ms: now + 60000,
+                }),
+                profiles: vec![],
+                routing: RoutingState::Available(None),
+            },
+        )
+        .unwrap();
+        assert!(next.profiles == vault.profiles);
+        assert!(!next.connection.sync.tracked[0].available);
+        assert!(next.connection.sync.lease_for(false, &[profile]).is_err());
     }
 }

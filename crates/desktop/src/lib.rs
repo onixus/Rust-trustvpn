@@ -363,6 +363,7 @@ mod tests {
             .sync
             .tracked
             .push(rtrust_store::TrackedProfile {
+                available: true,
                 id: "one".into(),
                 revision: "one".into(),
                 baseline: profile,

@@ -151,3 +151,11 @@ Managed SOCKS и постоянный service-owned Always-on пока не им
 альтернативный lifecycle/verifier удалён из текущего diff. На совмещённой
 версии прошли 194 API/SQLite регрессии. Старые network-none verifier receipts
 остаются историческими и не считаются доказательством этой серверной версии.
+
+Desktop receipt admission сохраняет managed принадлежность при изменении
+названия/локальной политики через credential identity. Если snapshot больше
+не выдаёт grant, данные остаются в vault с unavailable marker: новый receipt
+для соседних профилей не разрешает старый credential. Другой действующий
+grant той же identity может её разрешить; независимые credentials локального
+профиля остаются локальными. Явное удаление привязки — отдельное решение
+владельца, endpoint revoke по-прежнему проверяется сервером.
