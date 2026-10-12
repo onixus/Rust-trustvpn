@@ -42,6 +42,6 @@ if (output/filename).exists():assert hashlib.sha256((output/filename).read_bytes
 shutil.copyfile(source,output/filename);(output/filename).chmod(0o644)
 now=int(time.time());payload=dict(schema=1,sequence=a.sequence,version=a.version,target=a.target,min_ipc=ipc_version,max_ipc=ipc_version,published=now,expires=now+30*86400,url=f'https://onixus-rf.duckdns.org/rtrust/releases/{a.sequence}/{a.target}/{filename}',size=source.stat().st_size,sha256=sha)
 input_file=output/'payload.json';input_file.write_text(json.dumps(payload,separators=(',',':')))
-subprocess.run(['cargo','run','--offline','--quiet','-p','rtrust-update','--example','sign_release','--',str(a.signing_key or ROOT/'.release-secrets/update-signing.pk8'),str(input_file),str(output/'manifest.json')],cwd=ROOT,check=True)
+subprocess.run(['cargo','run','--offline','--locked','--quiet','-p','rtrust-update','--example','sign_release','--',str(a.signing_key or ROOT/'.release-secrets/update-signing.pk8'),str(input_file),str(output/'manifest.json')],cwd=ROOT,check=True)
 (output/'manifest.json').chmod(0o644)
 print('Prepared signed public release:',output,'SHA256:',sha)

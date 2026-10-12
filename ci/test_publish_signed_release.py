@@ -97,5 +97,22 @@ class PublisherGate(unittest.TestCase):
         self.assertIn("latest.json", self.calls[-1][-1])
 
 
+class LockedReleaseTools(unittest.TestCase):
+    def test_release_scripts_run_cargo_with_the_committed_lockfile(self):
+        import ast
+        scripts = pathlib.Path(__file__).resolve().parents[1] / "scripts"
+        for name in ("prepare-signed-release.py", "publish-signed-release.py"):
+            commands = [
+                [e.value for e in node.elts if isinstance(e, ast.Constant)]
+                for node in ast.walk(ast.parse((scripts / name).read_text()))
+                if isinstance(node, ast.List) and node.elts
+                and isinstance(node.elts[0], ast.Constant) and node.elts[0].value == "cargo"
+            ]
+            self.assertTrue(commands, name)
+            for command in commands:
+                self.assertIn("--locked", command, name)
+                self.assertIn("--offline", command, name)
+
+
 if __name__ == "__main__":
     unittest.main()
