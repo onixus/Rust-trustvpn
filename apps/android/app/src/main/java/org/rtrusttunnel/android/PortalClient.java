@@ -57,6 +57,15 @@ class PortalClient {
         new PortalClient(origin, result.getString("token"));
         return result.put("origin", origin);
     }
+    /** Same policy as iOS: 1..80 printable ASCII (0x20-0x7E); compared code unit by code unit. */
+    static boolean originLabel(String value) {
+        if (value.isEmpty() || value.length() > 80) return false;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c < 0x20 || c > 0x7E) return false;
+        }
+        return true;
+    }
     static java.util.Map<String, java.util.List<String>> metadata(JSONArray profiles) throws Exception {
         if (profiles.length() > 64) throw new IOException("Invalid profile list");
         java.util.Map<String, java.util.List<String>> result = new java.util.TreeMap<>();
@@ -71,8 +80,7 @@ class PortalClient {
             if (rawOrigin != null && rawOrigin != JSONObject.NULL) {
                 if (!(rawOrigin instanceof String)) throw new IOException("Invalid profile metadata");
                 profileOrigin = (String) rawOrigin;
-                if (profileOrigin.isEmpty() || profileOrigin.getBytes(StandardCharsets.UTF_8).length > 80
-                    || profileOrigin.codePoints().anyMatch(Character::isISOControl)) throw new IOException("Invalid profile metadata");
+                if (!originLabel(profileOrigin)) throw new IOException("Invalid profile metadata");
             }
             if (result.put(remoteId, java.util.Arrays.asList(revision, profileOrigin)) != null)
                 throw new IOException("Duplicate profile identifier");
@@ -84,15 +92,20 @@ class PortalClient {
         if (!parsed.getBoolean("ok")) throw new IOException();
         return parsed.getJSONObject("profile");
     }
-    static void checkCancelled() throws java.io.InterruptedIOException {
-        if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("Synchronization cancelled");
+    /** Cooperative stop signal; WorkManager stops a Worker without interrupting its thread. */
+    interface Cancellation { boolean cancelled(); }
+    static final Cancellation NEVER = () -> false;
+    static void checkCancelled(Cancellation cancellation) throws java.io.InterruptedIOException {
+        if (Thread.currentThread().isInterrupted() || cancellation.cancelled())
+            throw new java.io.InterruptedIOException("Synchronization cancelled");
     }
-    JSONArray download() throws Exception {
-        checkCancelled();
+    JSONArray download() throws Exception { return download(NEVER); }
+    JSONArray download(Cancellation cancellation) throws Exception {
+        checkCancelled(cancellation);
         java.util.Map<String, java.util.List<String>> before = metadata(request("/portal/v2/profiles", null).getJSONArray("profiles"));
         JSONArray result = new JSONArray();
         for (java.util.Map.Entry<String, java.util.List<String>> entry : before.entrySet()) {
-            checkCancelled();
+            checkCancelled(cancellation);
             String remoteId = entry.getKey(), revision = entry.getValue().get(0);
             JSONObject exported = request("/portal/v2/profiles/" + remoteId + "/export", new JSONObject()
                 .put("format", "profile_json").put("revision", revision).put("include_secrets", true).put("accept_losses", false));
@@ -100,10 +113,46 @@ class PortalClient {
             result.put(new JSONObject().put("id", "portal:" + remoteId).put("remote_id", remoteId).put("revision", revision)
                 .put("profile", profile));
         }
+        checkCancelled(cancellation);
         if (!before.equals(metadata(request("/portal/v2/profiles", null).getJSONArray("profiles"))))
             throw new IOException("Profile list changed during synchronization");
-        checkCancelled();
+        checkCancelled(cancellation);
         return result;
+    }
+    static boolean samePortal(JSONObject a, JSONObject b) {
+        return a != null && a.optString("origin").equals(b.optString("origin"))
+            && !a.optString("token").isEmpty() && a.optString("token").equals(b.optString("token"));
+    }
+    /**
+     * Pure vault commit step used by ProfileVault under its lock. Replaces every managed
+     * ({@code remote_id}) profile with {@code remote}, keeps local profiles and the selection when
+     * it still exists. All checks run before {@code data} is touched, so a rejected batch leaves it
+     * unchanged. A changed registration throws for a foreground sync and returns false (no write)
+     * for a background sync, which also requires background sync to still be enabled.
+     */
+    static boolean applyBatch(JSONObject data, JSONObject session, JSONArray remote, boolean background, long now) throws Exception {
+        JSONObject current = data.optJSONObject("portal");
+        if (!samePortal(current, session)) {
+            if (background) return false;
+            throw new IOException("Registration changed");
+        }
+        if (background && !current.optBoolean("background_sync")) return false;
+        String selected = data.getString("default");
+        JSONArray old = data.getJSONArray("profiles"), profiles = new JSONArray();
+        for (int i = 0; i < old.length(); i++) if (!old.getJSONObject(i).has("remote_id")) profiles.put(old.get(i));
+        if (profiles.length() + remote.length() > 64) throw new IOException("Profile limit");
+        java.util.HashSet<String> ids = new java.util.HashSet<>();
+        for (int i = 0; i < remote.length(); i++) {
+            JSONObject item = remote.getJSONObject(i);
+            if (!ids.add(item.getString("id"))) throw new IOException("Duplicate remote profile");
+            profiles.put(item);
+        }
+        String repaired = profiles.length() == 0 ? "" : profiles.getJSONObject(0).getString("id");
+        for (int i = 0; i < profiles.length(); i++)
+            if (profiles.getJSONObject(i).getString("id").equals(selected)) { repaired = selected; break; }
+        data.put("profiles", profiles).put("default", repaired);
+        current.put("last_sync", now).remove("sync_auth_expired");
+        return true;
     }
     static final class Failure extends IOException {
         final int status;
