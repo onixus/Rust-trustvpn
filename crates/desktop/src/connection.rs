@@ -44,7 +44,7 @@ impl Session {
         };
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         if mode != Mode::Socks {
-            return rtrust_control::Client::start_managed(
+            let client = rtrust_control::Client::start_managed(
                 profile,
                 fallbacks,
                 if mode == Mode::Full {
@@ -55,8 +55,8 @@ impl Session {
                 dns.parse().map_err(|_| "Invalid IPv4 DNS")?,
                 lease,
             )
-            .await
-            .map(Self::Tun);
+            .await?;
+            return Ok(Self::tun(client).await);
         }
         Err(
             "Managed freshness requires a compatible system TUN service; SOCKS is unsupported"
@@ -74,13 +74,15 @@ impl Session {
         let _ = &dns;
         match mode {
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Mode::Full => rtrust_control::Client::start_full(
-                profile,
-                fallbacks,
-                dns.parse().map_err(|_| "Некорректный IPv4 DNS")?,
-            )
-            .await
-            .map(Self::Tun),
+            Mode::Full => {
+                let client = rtrust_control::Client::start_full(
+                    profile,
+                    fallbacks,
+                    dns.parse().map_err(|_| "Некорректный IPv4 DNS")?,
+                )
+                .await?;
+                Ok(Self::tun(client).await)
+            }
             Mode::Socks => {
                 // The proxy has no service supervisor; backups apply to TUN modes.
                 let _ = (selection, fallbacks);
@@ -91,11 +93,23 @@ impl Session {
             }
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             Mode::Tun => {
-                rtrust_control::Client::start(profile, fallbacks, selection, dns.parse().ok())
-                    .await
-                    .map(Self::Tun)
+                let client =
+                    rtrust_control::Client::start(profile, fallbacks, selection, dns.parse().ok())
+                        .await?;
+                Ok(Self::tun(client).await)
             }
         }
+    }
+    // The owner survives a GUI crash so this user can still stop the
+    // service-owned session; only the OS credential store keeps it.
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    async fn tun(client: rtrust_control::Client) -> Self {
+        if let Some(owner) = client.owner() {
+            // Best effort: the live connection can still Stop without it.
+            let _ =
+                tokio::task::spawn_blocking(move || rtrust_store::save_session_owner(&owner)).await;
+        }
+        Self::Tun(client)
     }
     pub fn proxy(&self) -> Option<&rtrust_engine::proxy::Proxy> {
         match self {
@@ -150,7 +164,14 @@ impl Session {
                 Ok(())
             }
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Self::Tun(c) => c.close().await,
+            Self::Tun(c) => {
+                let owned = c.owner().is_some();
+                c.close().await?;
+                if owned {
+                    forget_owner().await;
+                }
+                Ok(())
+            }
         }
     }
     /// Worker/IPC liveness only; use observations for verified network availability.
@@ -168,4 +189,29 @@ impl Session {
             }
         }
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+async fn forget_owner() {
+    let _ = tokio::task::spawn_blocking(rtrust_store::clear_session_owner).await;
+}
+/// Explicit Recover: stops this user's live session with the stored owner, or
+/// releases a guard retained after the session ended. A live session started
+/// by another client stays protected and the service reports it.
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+pub async fn recover_service() -> Result<(), String> {
+    let owner = if cfg!(target_os = "macos") {
+        tokio::task::spawn_blocking(rtrust_store::load_session_owner)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let had_owner = owner.is_some();
+    rtrust_control::Client::recover(owner).await?;
+    if had_owner {
+        forget_owner().await;
+    }
+    Ok(())
 }

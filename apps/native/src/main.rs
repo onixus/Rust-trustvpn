@@ -912,13 +912,15 @@ impl App {
                 self.busy = true;
                 return Task::perform(
                     async {
-                        rtrust_control::Client::recover().await.map(|()| {
-                            if cfg!(target_os = "windows") {
-                                "Windows-служба доступна.".into()
-                            } else {
-                                "Блокировка выбранных сетей снята.".into()
-                            }
-                        })
+                        rtrust_desktop::connection::recover_service()
+                            .await
+                            .map(|()| {
+                                if cfg!(target_os = "windows") {
+                                    "Windows-служба доступна.".into()
+                                } else {
+                                    "Блокировка выбранных сетей снята.".into()
+                                }
+                            })
                     },
                     Message::Done,
                 );

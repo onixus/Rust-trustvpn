@@ -83,7 +83,7 @@ async fn desktop_without_admin_can_authenticate_service_but_unauthorized_token_c
         &mut pipe,
         &rtrust_control::Request {
             version: rtrust_control::VERSION,
-            command: rtrust_control::Command::Recover,
+            command: rtrust_control::Command::Recover { owner: None },
         },
     )
     .await

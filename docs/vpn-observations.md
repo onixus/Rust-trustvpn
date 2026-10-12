@@ -7,14 +7,16 @@ profile content or free-text error. Nothing is sent to a server.
 
 ## Contract and compatibility
 
-IPC version 5 requires observation schema 2 and an explicit capability response.
+IPC version 6 requires observation schema 2 and an explicit capability response.
+Version 6 adds the macOS session owner (Start reply, `Recover.owner`); see
+`docs/macos-system.md`.
 Schema 2 adds native network-change/resume events; schema 1 peers are rejected
 during capability negotiation, and the Android/iOS adapters accept only schema 2.
 Version 3 also adds opt-in persistent Linux/Windows recovery; observation schema remains 2.
 The desktop client negotiates through a separate authenticated, read-only
 `Capabilities` connection **before** sending a profile or issuing a mutation.
 Negotiation is available while another lease or Always-on owns the service.
-Version 1, 2, 3 and 4 clients/services are incompatible with version 5: upgrade the UI and service
+Version 1–5 clients/services are incompatible with version 6: upgrade the UI and service
 together. A mismatch fails before a new Start, Recover or update reservation;
 an existing service-owned VPN/guard is not disabled to achieve compatibility.
 Profile, routing-journal and boot-policy schema versions are unchanged.

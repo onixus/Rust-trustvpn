@@ -220,6 +220,28 @@ fn key(create: bool) -> Result<Zeroizing<Vec<u8>>> {
         _ => Err(Error::Vault),
     }
 }
+const SESSION_OWNER: &str = "service-session-owner-v1";
+fn owner_entry() -> Result<keyring::Entry> {
+    keyring::Entry::new("org.rtrusttunnel.desktop", SESSION_OWNER).map_err(|_| Error::Vault)
+}
+/// Keeps the service session owner in the OS credential store so a restarted
+/// GUI can stop the session it started. Never written to files or logs.
+pub fn save_session_owner(owner: &rtrust_control::owner::Owner) -> Result<()> {
+    owner_entry()?
+        .set_secret(owner.to_hex().as_bytes())
+        .map_err(|_| Error::Vault)
+}
+/// None when absent, unreadable or malformed: Recover then works only after
+/// the session ended (journal path).
+pub fn load_session_owner() -> Option<rtrust_control::owner::Owner> {
+    let secret = Zeroizing::new(owner_entry().ok()?.get_secret().ok()?);
+    rtrust_control::owner::Owner::from_hex(std::str::from_utf8(&secret).ok()?).ok()
+}
+pub fn clear_session_owner() {
+    if let Ok(entry) = owner_entry() {
+        let _ = entry.delete_credential();
+    }
+}
 fn encrypt(vault: &Vault, key: &[u8]) -> Result<Vec<u8>> {
     vault.validate()?;
     let plain = Zeroizing::new(serde_json::to_vec(vault).map_err(|_| Error::Invalid)?);

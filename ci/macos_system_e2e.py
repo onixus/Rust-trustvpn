@@ -12,7 +12,7 @@ class Pipe:
     def request(self,command):
         with self.lock:return self._request(command)
     def _request(self,command):
-        data=json.dumps(dict(version=5,command=command)).encode()
+        data=json.dumps(dict(version=6,command=command)).encode()
         self.socket.sendall(struct.pack('!I',len(data))+data)
         def receive(n):
             data=b''
@@ -47,10 +47,21 @@ def status_trace(pipe):
     try:yield
     finally:stop.set();thread.join(timeout=6)
     assert not failures, 'Unexpected transport reset during traffic: '+repr(failures[:3])
+# IPC v6: Recover of a live session needs the owner returned by its Start.
+# The driver keeps it in a private 0600 file shared only with its worker, so
+# cleanup still works after the worker fails; it is never printed.
+OWNER=os.environ.get('RTRUST_E2E_OWNER_FILE')
+def remember(response):
+    if OWNER and response.get('owner'):
+        fd=os.open(OWNER,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'w') as f:f.write(response['owner'])
 def recover():
+    command=dict(op='Recover')
+    with contextlib.suppress(FileNotFoundError):
+        if OWNER:command['owner']=pathlib.Path(OWNER).read_text().strip()
     pipe=Pipe()
     try:
-        response=pipe.request(dict(op='Recover'));assert response['state']=='Idle',response
+        response=pipe.request(command);assert response['state']=='Idle',(response['state'],response.get('message'))
     finally:pipe.close()
 def traffic(data):
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -89,7 +100,7 @@ def worker(path, original_vpn, service_crash=False):
     direct() # Prove the bypass target was reachable before installing the guard.
     try:
         profile=dict(schema_version=1,name='macOS acceptance fixture',endpoint=data['base'])
-        result=pipe.request(dict(op='StartFull',profile=profile,dns=data['target']))
+        result=pipe.request(dict(op='StartFull',profile=profile,dns=data['target']));remember(result)
         if result['state']!='Connected':
             routes=subprocess.check_output(['/usr/sbin/netstat','-rn','-f','inet'],text=True,timeout=5)
             print('Default routes after failed Start: '+repr([r for r in routes.splitlines() if r.startswith('default ')]),flush=True)
@@ -122,7 +133,7 @@ def worker(path, original_vpn, service_crash=False):
             assert any(line.strip()=='interface: utun5254' for line in route.splitlines()), 'Fixture route does not use owned utun'
         for mode in ('full','split'):
             command=dict(op='StartFull',profile=profile,dns=data['target']) if mode=='full' else dict(op='Start',profile=profile,networks=[data['target']+'/32'])
-            result=pipe.request(command);assert result['state']=='Connected',result
+            result=pipe.request(command);remember(result);assert result['state']=='Connected',result['state']
             tunnel_route()
             pipe.close() # Same attachment loss as a crashed GUI process.
             started=time.monotonic();deadline=started+65;observations=0
@@ -140,16 +151,23 @@ def worker(path, original_vpn, service_crash=False):
                 except OSError:pass
                 else:raise AssertionError('GUI crash released the network guard')
             observer=Pipe()
-            try:assert observer.request(dict(op='Status'))['state']=='Connected'
+            try:
+                assert observer.request(dict(op='Status'))['state']=='Connected'
+                # Same uid without the owner must not release the guard.
+                denied=observer.request(dict(op='Recover'));assert denied['state']=='Blocked',denied['state']
             finally:observer.close()
+            if mode=='full':
+                try:direct()
+                except OSError:pass
+                else:raise AssertionError('Recover without owner released the network guard')
             recover();direct()
             assert subprocess.run(['/sbin/ifconfig','utun5254'],capture_output=True).returncode!=0
             print('PASS '+mode+' detached fixture traffic >=65s, owned route, fresh Status and explicit Recover cleanup',flush=True)
             pipe=Pipe()
         if service_crash:
             pipe=Pipe()
-            result=pipe.request(dict(op='StartFull',profile=profile,dns=data['target']))
-            assert result['state']=='Connected',result
+            result=pipe.request(dict(op='StartFull',profile=profile,dns=data['target']));remember(result)
+            assert result['state']=='Connected',result['state']
             print('READY for authorized launchctl SIGKILL of org.rtrusttunnel.service',flush=True)
             pipe.socket.settimeout(60)
             assert pipe.socket.recv(1)==b'', 'Service must close IPC after SIGKILL'
@@ -181,6 +199,10 @@ def main():
     if 'expires_at' in fixture and fixture['expires_at']<time.time()+600:
         raise RuntimeError('Refresh the disposable endpoint before disconnecting the original VPN')
     # The independent driver survives child timeout/failure and restores VPN.
+    import tempfile
+    private=tempfile.mkdtemp(prefix='rtrust-e2e-')
+    os.environ['RTRUST_E2E_OWNER_FILE']=OWNER_PATH=os.path.join(private,'owner')
+    global OWNER;OWNER=OWNER_PATH
     try:
         subprocess.run(['/usr/sbin/scutil','--nc','stop',args.original_vpn],check=True,timeout=15)
         deadline=time.monotonic()+25
@@ -195,6 +217,8 @@ def main():
     finally:
         try:recover()
         finally:
+            with contextlib.suppress(FileNotFoundError):os.unlink(OWNER_PATH)
+            os.rmdir(private)
             subprocess.run(['/usr/sbin/scutil','--nc','start',args.original_vpn],check=True,timeout=20)
             print('Original VPN restart requested',flush=True)
 if __name__=='__main__':main()

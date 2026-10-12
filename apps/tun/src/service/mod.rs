@@ -255,7 +255,7 @@ async fn serve(
             let _ = read::<Request>(&mut stream).await;
             return Ok(());
         }
-        Command::Recover => {
+        Command::Recover { .. } => {
             return match FullRoutes::recover(uid).and_then(|()| Routes::recover(uid)) {
                 Ok(()) => reply(&mut stream, State::Idle, "Блокировка снята").await,
                 Err(e) => reply(&mut stream, State::Blocked, &e).await,
