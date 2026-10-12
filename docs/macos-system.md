@@ -186,7 +186,9 @@ lives only in the service registry and the caller.
   mechanism as the vault master key), so a restarted GUI can still Recover its
   session; it clears the item after a confirmed Stop or Recover. `rtrust-inspect
   --recover-service` reads the same item (macOS may ask to allow access).
-  The GUI uses the owner of its own live session from memory first. If the
+  The GUI uses the owner of its own live session from memory first; if its
+  Stop is not confirmed (e.g. IPC lost), it keeps that owner in memory until
+  Recover succeeds or a new session starts. If the
   service refuses the owner, the GUI explains the exit (disconnect in the
   starting app, or restart the Mac / have an administrator restart the
   service, then Recover). A failed Keychain write is shown as a warning while

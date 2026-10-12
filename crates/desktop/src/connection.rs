@@ -229,9 +229,9 @@ async fn forget_owner() {
 }
 pub fn owner_unsaved_text(russian: bool) -> &'static str {
     if russian {
-        "Ключ управления сессией VPN не сохранён в Связке ключей. Если приложение закроется аварийно, снять блокировку можно будет только после перезагрузки Mac или перезапуска службы R-TrustTunnel администратором."
+        "Ключ управления сессией VPN не сохранён в Связке ключей и хранится только в этом приложении. При закрытии или сбое приложения он будет потерян: снять блокировку тогда можно только после перезагрузки Mac или перезапуска службы R-TrustTunnel администратором."
     } else {
-        "The VPN session control key was not saved to the Keychain. If the app quits unexpectedly, the block can be removed only after restarting the Mac or an administrator restarting the R-TrustTunnel service."
+        "The VPN session control key was not saved to the Keychain and exists only in this app. It is lost when the app quits or crashes; the block can then be removed only after restarting the Mac or an administrator restarting the R-TrustTunnel service."
     }
 }
 /// The in-memory owner of this GUI's session wins; the Keychain covers a
@@ -251,8 +251,8 @@ fn recover_error(error: String, sent_owner: bool, russian: bool) -> String {
     match (sent_owner, russian) {
         (false, true) => "Подключение VPN запущено, но ключ управления им недоступен: его запустило другое приложение или ключ утерян. Сессия и защита сохранены. Отключите VPN в приложении, которое его запустило; если это было это приложение, перезагрузите Mac или перезапустите службу R-TrustTunnel от администратора, после чего снимите блокировку.",
         (false, false) => "The VPN session is running but its control key is unavailable: another app started it or the key was lost. The session and protection are kept. Disconnect in the app that started it; if it was this app, restart the Mac or have an administrator restart the R-TrustTunnel service, then remove the block.",
-        (true, true) => "Сохранённый ключ управления не подходит к текущей сессии VPN: её запустило другое приложение или более новое подключение. Сессия и защита сохранены. Отключите VPN в приложении, которое его запустило; если это было это приложение, перезагрузите Mac или перезапустите службу R-TrustTunnel от администратора, после чего снимите блокировку.",
-        (true, false) => "The saved control key does not match the current VPN session: another app or a newer connection started it. The session and protection are kept. Disconnect in the app that started it; if it was this app, restart the Mac or have an administrator restart the R-TrustTunnel service, then remove the block.",
+        (true, true) => "Ключ управления не подходит к текущей сессии VPN: её запустило другое приложение или более новое подключение. Сессия и защита сохранены. Отключите VPN в приложении, которое его запустило; если это было это приложение, перезагрузите Mac или перезапустите службу R-TrustTunnel от администратора, после чего снимите блокировку.",
+        (true, false) => "The control key does not match the current VPN session: another app or a newer connection started it. The session and protection are kept. Disconnect in the app that started it; if it was this app, restart the Mac or have an administrator restart the R-TrustTunnel service, then remove the block.",
     }
     .into()
 }
