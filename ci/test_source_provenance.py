@@ -1,5 +1,7 @@
 """Synthetic local Git fixtures; no credentials or network operations."""
 import json
+import os
+from unittest.mock import patch
 import pathlib
 import subprocess
 import tempfile
@@ -22,6 +24,7 @@ class ProvenanceTests(unittest.TestCase):
         (self.repo / 'tool.sh').write_bytes(b'#!/bin/sh\nexit 0\n')
         (self.repo / 'tool.sh').chmod(0o755)
         self.run_git('add', '.')
+        self.run_git('update-index', '--chmod=+x', 'tool.sh')
         self.run_git('commit', '-qm', 'fixture')
         self.sha = self.run_git('rev-parse', 'HEAD').strip()
         self.dest = self.base / 'snapshot'
@@ -33,9 +36,19 @@ class ProvenanceTests(unittest.TestCase):
         return snapshot(self.repo, self.sha, self.dest)
 
     def test_clean_roundtrip_and_executable(self):
-        self.export()
+        modes = []
+        original = pathlib.Path.chmod
+        def chmod(path, mode):
+            modes.append((path.name, mode))
+            original(path, mode)
+        with patch.object(pathlib.Path, 'chmod', autospec=True, side_effect=chmod):
+            self.export()
         verify(self.repo, self.dest, self.sha)
-        self.assertTrue((self.dest / 'tool.sh').stat().st_mode & 0o111)
+        self.assertIn(('tool.sh', 0o755), modes)
+        self.assertIn(('service.rs', 0o644), modes)
+        # NTFS does not expose POSIX executable bits for shell files.
+        if os.name != 'nt':
+            self.assertTrue((self.dest / 'tool.sh').stat().st_mode & 0o111)
 
     def test_autocrlf_does_not_rewrite_snapshot_bytes(self):
         self.run_git('config', 'core.autocrlf', 'true')
