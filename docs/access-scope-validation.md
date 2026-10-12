@@ -26,7 +26,8 @@ Windows и USB Android разрешены для испытаний. Не сле
   пока отвергается целиком: отсутствует корректный lifecycle обновления
   локальных префиксов при handoff. Local routes не выдаются за observed egress.
 - Retry Android использует общий jitter/budget/cooldown и лимит установления
-  соединения. Budget tests не заменяют измерения на устройстве.
+  фиксированного соединения; автоматический выбор резервных профилей пока
+  отсутствует. Budget tests не заменяют измерения на устройстве.
 - Новый server snapshot и индивидуальные credentials описаны в
   [managed-devices.md](managed-devices.md).
 
@@ -82,11 +83,18 @@ installed-package acceptance. Последующие group/session измене�
 полный Rust workspace/Clippy, JNI arm64/x86_64, APK/test APK build и lint.
 Android instrumentation по-прежнему `not_run`.
 
+Повторная Linux laboratory для `8440fe8` прошла build, service, H2, H3 и
+failover: `passed=true`, `cleanup_failures=[]`, source archive SHA-256
+`db6101fb5df0d3c314de5e02ec14e0a0c6a4cc9cc481c1f9f2b35f95cd956554`.
+Последующие изменения относятся только к mobile IPv4/status; этот lab receipt
+не переименовывается в доказательство другого commit. Android connection
+label различает подтверждённый transport и непроверенные системные DNS/HTTPS.
+
 | Задача | Что ещё нужно |
 | --- | --- |
 | #32 | OS route cutover/rollback и физические старые TCP/UDP flows; LAN group adapter/handoff |
 | #33 | Реальная UI/системная диагностика full/split, IPv6, outage/control loss на разрешённых устройствах |
-| #34 | Sleep/reboot/handoff/crash/outage, rollback cleanup, измерения retry/CPU/energy |
+| #34 | Mobile opt-in reserve selection; sleep/reboot/handoff/crash/outage, rollback cleanup, измерения retry/CPU/energy |
 | #35 / tunnel#22 | Активные сессии и физический SLA; legacy/shared migration, LAN groups, QR/renewal physical acceptance, обязательная offline freshness |
 | #36 | Exact commit/package hashes, installed update/rollback/vault tests, publisher signatures, 24h soak и budgets |
 

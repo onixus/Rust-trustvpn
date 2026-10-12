@@ -486,9 +486,9 @@ async fn run(
                 state(
                     2,
                     if profile.endpoint.has_ipv6 {
-                        "Connected · IPv4, IPv6 and DNS"
+                        "Transport connected · IPv4/IPv6 configured; check system DNS/HTTPS"
                     } else {
-                        "Connected · IPv4 and DNS"
+                        "Transport connected · IPv4 configured; check system DNS/HTTPS"
                     },
                 );
                 let started = std::time::Instant::now();
