@@ -1,4 +1,4 @@
-#define AppVersion "0.5.0"
+#define AppVersion "0.6.0"
 [Setup]
 AppId={{E9F177EC-7790-42A6-92C0-377DA6D29E9F}
 AppName=R-TrustTunnel
