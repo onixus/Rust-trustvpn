@@ -192,3 +192,17 @@ each promoted path, protocol and mode in the exact-package ledger.
 Issues #31–33 and #36 remain open until their missing implementation/device and
 publisher gates have evidence. This inventory neither closes issues nor
 publishes/promotes a release.
+
+Release source preparation requires Jenkins `SOURCE_PATH` and a full `SOURCE_SHA`.
+`ci/snapshot.py DEST --source REPO --sha COMMIT` exports that immutable Git tree
+into an empty, separate destination, preserving executable modes and excluding
+untracked and dirty working bytes. Symlinks, submodules and Git archive attribute
+rewrites fail closed. `source-manifest.json` retains its path-to-SHA256 format;
+archived `source-identity.json` binds its digest to the full commit and tree ID.
+
+`prepare-signed-release.py --source-sha COMMIT ...` verifies the complete manifest
+against Git and requires a matching clean tracked signing checkout before reading
+Jenkins credentials or creating release output. Old archives without identity
+must be rebuilt. These checks bind declared source identity; reviewers still
+correlate build logs and artifact receipts, publisher signing and device acceptance.
+They do not prove a binary was compiled honestly or replace required package gates.
