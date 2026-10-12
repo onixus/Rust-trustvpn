@@ -143,7 +143,10 @@ loses IPC reports ControlLost; reopening it does not prove control was recovered
 Use explicit Recover to stop and drain the current service-owned session,
 release its guard, then Start again. Recover and Stop acknowledge Idle only
 after session cleanup and lease release. Start and PrepareUpdate cannot run
-concurrently with the current tunnel.
+concurrently with the current tunnel. If the session supervisor ends
+unexpectedly (including a panic or cancellation), its registration and lease
+are dropped but the network guard is retained; Status and Recover then answer
+from the no-session path, so Recover can still release the retained guard.
 
 Normal service termination uses a durable signal outside the bounded IPC
 queue. An actor queued before termination observes the signal on its first
