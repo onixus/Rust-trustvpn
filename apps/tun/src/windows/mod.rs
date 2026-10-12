@@ -134,15 +134,14 @@ async fn reply(
 ) -> Result<(), String> {
     reply_as(pipe, VERSION, state, message).await
 }
-/// Replies on the wire version admitted for this request.
+/// Replies on the wire version and shape admitted for this request.
 async fn reply_as(
     pipe: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
     version: u32,
     state: State,
     message: &str,
 ) -> Result<(), String> {
-    let mut response = Response::new(state, message);
-    response.version = version;
+    let response = rtrust_control::Reply::new(version, state, message);
     tokio::time::timeout(Duration::from_secs(5), write(pipe, &response))
         .await
         .map_err(|_| "IPC write timed out")?
@@ -227,7 +226,8 @@ async fn serve(
         .await
         .map_err(|_| "IPC read timed out")??;
     // A previous-version updater may only negotiate and reserve the service,
-    // so a failed upgrade can still be rolled back by the old installer.
+    // and a released older updater (RELEASED_UPDATER_VERSIONS) only reserve
+    // it, so a failed upgrade can still be rolled back by the old installer.
     let Some(version) = rtrust_control::admitted_version(&request) else {
         return reply(pipe, State::Error, "IPC version mismatch").await;
     };
@@ -690,6 +690,24 @@ mod tests {
         }
         let response = exchange(VERSION - 2, Command::Capabilities).await;
         assert_eq!(response.message, "IPC version mismatch");
+    }
+    #[tokio::test]
+    async fn released_v1_updater_cannot_negotiate_or_control_a_session() {
+        for &version in rtrust_control::RELEASED_UPDATER_VERSIONS {
+            for command in [
+                Command::Capabilities,
+                Command::Stop,
+                Command::Status,
+                Command::Recover { owner: None },
+                Command::DisableAlwaysOn,
+                Command::AlwaysOnStatus,
+            ] {
+                let response = exchange(version, command).await;
+                assert_eq!(response.version, VERSION);
+                assert_eq!(response.state, State::Error);
+                assert_eq!(response.message, "IPC version mismatch");
+            }
+        }
     }
     #[tokio::test]
     async fn stop_after_transport_failure_does_not_poll_completed_task() {

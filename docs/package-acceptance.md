@@ -121,7 +121,7 @@ ledger is created per package set after that build.
 | --- | --- | --- | --- | --- |
 | Windows x64 installer + service | — | — | `not_run` | Windows lab; exact-source build pending |
 | Windows Authenticode | — | — | `blocked` | Windows publisher |
-| Windows signed update 9 → 10 + rollback | — | — | `blocked` | Windows lab; sequence-9 helper speaks IPC v1, service v6 admits only v5 (see [secure updates](secure-updates.md)) |
+| Windows signed update 9 → 10 + forced rollback | — | — | `not_run` | Windows lab; v1 helper reservation is unit-tested only (see [secure updates](secure-updates.md)) |
 | macOS system package installed acceptance | — | — | `blocked` | Dedicated test Mac required |
 | macOS Developer ID + notarization | — | — | `blocked` | Apple publisher; packages remain ad-hoc sealed |
 | Linux host package + Flatpaks, x86_64/ARM64, reboot/sleep | — | — | `not_run` | Linux lab |

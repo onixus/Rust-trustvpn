@@ -21,8 +21,10 @@ After Setup, the helper launches the installed GUI smoke mode. A failed health
 check installs and checks the previous signed package. If the replacement service
 is unavailable, active, or retains a guard, automatic rollback stops safely;
 the replacement service admits the previous IPC version only for capability
-negotiation and the maintenance reservation, so an IPC bump alone does not stop
-the old helper's rollback;
+negotiation and the maintenance reservation, and the IPC versions of published
+older helpers listed in `RELEASED_UPDATER_VERSIONS` only for the reservation,
+answered in that version's wire shape, so an IPC bump alone does not stop the
+old helper's rollback;
 packages, encrypted backup and logs remain in the transaction directory. The
 helper does not clear a network guard or overwrite the user's vault. A successful
 update restarts the GUI; after rollback the user can restart the previous version.
@@ -127,14 +129,20 @@ this source and runs the signing tool with `--offline --locked`. No sequence-10
 artifact, signed manifest or rollback envelope has been built or published, and
 no target's `latest` points at sequence 10. See [v0.6.0](releases/v0.6.0.md).
 
-Known gap before any Windows promotion: the `VERSION - 1` exception above covers
-one IPC step. The installed sequence-9 helper from v0.5.0-rebuild.9 speaks
-control IPC **v1**, while the 0.6.0 service is v6, so after a failed health
-check the old helper's `PrepareUpdate` is refused and automatic rollback stops
-safely without clearing the guard. The forward 9 → 10 install is unaffected
-because it reserves the running sequence-9 service. A real signed 9 → 10 update
-with injected failure and rollback on the Windows lab is NOT RUN and is required
-before Windows `latest` may move to sequence 10. macOS remains withheld.
+Rollback 10 → 9: the installed sequence-9 helper from v0.5.0-rebuild.9 speaks
+control IPC **v1**, two or more steps behind the 0.6.0 service (v6), so the
+one-step `VERSION - 1` exception alone would refuse its `PrepareUpdate` after a
+failed health check. `rtrust_control::RELEASED_UPDATER_VERSIONS = [1]` admits
+exactly `PrepareUpdate` from that published helper (v1 has no `Capabilities`),
+and the Windows service answers it in the v1 `Response` shape
+(`version`/`state`/`message`), which the v1 helper parses with
+`deny_unknown_fields`. Every other v1 command still gets an IPC version
+mismatch; pipe authentication is unchanged, and a retained guard or active
+session still refuses the reservation. Linux and macOS keep strict equality.
+Unit tests pin the v1 request JSON and the v1-readable reply. A real signed
+9 → 10 update with injected failure and rollback on the Windows lab is NOT RUN
+and is required before Windows `latest` may move to sequence 10. macOS remains
+withheld.
 
 ## Версия IPC и gate приёмки (issues #31/#36)
 

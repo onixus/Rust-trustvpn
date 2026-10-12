@@ -28,7 +28,7 @@
 | iOS | Preview на Swift/Network Extension: import/export, QR, portal sync, On Demand, widget; device archive требует Apple signing. |
 | Routing | Desktop IPv4 TUN include/exclude, LAN bypass, profile routing и server-assigned route groups. Route groups не используются Android/iOS. |
 | Proxy | SOCKS5 и HTTP-запросы на mixed desktop proxy port. |
-| Обновления | Опубликованный desktop sequence 9 исправляет ошибку идентичности старой 0.5.0 сборки; на Windows пройден реальный 7→9 update, forced unhealthy install, rollback на 7 и повторный update на 9. Исходники компилируются как sequence 10 (кандидат 0.6.0, не опубликован). Автооткат 10→9 на Windows пока не обеспечен: апдейтер sequence 9 говорит control IPC v1, а служба v6 допускает только v5 (см. [v0.6.0](releases/v0.6.0.md#compatibility)). |
+| Обновления | Опубликованный desktop sequence 9 исправляет ошибку идентичности старой 0.5.0 сборки; на Windows пройден реальный 7→9 update, forced unhealthy install, rollback на 7 и повторный update на 9. Исходники компилируются как sequence 10 (кандидат 0.6.0, не опубликован). Для автоотката 10→9 служба Windows допускает от апдейтера sequence 9 (control IPC v1) только `PrepareUpdate` и отвечает в форме v1; покрыто unit-тестами, реальный signed 9→10 с принудительным откатом не запускался (см. [v0.6.0](releases/v0.6.0.md#compatibility)). |
 | Наблюдения и диагностика | Типизированные observations с generations, события сети/пробуждения, route explain, system-path diagnostics с verdict/actions и автоматическими проверками; control IPC v6. |
 | Recovery | Opt-in восстановление через разрешённые резервные профили (обычная сессия на desktop; Always-on — только Linux/Windows), guard не снимается; macOS/mobile Always-on recovery не поддерживается. |
 
