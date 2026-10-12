@@ -224,7 +224,14 @@ public final class TunnelService extends VpnService {
         if(tun==null || !adapter.equals(adapterKey)){ParcelFileDescriptor next=establish(firstPlan,set.apps,guard);ParcelFileDescriptor old=tun;tun=next;if(old!=null)old.close();adapterKey=adapter;}
         alwaysOn=isAlwaysOn();lockdown=isLockdownEnabled();rememberAlwaysOn(this,alwaysOn);
         if(recovering && !alwaysOn){disconnect();return;}
-        if(firstPlan.getBoolean("require_lockdown") && (!alwaysOn || !lockdown))throw new IllegalArgumentException("System lockdown required");
+        if(firstPlan.getBoolean("require_lockdown") && (!alwaysOn || !lockdown)) {
+            // Android reports these flags after establish. This is a final refusal,
+            // not a transient network error that should retain the blocking TUN.
+            problem = getString(R.string.cannot_start_vpn_check_the_profile);
+            stopping = true;
+            cleanup(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf();
+            return;
+        }
         ProfileVault.Selection primary=set.profiles.get(0);localSource=primary.localPolicy;localPolicy=primary.localPolicy && set.profiles.size()==1;
         JSONObject request=new JSONObject().put("profiles",profiles).put("unavailable",unavailable).put("logical_session",logicalSession);
         if(guard){JSONObject context=new JSONObject().put("source",primary.managedRouting==null?"managed_unknown":primary.managedRouting.getString("revision").startsWith("admin:")?"admin":"user").put("revision",primary.managedRouting==null?primary.revision:primary.managedRouting.getString("revision"));request.put("selection",new JSONObject().put("routes",firstPlan.getJSONArray("routes")).put("ipv6",firstPlan.getBoolean("ipv6")).put("context",context));}
