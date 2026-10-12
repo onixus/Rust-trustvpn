@@ -58,7 +58,7 @@ struct PortalClient {
                         body.append(byte)
                     }
                 } catch { body.removeAll() }
-                message = Self.conflictMessage(body) ?? message
+                message = Self.conflictMessage(body)
             }
             throw NSError(domain: "RTrustPortal", code: code, userInfo: [NSLocalizedDescriptionKey: message])
         }
@@ -72,16 +72,17 @@ struct PortalClient {
         guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AppError.message("Invalid portal response") }
         return result
     }
-    /// Exact server `detail` values for device profile limits; any other 409 keeps the generic text.
-    static func conflictMessage(_ body: Data) -> String? {
-        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any], let detail = object["detail"] as? String else { return nil }
+    /// Exact server `detail` values select the device-limit texts; any other 409 is a revision conflict.
+    static func conflictMessage(_ body: Data) -> String {
+        let detail = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["detail"] as? String
         switch detail {
         case "Too many profiles for client sync":
             return tr("The portal assigns more than 64 profiles to this device. Sync stopped; local profiles are preserved. Remove extra profiles from this device on the portal.",
                       "На портале назначено больше 64 профилей для этого устройства. Синхронизация остановлена, локальные профили сохранены. Снимите лишние профили с устройства на портале.")
         case "Device profile limit reached (64)":
             return tr("Limit of 64 profiles per device reached", "Достигнут лимит 64 профиля на устройство")
-        default: return nil
+        default: return tr("The profile changed on the portal. Sync again and retry. Local data is preserved.",
+                           "Профиль изменился на портале. Синхронизируйте список и повторите. Локальные данные сохранены.")
         }
     }
     static func enroll(origin: String, code: String, name: String) async throws -> PortalSession {

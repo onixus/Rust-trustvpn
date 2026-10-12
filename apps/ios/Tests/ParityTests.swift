@@ -114,14 +114,21 @@ final class ParityTests: XCTestCase {
         }
         FixtureProtocol.handler = { _ in (409, Data("{\"detail\":\"Profile revision conflict\"}".utf8)) }
         do { _ = try await client.download(); XCTFail("409 accepted") } catch {
-            XCTAssertEqual(error.localizedDescription, tr("Portal request failed", "Ошибка запроса к серверу"))
+            XCTAssertEqual((error as NSError).code, 409)
+            XCTAssertEqual(error.localizedDescription, PortalClient.conflictMessage(Data()))
+            XCTAssertFalse(error.localizedDescription.contains("revision conflict"))
         }
         FixtureProtocol.handler = nil
     }
     func testPortalLimitConflictClassification() {
-        XCTAssertNotNil(PortalClient.conflictMessage(Data("{\"detail\":\"Device profile limit reached (64)\"}".utf8)))
+        let revision = PortalClient.conflictMessage(Data())
+        let sync = PortalClient.conflictMessage(Data("{\"detail\":\"Too many profiles for client sync\"}".utf8))
+        let device = PortalClient.conflictMessage(Data("{\"detail\":\"Device profile limit reached (64)\"}".utf8))
+        XCTAssertEqual(Set([revision, sync, device]).count, 3)
+        XCTAssertEqual(revision, tr("The profile changed on the portal. Sync again and retry. Local data is preserved.",
+                                    "Профиль изменился на портале. Синхронизируйте список и повторите. Локальные данные сохранены."))
         for body in ["{\"detail\":\"Profile revision conflict\"}", "{\"detail\":\"too many profiles for client sync\"}", "{\"detail\":[\"Too many profiles for client sync\"]}", "Too many profiles for client sync", ""] {
-            XCTAssertNil(PortalClient.conflictMessage(Data(body.utf8)), body)
+            XCTAssertEqual(PortalClient.conflictMessage(Data(body.utf8)), revision, body)
         }
     }
 }

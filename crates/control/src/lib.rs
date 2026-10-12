@@ -566,39 +566,46 @@ mod tests {
     }
     #[test]
     fn idle_reply_keeps_the_previous_wire_shape() {
-        let mut response = Response::new(State::Idle, "reserved");
-        response.version = VERSION - 1;
-        let value = serde_json::to_value(&response).unwrap();
-        let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
-        keys.sort();
-        assert_eq!(
-            keys,
-            [
-                "capabilities",
-                "message",
-                "observations",
-                "state",
-                "version"
-            ]
-        );
+        // Exact v5 (c2c5aaa) wire keys: a removed or added field must fail here.
+        // `managed_access_freshness` is omitted when false and defaulted by v5.
         let v5 = [
             "automatic_recovery",
             "endpoint_probes",
             "failover",
             "lifecycle_observations",
-            "managed_access_freshness",
             "network_events",
             "observations_schema",
             "system_probes",
         ];
-        assert!(
-            value["capabilities"]
-                .as_object()
-                .unwrap()
-                .keys()
-                .all(|key| v5.contains(&key.as_str()))
-        );
-        assert_eq!(value["version"], VERSION - 1);
+        for freshness in [false, true] {
+            let mut response = Response::new(State::Idle, "reserved");
+            response.version = VERSION - 1;
+            response.capabilities.managed_access_freshness = freshness;
+            let value = serde_json::to_value(&response).unwrap();
+            let keys = |value: &serde_json::Value| {
+                let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+                keys.sort();
+                keys
+            };
+            assert_eq!(
+                keys(&value),
+                [
+                    "capabilities",
+                    "message",
+                    "observations",
+                    "state",
+                    "version"
+                ]
+            );
+            let mut expected: Vec<_> = v5.iter().map(|key| key.to_string()).collect();
+            if freshness {
+                expected.push("managed_access_freshness".into());
+                expected.sort();
+            }
+            assert_eq!(keys(&value["capabilities"]), expected);
+            assert_eq!(value["version"], VERSION - 1);
+            assert_eq!(value["state"], "Idle");
+        }
     }
     #[test]
     fn selection_explain_matches_the_prefixes_installed_with_runtime_inputs() {

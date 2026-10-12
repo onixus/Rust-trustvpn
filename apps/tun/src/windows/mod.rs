@@ -257,16 +257,24 @@ async fn serve(
     let (mut freshness, command) = rtrust_control::freshness::start(request.command)?;
     let (profile, selection, dns, split_dns, fallbacks) = match command {
         Command::PrepareUpdate => {
-            if full::pending()? {
-                return reply_as(
-                    pipe,
-                    version,
-                    State::Blocked,
-                    "Сначала восстановите защиту VPN; обновление отменено",
-                )
-                .await;
+            // Failures are answered in the caller's version so a previous
+            // updater reports the reason; the reservation is still refused.
+            match full::pending() {
+                Ok(false) => {}
+                Ok(true) => {
+                    return reply_as(
+                        pipe,
+                        version,
+                        State::Blocked,
+                        "Сначала восстановите защиту VPN; обновление отменено",
+                    )
+                    .await;
+                }
+                Err(error) => return reply_as(pipe, version, State::Error, &error).await,
             }
-            routes::settled_adapter()?;
+            if let Err(error) = routes::settled_adapter() {
+                return reply_as(pipe, version, State::Error, &error).await;
+            }
             reply_as(
                 pipe,
                 version,
