@@ -101,17 +101,71 @@ class PortalClient {
         if (deadline<=System.currentTimeMillis()/1000) throw new Failure(401);
         return deadline;
     }
-    JSONArray download() throws Exception {
+    /** Same policy as iOS: 1..80 printable ASCII (0x20-0x7E); compared code unit by code unit. */
+    static boolean originLabel(String value) {
+        if (value.isEmpty() || value.length() > 80) return false;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c < 0x20 || c > 0x7E) return false;
+        }
+        return true;
+    }
+    /**
+     * Validates a profile metadata list (legacy list or snapshot metadata) into an
+     * order-independent id -> (revision, origin) map. Duplicates, malformed revisions and
+     * origins reject the whole batch before any export is requested or applied.
+     */
+    static java.util.Map<String, java.util.List<String>> metadata(JSONArray profiles) throws Exception {
+        if (profiles.length() > 64) throw new IOException("Invalid profile list");
+        java.util.Map<String, java.util.List<String>> result = new java.util.TreeMap<>();
+        for (int i = 0; i < profiles.length(); i++) {
+            JSONObject item = profiles.getJSONObject(i);
+            Object rawId = item.opt("id"), rawRevision = item.opt("revision");
+            if (!(rawId instanceof String) || !(rawRevision instanceof String)) throw new IOException("Invalid profile metadata");
+            String remoteId = id((String) rawId), revision = (String) rawRevision;
+            if (!revision.matches("[!-~]{1,256}")) throw new IOException("Invalid profile metadata");
+            Object rawOrigin = item.opt("origin");
+            String profileOrigin = null;
+            if (rawOrigin != null && rawOrigin != JSONObject.NULL) {
+                if (!(rawOrigin instanceof String)) throw new IOException("Invalid profile metadata");
+                profileOrigin = (String) rawOrigin;
+                if (!originLabel(profileOrigin)) throw new IOException("Invalid profile metadata");
+            }
+            if (result.put(remoteId, java.util.Arrays.asList(revision, profileOrigin)) != null)
+                throw new IOException("Duplicate profile identifier");
+        }
+        return result;
+    }
+    JSONObject parseExport(String content) throws Exception {
+        JSONObject parsed = new JSONObject(NativeCore.INSTANCE.parse(content));
+        if (!parsed.getBoolean("ok")) throw new IOException();
+        return parsed.getJSONObject("profile");
+    }
+    /** Cooperative stop signal; WorkManager stops a Worker without interrupting its thread. */
+    interface Cancellation { boolean cancelled(); }
+    static final Cancellation NEVER = () -> false;
+    static void checkCancelled(Cancellation cancellation) throws java.io.InterruptedIOException {
+        if (Thread.currentThread().isInterrupted() || cancellation.cancelled())
+            throw new java.io.InterruptedIOException("Synchronization cancelled");
+    }
+    JSONArray download() throws Exception { return download(NEVER); }
+    JSONArray download(Cancellation cancellation) throws Exception {
+        checkCancelled(cancellation);
         issuedWall=System.currentTimeMillis();issuedElapsed=android.os.SystemClock.elapsedRealtime();lease=null;
         batchDeadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
-        try { return downloadBatch(); } finally { batchDeadline=0; }
+        try {
+            JSONArray result = downloadBatch(cancellation);
+            checkCancelled(cancellation);
+            return result;
+        } finally { batchDeadline=0; }
     }
-    private JSONArray downloadBatch() throws Exception {
+    private JSONArray downloadBatch(Cancellation cancellation) throws Exception {
         JSONObject capabilities = request("/portal/v2/capabilities",null);
         if (capabilities.getInt("version") != 2 || capabilities.has("routing") && capabilities.getInt("routing") != 1
             || capabilities.has("snapshot") && capabilities.getInt("snapshot") != 1) throw new IOException();
         JSONArray result = new JSONArray();
         if (context!=null && capabilities.optInt("offline_freshness")!=1) throw new IOException("Panel freshness contract required");
+        checkCancelled(cancellation);
         if (capabilities.optInt("snapshot") == 1) {
             JSONObject consent=new JSONObject().put("include_secrets",true);
             if(context!=null) consent.put("freshness_version",1);
@@ -121,32 +175,41 @@ class PortalClient {
             JSONObject routing=batch.getJSONObject("routing"); requireSupportedRouting(routing);
             JSONArray items = batch.getJSONArray("profiles");
             if (items.length() > 64) throw new IOException();
-            java.util.HashSet<String> ids = new java.util.HashSet<>(); int total = 0;
+            // The snapshot is one server transaction: validate all metadata (ids, duplicates,
+            // revisions, origin labels) before parsing any profile content.
+            JSONArray metas = new JSONArray();
+            for (int i=0; i<items.length(); i++) metas.put(items.getJSONObject(i).getJSONObject("metadata"));
+            metadata(metas);
+            int total = 0;
             for (int i=0; i<items.length(); i++) {
+                checkCancelled(cancellation);
                 JSONObject item = items.getJSONObject(i), meta = item.getJSONObject("metadata");
-                if (!ids.add(id(meta.getString("id")))) throw new IOException();
                 String content = item.getString("content"); total += content.getBytes(StandardCharsets.UTF_8).length;
                 if (total > 4*1024*1024) throw new IOException();
                 result.put(downloaded(meta,content,routing));
             }
             return result;
         }
-        JSONArray metadata = request("/portal/v2/profiles", null).getJSONArray("profiles");
-        if (metadata.length() > 64) throw new IOException();
+        // Legacy panel without snapshots: list, export each revision, list again; any change in
+        // the id -> (revision, origin) map (order-independent) or routing rejects the batch.
+        java.util.Map<String, java.util.List<String>> before = metadata(request("/portal/v2/profiles", null).getJSONArray("profiles"));
+        checkCancelled(cancellation);
         JSONObject routing = legacyRouting(); requireSupportedRouting(routing);
-        java.util.HashSet<String> ids = new java.util.HashSet<>(); int total = 0;
-        for (int i = 0; i < metadata.length(); i++) {
-            JSONObject meta = metadata.getJSONObject(i);
-            String remoteId = id(meta.getString("id")), revision = meta.getString("revision");
-            if (!ids.add(remoteId)) throw new IOException();
+        int total = 0;
+        for (java.util.Map.Entry<String, java.util.List<String>> entry : before.entrySet()) {
+            checkCancelled(cancellation);
+            String remoteId = entry.getKey(), revision = entry.getValue().get(0);
             JSONObject exported = request("/portal/v2/profiles/" + remoteId + "/export", new JSONObject()
                 .put("format", "profile_json").put("revision", revision).put("include_secrets", true).put("accept_losses", false));
             String content = exported.getString("content"); total += content.getBytes(StandardCharsets.UTF_8).length;
             if (total > 4*1024*1024) throw new IOException();
-            result.put(downloaded(meta,content,routing));
+            result.put(downloaded(new JSONObject().put("id", remoteId).put("revision", revision),content,routing));
         }
-        if (!metadata.toString().equals(request("/portal/v2/profiles",null).getJSONArray("profiles").toString())
-            || !routing.toString().equals(legacyRouting().toString())) throw new IOException();
+        checkCancelled(cancellation);
+        if (!before.equals(metadata(request("/portal/v2/profiles",null).getJSONArray("profiles"))))
+            throw new IOException("Profile list changed during synchronization");
+        checkCancelled(cancellation);
+        if (!routing.toString().equals(legacyRouting().toString())) throw new IOException("Routing changed during synchronization");
         return result;
     }
     private JSONObject legacyRouting() throws Exception {
@@ -161,15 +224,61 @@ class PortalClient {
     private JSONObject downloaded(JSONObject meta, String content, JSONObject routing) throws Exception {
         String remoteId = id(meta.getString("id")), revision = meta.getString("revision");
         if (revision.isEmpty() || revision.length() > 256 || content.getBytes(StandardCharsets.UTF_8).length > 1024*1024) throw new IOException();
-        JSONObject parsed = new JSONObject(NativeCore.INSTANCE.parse(content));
-        if (!parsed.getBoolean("ok")) throw new IOException();
-        JSONObject profile=parsed.getJSONObject("profile"), group=routing.optJSONObject("policy");
+        JSONObject profile=parseExport(content), group=routing.optJSONObject("policy");
         if (group!=null && !new JSONObject(NativeCore.INSTANCE.planManaged(profile.toString(),group.toString())).getBoolean("ok")) throw new IOException();
         JSONObject result=new JSONObject().put("id", "portal:" + remoteId).put("remote_id", remoteId).put("revision", revision).put("profile",profile);
         if (group!=null) result.put("managed_routing",group);
         if(lease!=null) result.put("access_lease",new JSONObject(lease.toString()));
         if (routing.optBoolean("unsupported")) result.put("routing_unsupported",true);
         return result;
+    }
+    static boolean samePortal(JSONObject a, JSONObject b) {
+        return a != null && a.optString("origin").equals(b.optString("origin"))
+            && !a.optString("token").isEmpty() && a.optString("token").equals(b.optString("token"));
+    }
+    /**
+     * Pure vault commit step used by ProfileVault under its lock. Replaces every managed
+     * ({@code remote_id}) profile with {@code remote}, keeps local profiles and the selection when
+     * it still exists. All checks run before {@code data} is touched, so a rejected batch leaves it
+     * unchanged. A changed registration throws for a foreground sync and returns false (no write)
+     * for a background sync, which also requires background sync to still be enabled. Managed
+     * routing/revision conflicts reject the batch for both.
+     */
+    static boolean applyBatch(JSONObject data, JSONObject session, JSONArray remote, boolean background, long now) throws Exception {
+        JSONObject current = data.optJSONObject("portal");
+        if (!samePortal(current, session)) {
+            if (background) return false;
+            throw new IOException("Registration changed");
+        }
+        if (background && !current.optBoolean("background_sync")) return false;
+        JSONArray old = data.getJSONArray("profiles");
+        for (int i = 0; i < remote.length(); i++) {
+            JSONObject next = remote.getJSONObject(i), group = next.optJSONObject("managed_routing");
+            for (int j = 0; j < old.length(); j++) {
+                JSONObject previous = old.getJSONObject(j), priorGroup = previous.optJSONObject("managed_routing");
+                if (priorGroup != null && next.optBoolean("routing_unsupported")) throw new IOException("Assigned routing capability disappeared");
+                if (priorGroup != null && group != null && priorGroup.getString("revision").equals(group.getString("revision"))
+                    && !priorGroup.toString().equals(group.toString())) throw new IOException("Managed group revision conflict");
+                if (next.getString("id").equals(previous.getString("id")) && next.getString("revision").equals(previous.optString("revision"))
+                    && !next.getJSONObject("profile").toString().equals(previous.getJSONObject("profile").toString())) throw new IOException("Profile revision conflict");
+            }
+        }
+        String selected = data.getString("default");
+        JSONArray profiles = new JSONArray();
+        for (int i = 0; i < old.length(); i++) if (!old.getJSONObject(i).has("remote_id")) profiles.put(old.get(i));
+        if (profiles.length() + remote.length() > 64) throw new IOException("Profile limit");
+        java.util.HashSet<String> ids = new java.util.HashSet<>();
+        for (int i = 0; i < remote.length(); i++) {
+            JSONObject item = remote.getJSONObject(i);
+            if (!ids.add(item.getString("id"))) throw new IOException("Duplicate remote profile");
+            profiles.put(item);
+        }
+        String repaired = profiles.length() == 0 ? "" : profiles.getJSONObject(0).getString("id");
+        for (int i = 0; i < profiles.length(); i++)
+            if (profiles.getJSONObject(i).getString("id").equals(selected)) { repaired = selected; break; }
+        data.put("profiles", profiles).put("default", repaired);
+        current.put("last_sync", now).remove("sync_auth_expired");
+        return true;
     }
     static final class Failure extends IOException {
         final int status;

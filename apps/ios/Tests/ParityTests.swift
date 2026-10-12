@@ -5,12 +5,23 @@ import NetworkExtension
 @testable import RTrustTunnel
 
 final class FixtureProtocol: URLProtocol {
-    static var handler: ((URLRequest) throws -> (Int, Data))?
+    typealias Handler = @Sendable (URLRequest) throws -> (Int, Data)
+    /// Lock-protected so handlers can be swapped from tests while URL loading threads read them.
+    private final class Box: @unchecked Sendable {
+        let lock = NSLock()
+        var handler: Handler?
+    }
+    private static let box = Box()
+    static var handler: Handler? {
+        get { box.lock.lock(); defer { box.lock.unlock() }; return box.handler }
+        set { box.lock.lock(); box.handler = newValue; box.lock.unlock() }
+    }
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "fixture.invalid" }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         do {
-            let (status, data) = try Self.handler!(request)
+            guard let handler = Self.handler else { throw URLError(.resourceUnavailable) }
+            let (status, data) = try handler(request)
             let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type":"application/json"])!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
@@ -161,6 +172,244 @@ extension ParityTests {
             } catch {
                 XCTAssertEqual(configuration.events, failure == "save" ? ["save"] : ["save", "load"])
             }
+        }
+    }
+}
+
+
+/// Lock-protected fixture state: URLProtocol handlers run on URL loading threads.
+final class FixtureCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counts: [String: Int] = [:]
+    func next(_ key: String) -> Int { lock.lock(); defer { lock.unlock() }; counts[key, default: 0] += 1; return counts[key]! }
+    subscript(_ key: String) -> Int { lock.lock(); defer { lock.unlock() }; return counts[key, default: 0] }
+}
+/// Parks a fixture request until the test has cancelled the surrounding Task.
+final class FixtureGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hasArrived = false
+    private let released = DispatchSemaphore(value: 0)
+    func arriveAndWait() {
+        lock.lock(); hasArrived = true; lock.unlock()
+        _ = released.wait(timeout: .now() + 10)
+    }
+    var arrived: Bool { lock.lock(); defer { lock.unlock() }; return hasArrived }
+    func open() { released.signal() }
+}
+/// In-memory stand-in for the Keychain vault with the same read/mutate/validate/write order.
+final class FixtureVault: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data: VaultData
+    init(_ data: VaultData) { self.data = data }
+    func snapshot() -> VaultData { lock.lock(); defer { lock.unlock() }; return data }
+    func edit(_ mutation: (inout VaultData) throws -> Void) throws {
+        lock.lock(); defer { lock.unlock() }
+        var vault = data
+        try mutation(&vault)
+        try vault.validate()
+        data = vault
+    }
+    func encoded() throws -> Data {
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        return try encoder.encode(snapshot())
+    }
+}
+
+extension ParityTests {
+    static let fixtureToken = String(repeating: "a", count: 40)
+    static func fixtureClient(_ session: PortalSession) -> PortalClient {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        return PortalClient(session: session, configuration: config)
+    }
+    /// Local profile plus a stale managed profile; background sync enabled.
+    static func fixtureVault(selected: String = "portal:old") -> FixtureVault {
+        let local = SavedProfile(id: "local", name: "local", hostname: "local.invalid", content: "synthetic-local")
+        let old = SavedProfile(id: "portal:old", name: "old", hostname: "old.invalid", content: "synthetic-old", remoteID: "old", revision: "r0")
+        return FixtureVault(VaultData(profiles: [local, old], selected: selected, defaultProfileID: selected,
+                                      portal: PortalSession(origin: "https://fixture.invalid", token: fixtureToken, backgroundSync: true, authExpired: true)))
+    }
+    static func sync(_ vault: FixtureVault, background: Bool) async throws {
+        try await PortalSync.perform(background: background, client: { fixtureClient($0) },
+                                     snapshot: { vault.snapshot() }, edit: { try vault.edit($0) },
+                                     now: { Date(timeIntervalSince1970: 42) })
+    }
+    static func listResponse(_ profiles: [[String: Any]]) throws -> (Int, Data) {
+        (200, try JSONSerialization.data(withJSONObject: ["profiles": profiles]))
+    }
+
+    func testPortalWholeBatchFenceSequences() async throws {
+        let client = Self.fixtureClient(PortalSession(origin: "https://fixture.invalid", token: Self.fixtureToken))
+        let initial: [[String: Any]] = [["id": "one", "revision": "r1", "origin": "portal_managed"], ["id": "two", "revision": "r1"]]
+        let reordered: [[String: Any]] = [["id": "two", "revision": "r1", "origin": NSNull()], initial[0]]
+        let duplicate: [[String: Any]] = [initial[0], initial[0]]
+        let changedRevision: [[String: Any]] = [["id": "one", "revision": "r2", "origin": "portal_managed"], initial[1]]
+        let changedOrigin: [[String: Any]] = [["id": "one", "revision": "r1", "origin": "external_stored"], initial[1]]
+        let added = initial + [["id": "three", "revision": "r1"]]
+        let cases: [([[String: Any]], [[String: Any]], Bool)] = [
+            (initial, initial, true), (initial, reordered, true), ([], [], true),
+            (initial, changedRevision, false), (initial, changedOrigin, false),
+            (initial, added, false), (initial, [], false), (initial, duplicate, false),
+            (duplicate, initial, false), (initial, [["id": "one", "revision": 12]], false)
+        ]
+        defer { FixtureProtocol.handler = nil }
+        let raw = self.raw
+        for (before, after, succeeds) in cases {
+            let counter = FixtureCounter()
+            let first = try Self.listResponse(before), second = try Self.listResponse(after)
+            FixtureProtocol.handler = { request in
+                if request.url!.path == "/portal/v2/profiles" { return counter.next("lists") == 1 ? first : second }
+                _ = counter.next("exports")
+                return (200, try JSONSerialization.data(withJSONObject: ["content": raw]))
+            }
+            do {
+                let downloaded = try await client.download()
+                XCTAssertTrue(succeeds, "Changed list accepted")
+                XCTAssertEqual(downloaded.count, before.count)
+            } catch { XCTAssertFalse(succeeds, "Stable list rejected") }
+            if before.count == 2, before[0]["id"] as? String == before[1]["id"] as? String {
+                XCTAssertEqual(counter["exports"], 0, "Initial duplicates rejected before exports")
+            } else { XCTAssertEqual(counter["lists"], 2, "Recheck includes empty lists") }
+        }
+    }
+    /// Shared with Android PortalClientTest.originPolicy: identical inputs and expectations.
+    func testPortalOriginLabelPolicy() throws {
+        let rejected = ["", "\u{200B}", "portal\u{200B}managed", "\u{202E}portal", "\u{0085}", "\u{007F}", "\u{FEFF}portal",
+                        "line\n", "\u{00E9}", String(repeating: "x", count: 81)]
+        let accepted = ["portal_managed", "external_stored", "future source", "~", String(repeating: "x", count: 80)]
+        for origin in rejected {
+            XCTAssertFalse(PortalClient.originLabel(origin), "origin rejected: \(origin.unicodeScalars.map { String($0.value, radix: 16) })")
+            XCTAssertThrowsError(try PortalClient.metadata(["profiles": [["id": "one", "revision": "r1", "origin": origin]]]))
+        }
+        for origin in accepted {
+            XCTAssertTrue(PortalClient.originLabel(origin), "origin accepted: \(origin)")
+            XCTAssertEqual(try PortalClient.metadata(["profiles": [["id": "one", "revision": "r1", "origin": origin]]])["one"]?.origin, origin)
+        }
+        XCTAssertThrowsError(try PortalClient.metadata(["profiles": [["id": "one", "revision": "r1", "origin": 12]]]))
+        // Byte comparison like Java String.equals: canonically equivalent strings differ.
+        XCTAssertNotEqual(PortalClient.Metadata(revision: "r1", origin: "\u{00E9}"), PortalClient.Metadata(revision: "r1", origin: "e\u{0301}"))
+        XCTAssertEqual(PortalClient.Metadata(revision: "r1", origin: nil), PortalClient.Metadata(revision: "r1", origin: nil))
+        XCTAssertNotEqual(PortalClient.Metadata(revision: "r1", origin: nil), PortalClient.Metadata(revision: "r1", origin: "portal_managed"))
+    }
+    func testPortalMalformedMetadataAndUnknownOrigin() throws {
+        for revision in ["", "has space", "line\n", "é", String(repeating: "x", count: 257)] {
+            XCTAssertThrowsError(try PortalClient.metadata(["profiles": [["id": "one", "revision": revision]]]))
+        }
+        let missing = try PortalClient.metadata(["profiles": [["id": "one", "revision": "r1"]]])
+        let null = try PortalClient.metadata(["profiles": [["id": "one", "revision": "r1", "origin": NSNull()]]])
+        XCTAssertEqual(missing, null)
+        XCTAssertNil(missing["one"]?.origin)
+        let future = try PortalClient.metadata(["profiles": [["id": "one", "revision": "r1", "origin": "future_source"]]])
+        XCTAssertEqual(future["one"]?.origin, "future_source")
+    }
+}
+
+
+extension ParityTests {
+    /// Failure points through the production PortalSync.perform: vault keeps managed and local profiles.
+    func testPortalFailedSyncKeepsVault() async throws {
+        defer { FixtureProtocol.handler = nil }
+        let raw = self.raw
+        let stable = try Self.listResponse([["id": "one", "revision": "r1"], ["id": "two", "revision": "r1"]])
+        let rotated = try Self.listResponse([["id": "one", "revision": "r2"], ["id": "two", "revision": "r1"]])
+        // 0 first export, 1 mid-batch export, 2 recheck I/O, 3 recheck changed.
+        for mode in 0..<4 {
+            let vault = Self.fixtureVault()
+            let original = try vault.encoded()
+            let counter = FixtureCounter()
+            FixtureProtocol.handler = { request in
+                if request.url!.path == "/portal/v2/profiles" {
+                    let list = counter.next("lists")
+                    if list == 2 && mode == 2 { throw URLError(.timedOut) }
+                    return list == 2 && mode == 3 ? rotated : stable
+                }
+                let export = counter.next("exports")
+                if (export == 1 && mode == 0) || (export == 2 && mode == 1) { throw URLError(.networkConnectionLost) }
+                return (200, try JSONSerialization.data(withJSONObject: ["content": raw]))
+            }
+            do { try await Self.sync(vault, background: true); XCTFail("Failed batch committed, mode \(mode)") } catch { }
+            XCTAssertEqual(try vault.encoded(), original, "Vault unchanged, mode \(mode)")
+            XCTAssertEqual(vault.snapshot().profiles.map(\.id), ["local", "portal:old"])
+        }
+    }
+    /// Registration replaced, disabled or removed while the batch was downloading.
+    func testPortalRegistrationFence() async throws {
+        defer { FixtureProtocol.handler = nil }
+        let raw = self.raw
+        let stable = try Self.listResponse([["id": "one", "revision": "r1"]])
+        for change in ["token", "disabled", "removed"] {
+            for background in [true, false] {
+                let vault = Self.fixtureVault(selected: "local")
+                FixtureProtocol.handler = { request in
+                    if request.url!.path == "/portal/v2/profiles" { return stable }
+                    try vault.edit { data in
+                        switch change {
+                        case "token": data.portal?.token = String(repeating: "b", count: 40)
+                        case "disabled": data.portal?.backgroundSync = false
+                        default: data.portal = nil
+                        }
+                    }
+                    return (200, try JSONSerialization.data(withJSONObject: ["content": raw]))
+                }
+                try await Self.sync(vault, background: background)
+                // Foreground sync is user-initiated and ignores the background toggle (unchanged semantics).
+                if !background && change == "disabled" {
+                    XCTAssertEqual(vault.snapshot().profiles.map(\.id), ["local", "portal:one"])
+                } else {
+                    XCTAssertEqual(vault.snapshot().profiles.map(\.id), ["local", "portal:old"], "\(change) background=\(background)")
+                    XCTAssertNil(vault.snapshot().portal?.lastSync)
+                }
+            }
+        }
+    }
+    func testPortalSuccessfulSyncReplacesManagedKeepsLocal() async throws {
+        defer { FixtureProtocol.handler = nil }
+        let raw = self.raw
+        let stable = try Self.listResponse([["id": "two", "revision": "r1"], ["id": "one", "revision": "r1"]])
+        FixtureProtocol.handler = { request in
+            if request.url!.path == "/portal/v2/profiles" { return stable }
+            return (200, try JSONSerialization.data(withJSONObject: ["content": raw]))
+        }
+        let vault = Self.fixtureVault()
+        try await Self.sync(vault, background: true)
+        let data = vault.snapshot()
+        XCTAssertEqual(data.profiles.map(\.id), ["local", "portal:one", "portal:two"])
+        XCTAssertEqual(data.defaultProfileID, "local"); XCTAssertEqual(data.selected, "local")
+        XCTAssertEqual(data.portal?.lastSync, Date(timeIntervalSince1970: 42)); XCTAssertEqual(data.portal?.authExpired, false)
+    }
+    /// A real Task is cancelled while an export or the recheck list is in flight.
+    func testPortalTaskCancellationDuringExportAndRecheck() async throws {
+        defer { FixtureProtocol.handler = nil }
+        let raw = self.raw
+        let stable = try Self.listResponse([["id": "one", "revision": "r1"], ["id": "two", "revision": "r1"]])
+        for duringRecheck in [false, true] {
+            let vault = Self.fixtureVault()
+            let original = try vault.encoded()
+            let counter = FixtureCounter(), gate = FixtureGate()
+            FixtureProtocol.handler = { request in
+                if request.url!.path == "/portal/v2/profiles" {
+                    if counter.next("lists") == 2 && duringRecheck { gate.arriveAndWait() }
+                    return stable
+                }
+                if counter.next("exports") == 1 && !duringRecheck { gate.arriveAndWait() }
+                return (200, try JSONSerialization.data(withJSONObject: ["content": raw]))
+            }
+            let task = Task { try await Self.sync(vault, background: true) }
+            let deadline = Date().addingTimeInterval(10)
+            while !gate.arrived && Date() < deadline { try await Task.sleep(nanoseconds: 1_000_000) }
+            XCTAssertTrue(gate.arrived, "Fixture request reached")
+            task.cancel()
+            gate.open()
+            do {
+                try await task.value
+                XCTFail("Cancelled sync committed")
+            } catch {
+                // Task.checkCancellation throws CancellationError; URLSession may surface the same cancel as URLError.cancelled.
+                XCTAssertTrue(error is CancellationError || (error as? URLError)?.code == .cancelled, "Unexpected error \(error)")
+            }
+            XCTAssertEqual(try vault.encoded(), original, "Vault unchanged, recheck=\(duringRecheck)")
+            if !duringRecheck { XCTAssertEqual(counter["exports"], 1, "No export after cancellation") }
+            XCTAssertLessThanOrEqual(counter["lists"], 2)
         }
     }
 }

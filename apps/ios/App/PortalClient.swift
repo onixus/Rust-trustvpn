@@ -70,19 +70,57 @@ struct PortalClient {
         _ = try identifier(token, max: 128)
         return PortalSession(origin: origin, token: token)
     }
+    struct Metadata: Equatable {
+        let revision: String
+        let origin: String?
+        /// Byte comparison, like Java `String.equals`; Swift `==` would merge canonically equivalent strings.
+        static func == (a: Self, b: Self) -> Bool { sameBytes(a.revision, b.revision) && sameBytes(a.origin, b.origin) }
+    }
+    static func sameBytes(_ a: String?, _ b: String?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (a?, b?): return a.utf8.elementsEqual(b.utf8)
+        default: return false
+        }
+    }
+    /// Same policy as Android `PortalClient.originLabel`: 1...80 printable ASCII (0x20-0x7E).
+    static func originLabel(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 80 && value.utf8.allSatisfy { (0x20...0x7E).contains($0) }
+    }
+    static func metadata(_ response: [String: Any]) throws -> [String: Metadata] {
+        guard let profiles = response["profiles"] as? [[String: Any]], profiles.count <= 64 else { throw AppError.message("Invalid profile list") }
+        var result: [String: Metadata] = [:]
+        for item in profiles {
+            guard let id = item["id"] as? String, let revision = item["revision"] as? String,
+                  !revision.isEmpty, revision.utf8.count <= 256,
+                  revision.utf8.allSatisfy({ (33...126).contains($0) }) else { throw AppError.message("Invalid profile metadata") }
+            _ = try identifier(id)
+            var origin: String?
+            if let rawOrigin = item["origin"], !(rawOrigin is NSNull) {
+                guard let value = rawOrigin as? String, originLabel(value) else { throw AppError.message("Invalid profile metadata") }
+                origin = value
+            }
+            guard result[id] == nil else { throw AppError.message("Duplicate profile identifier") }
+            result[id] = Metadata(revision: revision, origin: origin)
+        }
+        return result
+    }
     func download() async throws -> [SavedProfile] {
-        let response = try await request("/portal/v2/profiles")
-        guard let metadata = response["profiles"] as? [[String: Any]], metadata.count <= 64 else { throw AppError.message("Invalid profile list") }
+        let before = try Self.metadata(try await request("/portal/v2/profiles"))
         var result: [SavedProfile] = []
-        for item in metadata {
-            guard let id = item["id"] as? String, let revision = item["revision"] as? String, !revision.isEmpty, revision.count <= 256 else { throw AppError.message("Invalid profile metadata") }
-            _ = try Self.identifier(id)
+        for id in before.keys.sorted() {
+            try Task.checkCancellation()
+            let revision = before[id]!.revision
             let response = try await request("/portal/v2/profiles/" + id + "/export", body: ["format":"profile_json", "revision":revision, "include_secrets":true, "accept_losses":false])
             guard let content = response["content"] as? String else { throw AppError.message("Invalid profile export") }
             var profile = SavedProfile.imported(try ProfilePlan.parse(Data(content.utf8)), id: "portal:" + id)
             profile.remoteID = id; profile.revision = revision
             result.append(profile)
         }
+        try Task.checkCancellation()
+        let after = try Self.metadata(try await request("/portal/v2/profiles"))
+        try Task.checkCancellation()
+        guard before == after else { throw AppError.message("Profile list changed during synchronization") }
         return result
     }
     func upload(_ profile: SavedProfile) async throws {
@@ -95,22 +133,34 @@ struct PortalClient {
 enum PortalSync {
     static var identifier: String { (Bundle.main.bundleIdentifier ?? "org.rtrusttunnel.ios") + ".portal-sync" }
     static func run(background: Bool) async throws { try await PortalSyncRunner.shared.run(background: background) }
-    static func perform(background: Bool) async throws {
-        guard let session = try ProfileVault.snapshot().portal, !background || session.backgroundSync else { return }
+    /// Pure commit step run inside `ProfileVault.edit`: replaces managed profiles and keeps local ones.
+    /// Returns false without touching `vault` when the registration changed or background sync was disabled.
+    @discardableResult
+    static func apply(_ vault: inout VaultData, session: PortalSession, remote: [SavedProfile], background: Bool, now: Date) -> Bool {
+        guard let current = vault.portal, PortalClient.sameBytes(current.origin, session.origin),
+              PortalClient.sameBytes(current.token, session.token), !background || current.backgroundSync else { return false }
+        vault.profiles = vault.profiles.filter { $0.remoteID == nil } + remote
+        vault.repairSelection()
+        vault.portal?.lastSync = now; vault.portal?.authExpired = false
+        return true
+    }
+    /// Dependencies are injectable only for synthetic tests; production uses the Keychain vault.
+    static func perform(background: Bool,
+                        client: (PortalSession) -> PortalClient = { PortalClient(session: $0) },
+                        snapshot: () throws -> VaultData = { try ProfileVault.snapshot() },
+                        edit: ((inout VaultData) throws -> Void) throws -> Void = { try ProfileVault.edit($0) },
+                        now: () -> Date = { Date() }) async throws {
+        guard let session = try snapshot().portal, !background || session.backgroundSync else { return }
         do {
-            let remote = try await PortalClient(session: session).download()
+            let remote = try await client(session).download()
             try Task.checkCancellation()
-            try ProfileVault.edit { vault in
-                guard vault.portal?.origin == session.origin, vault.portal?.token == session.token,
-                      !background || vault.portal?.backgroundSync == true else { return }
-                vault.profiles = vault.profiles.filter { $0.remoteID == nil } + remote
-                vault.repairSelection()
-                vault.portal?.lastSync = Date(); vault.portal?.authExpired = false
-            }
+            let committed = now()
+            try edit { vault in apply(&vault, session: session, remote: remote, background: background, now: committed) }
         } catch {
             if (error as NSError).domain == "RTrustPortal", (error as NSError).code == 401 {
-                try? ProfileVault.edit { vault in
-                    if vault.portal?.origin == session.origin && vault.portal?.token == session.token {
+                try? edit { vault in
+                    if let current = vault.portal, PortalClient.sameBytes(current.origin, session.origin),
+                       PortalClient.sameBytes(current.token, session.token) {
                         vault.portal?.backgroundSync = false; vault.portal?.authExpired = true
                     }
                 }

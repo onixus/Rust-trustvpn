@@ -81,25 +81,20 @@ final class ProfileVault {
     } }
     void renewPortalAccess(JSONObject session,long expiresAt) throws Exception { synchronized (LOCK) {
         JSONObject data=readUnlocked(), current=data.optJSONObject("portal");
-        if (!samePortal(current,session) || current.optLong("expires_at")!=session.optLong("expires_at")) throw new IOException("Registration changed");
+        if (!PortalClient.samePortal(current,session) || current.optLong("expires_at")!=session.optLong("expires_at")) throw new IOException("Registration changed");
         current.put("expires_at",expiresAt).remove("sync_auth_expired"); writeUnlocked(data);
     } }
     void expirePortalSync(JSONObject session) throws Exception { synchronized (LOCK) {
         JSONObject data = readUnlocked(), current = data.optJSONObject("portal");
-        if (!samePortal(current, session)) return;
+        if (!PortalClient.samePortal(current, session)) return;
         JSONArray entries=data.getJSONArray("profiles");
         for(int i=0;i<entries.length();i++){JSONObject entry=entries.getJSONObject(i);if(entry.has("remote_id"))entry.remove("access_lease");}
         current.put("background_sync", false).put("sync_auth_expired", true); writeUnlocked(data);
     } }
-    private static boolean samePortal(JSONObject a, JSONObject b) {
-        return a != null && a.optString("origin").equals(b.optString("origin"))
-            && !a.optString("token").isEmpty() && a.optString("token").equals(b.optString("token"));
-    }
     void syncPortalBackground(JSONObject session, JSONArray remote) throws Exception { synchronized (LOCK) {
-        JSONObject current = readUnlocked().optJSONObject("portal");
+        JSONObject data = readUnlocked();
         // A canceled, expired or replaced registration cannot commit an in-flight response.
-        if (!samePortal(current, session) || !current.optBoolean("background_sync")) return;
-        syncPortal(session, remote);
+        if (PortalClient.applyBatch(data, session, remote, true, System.currentTimeMillis())) writeUnlocked(data);
     } }
     void forgetPortal() throws Exception { synchronized (LOCK) {
         JSONObject data = readUnlocked(); removeRemote(data); data.remove("portal"); writeUnlocked(data);
@@ -116,30 +111,7 @@ final class ProfileVault {
     }
     void syncPortal(JSONObject session, JSONArray remote) throws Exception { synchronized (LOCK) {
         JSONObject data = readUnlocked();
-        if (!samePortal(data.optJSONObject("portal"), session)) throw new IOException("Registration changed");
-        JSONArray old=data.getJSONArray("profiles");
-        for (int i=0;i<remote.length();i++) {
-            JSONObject next=remote.getJSONObject(i), group=next.optJSONObject("managed_routing");
-            for (int j=0;j<old.length();j++) {
-                JSONObject previous=old.getJSONObject(j), priorGroup=previous.optJSONObject("managed_routing");
-                if (priorGroup!=null && next.optBoolean("routing_unsupported")) throw new IOException("Assigned routing capability disappeared");
-                if (priorGroup!=null && group!=null && priorGroup.getString("revision").equals(group.getString("revision"))
-                    && !priorGroup.toString().equals(group.toString())) throw new IOException("Managed group revision conflict");
-                if (next.getString("id").equals(previous.getString("id")) && next.getString("revision").equals(previous.optString("revision"))
-                    && !next.getJSONObject("profile").toString().equals(previous.getJSONObject("profile").toString())) throw new IOException("Profile revision conflict");
-            }
-        }
-        String selected = data.getString("default"); removeRemote(data);
-        JSONArray profiles = data.getJSONArray("profiles");
-        if (profiles.length() + remote.length() > 64) throw new IOException("Profile limit");
-        java.util.HashSet<String> ids = new java.util.HashSet<>();
-        for (int i = 0; i < remote.length(); i++) {
-            JSONObject item = remote.getJSONObject(i);
-            if (!ids.add(item.getString("id"))) throw new IOException("Duplicate remote profile");
-            profiles.put(item);
-        }
-        data.put("default", selected); repairDefault(data);
-        data.getJSONObject("portal").put("last_sync", System.currentTimeMillis()).remove("sync_auth_expired");
+        PortalClient.applyBatch(data, session, remote, false, System.currentTimeMillis());
         writeUnlocked(data);
     } }
     void pendingExport(String content) throws Exception { synchronized (LOCK) {
