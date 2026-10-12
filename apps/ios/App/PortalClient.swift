@@ -48,7 +48,19 @@ struct PortalClient {
         let (bytes, response) = try await transport.bytes(for: request)
         guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw NSError(domain: "RTrustPortal", code: code, userInfo: [NSLocalizedDescriptionKey: code == 401 ? tr("Portal registration expired", "Регистрация на сервере истекла") : tr("Portal request failed", "Ошибка запроса к серверу")])
+            var message = code == 401 ? tr("Portal registration expired", "Регистрация на сервере истекла") : tr("Portal request failed", "Ошибка запроса к серверу")
+            if code == 409 {
+                // At most 512 bytes, used only to classify the conflict; never shown or logged.
+                var body = Data()
+                do {
+                    for try await byte in bytes {
+                        guard body.count < 512 else { body.removeAll(); break }
+                        body.append(byte)
+                    }
+                } catch { body.removeAll() }
+                message = Self.conflictMessage(body) ?? message
+            }
+            throw NSError(domain: "RTrustPortal", code: code, userInfo: [NSLocalizedDescriptionKey: message])
         }
         guard response.expectedContentLength <= 2 * 1024 * 1024 else { throw AppError.message("Response too large") }
         var data = Data()
@@ -59,6 +71,18 @@ struct PortalClient {
         try Task.checkCancellation()
         guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AppError.message("Invalid portal response") }
         return result
+    }
+    /// Exact server `detail` values for device profile limits; any other 409 keeps the generic text.
+    static func conflictMessage(_ body: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any], let detail = object["detail"] as? String else { return nil }
+        switch detail {
+        case "Too many profiles for client sync":
+            return tr("The portal assigns more than 64 profiles to this device. Sync stopped; local profiles are preserved. Remove extra profiles from this device on the portal.",
+                      "На портале назначено больше 64 профилей для этого устройства. Синхронизация остановлена, локальные профили сохранены. Снимите лишние профили с устройства на портале.")
+        case "Device profile limit reached (64)":
+            return tr("Limit of 64 profiles per device reached", "Достигнут лимит 64 профиля на устройство")
+        default: return nil
+        }
     }
     static func enroll(origin: String, code: String, name: String) async throws -> PortalSession {
         let origin = try Self.origin(origin)

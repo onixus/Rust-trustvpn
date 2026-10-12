@@ -277,7 +277,19 @@ public final class PortalClientTest {
         check(data.getString("default").equals("portal:one") && data.getJSONArray("profiles").length() == 2, "rotated batch kept selection");
     }
 
+    static int conflict(String body) {
+        return PortalClient.Failure.conflict(body.getBytes(java.nio.charset.StandardCharsets.UTF_8)).conflict;
+    }
+    static void limitConflicts() {
+        check(conflict("{\"detail\":\"Too many profiles for client sync\"}") == PortalClient.Failure.SYNC_LIMIT, "sync limit");
+        check(conflict("{\"detail\":\"Device profile limit reached (64)\"}") == PortalClient.Failure.DEVICE_LIMIT, "device limit");
+        for (String body : new String[]{"{\"detail\":\"Profile revision conflict\"}", "{\"detail\":\"too many profiles for client sync\"}",
+                "{\"detail\":[\"Too many profiles for client sync\"]}", "{\"error\":\"Too many profiles for client sync\"}", "Too many profiles for client sync", ""})
+            check(conflict(body) == 0, "revision conflict fallback");
+        check(PortalClient.Failure.conflict(new byte[0]).status == 409, "409 status kept");
+    }
     public static void main(String[] args) throws Exception {
+        limitConflicts();
         metadataSequences();
         snapshotSequences();
         managedConflicts();

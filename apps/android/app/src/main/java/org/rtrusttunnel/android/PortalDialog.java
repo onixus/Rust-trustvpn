@@ -20,9 +20,18 @@ final class PortalDialog {
         ProgressDialog progress = new ProgressDialog(activity); progress.setMessage(activity.getString(R.string.portal_working)); progress.setCancelable(false); progress.show();
         new Thread(() -> {
             try { task.run(); }
-            catch (Exception e) { if(session!=null && e instanceof PortalClient.Failure && (((PortalClient.Failure)e).status==401 || ((PortalClient.Failure)e).status==403)){try{vault.expirePortalSync(session);}catch(Exception ignored){}} activity.runOnUiThread(() -> error(activity.getString(e instanceof PortalClient.Failure && ((PortalClient.Failure)e).status == 401 ? R.string.portal_expired : R.string.portal_failed))); }
+            catch (Exception e) { if(session!=null && e instanceof PortalClient.Failure && (((PortalClient.Failure)e).status==401 || ((PortalClient.Failure)e).status==403)){try{vault.expirePortalSync(session);}catch(Exception ignored){}} activity.runOnUiThread(() -> error(activity.getString(failureMessage(e)))); }
             finally { activity.runOnUiThread(() -> { if (!activity.isDestroyed()) progress.dismiss(); }); }
         }, "portal").start();
+    }
+    static int failureMessage(Exception e) {
+        if (!(e instanceof PortalClient.Failure)) return R.string.portal_failed;
+        PortalClient.Failure failure = (PortalClient.Failure) e;
+        if (failure.status == 401) return R.string.portal_expired;
+        if (failure.conflict == PortalClient.Failure.SYNC_LIMIT) return R.string.portal_sync_limit;
+        if (failure.conflict == PortalClient.Failure.DEVICE_LIMIT) return R.string.portal_device_limit;
+        if (failure.status == 409) return R.string.portal_conflict;
+        return R.string.portal_failed;
     }
     void show() {
         try {
