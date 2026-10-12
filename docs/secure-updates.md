@@ -117,6 +117,9 @@ profile vault remained unchanged and decryptable, installed GUI/service hashes
 matched the rebuilt artifacts, and the installed updater rejects sequence 9 as
 already current.
 
+The published Windows sequence-9 Setup is 14610519 bytes, SHA-256
+`dcb5ee4eb2eac4a3ef7d3c0cebb8209f7a600a0664d0724a57e308e7919b50e8`.
+
 Windows latest is sequence 9. macOS automatic-update promotion remains withheld.
 The rebuild release is:
 https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9
@@ -139,10 +142,14 @@ and the Windows service answers it in the v1 `Response` shape
 `deny_unknown_fields`. Every other v1 command still gets an IPC version
 mismatch; pipe authentication is unchanged, and a retained guard or active
 session still refuses the reservation. Linux and macOS keep strict equality.
-Unit tests pin the v1 request JSON and the v1-readable reply. A real signed
-9 → 10 update with injected failure and rollback on the Windows lab is NOT RUN
-and is required before Windows `latest` may move to sequence 10. macOS remains
-withheld.
+Unit tests pin the v1 request JSON and the v1-readable reply. On 2026-10-13 a
+lab-signed rehearsal on the Windows lab passed: the published sequence-9 package
+and updater installed the 0.6.0 candidate Setup (exact source `974debf`), an
+injected health failure made the v1 updater reserve the v6 service and roll
+back to 9, and the retry to 10 succeeded with the encrypted vault unchanged.
+The manifests used a throwaway lab key, so the production-key sequence-10
+metadata is still NOT RUN and is required, with the acceptance matrix, before
+Windows `latest` may move to sequence 10. macOS remains withheld.
 
 ## Версия IPC и gate приёмки (issues #31/#36)
 
