@@ -5197,7 +5197,7 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rtrust-android"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ipnet",
  "jni 0.22.4",
@@ -5216,7 +5216,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-codec"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "rtrust-profile",
  "serde",
@@ -5226,7 +5226,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-control"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ipnet",
  "libc",
@@ -5243,7 +5243,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-desktop"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "httparse",
  "libc",
@@ -5267,7 +5267,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-engine"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "blake2",
@@ -5307,7 +5307,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-inspect"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "rtrust-control",
  "rtrust-engine",
@@ -5321,7 +5321,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-ios"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "rtrust-engine",
  "rtrust-mobile",
@@ -5334,7 +5334,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-mobile"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ipnet",
  "rtrust-control",
@@ -5348,7 +5348,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-native"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "directories",
  "futures-util",
@@ -5376,7 +5376,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-portal"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ipnet",
  "keyring",
@@ -5394,7 +5394,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-profile"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "http",
@@ -5413,7 +5413,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-store"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chacha20poly1305",
  "directories",
@@ -5430,7 +5430,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-tun"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chacha20poly1305",
  "core-foundation 0.10.1",
@@ -5458,7 +5458,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-update"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "directories",
@@ -5476,7 +5476,7 @@ dependencies = [
 
 [[package]]
 name = "rtrust-webview"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "rfd",
  "rtrust-control",

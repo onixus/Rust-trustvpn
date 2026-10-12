@@ -450,16 +450,65 @@ fn cidrs(ranges: &[(u64, u64)]) -> Vec<Ipv4Net> {
 /// unchanged, and every other command still fails with a version mismatch.
 /// Invariant: both commands and the idle `Response::new` reply must stay
 /// wire compatible with `VERSION - 1` whenever `VERSION` is raised.
+///
+/// Updaters of published releases listed in [`RELEASED_UPDATER_VERSIONS`] may
+/// additionally send `PrepareUpdate` (and nothing else); [`Reply::new`] then
+/// answers in that version's wire shape.
 pub fn admitted_version(request: &Request) -> Option<u32> {
     if request.version == VERSION {
         return Some(VERSION);
     }
-    (request.version == VERSION - 1
+    let previous = request.version == VERSION - 1
         && matches!(
             request.command,
             Command::Capabilities | Command::PrepareUpdate
-        ))
-    .then_some(request.version)
+        );
+    let released = RELEASED_UPDATER_VERSIONS.contains(&request.version)
+        && matches!(request.command, Command::PrepareUpdate);
+    (previous || released).then_some(request.version)
+}
+/// Control IPC versions spoken by the updater (`rtrust-update.exe`) of a
+/// published Windows release older than `VERSION - 1`. After a failed health
+/// check that updater reserves the already upgraded service with
+/// `PrepareUpdate` before reinstalling its own package, so the service must keep
+/// admitting exactly that command from it.
+///
+/// - `1`: v0.5.0-rebuild.9, update sequence 9 (Windows `latest` before 0.6.0).
+///   Its `Command` has no `Capabilities`; its `Response` has only
+///   `version`/`state`/`message`/`always_on` and rejects unknown fields.
+///
+/// Add a version here only for a release that was actually published, and
+/// remove it only when no supported installation can roll back to it.
+pub const RELEASED_UPDATER_VERSIONS: &[u32] = &[1];
+/// A service reply in the wire shape of the version it was admitted with.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum Reply {
+    Current(Box<Response>),
+    /// v1 (sequence 9) shape; `always_on` is never set for maintenance replies.
+    V1 {
+        version: u32,
+        state: State,
+        message: String,
+    },
+}
+/// Wire version whose replies use [`Reply::V1`]. Every entry of
+/// [`RELEASED_UPDATER_VERSIONS`] must map to its own legacy shape here; a test
+/// fails if a listed version would fall back to the current `Response`.
+const V1_REPLY_VERSION: u32 = 1;
+impl Reply {
+    pub fn new(version: u32, state: State, message: &str) -> Self {
+        if version == V1_REPLY_VERSION {
+            return Self::V1 {
+                version,
+                state,
+                message: message.into(),
+            };
+        }
+        let mut response = Response::new(state, message);
+        response.version = version;
+        Self::Current(Box::new(response))
+    }
 }
 pub async fn read<T: serde::de::DeserializeOwned>(
     stream: &mut (impl AsyncRead + Unpin),
@@ -563,6 +612,103 @@ mod tests {
             };
             assert_eq!(admitted_version(&request), None);
         }
+    }
+    /// Minimal copies of the v0.5.0-rebuild.9 (sequence 9, IPC v1) wire types.
+    mod v1 {
+        use serde::{Deserialize, Serialize};
+        #[derive(Serialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct Request {
+            pub version: u32,
+            pub command: Command,
+        }
+        #[derive(Serialize)]
+        #[serde(tag = "op", deny_unknown_fields)]
+        pub enum Command {
+            Status,
+            PrepareUpdate,
+            DisableAlwaysOn,
+            AlwaysOnStatus,
+            Stop,
+            Recover,
+        }
+        #[derive(Debug, Deserialize, PartialEq, Eq)]
+        pub enum State {
+            Connected,
+            Blocked,
+            Idle,
+            Error,
+        }
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct Response {
+            pub version: u32,
+            pub state: State,
+            pub message: String,
+            #[serde(default)]
+            pub always_on: Option<bool>,
+        }
+    }
+    #[test]
+    fn released_sequence_9_updater_may_only_reserve_and_reads_the_reply() {
+        assert!(!RELEASED_UPDATER_VERSIONS.contains(&VERSION));
+        assert!(!RELEASED_UPDATER_VERSIONS.contains(&(VERSION - 1)));
+        for &version in RELEASED_UPDATER_VERSIONS {
+            assert!(
+                matches!(Reply::new(version, State::Idle, ""), Reply::V1 { .. }),
+                "released updater v{version} needs an explicit legacy reply shape"
+            );
+        }
+        let send = |command| {
+            let json = serde_json::to_string(&v1::Request {
+                version: 1,
+                command,
+            })
+            .unwrap();
+            serde_json::from_str::<Request>(&json).unwrap()
+        };
+        let prepare = serde_json::to_string(&v1::Request {
+            version: 1,
+            command: v1::Command::PrepareUpdate,
+        })
+        .unwrap();
+        assert_eq!(prepare, r#"{"version":1,"command":{"op":"PrepareUpdate"}}"#);
+        assert_eq!(admitted_version(&send(v1::Command::PrepareUpdate)), Some(1));
+        for command in [
+            v1::Command::Status,
+            v1::Command::Stop,
+            v1::Command::Recover,
+            v1::Command::DisableAlwaysOn,
+            v1::Command::AlwaysOnStatus,
+        ] {
+            assert_eq!(admitted_version(&send(command)), None);
+        }
+        // Capabilities did not exist in v1 and is not admitted from it.
+        let capabilities: Request =
+            serde_json::from_str(r#"{"version":1,"command":{"op":"Capabilities"}}"#).unwrap();
+        assert_eq!(admitted_version(&capabilities), None);
+        for (state, expected) in [
+            (State::Idle, v1::State::Idle),
+            (State::Blocked, v1::State::Blocked),
+            (State::Error, v1::State::Error),
+        ] {
+            let bytes = serde_json::to_vec(&Reply::new(1, state, "reserved")).unwrap();
+            let response: v1::Response = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!((response.version, response.state), (1, expected));
+            assert_eq!(
+                (response.message.as_str(), response.always_on),
+                ("reserved", None)
+            );
+        }
+        // The current shape is not readable by the v1 updater, hence `Reply`.
+        let mut current = Response::new(State::Idle, "reserved");
+        current.version = 1;
+        let bytes = serde_json::to_vec(&current).unwrap();
+        assert!(serde_json::from_slice::<v1::Response>(&bytes).is_err());
+        // Other admitted versions keep the current shape.
+        let value = serde_json::to_value(Reply::new(VERSION - 1, State::Idle, "x")).unwrap();
+        assert_eq!(value["version"], VERSION - 1);
+        assert!(value.get("capabilities").is_some());
     }
     #[test]
     fn idle_reply_keeps_the_previous_wire_shape() {

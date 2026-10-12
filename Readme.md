@@ -8,7 +8,7 @@ The client implements its own transport and does **not** wrap the official Trust
 
 > **Project status: development preview, October 7, 2026.**
 >
-> The workspace is **0.5.0**. The latest desktop rebuild is **v0.5.0-rebuild.9** from October 6; Android and iOS artifacts remain in the original **v0.5.0** release. The rebuild fixes desktop update identity/rollback sequencing and is built after the client/server repository split. See [v0.5.0 release scope](docs/releases/v0.5.0.md).
+> The source workspace is the unpublished **0.6.0** preview candidate (update sequence 10, not production-ready; see [v0.6.0 candidate](docs/releases/v0.6.0.md)). The latest published desktop rebuild is **v0.5.0-rebuild.9** from October 6; Android and iOS artifacts remain in the original **v0.5.0** release. The rebuild fixes desktop update identity/rollback sequencing and is built after the client/server repository split. See [v0.5.0 release scope](docs/releases/v0.5.0.md).
 
 ## Download
 
@@ -170,7 +170,7 @@ See [desktop lifecycle](docs/desktop-lifecycle.md) and [Always-on](docs/always-o
 5. For fail-closed behaviour after process death, enable Android **Always-on VPN** and **Block connections without VPN**.
 6. Server profiles can be enrolled and synchronized through the portal integration.
 
-The source tree currently declares Android minSdk 29, targetSdk 36, versionCode 50001 and versionName 0.5.0-preview.1.
+The source tree currently declares Android minSdk 29, targetSdk 36, versionCode 60001 and versionName 0.6.0-preview.1 (unpublished candidate; the published APK is still 0.5.0).
 
 See [Android documentation](docs/android.md) and [profile exchange](docs/portal.md).
 
