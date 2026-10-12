@@ -70,19 +70,44 @@ struct PortalClient {
         _ = try identifier(token, max: 128)
         return PortalSession(origin: origin, token: token)
     }
+    struct Metadata: Equatable {
+        let revision: String
+        let origin: String?
+    }
+    static func metadata(_ response: [String: Any]) throws -> [String: Metadata] {
+        guard let profiles = response["profiles"] as? [[String: Any]], profiles.count <= 64 else { throw AppError.message("Invalid profile list") }
+        var result: [String: Metadata] = [:]
+        for item in profiles {
+            guard let id = item["id"] as? String, let revision = item["revision"] as? String,
+                  !revision.isEmpty, revision.utf8.count <= 256,
+                  revision.utf8.allSatisfy({ (33...126).contains($0) }) else { throw AppError.message("Invalid profile metadata") }
+            _ = try identifier(id)
+            var origin: String?
+            if let rawOrigin = item["origin"], !(rawOrigin is NSNull) {
+                guard let value = rawOrigin as? String, !value.isEmpty, value.utf8.count <= 80,
+                      !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { throw AppError.message("Invalid profile metadata") }
+                origin = value
+            }
+            guard result[id] == nil else { throw AppError.message("Duplicate profile identifier") }
+            result[id] = Metadata(revision: revision, origin: origin)
+        }
+        return result
+    }
     func download() async throws -> [SavedProfile] {
-        let response = try await request("/portal/v2/profiles")
-        guard let metadata = response["profiles"] as? [[String: Any]], metadata.count <= 64 else { throw AppError.message("Invalid profile list") }
+        let before = try Self.metadata(try await request("/portal/v2/profiles"))
         var result: [SavedProfile] = []
-        for item in metadata {
-            guard let id = item["id"] as? String, let revision = item["revision"] as? String, !revision.isEmpty, revision.count <= 256 else { throw AppError.message("Invalid profile metadata") }
-            _ = try Self.identifier(id)
+        for id in before.keys.sorted() {
+            try Task.checkCancellation()
+            let revision = before[id]!.revision
             let response = try await request("/portal/v2/profiles/" + id + "/export", body: ["format":"profile_json", "revision":revision, "include_secrets":true, "accept_losses":false])
             guard let content = response["content"] as? String else { throw AppError.message("Invalid profile export") }
             var profile = SavedProfile.imported(try ProfilePlan.parse(Data(content.utf8)), id: "portal:" + id)
             profile.remoteID = id; profile.revision = revision
             result.append(profile)
         }
+        let after = try Self.metadata(try await request("/portal/v2/profiles"))
+        try Task.checkCancellation()
+        guard before == after else { throw AppError.message("Profile list changed during synchronization") }
         return result
     }
     func upload(_ profile: SavedProfile) async throws {

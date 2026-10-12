@@ -164,3 +164,90 @@ extension ParityTests {
         }
     }
 }
+
+
+extension ParityTests {
+    func testPortalWholeBatchFenceSequences() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        let client = PortalClient(session: PortalSession(origin: "https://fixture.invalid", token: String(repeating: "a", count: 40)), configuration: config)
+        let initial: [[String: Any]] = [["id": "one", "revision": "r1", "origin": "portal_managed"], ["id": "two", "revision": "r1"]]
+        let reordered: [[String: Any]] = [["id": "two", "revision": "r1", "origin": NSNull()], initial[0]]
+        let duplicate: [[String: Any]] = [initial[0], initial[0]]
+        let changedRevision: [[String: Any]] = [["id": "one", "revision": "r2", "origin": "portal_managed"], initial[1]]
+        let changedOrigin: [[String: Any]] = [["id": "one", "revision": "r1", "origin": "external_stored"], initial[1]]
+        let added = initial + [["id": "three", "revision": "r1"]]
+        let cases: [([[String: Any]], [[String: Any]], Bool)] = [
+            (initial, initial, true), (initial, reordered, true), ([], [], true),
+            (initial, changedRevision, false), (initial, changedOrigin, false),
+            (initial, added, false), (initial, [], false), (initial, duplicate, false),
+            (duplicate, initial, false), (initial, [["id": "one", "revision": 12]], false)
+        ]
+        defer { FixtureProtocol.handler = nil }
+        let raw = self.raw
+        for (before, after, succeeds) in cases {
+            var lists = 0, exports = 0
+            FixtureProtocol.handler = { request in
+                if request.url!.path == "/portal/v2/profiles" {
+                    lists += 1
+                    return (200, try JSONSerialization.data(withJSONObject: ["profiles": lists == 1 ? before : after]))
+                }
+                exports += 1
+                return (200, try JSONSerialization.data(withJSONObject: ["content": raw]))
+            }
+            let local = SavedProfile.imported(try ProfilePlan.parse(Data(raw.utf8)), id: "local")
+            var retained = [local]
+            do {
+                let downloaded = try await client.download()
+                XCTAssertTrue(succeeds, "Changed list accepted")
+                if succeeds { retained = downloaded; XCTAssertEqual(retained.count, before.count) }
+            } catch {
+                XCTAssertFalse(succeeds, "Stable list rejected")
+                XCTAssertEqual(retained.map(\.id), ["local"], "No partial local replacement")
+            }
+            if before.count == 2, before[0]["id"] as? String == before[1]["id"] as? String {
+                XCTAssertEqual(exports, 0, "Initial duplicates rejected before exports")
+            } else { XCTAssertEqual(lists, 2, "Recheck includes empty lists") }
+        }
+    }
+    func testPortalMalformedMetadataAndUnknownOrigin() throws {
+        for revision in ["", "has space", "line\n", "é", String(repeating: "x", count: 257)] {
+            XCTAssertThrowsError(try PortalClient.metadata(["profiles": [["id": "one", "revision": revision]]]))
+        }
+        for origin: Any in ["", "line\n", 12, String(repeating: "x", count: 81)] {
+            XCTAssertThrowsError(try PortalClient.metadata(["profiles": [["id": "one", "revision": "r1", "origin": origin]]]))
+        }
+        let missing = try PortalClient.metadata(["profiles": [["id": "one", "revision": "r1"]]])
+        let null = try PortalClient.metadata(["profiles": [["id": "one", "revision": "r1", "origin": NSNull()]]])
+        XCTAssertEqual(missing, null)
+        XCTAssertNil(missing["one"]?.origin)
+        let future = try PortalClient.metadata(["profiles": [["id": "one", "revision": "r1", "origin": "future_source"]]])
+        XCTAssertEqual(future["one"]?.origin, "future_source")
+    }
+}
+
+
+extension ParityTests {
+    func testPortalPostfetchFailureAndCancellationKeepCallerState() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        let client = PortalClient(session: PortalSession(origin: "https://fixture.invalid", token: String(repeating: "a", count: 40)), configuration: config)
+        defer { FixtureProtocol.handler = nil }
+        let raw = self.raw
+        for cancelExport in [false, true] {
+            var lists = 0
+            FixtureProtocol.handler = { request in
+                if request.url!.path == "/portal/v2/profiles" {
+                    lists += 1
+                    if lists == 2 { throw URLError(.timedOut) }
+                    return (200, try JSONSerialization.data(withJSONObject: ["profiles": [["id": "one", "revision": "r1"]]]))
+                }
+                if cancelExport { throw URLError(.cancelled) }
+                return (200, try JSONSerialization.data(withJSONObject: ["content": raw]))
+            }
+            var retained = [SavedProfile.imported(try ProfilePlan.parse(Data(raw.utf8)), id: "local")]
+            do { retained = try await client.download(); XCTFail("Failed batch accepted") }
+            catch { XCTAssertEqual(retained.map(\.id), ["local"]) }
+        }
+    }
+}

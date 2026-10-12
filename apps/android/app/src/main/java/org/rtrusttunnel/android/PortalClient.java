@@ -7,7 +7,7 @@ import javax.net.ssl.HttpsURLConnection;
 import org.json.*;
 
 /** The same v2 one-time enrollment / revision contract as the server UI. */
-final class PortalClient {
+class PortalClient {
     final String origin, token;
     static String origin(String input) throws Exception {
         URI uri = new URI(input.trim());
@@ -57,20 +57,52 @@ final class PortalClient {
         new PortalClient(origin, result.getString("token"));
         return result.put("origin", origin);
     }
+    static java.util.Map<String, java.util.List<String>> metadata(JSONArray profiles) throws Exception {
+        if (profiles.length() > 64) throw new IOException("Invalid profile list");
+        java.util.Map<String, java.util.List<String>> result = new java.util.TreeMap<>();
+        for (int i = 0; i < profiles.length(); i++) {
+            JSONObject item = profiles.getJSONObject(i);
+            Object rawId = item.opt("id"), rawRevision = item.opt("revision");
+            if (!(rawId instanceof String) || !(rawRevision instanceof String)) throw new IOException("Invalid profile metadata");
+            String remoteId = id((String) rawId), revision = (String) rawRevision;
+            if (!revision.matches("[!-~]{1,256}")) throw new IOException("Invalid profile metadata");
+            Object rawOrigin = item.opt("origin");
+            String profileOrigin = null;
+            if (rawOrigin != null && rawOrigin != JSONObject.NULL) {
+                if (!(rawOrigin instanceof String)) throw new IOException("Invalid profile metadata");
+                profileOrigin = (String) rawOrigin;
+                if (profileOrigin.isEmpty() || profileOrigin.getBytes(StandardCharsets.UTF_8).length > 80
+                    || profileOrigin.codePoints().anyMatch(Character::isISOControl)) throw new IOException("Invalid profile metadata");
+            }
+            if (result.put(remoteId, java.util.Arrays.asList(revision, profileOrigin)) != null)
+                throw new IOException("Duplicate profile identifier");
+        }
+        return result;
+    }
+    JSONObject parseExport(String content) throws Exception {
+        JSONObject parsed = new JSONObject(NativeCore.INSTANCE.parse(content));
+        if (!parsed.getBoolean("ok")) throw new IOException();
+        return parsed.getJSONObject("profile");
+    }
+    static void checkCancelled() throws java.io.InterruptedIOException {
+        if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("Synchronization cancelled");
+    }
     JSONArray download() throws Exception {
-        JSONArray metadata = request("/portal/v2/profiles", null).getJSONArray("profiles");
-        if (metadata.length() > 64) throw new IOException();
+        checkCancelled();
+        java.util.Map<String, java.util.List<String>> before = metadata(request("/portal/v2/profiles", null).getJSONArray("profiles"));
         JSONArray result = new JSONArray();
-        for (int i = 0; i < metadata.length(); i++) {
-            JSONObject meta = metadata.getJSONObject(i);
-            String remoteId = id(meta.getString("id")), revision = meta.getString("revision");
+        for (java.util.Map.Entry<String, java.util.List<String>> entry : before.entrySet()) {
+            checkCancelled();
+            String remoteId = entry.getKey(), revision = entry.getValue().get(0);
             JSONObject exported = request("/portal/v2/profiles/" + remoteId + "/export", new JSONObject()
                 .put("format", "profile_json").put("revision", revision).put("include_secrets", true).put("accept_losses", false));
-            JSONObject parsed = new JSONObject(NativeCore.INSTANCE.parse(exported.getString("content")));
-            if (!parsed.getBoolean("ok")) throw new IOException();
+            JSONObject profile = parseExport(exported.getString("content"));
             result.put(new JSONObject().put("id", "portal:" + remoteId).put("remote_id", remoteId).put("revision", revision)
-                .put("profile", parsed.getJSONObject("profile")));
+                .put("profile", profile));
         }
+        if (!before.equals(metadata(request("/portal/v2/profiles", null).getJSONArray("profiles"))))
+            throw new IOException("Profile list changed during synchronization");
+        checkCancelled();
         return result;
     }
     static final class Failure extends IOException {
