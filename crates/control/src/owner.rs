@@ -7,6 +7,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::{Zeroize, Zeroizing};
 
 pub const LEN: usize = 32;
+/// Service reply when a live session's owner is missing or wrong. Clients
+/// match on it to explain the next step; it never contains an owner.
+pub const NOT_OWNER: &str =
+    "Сессией VPN управляет другое приложение; защита сохранена. Отключите VPN в нём.";
 
 #[derive(Clone)]
 pub struct Owner([u8; LEN]);

@@ -383,7 +383,7 @@ pub async fn check_endpoint(session: Session) -> EndpointCheck {
         independent: false,
     };
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    if let Session::Tun(client) = &session {
+    if let Session::Tun(client, _) = &session {
         let initial = client.status();
         if initial.capabilities.endpoint_probes {
             result.fact = Fact::NotChecked;

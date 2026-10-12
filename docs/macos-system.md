@@ -185,7 +185,12 @@ lives only in the service registry and the caller.
   (`org.rtrusttunnel.desktop` / `service-session-owner-v1`, the same keyring
   mechanism as the vault master key), so a restarted GUI can still Recover its
   session; it clears the item after a confirmed Stop or Recover. `rtrust-inspect
-  --recover-service` reads the same item (macOS may ask to allow access). The owner is redacted in `Debug`, is
+  --recover-service` reads the same item (macOS may ask to allow access).
+  The GUI uses the owner of its own live session from memory first. If the
+  service refuses the owner, the GUI explains the exit (disconnect in the
+  starting app, or restart the Mac / have an administrator restart the
+  service, then Recover). A failed Keychain write is shown as a warning while
+  connected. The owner is redacted in `Debug`, is
   never logged, never in events, diagnostics or errors, and is dropped from the
   client status snapshot.
 - Version 5 clients get `IPC version mismatch` before any action, so an old GUI

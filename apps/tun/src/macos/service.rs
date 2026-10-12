@@ -40,8 +40,7 @@ fn new_owner() -> Result<Owner, String> {
         .map_err(|_| "Session owner unavailable")?;
     Ok(Owner::from_bytes(*bytes))
 }
-const NOT_OWNER: &str =
-    "Сессией VPN управляет другое приложение; защита сохранена. Отключите VPN в нём.";
+use rtrust_control::owner::NOT_OWNER;
 // Synchronous lock: the actor drop guard must clear it during unwind or
 // cancellation, where it cannot await. Never held across an await.
 type Registry = Arc<std::sync::Mutex<Option<Session>>>;

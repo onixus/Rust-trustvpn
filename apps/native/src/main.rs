@@ -910,9 +910,10 @@ impl App {
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             Message::RecoverService if self.can_change_profiles() => {
                 self.busy = true;
+                let current = self.session.as_ref().and_then(Session::owner);
                 return Task::perform(
-                    async {
-                        rtrust_desktop::connection::recover_service()
+                    async move {
+                        rtrust_desktop::connection::recover_service(current, true)
                             .await
                             .map(|()| {
                                 if cfg!(target_os = "windows") {
@@ -1144,6 +1145,11 @@ impl App {
                         self.last_diagnostic = None;
                         self.diagnostic_report = None;
                         self.status = if self.mode == Mode::Socks { "Прокси SOCKS5/HTTP включён. Его можно указать и как системный прокси Windows. Для DNS выберите разрешение имён через прокси." } else if self.saved_connection.mode == rtrust_store::Mode::Full && self.connection_ipv6 { "IPv4, IPv6 и DNS всего компьютера через VPN. Пересылка между интерфейсами заблокирована." } else if self.saved_connection.mode == rtrust_store::Mode::Full { "IPv4 и DNS всего компьютера через VPN. Сервер без IPv6: IPv6 заблокирован, приложения переходят на IPv4. Пересылка между интерфейсами заблокирована." } else { "Выбранные IPv4-сети подключены через службу. Исключения, остальной трафик и системный DNS идут напрямую." }.into();
+                        if let Some(warning) =
+                            self.session.as_ref().and_then(|s| s.owner_warning(true))
+                        {
+                            self.status = format!("{} {warning}", self.status);
+                        }
                         return Task::batch([self.monitor_connection(), self.start_diagnostic()]);
                     }
                     Err(error) => {
@@ -1789,6 +1795,14 @@ impl App {
                 }))
     }
     fn connection_check_summary(&self) -> String {
+        let summary = self.connection_check_text();
+        // Repeated while connected: a crash would otherwise need a restart.
+        match self.session.as_ref().and_then(|s| s.owner_warning(true)) {
+            Some(warning) => format!("{summary} {warning}"),
+            None => summary,
+        }
+    }
+    fn connection_check_text(&self) -> String {
         if self.diagnostic_task.is_some() {
             return format!(
                 "Проверяем {}: DNS → маршрут VPN → HTTPS…",

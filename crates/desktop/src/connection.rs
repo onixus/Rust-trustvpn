@@ -27,7 +27,16 @@ impl std::fmt::Display for Mode {
 pub enum Session {
     Socks(rtrust_engine::proxy::Proxy),
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-    Tun(rtrust_control::Client),
+    Tun(rtrust_control::Client, OwnerKey),
+}
+/// Whether the service session owner reached the OS credential store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerKey {
+    /// The service issued none (Linux/Windows or an older reply).
+    None,
+    Saved,
+    /// Recover after a GUI crash would need a service restart.
+    Unsaved,
 }
 impl Session {
     pub async fn start_authorized(
@@ -104,18 +113,41 @@ impl Session {
     // service-owned session; only the OS credential store keeps it.
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     async fn tun(client: rtrust_control::Client) -> Self {
-        if let Some(owner) = client.owner() {
-            // Best effort: the live connection can still Stop without it.
-            let _ =
-                tokio::task::spawn_blocking(move || rtrust_store::save_session_owner(&owner)).await;
+        let key = match client.owner() {
+            None => OwnerKey::None,
+            Some(owner) => {
+                match tokio::task::spawn_blocking(move || rtrust_store::save_session_owner(&owner))
+                    .await
+                {
+                    Ok(Ok(())) => OwnerKey::Saved,
+                    // The live connection can still Stop; the user is warned.
+                    _ => OwnerKey::Unsaved,
+                }
+            }
+        };
+        Self::Tun(client, key)
+    }
+    /// Session owner kept in memory; Recover prefers it over the Keychain.
+    pub fn owner(&self) -> Option<rtrust_control::owner::Owner> {
+        match self {
+            Self::Socks(_) => None,
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            Self::Tun(c, _) => c.owner(),
         }
-        Self::Tun(client)
+    }
+    /// Warning when the owner could not be saved; never contains its value.
+    pub fn owner_warning(&self, russian: bool) -> Option<&'static str> {
+        match self {
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            Self::Tun(_, OwnerKey::Unsaved) => Some(owner_unsaved_text(russian)),
+            _ => None,
+        }
     }
     pub fn proxy(&self) -> Option<&rtrust_engine::proxy::Proxy> {
         match self {
             Self::Socks(p) => Some(p),
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Self::Tun(_) => None,
+            Self::Tun(..) => None,
         }
     }
     pub fn is_tun(&self) -> bool {
@@ -125,7 +157,7 @@ impl Session {
         match self {
             Self::Socks(p) => p.address().to_string(),
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Self::Tun(c) => crate::observation_summary(&c.status().observations, true),
+            Self::Tun(c, _) => crate::observation_summary(&c.status().observations, true),
         }
     }
 
@@ -138,7 +170,7 @@ impl Session {
             )
             .sample(rtrust_control::observations::now_ms()),
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Self::Tun(c) => c.status().observations,
+            Self::Tun(c, _) => c.status().observations,
         }
     }
     /// 0 is the requested profile, 1.. the allowed backups in the order sent.
@@ -146,7 +178,7 @@ impl Session {
         match self {
             Self::Socks(_) => None,
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Self::Tun(c) => c.status().active_profile,
+            Self::Tun(c, _) => c.status().active_profile,
         }
     }
     pub fn status_summary(&self, russian: bool) -> String {
@@ -164,7 +196,7 @@ impl Session {
                 Ok(())
             }
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Self::Tun(c) => {
+            Self::Tun(c, _) => {
                 let owned = c.owner().is_some();
                 c.close().await?;
                 if owned {
@@ -179,7 +211,7 @@ impl Session {
         match self {
             Self::Socks(p) => p.health().await.map_err(|e| e.to_string()),
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            Self::Tun(c) => {
+            Self::Tun(c, _) => {
                 let r = c.status();
                 if r.state == rtrust_control::State::Connected {
                     Ok(())
@@ -195,12 +227,44 @@ impl Session {
 async fn forget_owner() {
     let _ = tokio::task::spawn_blocking(rtrust_store::clear_session_owner).await;
 }
-/// Explicit Recover: stops this user's live session with the stored owner, or
-/// releases a guard retained after the session ended. A live session started
-/// by another client stays protected and the service reports it.
+pub fn owner_unsaved_text(russian: bool) -> &'static str {
+    if russian {
+        "Ключ управления сессией VPN не сохранён в Связке ключей. Если приложение закроется аварийно, снять блокировку можно будет только после перезагрузки Mac или перезапуска службы R-TrustTunnel администратором."
+    } else {
+        "The VPN session control key was not saved to the Keychain. If the app quits unexpectedly, the block can be removed only after restarting the Mac or an administrator restarting the R-TrustTunnel service."
+    }
+}
+/// The in-memory owner of this GUI's session wins; the Keychain covers a
+/// restarted GUI. The loader runs only when memory has none.
+fn pick_owner(
+    memory: Option<rtrust_control::owner::Owner>,
+    stored: impl FnOnce() -> Option<rtrust_control::owner::Owner>,
+) -> Option<rtrust_control::owner::Owner> {
+    memory.or_else(stored)
+}
+/// Turns the service owner refusal into a concrete next step. Other errors
+/// pass through unchanged.
+fn recover_error(error: String, sent_owner: bool, russian: bool) -> String {
+    if error != rtrust_control::owner::NOT_OWNER {
+        return error;
+    }
+    match (sent_owner, russian) {
+        (false, true) => "Подключение VPN запущено, но ключ управления им недоступен: его запустило другое приложение или ключ утерян. Сессия и защита сохранены. Отключите VPN в приложении, которое его запустило; если это было это приложение, перезагрузите Mac или перезапустите службу R-TrustTunnel от администратора, после чего снимите блокировку.",
+        (false, false) => "The VPN session is running but its control key is unavailable: another app started it or the key was lost. The session and protection are kept. Disconnect in the app that started it; if it was this app, restart the Mac or have an administrator restart the R-TrustTunnel service, then remove the block.",
+        (true, true) => "Сохранённый ключ управления не подходит к текущей сессии VPN: её запустило другое приложение или более новое подключение. Сессия и защита сохранены. Отключите VPN в приложении, которое его запустило; если это было это приложение, перезагрузите Mac или перезапустите службу R-TrustTunnel от администратора, после чего снимите блокировку.",
+        (true, false) => "The saved control key does not match the current VPN session: another app or a newer connection started it. The session and protection are kept. Disconnect in the app that started it; if it was this app, restart the Mac or have an administrator restart the R-TrustTunnel service, then remove the block.",
+    }
+    .into()
+}
+/// Explicit Recover: stops this user's live session with its owner (from
+/// `current` or the Keychain), or releases a guard retained after the session
+/// ended. A live session started by another client stays protected.
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-pub async fn recover_service() -> Result<(), String> {
-    let owner = if cfg!(target_os = "macos") {
+pub async fn recover_service(
+    current: Option<rtrust_control::owner::Owner>,
+    russian: bool,
+) -> Result<(), String> {
+    let stored = if cfg!(target_os = "macos") && current.is_none() {
         tokio::task::spawn_blocking(rtrust_store::load_session_owner)
             .await
             .ok()
@@ -208,10 +272,53 @@ pub async fn recover_service() -> Result<(), String> {
     } else {
         None
     };
-    let had_owner = owner.is_some();
-    rtrust_control::Client::recover(owner).await?;
-    if had_owner {
+    let owner = pick_owner(current, || stored);
+    let sent_owner = owner.is_some();
+    rtrust_control::Client::recover(owner)
+        .await
+        .map_err(|error| recover_error(error, sent_owner, russian))?;
+    if sent_owner {
         forget_owner().await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use rtrust_control::owner::{LEN, NOT_OWNER, Owner};
+    #[test]
+    fn memory_owner_wins_and_keychain_is_read_only_without_it() {
+        let memory = Owner::from_bytes([1; LEN]);
+        let picked = pick_owner(Some(memory.clone()), || panic!("Keychain must not be read"));
+        assert!(picked.unwrap().matches(&memory));
+        let stored = Owner::from_bytes([2; LEN]);
+        let picked = pick_owner(None, || Some(stored.clone()));
+        assert!(picked.unwrap().matches(&stored));
+        assert!(pick_owner(None, || None).is_none());
+    }
+    #[test]
+    fn owner_refusal_gives_a_concrete_exit_and_other_errors_pass_through() {
+        for sent in [false, true] {
+            for russian in [false, true] {
+                let text = recover_error(NOT_OWNER.into(), sent, russian);
+                assert_ne!(text, NOT_OWNER);
+                assert!(text.contains(if russian {
+                    "перезапустите службу"
+                } else {
+                    "restart the R-TrustTunnel service"
+                }));
+            }
+        }
+        assert_ne!(
+            recover_error(NOT_OWNER.into(), false, true),
+            recover_error(NOT_OWNER.into(), true, true)
+        );
+        assert_eq!(
+            recover_error("IPC version mismatch".into(), true, true),
+            "IPC version mismatch"
+        );
+        assert!(owner_unsaved_text(true).contains("Связке ключей"));
+        assert!(owner_unsaved_text(false).contains("Keychain"));
+    }
 }
