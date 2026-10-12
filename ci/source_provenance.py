@@ -22,7 +22,7 @@ def commit_files(source, sha):
     if any(e and not e.startswith((b'100644 ', b'100755 ')) for e in entries):
         raise ValueError('Source tree contains unsupported symlinks or submodules')
     tree = git(source, 'rev-parse', sha + '^{tree}').decode().strip()
-    with tarfile.open(fileobj=io.BytesIO(git(source, 'archive', '--format=tar', sha))) as archive:
+    with tarfile.open(fileobj=io.BytesIO(git(source, '-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'archive', '--format=tar', sha))) as archive:
         files = {m.name: archive.extractfile(m).read() for m in archive.getmembers() if m.isfile()}
     names = {e.split(b'\t', 1)[1].decode() for e in entries if e}
     if set(files) != names:

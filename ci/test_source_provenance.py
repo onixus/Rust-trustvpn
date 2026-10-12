@@ -17,8 +17,9 @@ class ProvenanceTests(unittest.TestCase):
         self.run_git('init', '-q')
         self.run_git('config', 'user.email', 'fixture@example.invalid')
         self.run_git('config', 'user.name', 'Fixture')
-        (self.repo / 'service.rs').write_text('synthetic service\n')
-        (self.repo / 'tool.sh').write_text('#!/bin/sh\nexit 0\n')
+        self.run_git('config', 'core.autocrlf', 'false')
+        (self.repo / 'service.rs').write_bytes(b'synthetic service\n')
+        (self.repo / 'tool.sh').write_bytes(b'#!/bin/sh\nexit 0\n')
         (self.repo / 'tool.sh').chmod(0o755)
         self.run_git('add', '.')
         self.run_git('commit', '-qm', 'fixture')
@@ -35,6 +36,12 @@ class ProvenanceTests(unittest.TestCase):
         self.export()
         verify(self.repo, self.dest, self.sha)
         self.assertTrue((self.dest / 'tool.sh').stat().st_mode & 0o111)
+
+    def test_autocrlf_does_not_rewrite_snapshot_bytes(self):
+        self.run_git('config', 'core.autocrlf', 'true')
+        self.export()
+        self.assertEqual((self.dest / 'service.rs').read_bytes(), b'synthetic service\n')
+        self.assertEqual((self.dest / 'tool.sh').read_bytes(), b'#!/bin/sh\nexit 0\n')
 
     def test_dirty_source_exports_commit_and_stays_immutable(self):
         (self.repo / 'service.rs').write_text('dirty service\n')
