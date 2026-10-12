@@ -4,7 +4,7 @@ Job: http://localhost:8081/job/rtrust-native/
 
 `Jenkinsfile` targets `macos-arm64` (native macOS host, one executor) and `windows-amd64` (native Windows 11, MSVC). Linux ARM64 native/TUN tests run in disposable Docker containers on the Mac agent, including Weston Wayland, systemd-resolved and nftables. The controller is Linux and is used only to freeze source and run security gates. The job never treats the controller as macOS.
 
-The project is versioned in Git. `ci/snapshot.py` copies an explicit set of project directories into the controller workspace. All nodes receive the same stash; archived `source-manifest.json` contains per-file SHA-256 hashes. Reconfigure the inline job definition after changing `Jenkinsfile`. No controller restart or history deletion is required.
+The project is versioned in Git. `ci/snapshot.py` exports the complete immutable Git tree selected by the required `SOURCE_PATH` and full `SOURCE_SHA` parameters into an empty controller workspace. Bootstrap scripts also come from that commit. All nodes receive the same stash; archived `source-manifest.json` contains per-file SHA-256 hashes, and `source-identity.json` binds them to the commit and tree. Working changes and untracked files are excluded. Signing requires the complete manifest and a matching clean checkout; older archives without identity must be rebuilt. Reconfigure the inline job definition after changing `Jenkinsfile`. No controller restart or history deletion is required.
 
 Stages:
 

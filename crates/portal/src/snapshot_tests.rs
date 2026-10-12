@@ -22,6 +22,27 @@ struct Fixture {
     observed: Arc<Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
+#[tokio::test]
+async fn explicit_renewal_preserves_token_and_expired_access_never_contacts_server() {
+    let f = fixture(vec![step(
+        "/portal/v2/token/renew",
+        json!({"expires_in":3600,"scope":"portal_access_only"}),
+    )])
+    .await;
+    let mut client = f.client.clone();
+    client.token = Zeroizing::new("x".repeat(43));
+    let mut expired = client.clone();
+    expired.expires_at = Some(1);
+    assert!(expired.renew_access().await.is_err());
+    assert!(f.observed.lock().unwrap().is_empty());
+    let renewed = client.renew_access().await.unwrap();
+    assert_eq!(renewed.token.as_str(), "x".repeat(43));
+    assert!(renewed.expires_at.unwrap() > now().unwrap());
+    assert_eq!(
+        f.observed.lock().unwrap().as_slice(),
+        ["/portal/v2/token/renew"]
+    );
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.task.abort();
@@ -90,6 +111,11 @@ async fn fixture(steps: Vec<Step>) -> Fixture {
                     serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
                 assert_eq!(body["revision"], "1");
                 assert_eq!(body["include_secrets"], true);
+            }
+            if step.path.ends_with("/token/renew") {
+                let body: Value =
+                    serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+                assert_eq!(body, json!({"consent":true}));
             }
             recorded.lock().unwrap().push(step.path.into());
             if let Some(stalled) = step.stalled {
@@ -228,4 +254,70 @@ async fn caller_timeout_cancels_snapshot_before_any_batch_is_returned() {
             .is_err()
     );
     assert_eq!(fixture.observed.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn negotiated_atomic_snapshot_uses_one_body_and_rejects_ambiguous_batches() {
+    let legacy = snapshot_steps();
+    let mut capabilities = legacy[0].body.clone();
+    capabilities["snapshot"] = json!(1);
+    let metadata = profile_list("1")["profiles"][0].clone();
+    let content = legacy[3].body["content"].clone();
+    let batch = json!({"version":1,"revision":"a".repeat(64),"profiles":[{"metadata":metadata,"content":content}],"routing":{"policy":null}});
+    let f = fixture(vec![
+        step("/portal/v2/capabilities", capabilities.clone()),
+        step("/portal/v2/snapshot", batch.clone()),
+    ])
+    .await;
+    let result = authorized(&f.client).snapshot().await.unwrap();
+    assert_eq!(result.profiles.len(), 1);
+    assert_eq!(result.routing, RoutingState::Available(None));
+    assert_eq!(f.observed.lock().unwrap().len(), 2);
+    let mut duplicated = batch.clone();
+    let item = duplicated["profiles"][0].clone();
+    duplicated["profiles"].as_array_mut().unwrap().push(item);
+    let f = fixture(vec![
+        step("/portal/v2/capabilities", capabilities),
+        step("/portal/v2/snapshot", duplicated),
+    ])
+    .await;
+    let error = authorized(&f.client).snapshot().await.err().unwrap();
+    assert!(!error.contains("FIXTURE-SECRET"));
+    assert_eq!(f.observed.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn negotiated_freshness_bounds_access_and_refuses_missing_or_invalid_receipts() {
+    let legacy = snapshot_steps();
+    let mut capabilities = legacy[0].body.clone();
+    capabilities["snapshot"] = json!(1);
+    capabilities["offline_freshness"] = json!(1);
+    let batch = json!({"version":1,"revision":"b".repeat(64),"profiles":[{"metadata":profile_list("1")["profiles"][0],"content":legacy[3].body["content"]}],"routing":{"policy":null},"freshness":{"version":1,"max_age_seconds":3600,"token_remaining_seconds":120}});
+    let f = fixture(vec![
+        step("/portal/v2/capabilities", capabilities.clone()),
+        step("/portal/v2/snapshot", batch.clone()),
+    ])
+    .await;
+    let result = authorized(&f.client).snapshot().await.unwrap();
+    let lease = result.freshness.unwrap();
+    assert_eq!(lease.expires_at_ms - lease.issued_at_ms, 120000);
+    for freshness in [
+        None,
+        Some(json!({"version":2,"max_age_seconds":3600,"token_remaining_seconds":120})),
+        Some(json!({"version":1,"max_age_seconds":86401,"token_remaining_seconds":120})),
+        Some(json!({"version":1,"max_age_seconds":60,"token_remaining_seconds":0})),
+    ] {
+        let mut body = batch.clone();
+        if let Some(value) = freshness {
+            body["freshness"] = value;
+        } else {
+            body.as_object_mut().unwrap().remove("freshness");
+        }
+        let f = fixture(vec![
+            step("/portal/v2/capabilities", capabilities.clone()),
+            step("/portal/v2/snapshot", body),
+        ])
+        .await;
+        assert!(authorized(&f.client).snapshot().await.is_err());
+    }
 }

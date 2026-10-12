@@ -27,7 +27,50 @@ struct Session {
     finished: tokio::sync::watch::Receiver<bool>,
     shutdown: tokio::sync::watch::Sender<bool>,
 }
-type Registry = Arc<Mutex<Option<Session>>>;
+// Synchronous lock: the actor drop guard must clear it during unwind or
+// cancellation, where it cannot await. Never held across an await.
+type Registry = Arc<std::sync::Mutex<Option<Session>>>;
+fn registry_slot(registry: &Registry) -> std::sync::MutexGuard<'_, Option<Session>> {
+    registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+// Forget only this actor's entry; a replacement session stays registered.
+fn forget(registry: &Registry, identity: &Actor) {
+    let mut current = registry_slot(registry);
+    if current
+        .as_ref()
+        .is_some_and(|current| current.actor.same_channel(identity))
+    {
+        *current = None;
+    }
+}
+// Owned by the actor future, so it runs on normal return, panic unwind,
+// cancellation and drop before first poll. It only forgets IPC bookkeeping:
+// the network Guard has no Drop, so PF, routes and DNS stay installed until an
+// explicit Stop or Recover releases them.
+struct Finish {
+    registry: Registry,
+    identity: Actor,
+    lease: Option<Lease>,
+    finished: tokio::sync::watch::Sender<bool>,
+}
+impl Drop for Finish {
+    fn drop(&mut self) {
+        forget(&self.registry, &self.identity);
+        drop(self.lease.take());
+        self.finished.send_replace(true);
+    }
+}
+fn supervise(
+    finish: Finish,
+    actor: impl std::future::Future<Output = ()> + Send + 'static,
+) -> ActorTask {
+    Box::pin(async move {
+        let _finish = finish;
+        actor.await;
+    })
+}
 struct Control {
     commands: mpsc::Receiver<Envelope>,
     initial: Option<oneshot::Sender<Response>>,
@@ -39,6 +82,7 @@ struct Envelope {
     response: oneshot::Sender<Response>,
 }
 
+const SESSION_ENDED: &str = "Tunnel session ended";
 async fn ask(actor: &Actor, command: Command) -> Result<Response, String> {
     let (response, receive) = oneshot::channel();
     tokio::time::timeout(
@@ -47,11 +91,11 @@ async fn ask(actor: &Actor, command: Command) -> Result<Response, String> {
     )
     .await
     .map_err(|_| "Supervisor queue timed out")?
-    .map_err(|_| "Tunnel session ended")?;
+    .map_err(|_| SESSION_ENDED)?;
     tokio::time::timeout(Duration::from_secs(45), receive)
         .await
         .map_err(|_| "Supervisor response timed out")?
-        .map_err(|_| "Tunnel session ended".into())
+        .map_err(|_| SESSION_ENDED.into())
 }
 // Durable state, independent of the bounded IPC command queue. Losing the
 // service owner also requests fail-closed shutdown, even before first poll.
@@ -226,7 +270,7 @@ pub async fn run() -> Result<(), String> {
     events::record("service_started native_power_monitor=registered");
     let mut tasks = JoinSet::new();
     let mut actors = JoinSet::new();
-    let registry: Registry = Arc::new(Mutex::new(None));
+    let registry: Registry = Arc::new(std::sync::Mutex::new(None));
     let (spawn, mut spawned) = mpsc::channel::<ActorTask>(16);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|_| "Cannot register signal")?;
@@ -266,7 +310,7 @@ pub async fn run() -> Result<(), String> {
     while let Ok(task) = spawned.try_recv() {
         actors.spawn(task);
     }
-    let current = registry.lock().await.clone();
+    let current = registry_slot(&registry).clone();
     if let Some(actor) = current {
         actor.shutdown.send_replace(true);
     }
@@ -303,22 +347,38 @@ async fn serve(
     if matches!(request.command, Command::Capabilities) {
         return reply(&mut stream, State::Idle, "Capabilities").await;
     }
-    let current = registry.lock().await.clone();
+    let current = registry_slot(&registry).clone();
     if matches!(request.command, Command::Status | Command::Recover)
-        && let Some(actor) = current
+        && let Some(session) = current
     {
-        let command = if matches!(request.command, Command::Recover) {
+        let stopping = matches!(request.command, Command::Recover);
+        let command = if stopping {
             Command::Stop
         } else {
             Command::Status
         };
-        let stopping = matches!(command, Command::Stop);
-        let response = ask(&actor.actor, command).await?;
-        if stopping {
-            wait_finished(actor.finished).await?;
+        match ask(&session.actor, command).await {
+            Ok(response) => {
+                if stopping && let Err(error) = wait_finished(session.finished).await {
+                    return reply(&mut stream, State::Error, &error).await;
+                }
+                // Status is read-only and does not adopt the active session.
+                return write_response(&mut stream, &response).await;
+            }
+            // A live but unresponsive actor keeps its lease and guard.
+            Err(error) if error != SESSION_ENDED => {
+                return reply(&mut stream, State::Error, &error).await;
+            }
+            // The actor ended (returned, panicked or was cancelled) before it
+            // answered. Wait for its cleanup, then answer like no session is
+            // registered: the lease still serialises any recovery below.
+            Err(_) => {
+                if let Err(error) = wait_finished(session.finished).await {
+                    return reply(&mut stream, State::Error, &error).await;
+                }
+                forget(&registry, &session.actor);
+            }
         }
-        // Status is read-only and does not adopt the active session.
-        return write_response(&mut stream, &response).await;
     }
     let Ok(held) = lease.try_lock_owned() else {
         return reply(
@@ -373,15 +433,18 @@ async fn serve(
     let (shutdown_signal, shutdown_events) = tokio::sync::watch::channel(false);
     let (initial, response) = oneshot::channel();
     let (finished, completion) = tokio::sync::watch::channel(false);
-    *registry.lock().await = Some(Session {
+    *registry_slot(&registry) = Some(Session {
         actor: actor.clone(),
         finished: completion.clone(),
         shutdown: shutdown_signal,
     });
-    let cleanup = registry.clone();
-    let identity = actor.clone();
-    let task = Box::pin(async move {
-        let _lease = held_lease.clone();
+    let finish = Finish {
+        registry: registry.clone(),
+        identity: actor.clone(),
+        lease: Some(held_lease.clone()),
+        finished,
+    };
+    let task = supervise(finish, async move {
         let _ = start(
             request,
             uid,
@@ -394,19 +457,9 @@ async fn serve(
             },
         )
         .await;
-        let mut current = cleanup.lock().await;
-        if current
-            .as_ref()
-            .is_some_and(|current| current.actor.same_channel(&identity))
-        {
-            *current = None;
-        }
-        drop(current);
-        drop(_lease);
-        let _ = finished.send(true);
     });
+    // A rejected task is dropped here; its Finish forgets the registration.
     if spawn.send(task).await.is_err() {
-        *registry.lock().await = None;
         return Err("Service is stopping".into());
     }
     let mut unexpected = [0];
@@ -904,7 +957,15 @@ mod tests {
         power: tokio::sync::watch::Receiver<power::State>,
     ) -> Result<(), String> {
         let (spawn, _spawned) = mpsc::channel(16);
-        super::serve(stream, uid, lease, power, Arc::new(Mutex::new(None)), spawn).await
+        super::serve(
+            stream,
+            uid,
+            lease,
+            power,
+            Arc::new(std::sync::Mutex::new(None)),
+            spawn,
+        )
+        .await
     }
 
     struct TestActor {
@@ -1071,7 +1132,7 @@ mod tests {
                 .is_err()
         );
         let (_finished, completion) = tokio::sync::watch::channel(false);
-        let registry = Arc::new(Mutex::new(Some(Session {
+        let registry = Arc::new(std::sync::Mutex::new(Some(Session {
             actor: fixture.actor.clone(),
             finished: completion,
             shutdown: fixture.shutdown.clone(),
@@ -1242,7 +1303,7 @@ mod tests {
         let fixture = test_actor().await;
         fixture.initial.await.unwrap();
         let (_finished, completion) = tokio::sync::watch::channel(false);
-        let registry = Arc::new(Mutex::new(Some(Session {
+        let registry = Arc::new(std::sync::Mutex::new(Some(Session {
             actor: fixture.actor.clone(),
             finished: completion,
             shutdown: fixture.shutdown.clone(),
@@ -2024,5 +2085,159 @@ mod tests {
         assert_eq!(response.state, State::Error);
         task.await.unwrap().unwrap();
         drop(held);
+    }
+
+    async fn serve_once(
+        registry: &Registry,
+        lease: &Arc<Mutex<()>>,
+        command: Command,
+    ) -> (Option<Response>, Result<(), String>) {
+        let (spawn, _spawned) = mpsc::channel(16);
+        let (mut client, server) = tokio::io::duplex(4096);
+        let task = tokio::spawn(super::serve(
+            server,
+            501,
+            lease.clone(),
+            tokio::sync::watch::channel(power::State::default()).1,
+            registry.clone(),
+            spawn,
+        ));
+        write(
+            &mut client,
+            &Request {
+                version: VERSION,
+                command,
+            },
+        )
+        .await
+        .unwrap();
+        let response = read::<Response>(&mut client).await.ok();
+        (response, task.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn registered_recover_drains_actor_then_falls_back_to_journal_path() {
+        let fixture = test_actor().await;
+        fixture.initial.await.unwrap();
+        let (finished, completion) = tokio::sync::watch::channel(false);
+        let registry: Registry = Arc::new(std::sync::Mutex::new(Some(Session {
+            actor: fixture.actor.clone(),
+            finished: completion,
+            shutdown: fixture.shutdown.clone(),
+        })));
+        let task = fixture.task;
+        let supervisor = tokio::spawn(supervise(
+            Finish {
+                registry: registry.clone(),
+                identity: fixture.actor.clone(),
+                lease: None,
+                finished,
+            },
+            async move { task.await.unwrap().unwrap() },
+        ));
+        let (response, result) = serve_once(&registry, &fixture.lease, Command::Recover).await;
+        assert_eq!(response.unwrap().state, State::Idle);
+        result.unwrap();
+        // Idle is acknowledged only after Stop released the guard and drained workers.
+        assert!(fixture.released.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(fixture.dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(registry_slot(&registry).is_none());
+        supervisor.await.unwrap();
+        // The next Recover takes the no-session path, which needs the lease
+        // before state::recover; hold it so the test never touches host state.
+        let held = fixture.lease.clone().try_lock_owned().unwrap();
+        let (response, result) = serve_once(&registry, &fixture.lease, Command::Recover).await;
+        let response = response.unwrap();
+        assert_eq!(response.state, State::Error);
+        assert_eq!(response.message, "Служба уже обслуживает подключение");
+        result.unwrap();
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn panicked_actor_is_forgotten_and_recover_status_start_still_answer() {
+        let lease = Arc::new(Mutex::new(()));
+        let held: Lease = Arc::new(lease.clone().lock_owned().await);
+        let (actor, commands) = mpsc::channel::<Envelope>(16);
+        let (finished, completion) = tokio::sync::watch::channel(false);
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let session = Session {
+            actor: actor.clone(),
+            finished: completion,
+            shutdown,
+        };
+        let registry: Registry = Arc::new(std::sync::Mutex::new(Some(session.clone())));
+        let (trigger, fired) = oneshot::channel::<()>();
+        let task = tokio::spawn(supervise(
+            Finish {
+                registry: registry.clone(),
+                identity: actor.clone(),
+                lease: Some(held),
+                finished,
+            },
+            async move {
+                let _commands = commands;
+                let _ = fired.await;
+                panic!("synthetic actor panic");
+            },
+        ));
+        trigger.send(()).unwrap();
+        assert!(task.await.unwrap_err().is_panic());
+        assert!(registry_slot(&registry).is_none());
+        assert!(*session.finished.borrow());
+        assert!(lease.try_lock().is_ok());
+        // Recreate the window between actor exit and registry cleanup: a dead
+        // registration must still produce an answer, never an IPC EOF.
+        for command in [Command::Recover, Command::Status] {
+            *registry_slot(&registry) = Some(session.clone());
+            let held = lease.clone().try_lock_owned().unwrap();
+            let (response, result) = serve_once(&registry, &lease, command).await;
+            let response = response.expect("dead actor must not cause EOF");
+            assert_eq!(response.state, State::Error);
+            assert_eq!(response.message, "Служба уже обслуживает подключение");
+            result.unwrap();
+            assert!(registry_slot(&registry).is_none());
+            drop(held);
+        }
+        // Read-only Status with a free lease reports the journal state.
+        let (response, result) = serve_once(&registry, &lease, Command::Status).await;
+        assert!(matches!(
+            response.unwrap().state,
+            State::Idle | State::Blocked
+        ));
+        result.unwrap();
+        // Start is admitted again: not rejected by a stale registration or lease.
+        let profile = rtrust_profile::Profile::import("hostname='test.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='synthetic'\n").unwrap();
+        let (spawn, mut spawned) = mpsc::channel(16);
+        let (mut client, server) = tokio::io::duplex(4096);
+        let serving = tokio::spawn(super::serve(
+            server,
+            501,
+            lease.clone(),
+            tokio::sync::watch::channel(power::State::default()).1,
+            registry.clone(),
+            spawn,
+        ));
+        write(
+            &mut client,
+            &Request {
+                version: VERSION,
+                command: Command::StartFull {
+                    profile: Box::new(profile),
+                    dns: "192.0.2.53".parse().unwrap(),
+                    fallbacks: vec![],
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let admitted = spawned.recv().await.unwrap();
+        assert!(registry_slot(&registry).is_some());
+        assert!(lease.try_lock().is_err());
+        // Dropping the unpolled actor still runs its cleanup.
+        drop(admitted);
+        assert!(serving.await.unwrap().is_err());
+        assert!(registry_slot(&registry).is_none());
+        assert!(lease.try_lock().is_ok());
     }
 }

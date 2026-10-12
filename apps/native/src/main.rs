@@ -1078,6 +1078,20 @@ impl App {
                     let fallbacks = self
                         .saved_connection
                         .fallbacks_for(&self.profiles, Some(&profile));
+                    let authorized = std::iter::once(profile.clone())
+                        .chain(fallbacks.iter().cloned())
+                        .collect::<Vec<_>>();
+                    let lease = match self
+                        .saved_connection
+                        .sync
+                        .lease_for(self.saved_connection.managed_routes.is_some(), &authorized)
+                    {
+                        Ok(lease) => lease,
+                        Err(error) => {
+                            self.status = error;
+                            return Task::none();
+                        }
+                    };
                     self.connection_candidates = std::iter::once(profile.name.clone())
                         .chain(fallbacks.iter().map(|p| p.name.clone()))
                         .collect();
@@ -1094,9 +1108,11 @@ impl App {
                     .into();
                     let (task, handle) = Task::perform(
                         async move {
-                            Session::start(profile, fallbacks, mode, port, selection, dns)
-                                .await
-                                .map_err(|e| e.to_string())
+                            Session::start_authorized(
+                                profile, fallbacks, mode, port, selection, dns, lease,
+                            )
+                            .await
+                            .map_err(|e| e.to_string())
                         },
                         move |r| Message::Connected(epoch, r),
                     )

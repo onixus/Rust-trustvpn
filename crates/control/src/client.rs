@@ -228,9 +228,51 @@ impl Client {
         })
         .await
     }
+    pub async fn start_managed(
+        profile: rtrust_profile::Profile,
+        fallbacks: Vec<rtrust_profile::Profile>,
+        selection: Option<Selection>,
+        dns: std::net::Ipv4Addr,
+        lease: crate::freshness::Lease,
+    ) -> Result<Self, String> {
+        validate_fallbacks(&fallbacks)?;
+        validate_dns(dns)?;
+        lease.validate_at(crate::freshness::now())?;
+        let command = match selection {
+            Some(selection) => {
+                selection.validate()?;
+                Command::Start {
+                    profile: Box::new(profile),
+                    networks: selection.include,
+                    exclude: selection.exclude,
+                    exclude_lan: selection.exclude_lan,
+                    dns: Some(dns),
+                    fallbacks,
+                }
+            }
+            None => Command::StartFull {
+                profile: Box::new(profile),
+                dns,
+                fallbacks,
+            },
+        };
+        Self::start_command(Command::StartLeased {
+            lease,
+            command: Box::new(command),
+        })
+        .await
+    }
     async fn start_command(command: Command) -> Result<Self, String> {
         let capabilities = negotiate().await?;
-        if let Command::Start { fallbacks, .. } | Command::StartFull { fallbacks, .. } = &command
+        if matches!(&command, Command::StartLeased { .. }) && !capabilities.managed_access_freshness
+        {
+            return Err("Service freshness capability required; update the service".into());
+        }
+        let inspected = match &command {
+            Command::StartLeased { command, .. } => command.as_ref(),
+            other => other,
+        };
+        if let Command::Start { fallbacks, .. } | Command::StartFull { fallbacks, .. } = inspected
             && !fallbacks.is_empty()
             && !capabilities.failover
         {

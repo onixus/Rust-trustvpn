@@ -1,6 +1,8 @@
 //! Shared desktop connection and encrypted profile controller.
 pub mod connection;
 pub mod diagnostics;
+pub mod diagnostics_frontend;
+pub mod sync;
 use rtrust_profile::Profile;
 use rtrust_store::Vault;
 use serde::Serialize;
@@ -14,6 +16,7 @@ pub struct Summary {
 }
 #[derive(Serialize)]
 pub struct View {
+    pub diagnostics: diagnostics_frontend::View,
     pub revision: u64,
     pub profiles: Vec<Summary>,
     pub connection: rtrust_store::ConnectionSettings,
@@ -23,6 +26,9 @@ pub struct View {
     pub observations: Option<rtrust_control::observations::Snapshot>,
 }
 pub struct Controller {
+    pub diagnostics: diagnostics_frontend::Frontend,
+    pub session_epoch: u64,
+    pub connected_profile: Option<usize>,
     pub vault: Vault,
     storage_revision: Option<Vec<u8>>,
     pub revision: u64,
@@ -36,6 +42,9 @@ impl Controller {
     /// Isolated GUI smoke state; never reads an existing user's vault.
     pub fn smoke() -> Self {
         Self {
+            diagnostics: Default::default(),
+            session_epoch: 0,
+            connected_profile: None,
             vault: Vault::default(),
             storage_revision: None,
             revision: 0,
@@ -48,6 +57,9 @@ impl Controller {
     pub fn load() -> Result<Self, String> {
         let (vault, revision) = rtrust_store::snapshot().map_err(|e| e.to_string())?;
         Ok(Self {
+            diagnostics: Default::default(),
+            session_epoch: 0,
+            connected_profile: None,
             vault,
             storage_revision: revision,
             revision: 0,
@@ -59,6 +71,11 @@ impl Controller {
     }
     pub fn view(&self) -> View {
         View {
+            diagnostics: self.diagnostics.view(
+                self.session_epoch,
+                self.session.as_ref().map(|s| s.observations().generation),
+                rtrust_control::observations::now_ms(),
+            ),
             revision: self.revision,
             profiles: self
                 .vault
@@ -133,6 +150,8 @@ impl Controller {
         let sync = next.connection.sync.clone();
         next.connection = settings;
         next.connection.sync = sync;
+        // The local settings form cannot relabel or remove a portal policy.
+        next.connection.managed_routes = self.vault.connection.managed_routes.clone();
         self.save(next)
     }
     pub fn check(&self, revision: u64) -> Result<(), String> {
@@ -173,18 +192,26 @@ impl Controller {
         };
         let selection = c.effective_selection();
         let fallbacks = c.fallbacks_for(&self.vault.profiles, Some(&p));
+        let authorized = std::iter::once(p.clone())
+            .chain(fallbacks.iter().cloned())
+            .collect::<Vec<_>>();
+        let lease = c.sync.lease_for(c.managed_routes.is_some(), &authorized)?;
         let ipv4_only = mode == connection::Mode::Full && !p.endpoint.has_ipv6;
+        self.diagnostics.cancel();
+        self.session_epoch = self.session_epoch.wrapping_add(1);
         self.session = Some(
-            connection::Session::start(
+            connection::Session::start_authorized(
                 p,
                 fallbacks,
                 mode,
                 c.socks_port,
                 selection,
                 c.dns.to_string(),
+                lease,
             )
             .await?,
         );
+        self.connected_profile = Some(index);
         self.connected_note = if ipv4_only {
             "Connected · IPv4 and DNS. The server has no IPv6, so IPv6 is blocked and apps use IPv4."
         } else {
@@ -197,9 +224,12 @@ impl Controller {
         self.connected_note
     }
     pub async fn disconnect(&mut self) -> Result<(), String> {
+        self.diagnostics.cancel();
+        self.session_epoch = self.session_epoch.wrapping_add(1);
         if let Some(session) = self.session.as_ref() {
             session.clone().stop().await?;
             self.session = None;
+            self.connected_profile = None;
         }
         self.connected_note = "";
         self.status.clear();
@@ -270,6 +300,8 @@ fn recent_change(
         (EventKind::NetworkChanged, false) => "network changed, earlier checks are stale",
         (EventKind::Resumed, true) => "после сна, прежние проверки устарели",
         (EventKind::Resumed, false) => "resumed from sleep, earlier checks are stale",
+        (EventKind::PolicyChanged, true) => "правила изменились, прежние проверки устарели",
+        (EventKind::PolicyChanged, false) => "policy changed, earlier checks are stale",
         (EventKind::FailedOver, true) => "переключено на разрешённый резервный профиль",
         (EventKind::FailedOver, false) => "switched to an allowed backup profile",
         _ => return None,
@@ -331,11 +363,15 @@ mod tests {
             .sync
             .tracked
             .push(rtrust_store::TrackedProfile {
+                available: true,
                 id: "one".into(),
                 revision: "one".into(),
                 baseline: profile,
             });
         let controller = Controller {
+            diagnostics: Default::default(),
+            session_epoch: 0,
+            connected_profile: None,
             vault,
             storage_revision: None,
             revision: 7,

@@ -10,8 +10,9 @@ pub const SOCKET: &str = "/private/var/run/rtrust/control.sock";
 /// Opt-in automatic recovery: at most this many user-allowed backup profiles.
 pub const MAX_FALLBACKS: usize = 3;
 pub const LIMIT: usize = (2 + MAX_FALLBACKS) * rtrust_profile::MAX_INPUT;
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 pub mod endpoint;
+pub mod freshness;
 pub mod observations;
 pub mod recovery;
 pub use ipnet::Ipv4Net;
@@ -26,6 +27,10 @@ pub struct Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", deny_unknown_fields)]
 pub enum Command {
+    StartLeased {
+        lease: freshness::Lease,
+        command: Box<Command>,
+    },
     Start {
         profile: Box<rtrust_profile::Profile>,
         networks: Vec<Ipv4Net>,
@@ -108,6 +113,8 @@ pub struct Response {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Capabilities {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub managed_access_freshness: bool,
     pub observations_schema: u32,
     pub lifecycle_observations: bool,
     pub system_probes: bool,
@@ -122,6 +129,7 @@ pub struct Capabilities {
 impl Capabilities {
     pub fn current() -> Self {
         Self {
+            managed_access_freshness: cfg!(any(target_os = "linux", target_os = "windows")),
             observations_schema: observations::SCHEMA,
             lifecycle_observations: true,
             system_probes: false,

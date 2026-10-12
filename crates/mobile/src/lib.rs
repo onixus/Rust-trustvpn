@@ -1,6 +1,10 @@
 //! Explicit mobile adaptation of portable desktop route/DNS policy.
 pub mod flows;
+pub mod managed;
+pub mod reserves;
+pub mod session_policy;
 use ipnet::IpNet;
+pub use rtrust_control::recovery;
 use rtrust_profile::Profile;
 use serde::Serialize;
 use serde_json::Value;
@@ -257,6 +261,10 @@ impl Observations {
             .network_changed(rtrust_control::observations::now_ms());
     }
     /// The OS provider reported wake; a polling gap alone is not this event.
+    pub fn policy_changed(&mut self) {
+        self.monitor
+            .policy_changed(rtrust_control::observations::now_ms());
+    }
     pub fn resumed(&mut self) {
         self.monitor.resumed(rtrust_control::observations::now_ms());
     }

@@ -27,14 +27,48 @@ final class AppRoutingAcceptance {
             .put(new JSONObject().put("id", "second").put("profile", second)));
         check(ProfileVault.resolveProfile(profiles, "second") == second, "App uses explicitly selected profile");
         check(ProfileVault.resolveProfile(profiles, profiles.getString("default")) == first, "Widget uses default profile");
+        profiles.getJSONArray("profiles").getJSONObject(0).put("remote_id", "managed-1");
+        ProfileVault.Selection managedSelection = ProfileVault.resolveSelection(profiles, null);
+        profiles.put("default", "second");
+        check(managedSelection.profile == first && !managedSelection.localPolicy && managedSelection.id.equals("first"), "Loaded content retains its managed provenance after default change");
+        check(ProfileVault.resolveSelection(profiles, null).localPolicy, "New default selection resolves local provenance");
         boolean missingProfile = false;
         try { ProfileVault.resolveProfile(profiles, "removed"); } catch (Exception expected) { missingProfile = true; }
         check(missingProfile, "Removed selection never falls back to default");
+        JSONObject portable=new JSONObject(NativeCore.INSTANCE.parse("hostname='test.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='synthetic'\n")).getJSONObject("profile");
+        JSONObject group=new JSONObject().put("group","Team").put("revision","admin:1:2")
+            .put("include",new JSONArray().put("10.0.0.0/8")).put("exclude",new JSONArray().put("10.2.0.0/16")).put("exclude_lan",false);
+        JSONObject grouped=new JSONObject(NativeCore.INSTANCE.planManaged(portable.toString(),group.toString()));
+        check(grouped.getBoolean("ok") && !grouped.getJSONObject("plan").getBoolean("ipv6"), "Managed IPv4 group plans through JNI and blocks IPv6");
+        group.put("exclude_lan",true);
+        check(!new JSONObject(NativeCore.INSTANCE.planManagedOnNetwork(portable.toString(),group.toString(),"null")).getBoolean("ok"), "Unobserved LAN never becomes an empty exclusion");
+        check(new JSONObject(NativeCore.INSTANCE.planManagedOnNetwork(portable.toString(),group.toString(),"[\"10.1.0.7/24\"]")).getBoolean("ok"), "Observed LAN prefix compiles through JNI");
+        JSONObject lease=new JSONObject().put("version",1).put("issued_wall",1000).put("issued_elapsed",100).put("duration_ms",5000).put("boot",7);
+        check(OfflineLease.valid(lease,2000,1100,7), "Fresh lease accepted");
+        check(!OfflineLease.valid(lease,2000,5100,7), "Sleep elapsed time expires lease");
+        check(!OfflineLease.valid(lease,999,1100,7) && !OfflineLease.valid(lease,2000,1100,8), "Clock rollback and reboot need fresh receipt");
         AppRouting missing = new AppRouting(true, Collections.singletonList("org.rtrusttunnel.nonexistent.fixture"));
         boolean rejected = false; try { missing.validateInstalled(context.getPackageManager()); } catch (PackageManager.NameNotFoundException expected) { rejected = true; }
         check(rejected, "Missing selected package is rejected");
         ProfileVault vault = new ProfileVault(context); JSONObject original = vault.read();
         try {
+            group.put("exclude_lan",false);
+            JSONObject registration=new JSONObject().put("origin","https://panel.example").put("token","synthetic-registration");
+            vault.edit(data -> data.put("portal",registration));
+            JSONObject managedEntry=new JSONObject().put("id","portal:managed-1").put("remote_id","managed-1").put("revision","r1").put("profile",portable).put("managed_routing",group);
+            vault.syncPortal(registration,new JSONArray().put(managedEntry));
+            ProfileVault.Selection managed=vault.selection("portal:managed-1");
+            check(!managed.localPolicy && managed.managedRouting.getString("revision").equals("admin:1:2"), "Encrypted snapshot binds group and managed ownership to profile");
+            String before=vault.read().toString();
+            JSONObject unsupported=new JSONObject(managedEntry.toString()); unsupported.remove("managed_routing"); unsupported.put("routing_unsupported",true);
+            boolean refused=false;
+            try { vault.syncPortal(registration,new JSONArray().put(unsupported)); } catch (Exception expected) { refused=true; }
+            check(refused && before.equals(vault.read().toString()), "Capability regression leaves whole snapshot intact");
+            JSONObject conflict=new JSONObject(managedEntry.toString()); conflict.getJSONObject("managed_routing").put("include",new JSONArray().put("172.16.0.0/12"));
+            refused=false;
+            try { vault.syncPortal(registration,new JSONArray().put(conflict)); } catch (Exception expected) { refused=true; }
+            check(refused && before.equals(vault.read().toString()), "Same-revision managed route conflict remains atomic");
+            vault.write(original);
             AppRouting selected = new AppRouting(true, Arrays.asList(context.getPackageName(), context.getPackageName()));
             vault.saveAppRouting(selected);
             AppRouting restored = AppRouting.read(new ProfileVault(context).read());

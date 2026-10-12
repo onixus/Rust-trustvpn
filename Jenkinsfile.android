@@ -2,15 +2,33 @@
 pipeline {
   agent none
   options { disableConcurrentBuilds(); timestamps(); timeout(time: 90, unit: 'MINUTES'); buildDiscarder(logRotator(numToKeepStr: '15')) }
-  parameters { string(name: 'ANDROID_EMULATOR', defaultValue: 'emulator-5580', description: 'Already provisioned isolated Android emulator') }
+  parameters { string(name: 'SOURCE_PATH', defaultValue: '', description: 'Absolute local source repository path'); string(name: 'SOURCE_SHA', defaultValue: '', description: 'Full immutable 40-character commit SHA');  string(name: 'ANDROID_EMULATOR', defaultValue: 'emulator-5580', description: 'Already provisioned isolated Android emulator') }
   stages {
     stage('Source snapshot') {
       agent { label 'built-in' }
       steps {
         deleteDir()
-        sh 'python3 /Users/onixus/Git/R-Trusttunnel/ci/snapshot.py .'
+        sh '''set -eu
+          # Validate parameters before any Git call: no branch names or option-like values.
+          case "$SOURCE_SHA" in
+            *[!0123456789abcdef]*|'') echo 'SOURCE_SHA must be a full lowercase 40-character commit SHA' >&2; exit 1 ;;
+          esac
+          test "${#SOURCE_SHA}" -eq 40 || { echo 'SOURCE_SHA must be a full lowercase 40-character commit SHA' >&2; exit 1; }
+          case "$SOURCE_PATH" in
+            /*) ;;
+            *) echo 'SOURCE_PATH must be an absolute path' >&2; exit 1 ;;
+          esac
+          bootstrap=$(mktemp -d)
+          trap 'rm -rf "$bootstrap"' EXIT
+          git -C "$SOURCE_PATH" cat-file blob "$SOURCE_SHA:ci/snapshot.py" > "$bootstrap/snapshot.py"
+          git -C "$SOURCE_PATH" cat-file blob "$SOURCE_SHA:ci/source_provenance.py" > "$bootstrap/source_provenance.py"
+          python3 "$bootstrap/snapshot.py" . --source "$SOURCE_PATH" --sha "$SOURCE_SHA"
+        '''
+        sh 'python3 ci/run.py source-provenance python3 -m unittest discover -s ci -p test_source_provenance.py'
+        sh 'python3 ci/run.py release-acceptance python3 -m unittest discover -s ci -p test_release_acceptance.py'
+        sh 'python3 ci/run.py release-publisher python3 -m unittest discover -s ci -p test_publish_signed_release.py'
         stash name: 'source', includes: '**', useDefaultExcludes: false
-        archiveArtifacts artifacts: 'source-manifest.json', fingerprint: true
+        archiveArtifacts artifacts: 'source-manifest.json,source-identity.json', fingerprint: true
       }
     }
     stage('Gitleaks + Trivy') {

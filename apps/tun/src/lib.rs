@@ -9,6 +9,7 @@ pub mod echo;
 pub mod fragments;
 pub mod ipv6;
 pub mod packet;
+pub mod policy;
 pub mod stack;
 
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -36,4 +37,4 @@ pub mod windows;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
-pub use dataplane::{PacketDevice, run_with_dns as run_packet_flow};
+pub use dataplane::{PacketDevice, run_with_dns as run_packet_flow, run_with_policy};

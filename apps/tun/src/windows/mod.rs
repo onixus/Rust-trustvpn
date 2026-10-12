@@ -238,7 +238,8 @@ async fn serve(
     let Ok(_lease) = lease.try_lock_owned() else {
         return reply(pipe, State::Error, "Служба уже обслуживает подключение").await;
     };
-    let (profile, selection, dns, split_dns, fallbacks) = match request.command {
+    let (mut freshness, command) = rtrust_control::freshness::start(request.command)?;
+    let (profile, selection, dns, split_dns, fallbacks) = match command {
         Command::PrepareUpdate => {
             if full::pending()? {
                 return reply(
@@ -313,9 +314,11 @@ async fn serve(
         } else {
             vec![]
         };
-        let (session, udp) = failover
-            .connect_initial(|profile| async move { transport(&profile).await })
-            .await?;
+        let (session, udp) = rtrust_control::freshness::while_valid(
+            freshness.as_mut(),
+            failover.connect_initial(|profile| async move { transport(&profile).await }),
+        )
+        .await?;
         Ok::<_, String>((failover, networks, session, udp))
     };
     let (mut failover, networks, session, udp) = {
@@ -422,7 +425,7 @@ async fn serve(
         &mut worker,
         &mut stop,
         dns.is_some(),
-        supervisor.as_deref(),
+        (supervisor.as_deref(), freshness),
     )
     .await;
     worker.stop().await;
@@ -456,8 +459,13 @@ async fn lease_loop(
     worker: &mut Worker,
     stop: &mut watch::Receiver<bool>,
     full: bool,
-    supervisor: Option<&crate::always_on::Supervisor>,
+    context: (
+        Option<&crate::always_on::Supervisor>,
+        Option<rtrust_control::freshness::Deadline>,
+    ),
 ) -> Result<Option<rtrust_control::observations::Snapshot>, String> {
+    let (supervisor, mut freshness) = context;
+    let mut access_expired = false;
     let mut monitor = rtrust_control::observations::Monitor::new(
         if full {
             rtrust_control::observations::Mode::Full
@@ -507,6 +515,8 @@ async fn lease_loop(
         let mut pending = Box::pin(read::<Request>(pipe));
         let request = loop {
             tokio::select! {
+                biased;
+                _=async{freshness.as_mut().unwrap().expired().await},if freshness.is_some() && !access_expired=>{worker.stop().await;connecting=Box::pin(std::future::pending());reconnecting=false;access_expired=true;state=State::Blocked;monitor.transition(false,rtrust_control::observations::now_ms());},
                 r = &mut pending => break r?,
                 change = netwatch.next() => match change {
                     crate::netwatch::Change::Network => monitor.network_changed(rtrust_control::observations::now_ms()),
@@ -521,7 +531,7 @@ async fn lease_loop(
                     }
                     retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                 },
-                _ = &mut retry, if state == State::Blocked && !reconnecting => {
+                _ = &mut retry, if state == State::Blocked && !reconnecting && !access_expired => {
                     if full && full::refresh(device.if_index().map_err(|_| "Missing Wintun interface")?, &full::endpoints(&failover.guard_profile())?).is_err() {
                         retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                         continue;
@@ -559,7 +569,7 @@ async fn lease_loop(
                 reply_observed(
                     pipe,
                     state.clone(),
-                    if state == State::Connected {
+                    if access_expired { "Access confirmation expired; protection retained. Synchronize before reconnecting." } else if state == State::Connected {
                         "Wintun подключён"
                     } else {
                         "Переподключение; выбранные IPv4-сети удерживаются на Wintun"

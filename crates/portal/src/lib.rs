@@ -6,6 +6,88 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 const LIMIT: usize = 8 * MAX_INPUT;
+
+/// A QR contains a short-lived enrollment code, never persistent credentials.
+/// The selected HTTPS origin is an independent trust input; QR cannot replace it.
+fn enrollment_code(
+    input: &str,
+    expected_origin: &Url,
+    unix_seconds: u64,
+) -> Result<Zeroizing<String>, String> {
+    if !input.trim_start().starts_with('{') {
+        return Ok(Zeroizing::new(input.trim().to_owned()));
+    }
+    #[derive(Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+    #[serde(deny_unknown_fields)]
+    struct Invitation {
+        kind: String,
+        version: u64,
+        origin: String,
+        code: String,
+        expires_at: u64,
+    }
+    let invalid = || "Некорректное, просроченное или чужое приглашение панели".to_string();
+    if input.len() > 4096 {
+        return Err(invalid());
+    }
+    let mut invitation: Invitation = serde_json::from_str(input).map_err(|_| invalid())?;
+    let origin = Client::new(&invitation.origin)
+        .map_err(|_| invalid())?
+        .origin;
+    if invitation.kind != "rtrust_enrollment"
+        || invitation.version != 1
+        || origin != *expected_origin
+        || invitation.expires_at <= unix_seconds
+        || invitation.expires_at - unix_seconds > 300
+    {
+        return Err(invalid());
+    }
+    Ok(Zeroizing::new(std::mem::take(&mut invitation.code)))
+}
+
+#[cfg(test)]
+mod invitation_tests {
+    use super::*;
+    #[test]
+    fn qr_cannot_change_origin_extend_expiry_or_add_credentials() {
+        let expected = Url::parse("https://panel.example/").unwrap();
+        let code = "synthetic-one-time-code-123456";
+        let good = json!({"kind":"rtrust_enrollment","version":1,"origin":"https://panel.example","code":code,"expires_at":180});
+        assert_eq!(
+            enrollment_code(&good.to_string(), &expected, 100)
+                .unwrap()
+                .as_str(),
+            code
+        );
+        for (key, value) in [
+            ("origin", json!("https://foreign.example")),
+            ("origin", json!("https://panel.example/path")),
+            ("origin", json!("http://panel.example")),
+            ("expires_at", json!(100)),
+            ("expires_at", json!(401)),
+            ("version", json!(2)),
+            ("password", json!("synthetic-secret-canary")),
+        ] {
+            let mut bad = good.clone();
+            bad[key] = value;
+            let error = enrollment_code(&bad.to_string(), &expected, 100).unwrap_err();
+            assert!(!error.contains(code));
+            assert!(!error.contains("synthetic-secret-canary"));
+        }
+    }
+    #[tokio::test]
+    async fn expired_qr_is_rejected_before_contacting_portal() {
+        let client = Client::new("https://127.0.0.1:1").unwrap();
+        let expired = json!({"kind":"rtrust_enrollment","version":1,"origin":"https://127.0.0.1:1","code":"synthetic-one-time-code-123456","expires_at":1});
+        assert!(
+            client
+                .enroll(&expired.to_string(), "test")
+                .await
+                .unwrap_err()
+                .contains("приглашение")
+        );
+    }
+}
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct Summary {
     pub name: String,
@@ -88,6 +170,10 @@ struct Capabilities {
     max_profile_bytes: u64,
     #[serde(default)]
     routing: Option<u64>,
+    #[serde(default)]
+    snapshot: Option<u64>,
+    #[serde(default)]
+    offline_freshness: Option<u64>,
 }
 impl Capabilities {
     fn validate(&self) -> Result<(), String> {
@@ -96,8 +182,134 @@ impl Capabilities {
             || !self.enrollment.iter().any(|v| v == "one_time_code")
             || self.max_profile_bytes == 0
             || self.routing.is_some_and(|v| v != 1)
+            || self.snapshot.is_some_and(|v| v != 1)
         {
             return Err("Панель не поддерживает совместимый контракт профилей v2".into());
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceAccess {
+    pub schema: u32,
+    pub session_policy: String,
+    pub profiles: Vec<DeviceCredential>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceCredential {
+    pub id: String,
+    pub generation: u64,
+    pub desired: String,
+    pub state: String,
+    pub legacy_shared_access: String,
+    pub receipt: Option<CredentialReceipt>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialReceipt {
+    pub checked_at: u64,
+    pub generation: u64,
+    pub verifier_sha256: String,
+    pub endpoint_generation: u64,
+    pub checks: Vec<CredentialCheck>,
+    pub scope: String,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialCheck {
+    pub protocol: String,
+    pub outcome: String,
+    pub elapsed_ms: Option<u64>,
+}
+impl DeviceAccess {
+    fn validate(&self) -> Result<(), String> {
+        let invalid = || "Некорректное состояние управляемого доступа".to_owned();
+        if self.schema != 1
+            || self.session_policy != "restart_all_endpoint_sessions"
+            || self.profiles.len() > 200
+        {
+            return Err(invalid());
+        }
+        let mut ids = std::collections::HashSet::new();
+        for profile in &self.profiles {
+            identifier(&profile.id)?;
+            if !ids.insert(&profile.id)
+                || profile.generation == 0
+                || !matches!(profile.desired.as_str(), "active" | "revoked")
+                || !matches!(
+                    profile.state.as_str(),
+                    "requested" | "pending" | "applied" | "failed"
+                )
+                || !matches!(
+                    profile.legacy_shared_access.as_str(),
+                    "unmanaged" | "not_issued_by_this_flow"
+                )
+            {
+                return Err(invalid());
+            }
+            if let Some(receipt) = &profile.receipt {
+                if receipt.generation != profile.generation
+                    || receipt.checked_at == 0
+                    || receipt.verifier_sha256.len() != 64
+                    || !receipt
+                        .verifier_sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit())
+                    || receipt.checks.len() > 4
+                    || receipt.scope != "managed_credentials_only_legacy_shared_access_unmanaged"
+                {
+                    return Err(invalid());
+                }
+                for check in &receipt.checks {
+                    if !matches!(check.protocol.as_str(), "http2" | "http3")
+                        || !matches!(
+                            check.outcome.as_str(),
+                            "authenticated" | "rejected" | "unavailable"
+                        )
+                    {
+                        return Err(invalid());
+                    }
+                }
+            }
+            if profile.state == "applied" {
+                let receipt = profile.receipt.as_ref().ok_or_else(invalid)?;
+                for protocol in ["http2", "http3"] {
+                    let checks: Vec<_> = receipt
+                        .checks
+                        .iter()
+                        .filter(|c| c.protocol == protocol)
+                        .collect();
+                    let expected = if profile.desired == "revoked" {
+                        "rejected"
+                    } else {
+                        "authenticated"
+                    };
+                    let exact = if profile.desired == "revoked" {
+                        checks.len() == 1 && checks[0].outcome == "rejected"
+                    } else {
+                        (checks.len() == 1 && checks[0].outcome == "authenticated")
+                            || (checks.len() == 2
+                                && checks
+                                    .iter()
+                                    .filter(|c| c.outcome == "authenticated")
+                                    .count()
+                                    == 1
+                                && checks.iter().filter(|c| c.outcome == "rejected").count() == 1)
+                    };
+                    if !exact
+                        || checks.is_empty()
+                        || checks.len() > 2
+                        || !checks.iter().any(|c| c.outcome == expected)
+                        || checks.iter().any(|c| c.outcome == "unavailable")
+                        || (profile.desired == "revoked"
+                            && checks.iter().any(|c| c.outcome != "rejected"))
+                    {
+                        return Err(invalid());
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -106,6 +318,7 @@ impl Capabilities {
 pub struct Snapshot {
     pub profiles: Vec<(RemoteProfile, Profile)>,
     pub routing: RoutingState,
+    pub freshness: Option<rtrust_control::freshness::Lease>,
 }
 fn same_revisions(before: &[RemoteProfile], after: &[RemoteProfile]) -> bool {
     before.len() == after.len()
@@ -314,7 +527,36 @@ impl Client {
             .map(Some)
             .map_err(|_| "Некорректный ответ панели".into())
     }
+    /// Explicit renewal while this device token is still valid. An expired or
+    /// revoked registration must enroll again; endpoint access is independent.
+    pub async fn renew_access(mut self) -> Result<Self, String> {
+        if self.token.is_empty() {
+            return Err("Сначала привяжите устройство к панели".into());
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Renewed {
+            expires_in: u64,
+            scope: String,
+        }
+        let requested_at = now()?;
+        let result: Renewed = self
+            .request(Method::POST, "token/renew", Some(json!({"consent":true})))
+            .await?;
+        if result.expires_in == 0
+            || result.expires_in > 30 * 86400
+            || result.scope != "portal_access_only"
+        {
+            return Err("Некорректный срок продления доступа панели".into());
+        }
+        self.expires_at = token_deadline(requested_at, Some(result.expires_in))?;
+        if self.access_expired(now()?) {
+            return Err("Срок продления доступа панели истёк".into());
+        }
+        Ok(self)
+    }
     pub async fn enroll(mut self, code: &str, name: &str) -> Result<Self, String> {
+        let code = enrollment_code(code, &self.origin, now()?)?;
         if !(20..=128).contains(&code.len())
             || !code
                 .bytes()
@@ -349,7 +591,7 @@ impl Client {
             .request(
                 Method::POST,
                 "enroll",
-                Some(json!({"code":code,"name":name,"platform":platform})),
+                Some(json!({"code":code.as_str(),"name":name,"platform":platform})),
             )
             .await?;
         let token = Zeroizing::new(value.token);
@@ -366,6 +608,24 @@ impl Client {
         self.device_id = value.device_id;
         self.token = token;
         Ok(self)
+    }
+    /// Control-plane receipt only, dated by the server. It does not prove that
+    /// the current system VPN or arbitrary destinations are available.
+    pub async fn device_access(&self) -> Result<DeviceAccess, String> {
+        let device = self
+            .device_id
+            .ok_or("Панель не сообщила идентификатор устройства")?;
+        let result: Option<DeviceAccess> = self
+            .exchange(
+                Method::GET,
+                &format!("devices/{device}/credentials"),
+                None,
+                true,
+            )
+            .await?;
+        let access = result.ok_or("Панель не поддерживает состояние managed credentials")?;
+        access.validate()?;
+        Ok(access)
     }
     pub async fn list(&self) -> Result<Vec<RemoteProfile>, String> {
         #[derive(Deserialize)]
@@ -406,7 +666,16 @@ impl Client {
     /// Fetch all data before publishing any local update. Recheck source revisions;
     /// v2 has no server transaction revision, so this detects observed changes only.
     pub async fn snapshot(&self) -> Result<Snapshot, String> {
-        self.check_capabilities().await?;
+        let capabilities: Capabilities = self.request(Method::GET, "capabilities", None).await?;
+        capabilities.validate()?;
+        if capabilities.snapshot == Some(1) {
+            if capabilities.offline_freshness.is_some_and(|v| v != 1) {
+                return Err("Unsupported freshness contract".into());
+            }
+            return self
+                .atomic_snapshot(capabilities.offline_freshness == Some(1))
+                .await;
+        }
         let profiles = self.list().await?;
         let routing = self.routing_state().await?;
         let mut downloaded = Vec::with_capacity(profiles.len());
@@ -432,6 +701,103 @@ impl Client {
         Ok(Snapshot {
             profiles: downloaded,
             routing,
+            freshness: None,
+        })
+    }
+    async fn atomic_snapshot(&self, freshness_supported: bool) -> Result<Snapshot, String> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Freshness {
+            version: u32,
+            max_age_seconds: u64,
+            token_remaining_seconds: u64,
+        }
+        #[derive(Deserialize, zeroize::ZeroizeOnDrop)]
+        #[serde(deny_unknown_fields)]
+        struct Item {
+            #[zeroize(skip)]
+            metadata: RemoteProfile,
+            content: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Batch {
+            version: u32,
+            revision: String,
+            profiles: Vec<Item>,
+            routing: Routing,
+            #[serde(default)]
+            freshness: Option<Freshness>,
+        }
+        let requested_at = rtrust_control::freshness::now();
+        let mut consent = json!({"include_secrets":true});
+        if freshness_supported {
+            consent["freshness_version"] = json!(1);
+        }
+        let batch: Batch = self
+            .request(Method::POST, "snapshot", Some(consent))
+            .await?;
+        if batch.version != 1
+            || batch.revision.len() != 64
+            || !batch.revision.bytes().all(|b| b.is_ascii_hexdigit())
+            || batch.profiles.len() > 200
+        {
+            return Err("Некорректная атомарная партия панели".into());
+        }
+        let routing = RoutingState::Available(routing_policy(batch.routing)?);
+        let freshness = match batch.freshness {
+            Some(value)
+                if freshness_supported
+                    && value.version == 1
+                    && (60..=86400).contains(&value.max_age_seconds)
+                    && (1..=30 * 86400).contains(&value.token_remaining_seconds) =>
+            {
+                Some(rtrust_control::freshness::Lease {
+                    issued_at_ms: requested_at,
+                    expires_at_ms: requested_at
+                        .checked_add(
+                            value.max_age_seconds.min(value.token_remaining_seconds) * 1000,
+                        )
+                        .ok_or("Invalid freshness lease")?,
+                })
+            }
+            None if !freshness_supported => None,
+            _ => return Err("Invalid or missing freshness lease".into()),
+        };
+        let mut profiles = Vec::with_capacity(batch.profiles.len());
+        let mut total = 0usize;
+        let mut ids = std::collections::HashSet::new();
+        for mut item in batch.profiles {
+            let content = Zeroizing::new(std::mem::take(&mut item.content));
+            total = total
+                .checked_add(content.len())
+                .ok_or("Партия профилей слишком большая")?;
+            if content.len() > MAX_INPUT
+                || total > 4 * MAX_INPUT
+                || !ids.insert(item.metadata.id.clone())
+            {
+                return Err("Партия профилей слишком большая или неоднозначная".into());
+            }
+            identifier(&item.metadata.id)?;
+            if item.metadata.revision.is_empty()
+                || item.metadata.revision.len() > 256
+                || !item.metadata.revision.bytes().all(|b| b.is_ascii_graphic())
+                || item.metadata.origin.is_empty()
+                || item.metadata.origin.len() > 80
+                || item.metadata.origin.chars().any(char::is_control)
+            {
+                return Err("Некорректная версия профиля панели".into());
+            }
+            let profile = Profile::import(&content).map_err(|_| "Получен недопустимый профиль")?;
+            profiles.push((item.metadata.clone(), profile));
+        }
+        if let Some(lease) = &freshness {
+            lease.validate_at(rtrust_control::freshness::now())?;
+        }
+        Ok(Snapshot {
+            profiles,
+            routing,
+            freshness,
         })
     }
     pub async fn download(&self, profile: &RemoteProfile) -> Result<Profile, String> {

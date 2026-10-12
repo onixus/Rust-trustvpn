@@ -12,3 +12,4 @@ rtrust-engine.workspace = true
 rtrust-store.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 rtrust-control.workspace = true
+zeroize.workspace = true

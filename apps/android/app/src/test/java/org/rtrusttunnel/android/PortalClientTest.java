@@ -43,7 +43,20 @@ public final class PortalClientTest {
         Fixture(JSONArray before, JSONArray after) throws Exception {
             super("https://fixture.invalid", ""); this.before = before; this.after = after;
         }
+        JSONObject snapshot;
+        int snapshots;
         @Override JSONObject request(String path, JSONObject body) throws Exception {
+            // Capabilities negotiate the atomic snapshot only when the fixture provides one;
+            // otherwise the legacy list/export/recheck path runs against a panel without routing.
+            if (path.equals("/portal/v2/capabilities"))
+                return snapshot == null ? new JSONObject().put("version", 2) : new JSONObject().put("version", 2).put("snapshot", 1);
+            if (path.equals("/portal/v2/routing")) throw new PortalClient.Failure(404);
+            if (path.equals("/portal/v2/snapshot")) {
+                snapshots++;
+                check(snapshot != null && body.getBoolean("include_secrets") && !body.has("freshness_version"), "snapshot consent without Context");
+                if (stopAfterFirstExport != null) stopAfterFirstExport.run();
+                return new JSONObject(snapshot.toString());
+            }
             if (path.equals("/portal/v2/profiles")) {
                 lists++;
                 if (lists == 2 && interruptRecheck) Thread.currentThread().interrupt();
@@ -202,8 +215,72 @@ public final class PortalClientTest {
         }
     }
 
+    static JSONObject snapshot(JSONArray metadata) throws Exception {
+        JSONArray profiles = new JSONArray();
+        for (int i = 0; i < metadata.length(); i++)
+            profiles.put(new JSONObject().put("metadata", metadata.get(i)).put("content", "synthetic"));
+        return new JSONObject().put("version", 1).put("revision", "a".repeat(64))
+            .put("routing", new JSONObject().put("policy", JSONObject.NULL)).put("profiles", profiles);
+    }
+    /** Atomic snapshot (#54): one transaction, so no second list, but the same metadata policy. */
+    static void snapshotSequences() throws Exception {
+        JSONArray good = list("[{\"id\":\"two\",\"revision\":\"r1\",\"origin\":\"portal_managed\"},{\"id\":\"one\",\"revision\":\"r1\"}]");
+        Fixture ok = new Fixture(list("[]"), list("[]")); ok.snapshot = snapshot(good);
+        JSONArray downloaded = ok.download();
+        check(downloaded.length() == 2 && ok.lists == 0 && ok.exports == 0 && ok.snapshots == 1, "snapshot used without list/export");
+        check(downloaded.getJSONObject(0).getString("id").equals("portal:two") && downloaded.getJSONObject(0).has("profile"), "snapshot entry");
+        String[] rejected = {
+            "[{\"id\":\"one\",\"revision\":\"r1\"},{\"id\":\"one\",\"revision\":\"r2\"}]",
+            "[{\"id\":\"one\",\"revision\":\"r1\",\"origin\":\"\u00e9\"}]",
+            "[{\"id\":\"one\",\"revision\":\"r1\",\"origin\":\"\"}]",
+            "[{\"id\":\"one\",\"revision\":\"r1\",\"origin\":12}]",
+            "[{\"id\":\"one\",\"revision\":\"has space\"}]",
+            "[{\"id\":\"bad/id\",\"revision\":\"r1\"}]"};
+        for (String metadata : rejected) {
+            Fixture fixture = new Fixture(list("[]"), list("[]")); fixture.snapshot = snapshot(list(metadata));
+            try { fixture.download(); throw new AssertionError("Invalid snapshot accepted: " + metadata); }
+            catch (java.io.IOException | IllegalArgumentException expected) { }
+        }
+        Fixture stopped = new Fixture(list("[]"), list("[]")); stopped.snapshot = snapshot(good);
+        stopped.stopAfterFirstExport = () -> stopped.stopped = true;
+        try { stopped.download(() -> stopped.stopped); throw new AssertionError("Stopped snapshot returned"); }
+        catch (java.io.InterruptedIOException expected) { }
+        Fixture early = new Fixture(list("[]"), list("[]")); early.snapshot = snapshot(good);
+        try { early.download(() -> true); throw new AssertionError("Pre-cancelled sync ran"); }
+        catch (java.io.InterruptedIOException expected) { }
+        check(early.snapshots == 0 && early.lists == 0, "cancelled before any request");
+    }
+    /** #54 managed routing/revision conflicts are rejected inside the fenced commit step. */
+    static void managedConflicts() throws Exception {
+        JSONObject group = new JSONObject().put("revision", "g1").put("prefixes", list("[\"10.0.0.0/8\"]"));
+        JSONObject base = new JSONObject()
+            .put("profiles", new JSONArray().put(new JSONObject().put("id", "local").put("profile", new JSONObject().put("name", "local")))
+                .put(new JSONObject().put("id", "portal:one").put("remote_id", "one").put("revision", "r1")
+                    .put("profile", new JSONObject().put("name", "one")).put("managed_routing", group)))
+            .put("default", "portal:one").put("portal", session());
+        JSONObject[] conflicts = {
+            new JSONObject().put("id", "portal:one").put("remote_id", "one").put("revision", "r1").put("profile", new JSONObject().put("name", "changed")).put("managed_routing", group),
+            new JSONObject().put("id", "portal:one").put("remote_id", "one").put("revision", "r2").put("profile", new JSONObject().put("name", "one"))
+                .put("managed_routing", new JSONObject().put("revision", "g1").put("prefixes", list("[\"192.168.0.0/16\"]"))),
+            new JSONObject().put("id", "portal:one").put("remote_id", "one").put("revision", "r2").put("profile", new JSONObject().put("name", "one")).put("routing_unsupported", true)};
+        for (JSONObject conflict : conflicts) for (boolean background : new boolean[]{true, false}) {
+            JSONObject data = new JSONObject(base.toString());
+            String original = data.toString();
+            try { PortalClient.applyBatch(data, session(), new JSONArray().put(conflict), background, 42L); throw new AssertionError("Conflict applied"); }
+            catch (java.io.IOException expected) { }
+            check(data.toString().equals(original), "conflict leaves data unchanged");
+        }
+        JSONObject data = new JSONObject(base.toString());
+        JSONObject rotated = new JSONObject().put("id", "portal:one").put("remote_id", "one").put("revision", "r2")
+            .put("profile", new JSONObject().put("name", "rotated")).put("managed_routing", new JSONObject().put("revision", "g2").put("prefixes", list("[]")));
+        check(PortalClient.applyBatch(data, session(), new JSONArray().put(rotated), true, 42L), "new revisions apply");
+        check(data.getString("default").equals("portal:one") && data.getJSONArray("profiles").length() == 2, "rotated batch kept selection");
+    }
+
     public static void main(String[] args) throws Exception {
         metadataSequences();
+        snapshotSequences();
+        managedConflicts();
         originPolicy();
         failedSyncKeepsVault();
         registrationFence();

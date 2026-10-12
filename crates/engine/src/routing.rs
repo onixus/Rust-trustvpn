@@ -59,7 +59,12 @@ pub struct ObservedDecision {
     pub observed_at: Instant,
     pub decision: Decision,
 }
+pub struct PreparedPolicy {
+    compiled: Compiled,
+}
+
 pub struct Router {
+    selection: Option<(Vec<IpNet>, bool, Context)>,
     policy: RwLock<RuntimePolicy>,
     learned: Mutex<HashMap<(IpAddr, String), Instant>>,
     observed: tokio::sync::broadcast::Sender<ObservedDecision>,
@@ -164,6 +169,7 @@ impl Policy {
         let direct_permitted = current.selective || !current.rules.is_empty();
         let (observed, _) = tokio::sync::broadcast::channel(32);
         Ok(Router {
+            selection: None,
             policy: RwLock::new(RuntimePolicy {
                 current,
                 previous: None,
@@ -177,6 +183,49 @@ impl Policy {
     }
 }
 impl Router {
+    /// Immutable OS-prefix equivalent for a mobile blocking TUN. Changes require
+    /// replacing the owning runner after joining its old flows.
+    pub fn with_prefix_selection(
+        mut self,
+        routes: Vec<IpNet>,
+        ipv6: bool,
+        context: Context,
+    ) -> Result<Self> {
+        if routes.is_empty()
+            || routes.len() > 256
+            || routes.iter().any(|n| n.trunc() != *n)
+            || context
+                .revision
+                .as_ref()
+                .is_none_or(|r| r.is_empty() || r.len() > 256 || r.chars().any(char::is_control))
+        {
+            return Err(Error::Unsupported("mobile prefix selection"));
+        }
+        self.selection = Some((routes, ipv6, context));
+        Ok(self)
+    }
+    fn selected(&self, destination: SocketAddr, prediction: bool) -> Option<Decision> {
+        let (routes, ipv6, context) = self.selection.as_ref()?;
+        if destination.port() == 53 {
+            return None;
+        }
+        let (action, reason) = if destination.is_ipv6() && !ipv6 {
+            (Action::Block, Reason::UnsupportedFamily)
+        } else if routes.iter().any(|n| n.contains(&destination.ip())) {
+            return None;
+        } else {
+            (Action::Direct, Reason::OutsideSelection)
+        };
+        Some(Decision {
+            action,
+            scope: rtrust_profile::routing::Scope::SelectedIpv4,
+            rules: vec![],
+            context: context.clone(),
+            reason,
+            basis: Basis::NumericDestination,
+            prediction,
+        })
+    }
     fn token(policy: &RuntimePolicy) -> PolicyVersion {
         PolicyVersion {
             revision: policy
@@ -194,19 +243,19 @@ impl Router {
     /// Atomic policy replacement for subsequent decisions only. The caller must
     /// coordinate existing flow cancellation and OS routes separately.
     /// Managed policies cannot be changed through this local API.
-    pub fn apply_local(
+    pub fn prepare_local(
         &self,
         expected: &PolicyVersion,
         policy: &Policy,
         context: Context,
-    ) -> Result<PolicyVersion> {
+    ) -> Result<PreparedPolicy> {
         let candidate = policy.compile_with_context(context)?;
         let candidate = candidate
             .policy
             .into_inner()
             .unwrap_or_else(|p| p.into_inner())
             .current;
-        let mut state = self.policy.write().unwrap_or_else(|p| p.into_inner());
+        let state = self.policy.read().unwrap_or_else(|p| p.into_inner());
         if Self::token(&state) != *expected {
             return Err(Error::Unsupported("stale routing policy revision"));
         }
@@ -227,6 +276,43 @@ impl Router {
                 "direct routing requires a new protected session",
             ));
         }
+        Ok(PreparedPolicy {
+            compiled: candidate,
+        })
+    }
+    pub fn apply_local(
+        &self,
+        expected: &PolicyVersion,
+        policy: &Policy,
+        context: Context,
+    ) -> Result<PolicyVersion> {
+        let candidate = self.prepare_local(expected, policy, context)?;
+        self.commit_local(expected, candidate)
+    }
+    /// The dataplane calls this only after old pending/established flows drain.
+    pub fn commit_local(
+        &self,
+        expected: &PolicyVersion,
+        candidate: PreparedPolicy,
+    ) -> Result<PolicyVersion> {
+        let mut state = self.policy.write().unwrap_or_else(|p| p.into_inner());
+        if Self::token(&state) != *expected {
+            return Err(Error::Unsupported("stale routing policy revision"));
+        }
+        let candidate = candidate.compiled;
+        // A prepared policy can be passed across routers. Recheck ownership and
+        // direct-path authority here, not just its caller-supplied version.
+        if matches!(
+            state.current.context.source,
+            rtrust_profile::routing::Source::Admin
+                | rtrust_profile::routing::Source::ManagedUnknown
+                | rtrust_profile::routing::Source::Unknown
+        ) || state.current.context.source != candidate.context.source
+            || candidate.context.revision == state.current.context.revision
+            || (!state.direct_permitted && (candidate.selective || !candidate.rules.is_empty()))
+        {
+            return Err(Error::Unsupported("routing policy authority changed"));
+        }
         let epoch = state
             .epoch
             .checked_add(1)
@@ -238,12 +324,12 @@ impl Router {
         learned.clear();
         Ok(Self::token(&state))
     }
-    pub fn rollback_local(
+    pub fn prepare_rollback(
         &self,
         expected: &PolicyVersion,
         previous_revision: &str,
-    ) -> Result<PolicyVersion> {
-        let mut state = self.policy.write().unwrap_or_else(|p| p.into_inner());
+    ) -> Result<PreparedPolicy> {
+        let state = self.policy.read().unwrap_or_else(|p| p.into_inner());
         if Self::token(&state) != *expected {
             return Err(Error::Unsupported("stale routing rollback revision"));
         }
@@ -262,22 +348,41 @@ impl Router {
         {
             return Err(Error::Unsupported("routing rollback target unavailable"));
         }
-        let epoch = state
-            .epoch
-            .checked_add(1)
-            .ok_or(Error::Unsupported("routing epoch exhausted"))?;
-        let mut learned = self.learned.lock().unwrap_or_else(|p| p.into_inner());
-        let previous = state.previous.take().expect("validated rollback target");
-        state.previous = Some(std::mem::replace(&mut state.current, previous));
-        state.epoch = epoch;
-        learned.clear();
-        Ok(Self::token(&state))
+        Ok(PreparedPolicy {
+            compiled: state
+                .previous
+                .as_ref()
+                .expect("validated rollback target")
+                .clone(),
+        })
+    }
+    pub fn rollback_local(
+        &self,
+        expected: &PolicyVersion,
+        previous_revision: &str,
+    ) -> Result<PolicyVersion> {
+        let candidate = self.prepare_rollback(expected, previous_revision)?;
+        self.commit_local(expected, candidate)
+    }
+    /// A replacement network runner must not reuse DNS evidence from its old path.
+    /// Call after joining its old query/flow owners; policy and rollback stay intact.
+    pub fn reset_dns_evidence(&self) {
+        self.learned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
     }
     pub fn needs_direct(&self) -> bool {
+        if self.selection.is_some() {
+            return true;
+        }
         let policy = self.policy.read().unwrap_or_else(|p| p.into_inner());
         policy.current.selective || !policy.current.rules.is_empty()
     }
     pub fn tunneled(&self, destination: SocketAddr) -> bool {
+        if let Some(decision) = self.selected(destination, true) {
+            return decision.action == Action::Tunnel;
+        }
         let policy = self.policy.read().unwrap_or_else(|p| p.into_inner());
         self.evaluate(&policy.current, destination).0 == Action::Tunnel
     }
@@ -295,6 +400,17 @@ impl Router {
     /// The unobserved hot path avoids cloning revision metadata/rule ids.
     pub fn route_flow(&self, destination: SocketAddr) -> Action {
         let policy = self.policy.read().unwrap_or_else(|p| p.into_inner());
+        if let Some(decision) = self.selected(destination, false) {
+            let action = decision.action;
+            if self.observed.receiver_count() > 0 {
+                let _ = self.observed.send(ObservedDecision {
+                    version: Self::token(&policy),
+                    observed_at: Instant::now(),
+                    decision,
+                });
+            }
+            return action;
+        }
         let evaluation = self.evaluate(&policy.current, destination);
         if self.observed.receiver_count() > 0 {
             let _ = self.observed.send(ObservedDecision {
@@ -330,6 +446,9 @@ impl Router {
     /// Same evaluator used by the dataplane. DNS cache names are evidence of
     /// resolver answers, not proof of the application/hostname of this flow.
     pub fn decide(&self, destination: SocketAddr) -> Decision {
+        if let Some(decision) = self.selected(destination, true) {
+            return decision;
+        }
         let policy = self.policy.read().unwrap_or_else(|p| p.into_inner());
         Self::decision(
             &policy.current,
@@ -532,6 +651,86 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn network_replacement_clears_dns_evidence_without_resetting_policy_history() {
+        let router = Policy {
+            mode: "general".into(),
+            exclusions: vec!["*.example".into()],
+        }
+        .compile()
+        .unwrap();
+        let address = "203.0.113.1".parse().unwrap();
+        router.learned.lock().unwrap().insert(
+            (address, "direct.example".into()),
+            Instant::now() + Duration::from_secs(60),
+        );
+        assert_eq!(
+            router.route_flow(SocketAddr::new(address, 443)),
+            Action::Direct
+        );
+        let initial = router.version();
+        let changed = router
+            .apply_local(
+                &initial,
+                &Policy {
+                    mode: "general".into(),
+                    exclusions: vec!["*.example:443".into()],
+                },
+                Context::default(),
+            )
+            .unwrap();
+        router.learned.lock().unwrap().insert(
+            (address, "direct.example".into()),
+            Instant::now() + Duration::from_secs(60),
+        );
+        router.reset_dns_evidence();
+        assert_eq!(
+            router.route_flow(SocketAddr::new(address, 443)),
+            Action::Tunnel
+        );
+        assert_eq!(router.version(), changed);
+        assert!(router.rollback_local(&changed, &initial.revision).is_ok());
+    }
+    #[test]
+    fn mobile_prefix_scope_and_flow_scope_share_dataplane_explanation() {
+        let router = Policy {
+            mode: "general".into(),
+            exclusions: vec!["10.2.0.0/16".into()],
+        }
+        .compile()
+        .unwrap()
+        .with_prefix_selection(
+            vec!["10.0.0.0/8".parse().unwrap()],
+            false,
+            Context {
+                source: rtrust_profile::routing::Source::Admin,
+                revision: Some("admin:1:2".into()),
+            },
+        )
+        .unwrap();
+        for (address, action) in [
+            ("10.1.0.1:443", Action::Tunnel),
+            ("10.2.0.1:443", Action::Direct),
+            ("192.0.2.1:443", Action::Direct),
+            ("192.0.2.1:53", Action::Tunnel),
+            ("[2001:db8::1]:443", Action::Block),
+        ] {
+            let destination = address.parse().unwrap();
+            assert_eq!(router.route_flow(destination), action);
+            assert_eq!(router.decide(destination).action, action);
+        }
+        assert_eq!(
+            router
+                .decide("192.0.2.1:443".parse().unwrap())
+                .context
+                .source,
+            rtrust_profile::routing::Source::Admin
+        );
+        assert_eq!(
+            router.decide("10.2.0.1:443".parse().unwrap()).scope,
+            rtrust_profile::routing::Scope::FlowPolicy
+        );
+    }
     #[test]
     fn cname_evidence_is_bounded_by_chain_ttl_and_ignores_unrelated_records() {
         use hickory_proto::{

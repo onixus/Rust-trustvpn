@@ -1,10 +1,18 @@
 """Sign an archived successful Jenkins artifact with the offline local release key.
 Does not publish latest.json. Private key is never copied to the output directory.
 """
+import sys
 import argparse,base64,hashlib,json,pathlib,shutil,subprocess,time,tomllib,re,urllib.request,xml.etree.ElementTree as ET
-p=argparse.ArgumentParser();p.add_argument('--job',default='rtrust-native');p.add_argument('--signing-key',type=pathlib.Path);p.add_argument('--build',type=int,required=True);p.add_argument('--sequence',type=int,required=True);p.add_argument('--version',required=True);p.add_argument('--target',choices=['windows-x86_64','macos-aarch64'],required=True);a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--source-sha',required=True);p.add_argument('--job',default='rtrust-native');p.add_argument('--signing-key',type=pathlib.Path);p.add_argument('--build',type=int,required=True);p.add_argument('--sequence',type=int,required=True);p.add_argument('--version',required=True);p.add_argument('--target',choices=['windows-x86_64','macos-aarch64'],required=True);a=p.parse_args()
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 assert re.fullmatch(r'[A-Za-z0-9_-]+',a.job),'Invalid Jenkins job name'
+sys.path.insert(0, str(ROOT/'ci'))
+from source_provenance import verify
+build=pathlib.Path('/Users/onixus/jenkins_home/jobs')/a.job/'builds'/str(a.build)
+archive=build/'archive'
+# Full commit/tree/manifest and checkout verification precedes credentials and output.
+verify(ROOT, archive, a.source_sha)
+
 # Jenkins may expose result=SUCCESS while it is still archiving. Require completion.
 token=pathlib.Path('/Users/onixus/jenkins_home/admin-token.txt').read_text().strip()
 request=urllib.request.Request(f'http://localhost:8081/job/{a.job}/{a.build}/api/json?tree=building,result',headers={'Authorization':'Basic '+base64.b64encode(('admin:'+token).encode()).decode()})
