@@ -9,11 +9,19 @@ pipeline {
       steps {
         deleteDir()
         sh '''set -eu
-          test -n "$SOURCE_PATH" && test -n "$SOURCE_SHA"
+          # Validate parameters before any Git call: no branch names or option-like values.
+          case "$SOURCE_SHA" in
+            *[!0123456789abcdef]*|'') echo 'SOURCE_SHA must be a full lowercase 40-character commit SHA' >&2; exit 1 ;;
+          esac
+          test "${#SOURCE_SHA}" -eq 40 || { echo 'SOURCE_SHA must be a full lowercase 40-character commit SHA' >&2; exit 1; }
+          case "$SOURCE_PATH" in
+            /*) ;;
+            *) echo 'SOURCE_PATH must be an absolute path' >&2; exit 1 ;;
+          esac
           bootstrap=$(mktemp -d)
           trap 'rm -rf "$bootstrap"' EXIT
-          git -C "$SOURCE_PATH" show "$SOURCE_SHA:ci/snapshot.py" > "$bootstrap/snapshot.py"
-          git -C "$SOURCE_PATH" show "$SOURCE_SHA:ci/source_provenance.py" > "$bootstrap/source_provenance.py"
+          git -C "$SOURCE_PATH" cat-file blob "$SOURCE_SHA:ci/snapshot.py" > "$bootstrap/snapshot.py"
+          git -C "$SOURCE_PATH" cat-file blob "$SOURCE_SHA:ci/source_provenance.py" > "$bootstrap/source_provenance.py"
           python3 "$bootstrap/snapshot.py" . --source "$SOURCE_PATH" --sha "$SOURCE_SHA"
         '''
         sh 'python3 ci/run.py source-provenance python3 -m unittest discover -s ci -p test_source_provenance.py'

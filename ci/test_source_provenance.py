@@ -6,7 +6,10 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
-from source_provenance import snapshot, verify
+import unicodedata
+from source_provenance import reject_path_collisions, snapshot, verify
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class ProvenanceTests(unittest.TestCase):
@@ -111,6 +114,92 @@ class ProvenanceTests(unittest.TestCase):
         self.run_git('commit', '-qm', 'link')
         with self.assertRaises(ValueError):
             snapshot(self.repo, self.run_git('rev-parse', 'HEAD').strip(), self.dest)
+
+
+    def commit_tree(self, files):
+        """Commit synthetic paths via the index so case-insensitive hosts can hold them."""
+        for name, data in files.items():
+            blob = subprocess.run(['git', '-C', str(self.repo), 'hash-object', '-w', '--stdin'],
+                                  input=data, capture_output=True, check=True).stdout.decode().strip()
+            self.run_git('update-index', '--add', '--cacheinfo', '100644,%s,%s' % (blob, name))
+        self.run_git('commit', '-qm', 'colliding fixture')
+        return self.run_git('rev-parse', 'HEAD').strip()
+
+    def test_path_collisions_rejected_before_any_write(self):
+        nfc = unicodedata.normalize('NFC', 'caf\u00e9.rs')
+        nfd = unicodedata.normalize('NFD', nfc)
+        variants = [
+            {'A.rs': b'upper\n', 'a.rs': b'lower\n'},
+            {nfc: b'composed\n', nfd: b'decomposed\n'},
+            {'Dir/x.rs': b'dir\n', 'dir': b'file\n'},
+            {'Dir/x.rs': b'one\n', 'dir/y.rs': b'two\n'},
+            {'Source-Manifest.json': b'{}\n'},
+        ]
+        # Keep NFD argv spelling on macOS so the fixture commit holds both forms.
+        self.run_git('config', 'core.precomposeunicode', 'false')
+        for files in variants:
+            with self.subTest(files=sorted(files)):
+                self.run_git('reset', '-q', '--hard', self.sha)
+                sha = self.commit_tree(files)
+                committed = self.run_git('ls-tree', '-r', '--name-only', '-z', sha).split('\0')
+                self.assertTrue(set(files) <= set(committed))
+                with self.assertRaises(ValueError):
+                    snapshot(self.repo, sha, self.dest)
+                self.assertFalse(self.dest.exists())
+                with self.assertRaises(ValueError):
+                    verify(self.repo, self.dest, sha)
+
+    def test_collision_keys_are_filesystem_independent(self):
+        reject_path_collisions(['a/b.rs', 'a/c.rs', 'b.rs'])
+        for names in [['A.rs', 'a.rs'], ['x/\u00c5.rs', 'x/A\u030a.rs'], ['Dir/x', 'dir']]:
+            with self.assertRaises(ValueError):
+                reject_path_collisions(names)
+
+    def test_snapshot_read_back_mismatch_fails_closed(self):
+        original = pathlib.Path.write_bytes
+        def corrupt(path, data):
+            return original(path, b'altered\n' if path.name == 'service.rs' else data)
+        with patch.object(pathlib.Path, 'write_bytes', autospec=True, side_effect=corrupt):
+            with self.assertRaises(ValueError):
+                self.export()
+        self.assertFalse((self.dest / 'source-identity.json').exists())
+        self.assertFalse((self.dest / 'source-manifest.json').exists())
+
+    def test_untracked_and_cargo_override_rejected(self):
+        self.export()
+        (self.repo / 'target' / 'debug').mkdir(parents=True)
+        (self.repo / 'target' / 'debug' / 'out').write_bytes(b'synthetic build output\n')
+        (self.repo / '.git' / 'info' / 'exclude').write_text('/target/\n/.cargo/\n/ignored-ok\n')
+        (self.repo / 'ignored-ok').write_text('synthetic ignored\n')
+        verify(self.repo, self.dest, self.sha)
+        (self.repo / 'untracked.rs').write_text('synthetic untracked\n')
+        with self.assertRaises(ValueError):
+            verify(self.repo, self.dest, self.sha)
+        (self.repo / 'untracked.rs').unlink()
+        (self.repo / '.cargo').mkdir()
+        (self.repo / '.cargo' / 'config.toml').write_text('[build]\n')
+        with self.assertRaises(ValueError):
+            verify(self.repo, self.dest, self.sha)
+        (self.repo / '.cargo' / 'config.toml').unlink()
+        (self.repo / '.cargo').rmdir()
+        (self.repo / 'nested' / '.cargo').mkdir(parents=True)
+        (self.repo / 'nested' / '.cargo' / 'config').write_text('[build]\n')
+        (self.repo / '.git' / 'info' / 'exclude').write_text('/target/\n/nested/\n')
+        with self.assertRaises(ValueError):
+            verify(self.repo, self.dest, self.sha)
+
+    def test_jenkinsfiles_validate_parameters_before_git(self):
+        for name in ['Jenkinsfile', 'Jenkinsfile.android', 'Jenkinsfile.linux']:
+            with self.subTest(name=name):
+                text = (ROOT / name).read_text()
+                sha_check = text.index('case "$SOURCE_SHA" in')
+                length_check = text.index('test "${#SOURCE_SHA}" -eq 40')
+                path_check = text.index('case "$SOURCE_PATH" in')
+                first_git = min(i for i in [text.find('git '), text.find('git\t')] if i >= 0)
+                self.assertLess(max(sha_check, length_check, path_check), first_git)
+                self.assertIn('*[!0123456789abcdef]*', text)
+                self.assertNotIn('show "$SOURCE_SHA', text)
+                self.assertIn('cat-file blob "$SOURCE_SHA:ci/snapshot.py"', text)
 
 
 if __name__ == '__main__':
