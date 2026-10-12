@@ -12,7 +12,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 def workspace_version(root=ROOT):
     # Regex instead of tomllib: Windows/Linux packaging hosts may run Python < 3.11.
-    found = re.search(r'^\[workspace\.package\]\s*\nversion = "([0-9][0-9A-Za-z.+-]*)"$', (root / "Cargo.toml").read_text(), re.M)
+    found = re.search(r'^\[workspace\.package\]\s*\nversion = "([0-9][0-9A-Za-z.+-]*)"$', (root / "Cargo.toml").read_text(encoding="utf-8"), re.M)
     if not found:
         raise SystemExit("workspace.package version not found")
     return found.group(1)
@@ -20,7 +20,7 @@ def workspace_version(root=ROOT):
 
 def update_sequence(root=ROOT):
     """CFBundleVersion is the compiled update sequence, like the former hand-kept values (0.4.0: 7)."""
-    found = re.search(r"pub const CURRENT_SEQUENCE: u64 = (\d+);", (root / "crates/update/src/lib.rs").read_text())
+    found = re.search(r"pub const CURRENT_SEQUENCE: u64 = (\d+);", (root / "crates/update/src/lib.rs").read_text(encoding="utf-8"))
     if not found:
         raise SystemExit("CURRENT_SEQUENCE not found")
     return found.group(1)

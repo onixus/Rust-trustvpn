@@ -104,7 +104,7 @@ class LockedReleaseTools(unittest.TestCase):
         for name in ("prepare-signed-release.py", "publish-signed-release.py"):
             commands = [
                 [e.value for e in node.elts if isinstance(e, ast.Constant)]
-                for node in ast.walk(ast.parse((scripts / name).read_text()))
+                for node in ast.walk(ast.parse((scripts / name).read_text(encoding="utf-8")))
                 if isinstance(node, ast.List) and node.elts
                 and isinstance(node.elts[0], ast.Constant) and node.elts[0].value == "cargo"
             ]
@@ -137,7 +137,7 @@ class PackagingVersions(unittest.TestCase):
         for path in sorted((self.root / "scripts").glob("*.py")) + sorted((self.root / "ci").glob("*.py")):
             if path.name.startswith("test"):
                 continue
-            self.assertIsNone(literal.search(path.read_text()), path.name)
+            self.assertIsNone(literal.search(path.read_text(encoding="utf-8")), path.name)
 
     def test_platform_manifests_match_workspace_version(self):
         import plistlib
@@ -147,12 +147,12 @@ class PackagingVersions(unittest.TestCase):
                 info = plistlib.load(f)
             self.assertEqual(info["CFBundleShortVersionString"], self.version, target)
             codes.add(info["CFBundleVersion"])
-        gradle = (self.root / "apps/android/app/build.gradle").read_text()
+        gradle = (self.root / "apps/android/app/build.gradle").read_text(encoding="utf-8")
         self.assertIn(f"versionName '{self.version}-", gradle)
         android_code = self.re.search(r"rtrustVersionCode'\) \?: '(\d+)'", gradle).group(1)
         self.assertEqual(codes, {android_code})
-        self.assertIn(f'#define AppVersion "{self.version}"', (self.root / "deploy/windows/setup.iss").read_text())
-        self.assertEqual(json.loads((self.root / "apps/webview/tauri.conf.json").read_text())["version"], self.version)
+        self.assertIn(f'#define AppVersion "{self.version}"', (self.root / "deploy/windows/setup.iss").read_text(encoding="utf-8"))
+        self.assertEqual(json.loads((self.root / "apps/webview/tauri.conf.json").read_text(encoding="utf-8"))["version"], self.version)
 
 
 if __name__ == "__main__":
