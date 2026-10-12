@@ -21,8 +21,11 @@ fn available() -> bool {
     true
 }
 fn same_access(left: &Profile, right: &Profile) -> bool {
-    left.endpoint.username == right.endpoint.username
-        && left.endpoint.password == right.endpoint.password
+    // Hysteria and AmneziaWG ignore the compatibility username field.
+    // Editing it cannot change ownership of the auth/private key.
+    left.endpoint.password == right.endpoint.password
+        && (left.protocol != rtrust_profile::Protocol::TrustTunnel
+            || left.endpoint.username == right.endpoint.username)
 }
 impl SyncSettings {
     pub fn lease_for(
@@ -86,6 +89,14 @@ impl SyncSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ignored_transport_username_cannot_release_managed_identity() {
+        let baseline = Profile::import("hy2://synthetic-fixture-key@vpn.example:443").unwrap();
+        let mut edited = baseline.clone();
+        edited.endpoint.username = rtrust_profile::Secret::new("edited-unused");
+        edited.validate().unwrap();
+        assert!(same_access(&baseline, &edited));
+    }
     #[test]
     fn expired_managed_receipt_remains_readable_but_cannot_authorize_primary_or_backup() {
         let remote=Profile::import("hostname='vpn.example'\naddresses=['192.0.2.10:443']\nusername='device'\npassword='FIXTURE-SECRET'\n").unwrap();
