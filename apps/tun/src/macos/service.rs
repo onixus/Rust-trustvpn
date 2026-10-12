@@ -1567,16 +1567,28 @@ mod tests {
         let signal = entered.clone();
         let (unblock, wait) = std::sync::mpsc::channel();
         let wait = std::sync::Mutex::new(wait);
-        let worker = tokio::spawn(guarded_connect(
-            held.clone(),
-            move || {
+        let worker_lease = held.clone();
+        let tunnel = tokio::spawn(async move {
+            let _lease = worker_lease;
+            tokio::task::block_in_place(|| {
                 signal.notify_one();
                 wait.lock().unwrap().recv().unwrap();
-                Ok(())
-            },
-            std::future::pending::<Result<device::Prepared, String>>(),
-        ));
+            });
+            std::future::pending::<RunResult>().await
+        });
         entered.notified().await;
+        struct StopEntered(Arc<tokio::sync::Notify>);
+        impl Drop for StopEntered {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+        let cancelled = Arc::new(tokio::sync::Notify::new());
+        let stop_entered = StopEntered(cancelled.clone());
+        let reconnect = tokio::spawn(async move {
+            let _stop_entered = stop_entered;
+            std::future::pending::<Result<device::Prepared, String>>().await
+        });
         let (actor, commands) = mpsc::channel(16);
         let (shutdown, shutdown_events) = tokio::sync::watch::channel(false);
         let (_power, receiver) = tokio::sync::watch::channel(power::State::default());
@@ -1590,8 +1602,8 @@ mod tests {
                 shutdown: shutdown_events,
             },
             Workers {
-                tunnel: None,
-                reconnect: Some(worker),
+                tunnel: Some(tunnel),
+                reconnect: Some(reconnect),
             },
             false,
             receiver,
@@ -1612,12 +1624,10 @@ mod tests {
             })
             .await
             .unwrap();
-        let admitted = tokio::time::timeout(Duration::from_secs(1), async {
-            while actor.capacity() != 16 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
+        // Workers::stop first aborts and joins reconnect. Its destructor is
+        // observable proof that Stop entered worker drain, rather than merely
+        // dequeuing a command before a competing shutdown branch won.
+        let admitted = tokio::time::timeout(Duration::from_secs(1), cancelled.notified()).await;
         shutdown.send_replace(true);
         let lease_before_drain = lease.try_lock().is_err();
         unblock.send(()).unwrap();
