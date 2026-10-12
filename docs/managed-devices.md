@@ -83,13 +83,13 @@ ownership, обязательности профильной политики и
 | Возможность | Windows/Linux/macOS native | Android/iOS | Сервер v2 |
 | --- | --- | --- | --- |
 | HTTPS enrollment, keyring, bounded sync | native и WebView | Android: Keystore, срок токена, snapshot; iOS отложен | one_time_code, profile_json, snapshot v1 |
-| Group IPv4 routes | TUN, include/exclude/LAN | Android отклоняет всю партию с policy; iOS отложен | routing v1 или legacy 404 |
-| Profile-embedded policy + group reconciliation | контракт отсутствует | контракт отсутствует | отсутствует |
+| Group IPv4 routes | TUN, include/exclude/LAN | Android: include/exclude + наблюдаемый LAN; iOS отложен | routing v1 или legacy 404 |
+| Profile-embedded policy + group reconciliation | separate immutable layers | Android: единый evaluator, старые owners завершаются | atomic snapshot |
 | Device-specific VPN rotation | не подтверждено | не подтверждено | зависит от tunnel#22 |
 | Endpoint revoke + active-session SLA | не подтверждено | не подтверждено | зависит от tunnel#22 |
 | QR invitation | JSON paste с origin fence | Android camera/image + confirmation; iOS отложен | short-lived one_time_qr на HTTPS |
 | Portal token renewal | явное продление до expiry | Android: явное продление; iOS отложен | device-only token/renew, ещё действующий токен |
-| Mandatory offline freshness deadline | не реализовано | не реализовано | не реализовано |
+| Mandatory offline freshness deadline | Linux/Windows TUN/full, IPC v5; SOCKS/постоянный Always-on отклонены | Android: boot/elapsed receipt + блокирующий TUN | offline_freshness v1 |
 
 «Забыть локально» удаляет привязку keyring. Серверное удаление устройства
 отзывает API tokens/grants/routing membership; legacy/shared VPN-пароль
@@ -99,28 +99,21 @@ ownership, обязательности профильной политики и
 сессий. До такой серверной реализации issue #35 нельзя считать полностью
 закрытым.
 
-## Индивидуальные credentials: новый opt-in контракт
+## Индивидуальные credentials
 
-Сервер с настроенным проверяющим бинарником может объявить
-`device_credentials.version: 1`. Для нового managed grant создаётся случайная
-пара credentials на устройство и профиль, зашифрованная тем же owner-bound
-vault. Export недоступен до подтверждённого применения на endpoint. Ротация
-проверяет ожидаемое поколение и idempotency key. Сервер различает requested,
-pending, applied и failed; DB commit или наличие процесса не дают applied.
+Серверная main использует единственного владельца `rtrust_credentials` и
+capability `managed_credentials`. Его provision/rotate/revoke сохраняют
+принадлежность устройства, сериализацию и применение endpoint. Подробный
+контракт — [tunnel device credentials](https://github.com/onixus/tunnel/blob/main/docs/device-credentials.md).
+Клиентская диагностика не превращает серверное состояние applied в
+подтверждение доступности сети. Импортированные и legacy/shared пароли
+остаются вне обещания managed revoke.
 
-Применение требует отдельного согласия владельца: единственный endpoint
-перезапускается, завершая все его активные сессии. Другие устройства сохраняют
-свои credentials, но должны переподключиться. Verifier использует только
-loopback endpoint и проверенный TLS; новый пароль должен получить auth response,
-старый — auth rejection отдельно по H2 и H3. Ответы ограждены поколением процесса,
-credentials и SHA-256 verifier. Частичный результат остаётся failed. После
-restart на всю партию подтверждений выделено 25 секунд; каждый процесс проверки
-имеет максимум 12 секунд. Это бюджет проверки, не обещание физического SLA.
-
-Native UI показывает датированный control-plane receipt отдельно от текущей
-доступности VPN. Импортированные внешние профили и прежний общий пароль остаются
-unmanaged. Миграция общего пароля, физическая QR-приёмка, SLA и
-полная mobile-политика требуют дальнейшей реализации и приёмки.
+Snapshot, QR, `/token/renew` и freshness добавляются поверх этого владельца,
+без второго supervisor или параллельной таблицы credentials. Предыдущая
+лаборатория альтернативного verifier остаётся историческим результатом,
+а не доказательством совмещённого server head. Физическая приёмка активных
+сессий и SLA ещё требуется.
 
 ## Продление API-доступа
 

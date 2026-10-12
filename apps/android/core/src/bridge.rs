@@ -174,8 +174,8 @@ struct Candidates {
     logical_session: u64,
     selection: Option<PrefixSelection>,
 }
-static RECOVERY: Mutex<Option<(u64, usize, Arc<Mutex<rtrust_mobile::reserves::Planner>>)>> =
-    Mutex::new(None);
+type RecoveryBudget = Arc<Mutex<rtrust_mobile::reserves::Planner>>;
+static RECOVERY: Mutex<Option<(u64, usize, RecoveryBudget)>> = Mutex::new(None);
 static NEXT_FIXED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 fn start<'a>(
     env: &mut Env<'a>,
@@ -381,10 +381,12 @@ fn start_candidates<'a>(
                     .enable_all()
                     .build()?;
                 runtime.block_on(run(
-                    prepared,
-                    unavailable,
-                    budget,
-                    valid,
+                    RecoveryInputs {
+                        profiles: prepared,
+                        unavailable,
+                        budget,
+                        valid,
+                    },
                     owned,
                     protect,
                     receiver,
@@ -614,11 +616,14 @@ fn flow_policy<'a>(
     JString::new(env, value.to_string())
 }
 
-async fn run(
+struct RecoveryInputs {
     profiles: Vec<Profile>,
     unavailable: Vec<bool>,
-    budget: Arc<Mutex<rtrust_mobile::reserves::Planner>>,
+    budget: RecoveryBudget,
     valid: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+async fn run(
+    inputs: RecoveryInputs,
     fd: OwnedFd,
     protect: SocketProtector,
     mut cancel: watch::Receiver<bool>,
@@ -626,6 +631,12 @@ async fn run(
     runner_session: u64,
     mut policy: rtrust_tun::policy::Receiver,
 ) -> std::io::Result<()> {
+    let RecoveryInputs {
+        profiles,
+        unavailable,
+        budget,
+        valid,
+    } = inputs;
     // VpnService configured addresses, DNS and routes before handing over the FD.
     let device = Arc::new(unsafe { tun_rs::AsyncDevice::from_fd(fd.into_raw_fd()) }?);
     let dns = rtrust_engine::dns::encrypted(&profiles[0].endpoint.dns_upstreams)
