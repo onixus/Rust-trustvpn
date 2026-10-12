@@ -132,12 +132,20 @@ async fn reply(
     state: State,
     message: &str,
 ) -> Result<(), String> {
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        write(pipe, &Response::new(state, message)),
-    )
-    .await
-    .map_err(|_| "IPC write timed out")?
+    reply_as(pipe, VERSION, state, message).await
+}
+/// Replies on the wire version admitted for this request.
+async fn reply_as(
+    pipe: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
+    version: u32,
+    state: State,
+    message: &str,
+) -> Result<(), String> {
+    let mut response = Response::new(state, message);
+    response.version = version;
+    tokio::time::timeout(Duration::from_secs(5), write(pipe, &response))
+        .await
+        .map_err(|_| "IPC write timed out")?
 }
 /// Selected routes minus the pinned endpoint (and LAN on request), checked
 /// against the current table.
@@ -218,11 +226,13 @@ async fn serve(
     let request: Request = tokio::time::timeout(Duration::from_secs(5), read(pipe))
         .await
         .map_err(|_| "IPC read timed out")??;
-    if request.version != VERSION {
+    // A previous-version updater may only negotiate and reserve the service,
+    // so a failed upgrade can still be rolled back by the old installer.
+    let Some(version) = rtrust_control::admitted_version(&request) else {
         return reply(pipe, State::Error, "IPC version mismatch").await;
-    }
+    };
     if matches!(request.command, Command::Capabilities) {
-        return write(pipe, &Response::new(State::Idle, "Capabilities")).await;
+        return reply_as(pipe, version, State::Idle, "Capabilities").await;
     }
     if let Some(ref supervisor) = supervisor {
         if matches!(request.command, Command::Stop) {
@@ -231,26 +241,39 @@ async fn serve(
         match request.command {
             Command::AlwaysOnStatus=>return write(pipe,&supervisor.state()).await,
             command @ (Command::EnableAlwaysOn{..}|Command::EnableRecovery{..}|Command::DisableAlwaysOn)=>return write(pipe,&supervisor.command(command).await).await,
-            _ if supervisor.enabled()=>return reply(pipe,State::Error,"Always-on управляется системной службой. Для обслуживания сначала выключите always-on.").await,
+            _ if supervisor.enabled()=>return reply_as(pipe,version,State::Error,"Always-on управляется системной службой. Для обслуживания сначала выключите always-on.").await,
             _=>{},
         }
     }
     let Ok(_lease) = lease.try_lock_owned() else {
-        return reply(pipe, State::Error, "Служба уже обслуживает подключение").await;
+        return reply_as(
+            pipe,
+            version,
+            State::Error,
+            "Служба уже обслуживает подключение",
+        )
+        .await;
     };
     let (mut freshness, command) = rtrust_control::freshness::start(request.command)?;
     let (profile, selection, dns, split_dns, fallbacks) = match command {
         Command::PrepareUpdate => {
             if full::pending()? {
-                return reply(
+                return reply_as(
                     pipe,
+                    version,
                     State::Blocked,
                     "Сначала восстановите защиту VPN; обновление отменено",
                 )
                 .await;
             }
             routes::settled_adapter()?;
-            reply(pipe, State::Idle, "Служба зарезервирована для обновления").await?;
+            reply_as(
+                pipe,
+                version,
+                State::Idle,
+                "Служба зарезервирована для обновления",
+            )
+            .await?;
             tokio::select! { _=stop.changed()=>{}, _=read::<Request>(pipe)=>{} }
             return Ok(());
         }
@@ -626,6 +649,40 @@ pub(crate) fn boot_active() -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    async fn exchange(version: u32, command: Command) -> Response {
+        let (mut client, mut server) = tokio::io::duplex(1 << 16);
+        let (_stop, stop) = watch::channel(false);
+        let service =
+            tokio::spawn(
+                async move { serve(&mut server, Arc::new(Mutex::new(())), stop, None).await },
+            );
+        write(&mut client, &Request { version, command })
+            .await
+            .unwrap();
+        let response = read(&mut client).await.unwrap();
+        drop(client);
+        let _ = service.await;
+        response
+    }
+    #[tokio::test]
+    async fn previous_version_negotiates_but_cannot_control_a_session() {
+        let previous = VERSION - 1;
+        let response = exchange(previous, Command::Capabilities).await;
+        assert_eq!((response.version, response.state), (previous, State::Idle));
+        for command in [
+            Command::Stop,
+            Command::Status,
+            Command::Recover { owner: None },
+            Command::DisableAlwaysOn,
+        ] {
+            let response = exchange(previous, command).await;
+            assert_eq!(response.version, VERSION);
+            assert_eq!(response.state, State::Error);
+            assert_eq!(response.message, "IPC version mismatch");
+        }
+        let response = exchange(VERSION - 2, Command::Capabilities).await;
+        assert_eq!(response.message, "IPC version mismatch");
+    }
     #[tokio::test]
     async fn stop_after_transport_failure_does_not_poll_completed_task() {
         let mut worker = Worker::new(tokio::spawn(async { Err("endpoint lost".into()) }));

@@ -441,6 +441,26 @@ fn cidrs(ranges: &[(u64, u64)]) -> Vec<Ipv4Net> {
     }
     nets
 }
+/// Wire version a service answers `request` with, or `None` for a mismatch.
+///
+/// An updater of the previous release (`VERSION - 1`) must still reserve the
+/// already upgraded service to roll a failed update back. Only `Capabilities`
+/// and `PrepareUpdate` are admitted across versions; the reply carries the
+/// caller's version so its strict check passes. Peer authentication is
+/// unchanged, and every other command still fails with a version mismatch.
+/// Invariant: both commands and the idle `Response::new` reply must stay
+/// wire compatible with `VERSION - 1` whenever `VERSION` is raised.
+pub fn admitted_version(request: &Request) -> Option<u32> {
+    if request.version == VERSION {
+        return Some(VERSION);
+    }
+    (request.version == VERSION - 1
+        && matches!(
+            request.command,
+            Command::Capabilities | Command::PrepareUpdate
+        ))
+    .then_some(request.version)
+}
 pub async fn read<T: serde::de::DeserializeOwned>(
     stream: &mut (impl AsyncRead + Unpin),
 ) -> Result<T, String> {
@@ -498,6 +518,88 @@ pub fn tunneled_resolver(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn previous_version_may_only_negotiate_and_reserve_for_rollback() {
+        let request = |version, json: &str| Request {
+            version,
+            command: serde_json::from_str(json).unwrap(),
+        };
+        let previous = VERSION - 1;
+        for op in [r#"{"op":"Capabilities"}"#, r#"{"op":"PrepareUpdate"}"#] {
+            assert_eq!(admitted_version(&request(previous, op)), Some(previous));
+            assert_eq!(admitted_version(&request(VERSION, op)), Some(VERSION));
+            assert_eq!(admitted_version(&request(VERSION - 2, op)), None);
+            assert_eq!(admitted_version(&request(VERSION + 1, op)), None);
+        }
+        let profile = Box::new(
+            rtrust_profile::Profile::import(
+                "hostname='vpn.example'\naddresses=['192.0.2.1:443']\nusername='u'\npassword='p'\n",
+            )
+            .unwrap(),
+        );
+        for command in [
+            Command::Start {
+                profile: profile.clone(),
+                networks: vec!["10.0.0.0/8".parse().unwrap()],
+                exclude: vec![],
+                exclude_lan: false,
+                dns: None,
+                fallbacks: vec![],
+            },
+            Command::StartFull {
+                profile,
+                dns: "10.0.0.53".parse().unwrap(),
+                fallbacks: vec![],
+            },
+            Command::Recover { owner: None },
+            Command::Stop,
+            Command::Status,
+            Command::DisableAlwaysOn,
+            Command::AlwaysOnStatus,
+        ] {
+            let request = Request {
+                version: previous,
+                command,
+            };
+            assert_eq!(admitted_version(&request), None);
+        }
+    }
+    #[test]
+    fn idle_reply_keeps_the_previous_wire_shape() {
+        let mut response = Response::new(State::Idle, "reserved");
+        response.version = VERSION - 1;
+        let value = serde_json::to_value(&response).unwrap();
+        let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "capabilities",
+                "message",
+                "observations",
+                "state",
+                "version"
+            ]
+        );
+        let v5 = [
+            "automatic_recovery",
+            "endpoint_probes",
+            "failover",
+            "lifecycle_observations",
+            "managed_access_freshness",
+            "network_events",
+            "observations_schema",
+            "system_probes",
+        ];
+        assert!(
+            value["capabilities"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|key| v5.contains(&key.as_str()))
+        );
+        assert_eq!(value["version"], VERSION - 1);
+    }
     #[test]
     fn selection_explain_matches_the_prefixes_installed_with_runtime_inputs() {
         use rtrust_profile::routing::{Action, Context, Reason};
