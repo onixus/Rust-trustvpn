@@ -2,15 +2,25 @@
 pipeline {
   agent none
   options { disableConcurrentBuilds(); timestamps(); timeout(time: 120, unit: 'MINUTES'); buildDiscarder(logRotator(numToKeepStr: '15')) }
-  parameters { booleanParam(name: 'RUN_WINDOWS', defaultValue: true, description: 'Explicitly defer Windows when its node is offline'); booleanParam(name: 'RUN_LINUX', defaultValue: true, description: 'Run additional Linux ARM checks; x86 Linux has an independent pipeline'); booleanParam(name: 'WINDOWS_SYSTEM_E2E', defaultValue: false, description: 'Run invasive installer/Wintun tests only on an idle Windows test host without a user installation'); choice(name: 'WINDOWS_TRANSPORT', choices: ['trusttunnel', 'http3'], description: 'TrustTunnel transport of the Wintun service E2E: HTTP/2 (trusttunnel) or HTTP/3') }
+  parameters { string(name: 'SOURCE_PATH', defaultValue: '', description: 'Absolute local source repository path'); string(name: 'SOURCE_SHA', defaultValue: '', description: 'Full immutable 40-character commit SHA');  booleanParam(name: 'RUN_WINDOWS', defaultValue: true, description: 'Explicitly defer Windows when its node is offline'); booleanParam(name: 'RUN_LINUX', defaultValue: true, description: 'Run additional Linux ARM checks; x86 Linux has an independent pipeline'); booleanParam(name: 'WINDOWS_SYSTEM_E2E', defaultValue: false, description: 'Run invasive installer/Wintun tests only on an idle Windows test host without a user installation'); choice(name: 'WINDOWS_TRANSPORT', choices: ['trusttunnel', 'http3'], description: 'TrustTunnel transport of the Wintun service E2E: HTTP/2 (trusttunnel) or HTTP/3') }
   stages {
     stage('Source snapshot') {
       agent { label 'built-in' }
       steps {
         deleteDir()
-        sh 'python3 /Users/onixus/Git/R-Trusttunnel/ci/snapshot.py .'
+        sh '''set -eu
+          test -n "$SOURCE_PATH" && test -n "$SOURCE_SHA"
+          bootstrap=$(mktemp -d)
+          trap 'rm -rf "$bootstrap"' EXIT
+          git -C "$SOURCE_PATH" show "$SOURCE_SHA:ci/snapshot.py" > "$bootstrap/snapshot.py"
+          git -C "$SOURCE_PATH" show "$SOURCE_SHA:ci/source_provenance.py" > "$bootstrap/source_provenance.py"
+          python3 "$bootstrap/snapshot.py" . --source "$SOURCE_PATH" --sha "$SOURCE_SHA"
+        '''
+        sh 'python3 ci/run.py source-provenance python3 -m unittest discover -s ci -p test_source_provenance.py'
+        sh 'python3 ci/run.py release-acceptance python3 -m unittest discover -s ci -p test_release_acceptance.py'
+        sh 'python3 ci/run.py release-publisher python3 -m unittest discover -s ci -p test_publish_signed_release.py'
         stash name: 'source', includes: '**', useDefaultExcludes: false
-        archiveArtifacts artifacts: 'source-manifest.json,Jenkinsfile', fingerprint: true
+        archiveArtifacts artifacts: 'source-manifest.json,source-identity.json,Jenkinsfile', fingerprint: true
       }
     }
     stage('Gitleaks + Trivy') {
