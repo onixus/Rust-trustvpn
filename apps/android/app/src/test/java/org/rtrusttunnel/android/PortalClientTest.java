@@ -162,7 +162,8 @@ public final class PortalClientTest {
             boolean commits = !background && change.equals("disabled");
             try {
                 if (background) vault.syncPortalBackground(session(), remote); else vault.syncPortal(session(), remote);
-                check(commits, "fence must reject " + change + (background ? " background" : " foreground"));
+                // Background fence rejects silently (no write); foreground must throw unless it commits.
+                check(commits || background, "fence must reject " + change + (background ? " background" : " foreground"));
             } catch (java.io.IOException expected) {
                 check(!background && !commits && "Registration changed".equals(expected.getMessage()), "foreground fence error");
             }
@@ -175,15 +176,17 @@ public final class PortalClientTest {
 
     static void successfulApply() throws Exception {
         JSONArray initial = list("[{\"id\":\"two\",\"revision\":\"r1\"},{\"id\":\"one\",\"revision\":\"r1\"}]");
-        for (String selected : new String[]{"local", "portal:old"}) {
+        // portal:two is not first after sync, so it stays selected only if the selection is kept.
+        for (String selected : new String[]{"local", "portal:old", "portal:two"}) {
             SyntheticVault vault = vault(selected);
+            String expected = selected.equals("portal:old") ? "local" : selected;
             vault.syncPortalBackground(session(), new Fixture(initial, initial).download());
             JSONObject data = vault.data();
             JSONArray profiles = data.getJSONArray("profiles");
             check(profiles.length() == 3 && profiles.getJSONObject(0).getString("id").equals("local")
                 && profiles.getJSONObject(1).getString("id").equals("portal:one")
                 && profiles.getJSONObject(2).getString("id").equals("portal:two"), "managed replaced, local kept");
-            check(data.getString("default").equals("local"), "selection kept or repaired to first profile");
+            check(data.getString("default").equals(expected), "selection kept or repaired to first profile");
             check(data.getJSONObject("portal").getLong("last_sync") == 42L && !data.getJSONObject("portal").has("sync_auth_expired"), "sync marker");
         }
         // Rejections inside applyBatch never touch the caller's object.
