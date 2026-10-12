@@ -25,31 +25,25 @@ type Actor = mpsc::Sender<Envelope>;
 struct Session {
     actor: Actor,
     finished: tokio::sync::watch::Receiver<bool>,
+    shutdown: tokio::sync::watch::Sender<bool>,
 }
 type Registry = Arc<Mutex<Option<Session>>>;
 struct Control {
     commands: mpsc::Receiver<Envelope>,
     initial: Option<oneshot::Sender<Response>>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
 }
 type ActorTask = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 struct Envelope {
     command: Command,
-    shutdown: bool,
     response: oneshot::Sender<Response>,
 }
 
 async fn ask(actor: &Actor, command: Command) -> Result<Response, String> {
-    dispatch(actor, command, false).await
-}
-async fn dispatch(actor: &Actor, command: Command, shutdown: bool) -> Result<Response, String> {
     let (response, receive) = oneshot::channel();
     tokio::time::timeout(
         Duration::from_secs(5),
-        actor.send(Envelope {
-            command,
-            shutdown,
-            response,
-        }),
+        actor.send(Envelope { command, response }),
     )
     .await
     .map_err(|_| "Supervisor queue timed out")?
@@ -59,6 +53,22 @@ async fn dispatch(actor: &Actor, command: Command, shutdown: bool) -> Result<Res
         .map_err(|_| "Supervisor response timed out")?
         .map_err(|_| "Tunnel session ended".into())
 }
+// Durable state, independent of the bounded IPC command queue. Losing the
+// service owner also requests fail-closed shutdown, even before first poll.
+fn shutdown_requested(shutdown: &tokio::sync::watch::Receiver<bool>) -> bool {
+    *shutdown.borrow() || shutdown.has_changed().is_err()
+}
+async fn shutting_down(shutdown: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if shutdown_requested(shutdown) {
+            return;
+        }
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 async fn write_response(
     stream: &mut (impl AsyncWrite + Unpin),
     response: &Response,
@@ -258,7 +268,7 @@ pub async fn run() -> Result<(), String> {
     }
     let current = registry.lock().await.clone();
     if let Some(actor) = current {
-        let _ = dispatch(&actor.actor, Command::Stop, true).await;
+        actor.shutdown.send_replace(true);
     }
     while actors.join_next().await.is_some() {}
     fs::remove_file(rtrust_control::SOCKET).map_err(|_| "Cannot remove service socket")?;
@@ -360,17 +370,30 @@ async fn serve(
     }
     let held_lease = Arc::new(held);
     let (actor, commands) = mpsc::channel(16);
+    let (shutdown_signal, shutdown_events) = tokio::sync::watch::channel(false);
     let (initial, response) = oneshot::channel();
     let (finished, completion) = tokio::sync::watch::channel(false);
     *registry.lock().await = Some(Session {
         actor: actor.clone(),
         finished: completion.clone(),
+        shutdown: shutdown_signal,
     });
     let cleanup = registry.clone();
     let identity = actor.clone();
     let task = Box::pin(async move {
         let _lease = held_lease.clone();
-        let _ = start(request, uid, held_lease, power, commands, Some(initial)).await;
+        let _ = start(
+            request,
+            uid,
+            held_lease,
+            power,
+            Control {
+                commands,
+                initial: Some(initial),
+                shutdown: shutdown_events,
+            },
+        )
+        .await;
         let mut current = cleanup.lock().await;
         if current
             .as_ref()
@@ -444,12 +467,15 @@ async fn prepare<T>(
     future: impl std::future::Future<Output = Result<T, String>>,
     initial: &mut oneshot::Sender<Response>,
     commands: &mut mpsc::Receiver<Envelope>,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<T, String> {
     tokio::pin!(future);
     loop {
         tokio::select! {
-            result = &mut future => return result,
+            biased;
+            _ = shutting_down(shutdown) => return Err("Service is stopping".into()),
             _ = initial.closed() => return Err("Start cancelled".into()),
+            result = &mut future => return result,
             command = commands.recv() => match command {
                 Some(Envelope { command: Command::Stop, response, .. }) => {
                     let _ = response.send(Response::new(State::Idle, "Подключение отменено"));
@@ -467,9 +493,16 @@ async fn start(
     uid: u32,
     held_lease: Lease,
     mut power: tokio::sync::watch::Receiver<power::State>,
-    mut commands: mpsc::Receiver<Envelope>,
-    mut initial: Option<oneshot::Sender<Response>>,
+    control: Control,
 ) -> Result<(), String> {
+    let Control {
+        mut commands,
+        mut initial,
+        mut shutdown,
+    } = control;
+    if shutdown_requested(&shutdown) {
+        return Ok(());
+    }
     power.borrow_and_update();
     let (profile, selection, dns, split_dns, fallbacks) = match request.command {
         Command::Start {
@@ -514,6 +547,7 @@ async fn start(
         crate::failover::Failover::pin(*profile, fallbacks, crate::failover::Pin::Ipv4),
         initial.as_mut().unwrap(),
         &mut commands,
+        &mut shutdown,
     )
     .await
     {
@@ -572,6 +606,7 @@ async fn start(
         },
         initial.as_mut().unwrap(),
         &mut commands,
+        &mut shutdown,
     )
     .await
     {
@@ -585,7 +620,7 @@ async fn start(
             .await;
         }
     };
-    if initial.as_ref().is_some_and(oneshot::Sender::is_closed) {
+    if shutdown_requested(&shutdown) || initial.as_ref().is_some_and(oneshot::Sender::is_closed) {
         return Ok(());
     }
     let guard = match Guard::install(
@@ -606,7 +641,11 @@ async fn start(
     };
     let retry_guard = guard.clone();
     connected(
-        Control { commands, initial },
+        Control {
+            commands,
+            initial,
+            shutdown,
+        },
         workers,
         full,
         power,
@@ -634,7 +673,12 @@ async fn connected(
     let Control {
         mut commands,
         mut initial,
+        mut shutdown,
     } = control;
+    if shutdown_requested(&shutdown) {
+        workers.stop().await;
+        return Ok(());
+    }
     events::record("tunnel_connected");
     let mut retry_delay = rtrust_control::recovery::Budget::default();
     let mut connected_since = Instant::now();
@@ -677,15 +721,19 @@ async fn connected(
         let request = loop {
             // Aborted block_in_place work can still own route mutations. Join
             // completion in select below, keeping Status and EOF responsive.
+            if shutdown_requested(&shutdown) {
+                workers.stop().await;
+                return Ok(());
+            }
             if awake && workers.idle() {
                 events::record("reconnect_scheduled");
                 retry(&mut workers, failover.current(), &mut retry_delay);
                 restart_pending = false;
             }
             tokio::select! {
-                request = commands.recv() => {
-                    if let Some(request) = request { break request; }
-                    return Err("Service supervisor stopped".into());
+                _ = shutting_down(&mut shutdown) => {
+                    workers.stop().await;
+                    return Ok(());
                 },
                 event = power.changed() => {
                     event.map_err(|_| "macOS power monitor stopped")?;
@@ -722,6 +770,7 @@ async fn connected(
                 }
                 result = async { workers.reconnect.as_mut().unwrap().await }, if workers.reconnect.is_some() => {
                     workers.reconnect = None;
+                    if shutdown_requested(&shutdown) { workers.stop().await; return Ok(()); }
                     // A task can complete just before abort. Do not resurrect
                     // its pre-wake transport even if its result was successful.
                     if restart_pending { continue; }
@@ -745,14 +794,14 @@ async fn connected(
                         monitor.failed_over(rtrust_control::observations::now_ms());
                     }
                 }
+                request = commands.recv() => {
+                    if let Some(request) = request { break request; }
+                    return Err("Service supervisor stopped".into());
+                },
             }
         };
-        if request.shutdown {
+        if shutdown_requested(&shutdown) {
             workers.stop().await;
-            let _ = request.response.send(Response::new(
-                State::Blocked,
-                "Служба остановлена; защита сохранена",
-            ));
             return Ok(());
         }
         match request.command {
@@ -776,6 +825,15 @@ async fn connected(
             Command::Stop => {
                 events::record("stop_requested");
                 workers.stop().await;
+                // Shutdown can arrive after Stop was admitted while route work
+                // is draining. Process termination must retain the guard.
+                if shutdown_requested(&shutdown) {
+                    let _ = request.response.send(Response::new(
+                        State::Blocked,
+                        "Служба остановлена; защита сохранена",
+                    ));
+                    return Ok(());
+                }
                 let response = match release() {
                     Ok(()) => {
                         monitor.stop(rtrust_control::observations::now_ms());
@@ -815,11 +873,13 @@ mod tests {
         release: impl FnOnce() -> Result<(), String> + Send + 'static,
     ) -> Result<(), String> {
         let (actor, commands) = mpsc::channel(16);
+        let (_shutdown_signal, shutdown_events) = tokio::sync::watch::channel(false);
         let (initial, response) = oneshot::channel();
         let supervisor = tokio::spawn(super::connected(
             Control {
                 commands,
                 initial: Some(initial),
+                shutdown: shutdown_events,
             },
             workers,
             full,
@@ -856,6 +916,7 @@ mod tests {
         released: Arc<std::sync::atomic::AtomicBool>,
         dropped: Arc<std::sync::atomic::AtomicBool>,
         retries: Arc<std::sync::atomic::AtomicUsize>,
+        shutdown: tokio::sync::watch::Sender<bool>,
     }
     struct Dropped(Arc<std::sync::atomic::AtomicBool>);
     impl Drop for Dropped {
@@ -879,6 +940,7 @@ mod tests {
         entered.await.unwrap();
         let (power, receiver) = tokio::sync::watch::channel(power::State::default());
         let (actor, commands) = mpsc::channel(16);
+        let (shutdown_signal, shutdown_events) = tokio::sync::watch::channel(false);
         let (initial, response) = oneshot::channel();
         let retries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let retry_count = retries.clone();
@@ -886,6 +948,7 @@ mod tests {
             Control {
                 commands,
                 initial: Some(initial),
+                shutdown: shutdown_events,
             },
             Workers {
                 tunnel: Some(worker),
@@ -913,6 +976,7 @@ mod tests {
             released,
             dropped,
             retries,
+            shutdown: shutdown_signal,
         }
     }
 
@@ -1010,6 +1074,7 @@ mod tests {
         let registry = Arc::new(Mutex::new(Some(Session {
             actor: fixture.actor.clone(),
             finished: completion,
+            shutdown: fixture.shutdown.clone(),
         })));
         let (spawn, _spawned) = mpsc::channel(16);
         let (mut observer, server) = tokio::io::duplex(4096);
@@ -1132,12 +1197,14 @@ mod tests {
         let (initial, response) = oneshot::channel();
         let mut initial = initial;
         let (_actor, mut commands) = mpsc::channel(16);
+        let (_shutdown_signal, mut shutdown_events) = tokio::sync::watch::channel(false);
         drop(response);
         assert!(
             prepare(
                 std::future::pending::<Result<(), String>>(),
                 &mut initial,
-                &mut commands
+                &mut commands,
+                &mut shutdown_events
             )
             .await
             .is_err()
@@ -1145,12 +1212,14 @@ mod tests {
         let (initial, _response) = oneshot::channel();
         let mut initial = initial;
         let (actor, mut commands) = mpsc::channel(16);
+        let (_shutdown_signal, mut shutdown_events) = tokio::sync::watch::channel(false);
         let stopping = tokio::spawn(async move { ask(&actor, Command::Stop).await });
         assert!(
             prepare(
                 std::future::pending::<Result<(), String>>(),
                 &mut initial,
-                &mut commands
+                &mut commands,
+                &mut shutdown_events
             )
             .await
             .is_err()
@@ -1162,13 +1231,7 @@ mod tests {
     async fn normal_service_shutdown_drains_workers_and_retains_guard() {
         let fixture = test_actor().await;
         fixture.initial.await.unwrap();
-        assert_eq!(
-            dispatch(&fixture.actor, Command::Stop, true)
-                .await
-                .unwrap()
-                .state,
-            State::Blocked
-        );
+        fixture.shutdown.send_replace(true);
         fixture.task.await.unwrap().unwrap();
         assert!(fixture.dropped.load(std::sync::atomic::Ordering::SeqCst));
         assert!(!fixture.released.load(std::sync::atomic::Ordering::SeqCst));
@@ -1182,6 +1245,7 @@ mod tests {
         let registry = Arc::new(Mutex::new(Some(Session {
             actor: fixture.actor.clone(),
             finished: completion,
+            shutdown: fixture.shutdown.clone(),
         })));
         let profile = rtrust_profile::Profile::import("hostname='test.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='synthetic'\n").unwrap();
         for command in [
@@ -1229,7 +1293,6 @@ mod tests {
         actor
             .send(Envelope {
                 command: Command::Status,
-                shutdown: false,
                 response,
             })
             .await
@@ -1268,6 +1331,7 @@ mod tests {
             ));
             entered.notified().await;
             let (actor, commands) = mpsc::channel(16);
+            let (shutdown_signal, shutdown_events) = tokio::sync::watch::channel(false);
             let (initial, response) = oneshot::channel();
             let (power, receiver) = tokio::sync::watch::channel(power::State::default());
             let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1276,6 +1340,7 @@ mod tests {
                 Control {
                     commands,
                     initial: Some(initial),
+                    shutdown: shutdown_events,
                 },
                 Workers {
                     tunnel: None,
@@ -1292,33 +1357,280 @@ mod tests {
                 },
             ));
             response.await.unwrap();
-            let stopping =
-                tokio::spawn(async move { dispatch(&actor, Command::Stop, shutdown).await });
+            let stopping = if shutdown {
+                shutdown_signal.send_replace(true);
+                None
+            } else {
+                Some(tokio::spawn(
+                    async move { ask(&actor, Command::Stop).await },
+                ))
+            };
             tokio::time::sleep(Duration::from_millis(30)).await;
-            let ack_before_drain = stopping.is_finished();
+            let ack_before_drain =
+                stopping.as_ref().is_some_and(|task| task.is_finished()) || task.is_finished();
             let lease_before_drain = lease.try_lock().is_err();
             let released_before_drain = released.load(std::sync::atomic::Ordering::SeqCst);
             unblock.send(()).unwrap();
-            let result = stopping.await.unwrap().unwrap();
+            let result = if let Some(stopping) = stopping {
+                Some(stopping.await.unwrap().unwrap())
+            } else {
+                None
+            };
             task.await.unwrap().unwrap();
             drop(power);
             assert!(!ack_before_drain);
             assert!(lease_before_drain);
             assert!(!released_before_drain);
-            assert_eq!(
-                result.state,
-                if shutdown {
-                    State::Blocked
-                } else {
-                    State::Idle
-                }
-            );
+            if let Some(result) = result {
+                assert_eq!(result.state, State::Idle);
+            }
             assert_eq!(
                 released.load(std::sync::atomic::Ordering::SeqCst),
                 !shutdown
             );
             assert!(lease.try_lock().is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_ready_and_pending_preparation_even_without_owner() {
+        for already_set in [false, true] {
+            let (signal, mut shutdown) = tokio::sync::watch::channel(already_set);
+            let (initial, _response) = oneshot::channel();
+            let mut initial = initial;
+            let (_actor, mut commands) = mpsc::channel(16);
+            if already_set {
+                assert!(
+                    prepare(
+                        async { Ok::<_, String>(()) },
+                        &mut initial,
+                        &mut commands,
+                        &mut shutdown
+                    )
+                    .await
+                    .is_err()
+                );
+            } else {
+                let task = tokio::spawn(async move {
+                    prepare(
+                        std::future::pending::<Result<(), String>>(),
+                        &mut initial,
+                        &mut commands,
+                        &mut shutdown,
+                    )
+                    .await
+                });
+                signal.send_replace(true);
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(1), task)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .is_err()
+                );
+            }
+        }
+        let (signal, mut shutdown) = tokio::sync::watch::channel(false);
+        drop(signal);
+        let (initial, _response) = oneshot::channel();
+        let mut initial = initial;
+        let (_actor, mut commands) = mpsc::channel(16);
+        assert!(
+            prepare(
+                async { Ok::<_, String>(()) },
+                &mut initial,
+                &mut commands,
+                &mut shutdown
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_before_first_poll_bypasses_full_queue_and_drains_owned_workers() {
+        let lease = Arc::new(Mutex::new(()));
+        let held = Arc::new(lease.clone().lock_owned().await);
+        let owner = held.clone();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let signal = entered.clone();
+        let (unblock, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let worker = tokio::spawn(guarded_connect(
+            held.clone(),
+            move || {
+                signal.notify_one();
+                wait.lock().unwrap().recv().unwrap();
+                Ok(())
+            },
+            std::future::pending::<Result<device::Prepared, String>>(),
+        ));
+        entered.notified().await;
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drop_signal = Dropped(dropped.clone());
+        let tunnel = tokio::spawn(async move {
+            let _drop_signal = drop_signal;
+            std::future::pending::<RunResult>().await
+        });
+        let (actor, commands) = mpsc::channel(16);
+        let mut replies = Vec::new();
+        for index in 0..16 {
+            let (response, receive) = oneshot::channel();
+            actor
+                .send(Envelope {
+                    command: if index == 0 {
+                        Command::Stop
+                    } else {
+                        Command::Status
+                    },
+                    response,
+                })
+                .await
+                .unwrap();
+            replies.push(receive);
+        }
+        let (shutdown, shutdown_events) = tokio::sync::watch::channel(false);
+        let (power, receiver) = tokio::sync::watch::channel(power::State::default());
+        power.send_modify(|state| state.generation += 1);
+        let (initial, response) = oneshot::channel();
+        let (started, startup) = oneshot::channel();
+        let (finished, completion) = tokio::sync::watch::channel(false);
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = released.clone();
+        let failover = failover().await;
+        let task = tokio::spawn(async move {
+            startup.await.unwrap();
+            let result = super::connected(
+                Control {
+                    commands,
+                    initial: Some(initial),
+                    shutdown: shutdown_events,
+                },
+                Workers {
+                    tunnel: Some(tunnel),
+                    reconnect: Some(worker),
+                },
+                false,
+                receiver,
+                failover,
+                |_, _, _| panic!("shutdown must outrank retry and pending power event"),
+                move || {
+                    drop(held);
+                    release.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await;
+            drop(owner);
+            finished.send_replace(true);
+            result
+        });
+        // Exceed the obsolete enqueue deadline while the actor is still queued.
+        shutdown.send_replace(true);
+        tokio::time::sleep(Duration::from_millis(5100)).await;
+        assert_eq!(actor.capacity(), 0);
+        started.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let completed_before_drain = task.is_finished();
+        let lease_before_drain = lease.try_lock().is_err();
+        let release_before_drain = released.load(std::sync::atomic::Ordering::SeqCst);
+        unblock.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        wait_finished(completion).await.unwrap();
+        assert!(!completed_before_drain);
+        assert!(lease_before_drain);
+        assert!(!release_before_drain);
+        assert!(!released.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(lease.try_lock().is_ok());
+        assert!(
+            response.await.is_err(),
+            "shutdown must not report Connected"
+        );
+        for reply in replies {
+            assert!(
+                reply.await.is_err(),
+                "queued requests must not defeat shutdown"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_during_admitted_stop_drain_retains_guard_and_reports_blocked() {
+        let lease = Arc::new(Mutex::new(()));
+        let held = Arc::new(lease.clone().lock_owned().await);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let signal = entered.clone();
+        let (unblock, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let worker = tokio::spawn(guarded_connect(
+            held.clone(),
+            move || {
+                signal.notify_one();
+                wait.lock().unwrap().recv().unwrap();
+                Ok(())
+            },
+            std::future::pending::<Result<device::Prepared, String>>(),
+        ));
+        entered.notified().await;
+        let (actor, commands) = mpsc::channel(16);
+        let (shutdown, shutdown_events) = tokio::sync::watch::channel(false);
+        let (_power, receiver) = tokio::sync::watch::channel(power::State::default());
+        let (initial, response) = oneshot::channel();
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = released.clone();
+        let task = tokio::spawn(super::connected(
+            Control {
+                commands,
+                initial: Some(initial),
+                shutdown: shutdown_events,
+            },
+            Workers {
+                tunnel: None,
+                reconnect: Some(worker),
+            },
+            false,
+            receiver,
+            failover().await,
+            |_, _, _| panic!("must drain before retry"),
+            move || {
+                drop(held);
+                release.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        ));
+        response.await.unwrap();
+        let (response, stopped) = oneshot::channel();
+        actor
+            .send(Envelope {
+                command: Command::Stop,
+                response,
+            })
+            .await
+            .unwrap();
+        let admitted = tokio::time::timeout(Duration::from_secs(1), async {
+            while actor.capacity() != 16 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        shutdown.send_replace(true);
+        let lease_before_drain = lease.try_lock().is_err();
+        unblock.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(1), stopped)
+            .await
+            .unwrap()
+            .unwrap();
+        task.await.unwrap().unwrap();
+        assert!(admitted.is_ok());
+        assert!(lease_before_drain);
+        assert_eq!(response.state, State::Blocked);
+        assert!(!released.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(lease.try_lock().is_ok());
     }
 
     async fn failover() -> crate::failover::Failover {

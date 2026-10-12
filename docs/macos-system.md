@@ -145,8 +145,13 @@ release its guard, then Start again. Recover and Stop acknowledge Idle only
 after session cleanup and lease release. Start and PrepareUpdate cannot run
 concurrently with the current tunnel.
 
-Normal service termination drains worker route mutations and retains the
-fail-closed journal/guard for explicit recovery. Service crash and launchd
+Normal service termination uses a durable signal outside the bounded IPC
+queue. An actor queued before termination observes the signal on its first
+poll; pending preparation is cancelled and committed worker route mutations
+are drained while retaining the fail-closed journal/guard for explicit recovery.
+Shutdown takes priority over queued requests and reconnect; if it arrives
+while explicit Stop drains workers, the Stop response is Blocked and the guard
+is retained. Service crash and launchd
 restart continue to require recovery as before. None of these lifecycle
 observations establish DNS/IPv6 leak freedom or kill-switch enforcement.
 
