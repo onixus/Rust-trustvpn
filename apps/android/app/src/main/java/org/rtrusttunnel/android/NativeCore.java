@@ -13,6 +13,8 @@ public final class NativeCore {
     public native boolean startProfiles(String raw, int fd, Object protector);
     public native boolean start(String raw, int fd, Object protector);
     public native void stop();
+    /** Join a network runner while retaining logical-session policy and retry budget. */
+    public native void suspend();
     /** OS-selected underlying network changed; no address/name crosses JNI. */
     public native void networkChanged();
     /** Kernel clocks report deep sleep while this native session is active. */

@@ -22,6 +22,8 @@ struct Runner {
     thread: std::thread::JoinHandle<()>,
 }
 static RUNNER: Mutex<Option<Runner>> = Mutex::new(None);
+static SESSION_POLICY: std::sync::LazyLock<Mutex<rtrust_mobile::session_policy::SessionPolicy>> =
+    std::sync::LazyLock::new(|| Mutex::new(Default::default()));
 static FLOWS: std::sync::LazyLock<Mutex<rtrust_mobile::flows::Capture>> =
     std::sync::LazyLock::new(|| Mutex::new(rtrust_mobile::flows::Capture::default()));
 static STATE: AtomicU8 = AtomicU8::new(0);
@@ -300,12 +302,17 @@ fn start_candidates<'a>(
             revision: None,
         })
         .map_err(|_| jni::errors::Error::NullPtr("Invalid flow policy"))?;
+    let mutable_local = mutable && selection.is_none();
     if let Some(selected) = selection {
         router = router
             .with_prefix_selection(selected.routes, selected.ipv6, selected.context)
             .map_err(|_| jni::errors::Error::NullPtr("Invalid prefix selection"))?;
     }
-    let router = Arc::new(router);
+    let router = SESSION_POLICY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .restore(logical_session, &policy, Arc::new(router), mutable_local)
+        .map_err(|_| jni::errors::Error::NullPtr("Logical policy session changed"))?;
     let budget = {
         let mut cache = RECOVERY.lock().unwrap_or_else(|p| p.into_inner());
         if cache
@@ -429,14 +436,30 @@ fn start_candidates<'a>(
 const _: jni::NativeMethod =
     native_method! {java_type="org.rtrusttunnel.android.NativeCore",extern fn stop(),};
 fn stop(_env: &mut Env<'_>, _this: JObject<'_>) -> jni::errors::Result<()> {
+    stop_runner(true);
+    Ok(())
+}
+const _: jni::NativeMethod =
+    native_method! {java_type="org.rtrusttunnel.android.NativeCore",extern fn suspend(),};
+fn suspend(_env: &mut Env<'_>, _this: JObject<'_>) -> jni::errors::Result<()> {
+    stop_runner(false);
+    Ok(())
+}
+fn stop_runner(end_session: bool) {
     let mut slot = RUNNER.lock().unwrap_or_else(|p| p.into_inner());
     FLOWS.lock().unwrap_or_else(|p| p.into_inner()).detach();
     if let Some(runner) = slot.take() {
         let _ = runner.cancel.send(true);
         let _ = runner.thread.join();
     }
+    if end_session {
+        SESSION_POLICY
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        *RECOVERY.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
     state(0, "");
-    Ok(())
 }
 const _: jni::NativeMethod = native_method! {java_type="org.rtrusttunnel.android.NativeCore",name="networkChanged",extern fn network_changed(),};
 fn network_changed(_env: &mut Env<'_>, _this: JObject<'_>) -> jni::errors::Result<()> {

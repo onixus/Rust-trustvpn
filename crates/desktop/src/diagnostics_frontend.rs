@@ -44,13 +44,18 @@ impl Frontend {
             task.abort();
         }
     }
-    pub fn begin(&mut self, epoch: u64, generation: u64) -> Result<Ticket, &'static str> {
+    /// Check before a diagnostic action performs connection-changing work.
+    pub fn ensure_ready(&self) -> Result<(), &'static str> {
         if self
             .last_started
             .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
         {
             return Err("Wait five seconds between checks");
         }
+        Ok(())
+    }
+    pub fn begin(&mut self, epoch: u64, generation: u64) -> Result<Ticket, &'static str> {
+        self.ensure_ready()?;
         self.cancel();
         self.last_started = Some(Instant::now());
         Ok(Ticket {
@@ -159,6 +164,23 @@ mod tests {
         ui.replace_export();
         assert!(!ui.view(1, Some(5), 2_001).export_edited);
         assert!(ui.edit_export("x".repeat(65_537)).is_err());
+    }
+    #[test]
+    fn action_preflight_preserves_report_and_reserves_no_new_ticket_on_cooldown() {
+        let mut ui = Frontend::default();
+        let ticket = ui.begin(1, 5).unwrap();
+        assert!(ui.finish(ticket, 1, 5, report(5)));
+        assert!(ui.ensure_ready().is_err());
+        assert!(!ui.view(1, Some(5), 1_001).historical);
+        assert!(ui.current_report(1, 5, 1_001).is_some());
+        ui.last_started = Some(Instant::now() - Duration::from_secs(5));
+        ui.ensure_ready().unwrap();
+        assert!(!ui.view(1, Some(5), 1_001).historical);
+        ui.cancel(); // normal reconnect invalidates old connection evidence
+        let next = ui.begin(2, 6).unwrap();
+        assert!(!ui.finish(ticket, 2, 6, report(6)));
+        assert!(ui.finish(next, 2, 6, report(6)));
+        assert!(ui.ensure_ready().is_err());
     }
     #[test]
     fn destination_change_cannot_reset_cooldown() {

@@ -11,7 +11,7 @@ final class RecoveryDialog {
         if(previous!=null && primary.id.equals(previous.optString("primary"))){JSONArray old=previous.optJSONArray("backups");if(old!=null)for(int i=0;i<old.length();i++){int index=ids.indexOf(old.getString(i));if(index>=0)checked[index]=true;}}
         new AlertDialog.Builder(activity).setTitle(R.string.recovery_title)
             .setMultiChoiceItems(names.toArray(new String[0]),checked,(d,index,on)->checked[index]=on)
-            .setNeutralButton(R.string.recovery_disable,(d,w)->{try{vault.edit(v->v.remove("mobile_recovery"));TunnelService.recoverySettingsChanged();}catch(Exception ignored){}})
+            .setNeutralButton(R.string.recovery_disable,(d,w)->{try{if(TunnelService.active)throw new IllegalStateException();vault.edit(v->v.remove("mobile_recovery"));TunnelService.recoverySettingsChanged();}catch(Exception error){new AlertDialog.Builder(activity).setMessage(R.string.recovery_invalid).setPositiveButton(android.R.string.ok,null).show();}})
             .setNegativeButton(android.R.string.cancel,null)
             .setPositiveButton(R.string.recovery_enable,(d,w)->{
                 try {

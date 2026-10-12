@@ -75,6 +75,7 @@ async fn diagnostic_start(
     } else {
         Action::Recheck
     };
+    c.diagnostics.ensure_ready()?;
     let endpoint = match action.as_str() {
         "recheck" => false,
         "reconnect"

@@ -28,6 +28,12 @@ fn same_access(left: &Profile, right: &Profile) -> bool {
             || left.endpoint.username == right.endpoint.username)
 }
 impl SyncSettings {
+    /// Credential ownership survives local name/policy edits and unavailable grants.
+    pub fn tracks_access(&self, profile: &Profile) -> bool {
+        self.tracked
+            .iter()
+            .any(|entry| same_access(&entry.baseline, profile))
+    }
     pub fn lease_for(
         &self,
         assigned_routes: bool,

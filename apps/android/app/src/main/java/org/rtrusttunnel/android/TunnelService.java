@@ -195,7 +195,7 @@ public final class TunnelService extends VpnService {
     }
     private void rebuild(long epoch)throws Exception {
         if(stopping)return;transitioning=true;
-        NativeCore.INSTANCE.stop(); // joins old owners before changing prefix evidence
+        NativeCore.INSTANCE.suspend(); // joins old owners; retains local session policy and retry budget
         ProfileVault vault=new ProfileVault(this);
         ProfileVault.Admission admission=vault.admission(requestedId);requestedId=admission.primary.id;
         boolean guard=!admission.primary.localPolicy;

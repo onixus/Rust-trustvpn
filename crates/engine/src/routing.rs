@@ -364,6 +364,14 @@ impl Router {
         let candidate = self.prepare_rollback(expected, previous_revision)?;
         self.commit_local(expected, candidate)
     }
+    /// A replacement network runner must not reuse DNS evidence from its old path.
+    /// Call after joining its old query/flow owners; policy and rollback stay intact.
+    pub fn reset_dns_evidence(&self) {
+        self.learned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+    }
     pub fn needs_direct(&self) -> bool {
         if self.selection.is_some() {
             return true;
@@ -643,6 +651,46 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn network_replacement_clears_dns_evidence_without_resetting_policy_history() {
+        let router = Policy {
+            mode: "general".into(),
+            exclusions: vec!["*.example".into()],
+        }
+        .compile()
+        .unwrap();
+        let address = "203.0.113.1".parse().unwrap();
+        router.learned.lock().unwrap().insert(
+            (address, "direct.example".into()),
+            Instant::now() + Duration::from_secs(60),
+        );
+        assert_eq!(
+            router.route_flow(SocketAddr::new(address, 443)),
+            Action::Direct
+        );
+        let initial = router.version();
+        let changed = router
+            .apply_local(
+                &initial,
+                &Policy {
+                    mode: "general".into(),
+                    exclusions: vec!["*.example:443".into()],
+                },
+                Context::default(),
+            )
+            .unwrap();
+        router.learned.lock().unwrap().insert(
+            (address, "direct.example".into()),
+            Instant::now() + Duration::from_secs(60),
+        );
+        router.reset_dns_evidence();
+        assert_eq!(
+            router.route_flow(SocketAddr::new(address, 443)),
+            Action::Tunnel
+        );
+        assert_eq!(router.version(), changed);
+        assert!(router.rollback_local(&changed, &initial.revision).is_ok());
+    }
     #[test]
     fn mobile_prefix_scope_and_flow_scope_share_dataplane_explanation() {
         let router = Policy {
