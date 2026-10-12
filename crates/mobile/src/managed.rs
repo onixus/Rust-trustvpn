@@ -40,7 +40,7 @@ pub fn prepare_group(profile: Profile, group: &Group) -> Result<(Profile, Plan),
     let selection = group.validate()?;
     // Preserve and validate the embedded flow/DNS/guard policy first. The device
     // group's selected IPv4 prefixes override only OS route selection.
-    let (profile, mut plan) = prepare(profile)?;
+    let (mut profile, mut plan) = prepare(profile)?;
     let endpoints = profile
         .endpoint
         .addresses
@@ -68,6 +68,9 @@ pub fn prepare_group(profile: Profile, group: &Group) -> Result<(Profile, Plan),
     }
     plan.routes = routes.iter().map(ToString::to_string).collect();
     plan.ipv6 = false;
+    // The runtime copy also drives transport capability/status; do not announce
+    // IPv6 when this selected-IPv4 group blocks the family in VpnService.
+    profile.endpoint.has_ipv6 = false;
     Ok((profile, plan))
 }
 
@@ -79,7 +82,8 @@ mod tests {
         let mut profile = Profile::import("hostname='test.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='synthetic'\n").unwrap();
         profile.policy = serde_json::json!({"mode":"selective","exclusions":["*.example:443"],"kill_switch":"always_on","dns_upstreams":["tls://dns.example"]});
         let group: Group = serde_json::from_value(serde_json::json!({"group":"Team","revision":"admin:1:2","include":["10.0.0.0/8"],"exclude":["10.2.0.0/16"],"exclude_lan":false})).unwrap();
-        let (_, plan) = prepare_group(profile, &group).unwrap();
+        let (runtime, plan) = prepare_group(profile, &group).unwrap();
+        assert!(!runtime.endpoint.has_ipv6);
         assert_eq!(plan.flow.mode, "selective");
         assert_eq!(plan.flow.exclusions, ["*.example:443"]);
         assert!(plan.require_lockdown);
