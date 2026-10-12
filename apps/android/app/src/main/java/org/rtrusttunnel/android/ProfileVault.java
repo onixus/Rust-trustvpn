@@ -140,15 +140,32 @@ final class ProfileVault {
         if (age < 0 || age > 3600000) return null;
         return pending.getString("content");
     } }
-    JSONObject selected() throws Exception { return profile(read().getString("default")); }
-    JSONObject profile(String id) throws Exception { return resolveProfile(read(), id); }
-    static JSONObject resolveProfile(JSONObject data, String id) throws Exception {
-        if (id == null || id.isEmpty()) throw new IOException("Select a profile first");
+    static final class Selection {
+        final String id;
+        final JSONObject profile;
+        final boolean localPolicy;
+        Selection(JSONObject entry) throws Exception {
+            id = entry.getString("id"); profile = entry.getJSONObject("profile");
+            localPolicy = !entry.has("remote_id");
+        }
+    }
+    Selection selection(String requestedId) throws Exception { synchronized (LOCK) {
+        return resolveSelection(readUnlocked(), requestedId);
+    } }
+    static Selection resolveSelection(JSONObject data, String requestedId) throws Exception {
+        String id = requestedId == null ? data.getString("default") : requestedId;
+        if (id.isEmpty()) throw new IOException("Select a profile first");
         JSONArray profiles = data.getJSONArray("profiles");
         for (int i = 0; i < profiles.length(); i++) {
             JSONObject item = profiles.getJSONObject(i);
-            if (item.getString("id").equals(id)) return item.getJSONObject("profile");
+            if (item.getString("id").equals(id)) return new Selection(item);
         }
         throw new IOException("Selected profile no longer exists");
+    }
+    JSONObject selected() throws Exception { return selection(null).profile; }
+    JSONObject profile(String id) throws Exception { return resolveProfile(read(), id); }
+    static JSONObject resolveProfile(JSONObject data, String id) throws Exception {
+        if (id == null || id.isEmpty()) throw new IOException("Select a profile first");
+        return resolveSelection(data, id).profile;
     }
 }

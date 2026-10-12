@@ -27,6 +27,11 @@ final class AppRoutingAcceptance {
             .put(new JSONObject().put("id", "second").put("profile", second)));
         check(ProfileVault.resolveProfile(profiles, "second") == second, "App uses explicitly selected profile");
         check(ProfileVault.resolveProfile(profiles, profiles.getString("default")) == first, "Widget uses default profile");
+        profiles.getJSONArray("profiles").getJSONObject(0).put("remote_id", "managed-1");
+        ProfileVault.Selection selected = ProfileVault.resolveSelection(profiles, null);
+        profiles.put("default", "second");
+        check(selected.profile == first && !selected.localPolicy && selected.id.equals("first"), "Loaded content retains its managed provenance after default change");
+        check(ProfileVault.resolveSelection(profiles, null).localPolicy, "New default selection resolves local provenance");
         boolean missingProfile = false;
         try { ProfileVault.resolveProfile(profiles, "removed"); } catch (Exception expected) { missingProfile = true; }
         check(missingProfile, "Removed selection never falls back to default");

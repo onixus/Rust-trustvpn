@@ -60,6 +60,16 @@ USB Android отклонил side APK установку с INSTALL_FAILED_USER_
 
 ## Оставшаяся приёмка и реализация
 
+Review QR/renewal diff завершён с частичным security coverage: динамическая
+проверка двух timing-вопросов заблокирована автоматической cybersecurity
+защитой. Это не означает отсутствия рисков. Следом исправлены потеря ownership
+retired TCP tasks при drain, раздельные snapshots Android profile/provenance,
+проверка срока token до ожидания SQLite lock, неполный Docker build context
+и поздняя регистрация индивидуальных credentials при server startup.
+Для исправлений прошли полный Rust workspace/Clippy и 92 scoped server tests.
+Regression startup проверяет данные, видимые исходному владельцу endpoint
+до его старта; он не запускает endpoint и не заменяет physical restart test.
+
 | Задача | Что ещё нужно |
 | --- | --- |
 | #32 | OS route cutover/rollback и физические старые TCP/UDP flows; mobile group-policy adapter |

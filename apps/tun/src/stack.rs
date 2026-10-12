@@ -81,6 +81,7 @@ pub struct Stack {
     interface: Interface,
     sockets: SocketSet<'static>,
     flows: HashMap<Key, Flow>,
+    retired: Vec<JoinHandle<Result<(), rtrust_engine::Error>>>,
     epoch: Instant,
 }
 
@@ -114,6 +115,7 @@ impl Stack {
             interface,
             sockets: SocketSet::new(vec![]),
             flows: HashMap::new(),
+            retired: Vec::new(),
             epoch: Instant::now(),
         }
     }
@@ -128,7 +130,7 @@ impl Stack {
             return;
         };
         if !self.flows.contains_key(&key) {
-            if !syn || self.flows.len() >= MAX_FLOWS {
+            if !syn || self.flows.len() + self.retired.len() >= MAX_FLOWS {
                 return;
             }
             let mut socket = Socket::new(
@@ -221,8 +223,15 @@ impl Stack {
         // Dispatch FIN/RST before removing closed sockets.
         self.interface
             .poll(now, &mut self.device, &mut self.sockets);
+        // Finished tasks own no sockets. Retain aborted but still running owners
+        // until the next policy drain can join them; bound them with live flows.
+        self.retired.retain(|task| !task.is_finished());
         self.flows.retain(|_, f| {
             if self.sockets.get::<Socket>(f.socket).state() == State::Closed {
+                if let Some(task) = f.task.take() {
+                    task.abort();
+                    self.retired.push(task);
+                }
                 self.sockets.remove(f.socket);
                 false
             } else {
@@ -234,7 +243,7 @@ impl Stack {
     /// Revoke pending connects as well as established TCP sockets, then wait
     /// until their socket owners have exited before acknowledging a policy swap.
     pub async fn drain(&mut self) {
-        let mut tasks = Vec::new();
+        let mut tasks = std::mem::take(&mut self.retired);
         for (_, mut flow) in self.flows.drain() {
             if let Some(task) = flow.task.take() {
                 task.abort();
