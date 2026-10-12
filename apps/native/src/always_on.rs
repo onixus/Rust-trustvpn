@@ -356,7 +356,6 @@ mod tests {
         let mut app = mixed_profiles();
         app.profiles.swap(0, 2);
         app.profiles[0].name = "renamed".into();
-        app.profiles[0].policy = serde_json::json!({});
         let _ = app.always_update(Action::Enable);
         let _ = app.always_update(Action::Enable);
         assert!(!app.busy && !app.always_on.enabling);
