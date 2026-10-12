@@ -60,6 +60,7 @@ class PortalClient {
                 finally { java.util.Arrays.fill(bytes, (byte) 0); }
             }
             int code = connection.getResponseCode();
+            if (code == 409) throw Failure.conflict(conflictBody(connection));
             if (code != 200) throw new Failure(code);
             try (InputStream in = connection.getInputStream()) {
                 byte[] bytes = ProfileVault.readBounded(in, 8 * 1024 * 1024);
@@ -280,8 +281,28 @@ class PortalClient {
         current.put("last_sync", now).remove("sync_auth_expired");
         return true;
     }
+    /** Reads at most 512 bytes of a 409 body for classification only; never logged or shown. */
+    static byte[] conflictBody(HttpsURLConnection connection) {
+        try (InputStream in = connection.getErrorStream()) {
+            if (in == null) return new byte[0];
+            byte[] body = new byte[512]; int size = 0;
+            for (int n; size < body.length && (n = in.read(body, size, body.length - size)) != -1;) size += n;
+            if (in.read() != -1) return new byte[0];
+            return java.util.Arrays.copyOf(body, size);
+        } catch (Exception ignored) { return new byte[0]; }
+    }
     static final class Failure extends IOException {
-        final int status;
-        Failure(int status) { super("Portal request failed"); this.status = status; }
+        static final int SYNC_LIMIT = 1, DEVICE_LIMIT = 2;
+        final int status, conflict;
+        Failure(int status) { this(status, 0); }
+        private Failure(int status, int conflict) { super("Portal request failed"); this.status = status; this.conflict = conflict; }
+        /** Only the server's exact limit details are recognised; other 409s stay revision conflicts. */
+        static Failure conflict(byte[] body) {
+            String detail = null;
+            try { detail = new JSONObject(new String(body, StandardCharsets.UTF_8)).optString("detail", null); } catch (Exception ignored) {}
+            if ("Too many profiles for client sync".equals(detail)) return new Failure(409, SYNC_LIMIT);
+            if ("Device profile limit reached (64)".equals(detail)) return new Failure(409, DEVICE_LIMIT);
+            return new Failure(409, 0);
+        }
     }
 }

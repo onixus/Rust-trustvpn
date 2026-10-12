@@ -320,6 +320,43 @@ pub struct Snapshot {
     pub routing: RoutingState,
     pub freshness: Option<rtrust_control::freshness::Lease>,
 }
+/// Error bodies are read only to classify a 409; they are never shown or logged.
+const CONFLICT_BODY_LIMIT: usize = 512;
+const TOO_MANY_PROFILES: &str = "На портале назначено больше 64 профилей для этого устройства. \
+Синхронизация остановлена, локальные профили сохранены. Снимите лишние профили с устройства на портале.";
+const PROFILE_LIMIT_REACHED: &str = "Достигнут лимит 64 профиля на устройство";
+const PROFILE_CHANGED: &str = "Профиль изменился. Обновите список и повторите просмотр.";
+
+/// Maps the server's exact `detail` of a 409 to a user message. Anything else,
+/// including oversized or malformed bodies, keeps the revision-conflict text.
+fn conflict_message(body: &[u8]) -> &'static str {
+    #[derive(Deserialize)]
+    struct Detail {
+        detail: String,
+    }
+    match serde_json::from_slice::<Detail>(body).map(|d| d.detail) {
+        Ok(d) if d == "Too many profiles for client sync" => TOO_MANY_PROFILES,
+        Ok(d) if d == "Device profile limit reached (64)" => PROFILE_LIMIT_REACHED,
+        _ => PROFILE_CHANGED,
+    }
+}
+
+/// Reads at most `limit` bytes; an oversized body yields an empty buffer.
+async fn bounded_body(response: &mut reqwest::Response, limit: usize) -> Zeroizing<Vec<u8>> {
+    let mut bytes = Zeroizing::new(Vec::new());
+    if response.content_length().is_some_and(|n| n > limit as u64) {
+        return bytes;
+    }
+    while let Ok(Some(chunk)) = response.chunk().await {
+        if bytes.len() + chunk.len() > limit {
+            bytes.clear();
+            break;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    bytes
+}
+
 fn same_revisions(before: &[RemoteProfile], after: &[RemoteProfile]) -> bool {
     before.len() == after.len()
         && before
@@ -500,12 +537,16 @@ impl Client {
         if missing_ok && response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
+        if response.status() == StatusCode::CONFLICT {
+            return Err(
+                conflict_message(&bounded_body(&mut response, CONFLICT_BODY_LIMIT).await).into(),
+            );
+        }
         if !response.status().is_success() {
             return Err(match response.status().as_u16() {
                 401 => "Код истёк или доступ устройства отозван. Привяжите устройство заново.",
                 403 => "Недостаточно прав на эту операцию.",
                 404 => "Профиль недоступен. Проверьте выданные устройству права.",
-                409 => "Профиль изменился. Обновите список и повторите просмотр.",
                 410 => "Предварительный просмотр истёк. Проверьте профиль заново.",
                 429 => "Слишком много запросов. Повторите через минуту.",
                 _ => "Панель отклонила запрос.",
@@ -859,6 +900,27 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn conflict_detail_selects_limit_messages_and_falls_back() {
+        assert_eq!(
+            conflict_message(br#"{"detail":"Too many profiles for client sync"}"#),
+            TOO_MANY_PROFILES
+        );
+        assert_eq!(
+            conflict_message(br#"{"detail":"Device profile limit reached (64)"}"#),
+            PROFILE_LIMIT_REACHED
+        );
+        for body in [
+            &br#"{"detail":"Profile revision conflict"}"#[..],
+            br#"{"detail":"too many profiles for client sync"}"#,
+            br#"{"detail":["Too many profiles for client sync"]}"#,
+            br#"{"error":"Too many profiles for client sync"}"#,
+            b"Too many profiles for client sync",
+            b"",
+        ] {
+            assert_eq!(conflict_message(body), PROFILE_CHANGED);
+        }
+    }
     #[test]
     fn expiry_is_conservative_and_legacy_expiry_stays_unknown() {
         assert_eq!(token_deadline(100, Some(30)).unwrap(), Some(130));

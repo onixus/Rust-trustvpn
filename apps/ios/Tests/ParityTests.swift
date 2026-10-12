@@ -106,7 +106,30 @@ final class ParityTests: XCTestCase {
         }
         FixtureProtocol.handler = { _ in (302, Data()) }
         do { _ = try await client.download(); XCTFail("redirect accepted") } catch { XCTAssertEqual((error as NSError).code, 302) }
+        FixtureProtocol.handler = { _ in (409, Data("{\"detail\":\"Too many profiles for client sync\"}".utf8)) }
+        do { _ = try await client.download(); XCTFail("409 accepted") } catch {
+            XCTAssertEqual((error as NSError).code, 409)
+            XCTAssertEqual(error.localizedDescription, PortalClient.conflictMessage(Data("{\"detail\":\"Too many profiles for client sync\"}".utf8)))
+            XCTAssertTrue(error.localizedDescription.contains("64")); XCTAssertFalse(error.localizedDescription.contains("Too many"))
+        }
+        FixtureProtocol.handler = { _ in (409, Data("{\"detail\":\"Profile revision conflict\"}".utf8)) }
+        do { _ = try await client.download(); XCTFail("409 accepted") } catch {
+            XCTAssertEqual((error as NSError).code, 409)
+            XCTAssertEqual(error.localizedDescription, PortalClient.conflictMessage(Data()))
+            XCTAssertFalse(error.localizedDescription.contains("revision conflict"))
+        }
         FixtureProtocol.handler = nil
+    }
+    func testPortalLimitConflictClassification() {
+        let revision = PortalClient.conflictMessage(Data())
+        let sync = PortalClient.conflictMessage(Data("{\"detail\":\"Too many profiles for client sync\"}".utf8))
+        let device = PortalClient.conflictMessage(Data("{\"detail\":\"Device profile limit reached (64)\"}".utf8))
+        XCTAssertEqual(Set([revision, sync, device]).count, 3)
+        XCTAssertEqual(revision, tr("The profile changed on the portal. Sync again and retry. Local data is preserved.",
+                                    "Профиль изменился на портале. Синхронизируйте список и повторите. Локальные данные сохранены."))
+        for body in ["{\"detail\":\"Profile revision conflict\"}", "{\"detail\":\"too many profiles for client sync\"}", "{\"detail\":[\"Too many profiles for client sync\"]}", "Too many profiles for client sync", ""] {
+            XCTAssertEqual(PortalClient.conflictMessage(Data(body.utf8)), revision, body)
+        }
     }
 }
 

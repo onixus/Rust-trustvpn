@@ -20,6 +20,9 @@ installation; unsupported IPC never bypasses the check.
 After Setup, the helper launches the installed GUI smoke mode. A failed health
 check installs and checks the previous signed package. If the replacement service
 is unavailable, active, or retains a guard, automatic rollback stops safely;
+the replacement service admits the previous IPC version only for capability
+negotiation and the maintenance reservation, so an IPC bump alone does not stop
+the old helper's rollback;
 packages, encrypted backup and logs remain in the transaction directory. The
 helper does not clear a network guard or overwrite the user's vault. A successful
 update restarts the GUI; after rollback the user can restart the previous version.

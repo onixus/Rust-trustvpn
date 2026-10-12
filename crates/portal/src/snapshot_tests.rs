@@ -321,3 +321,20 @@ async fn negotiated_freshness_bounds_access_and_refuses_missing_or_invalid_recei
         assert!(authorized(&f.client).snapshot().await.is_err());
     }
 }
+
+#[tokio::test]
+async fn sync_limit_conflict_is_explained_without_echoing_the_body() {
+    let mut steps = snapshot_steps();
+    steps[1].status = 409;
+    steps[1].body = json!({"detail":"Too many profiles for client sync"});
+    let f = fixture(steps).await;
+    let error = authorized(&f.client).snapshot().await.err().unwrap();
+    assert!(error.contains("больше 64 профилей"));
+    assert!(!error.contains("Too many"));
+    let mut steps = snapshot_steps();
+    steps[1].status = 409;
+    steps[1].body = json!({"detail":"Profile revision conflict"});
+    let f = fixture(steps).await;
+    let error = authorized(&f.client).snapshot().await.err().unwrap();
+    assert!(error.contains("Профиль изменился"));
+}

@@ -12,6 +12,9 @@
     <string name="portal_working">"Contacting server…"</string>
     <string name="portal_expired">"Registration expired or was revoked. Remove the registration and enroll again. Local profiles have not changed."</string>
     <string name="portal_failed">"Server operation failed. Check HTTPS address, connectivity, permissions and profile revision. Local data is preserved."</string>
+    <string name="portal_sync_limit">"The portal assigns more than 64 profiles to this device. Sync stopped; local profiles are preserved. Remove extra profiles from this device on the portal."</string>
+    <string name="portal_device_limit">"Limit of 64 profiles per device reached"</string>
+    <string name="portal_conflict">"The profile changed on the portal. Sync again and retry. Local data is preserved."</string>
     <string name="portal_sync">"Download / synchronize"</string>
     <string name="portal_upload">"Upload profile"</string>
     <string name="portal_forget">"Remove registration"</string>
