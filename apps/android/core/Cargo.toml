@@ -20,5 +20,6 @@ ipnet = "2"
 rtrust-tun = { path = "../../tun" }
 tokio.workspace = true
 jni = "0.22.4"
+rand = "0.9"
 libc = "0.2"
 tun-rs = { version = "2.8", features = ["async_tokio"] }

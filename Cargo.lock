@@ -5202,6 +5202,7 @@ dependencies = [
  "ipnet",
  "jni 0.22.4",
  "libc",
+ "rand 0.9.5",
  "rtrust-engine",
  "rtrust-mobile",
  "rtrust-profile",
@@ -5315,6 +5316,7 @@ dependencies = [
  "rtrust-store",
  "serde_json",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -5380,6 +5382,7 @@ dependencies = [
  "keyring",
  "rcgen",
  "reqwest 0.12.28",
+ "rtrust-control",
  "rtrust-profile",
  "rustls",
  "serde",

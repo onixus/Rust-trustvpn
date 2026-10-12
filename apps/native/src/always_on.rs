@@ -132,6 +132,25 @@ impl App {
             }
             _ => return Task::none(),
         };
+        let managed = match &command {
+            rtrust_control::Command::EnableAlwaysOn { profile, .. } => {
+                self.saved_connection.managed_routes.is_some()
+                    || self.saved_connection.sync.tracks_access(profile)
+            }
+            rtrust_control::Command::EnableRecovery {
+                profile, backups, ..
+            } => {
+                self.saved_connection.managed_routes.is_some()
+                    || std::iter::once(profile.as_ref())
+                        .chain(backups.iter())
+                        .any(|p| self.saved_connection.sync.tracks_access(p))
+            }
+            _ => false,
+        };
+        if managed {
+            self.always_on.status="Управляемый доступ требует ограниченной lease; постоянный системный Always-on для него пока не поддерживается. Используйте обычное TUN-подключение.".into();
+            return Task::none();
+        }
         self.always_on.generation = self.always_on.generation.wrapping_add(1);
         let generation = self.always_on.generation;
         self.always_on.enabling = matches!(
@@ -299,6 +318,60 @@ mod tests {
         assert!(!app.busy);
         let _ = app.always_update(Action::EnableRecovery);
         assert!(app.busy);
+    }
+    fn mixed_profiles() -> App {
+        let mut app = crate::tests::app();
+        app.profiles = vec![
+            profile("local", "192.0.2.1"),
+            profile("backup", "192.0.2.2"),
+            profile("managed", "192.0.2.3"),
+        ];
+        app.profiles[2].endpoint.password = rtrust_profile::Secret::new("managed-access");
+        app.saved_connection
+            .sync
+            .tracked
+            .push(rtrust_store::TrackedProfile {
+                available: false,
+                id: "remote".into(),
+                revision: "1".into(),
+                baseline: app.profiles[2].clone(),
+            });
+        app.dns = "1.1.1.1".into();
+        app
+    }
+    #[test]
+    fn unrelated_managed_profile_does_not_disable_local_always_on_or_reserves() {
+        let mut app = mixed_profiles();
+        let _ = app.always_update(Action::Enable);
+        let _ = app.always_update(Action::Enable);
+        assert!(app.busy && app.always_on.enabling);
+        let mut app = mixed_profiles();
+        let _ = app.always_update(Action::Backup(1, true));
+        let _ = app.always_update(Action::EnableRecovery);
+        let _ = app.always_update(Action::EnableRecovery);
+        assert!(app.busy && app.always_on.enabling);
+    }
+    #[test]
+    fn managed_primary_alias_or_backup_still_cannot_enable_persistent_access() {
+        let mut app = mixed_profiles();
+        app.profiles.swap(0, 2);
+        app.profiles[0].name = "renamed".into();
+        let _ = app.always_update(Action::Enable);
+        let _ = app.always_update(Action::Enable);
+        assert!(!app.busy && !app.always_on.enabling);
+        let mut app = mixed_profiles();
+        let _ = app.always_update(Action::Backup(2, true));
+        let _ = app.always_update(Action::EnableRecovery);
+        let _ = app.always_update(Action::EnableRecovery);
+        assert!(!app.busy && !app.always_on.enabling);
+        app.saved_connection.managed_routes = Some(rtrust_store::ManagedRoutes {
+            group: "assigned".into(),
+            revision: "1".into(),
+            selection: rtrust_control::Selection::default(),
+        });
+        let _ = app.always_update(Action::Enable);
+        let _ = app.always_update(Action::Enable);
+        assert!(!app.busy);
     }
     #[test]
     fn edited_backup_invalidates_confirmation_without_sending_credentials() {

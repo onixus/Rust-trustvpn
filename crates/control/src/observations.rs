@@ -102,6 +102,8 @@ pub enum EventKind {
     Resumed,
     /// Opt-in recovery moved to another user-allowed profile.
     FailedOver,
+    /// The dataplane drained prior flows and committed a new policy epoch.
+    PolicyChanged,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -266,6 +268,12 @@ impl Monitor {
     }
     /// The worker may not have noticed a dead session yet: like a polling gap,
     /// transport stays stale until a real worker transition.
+    pub fn policy_changed(&mut self, now: u64) {
+        if !self.stopped {
+            self.snapshot
+                .invalidate(Reason::SessionChanged, EventKind::PolicyChanged, now);
+        }
+    }
     pub fn resumed(&mut self, now: u64) {
         if !self.stopped {
             self.snapshot

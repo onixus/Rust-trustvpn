@@ -10,9 +10,16 @@
 Клиент принимает только HTTPS origin без пути, credentials, query или fragment.
 HTTP redirect запрещён; сертификат проверяется. Одноразовый код отправляется
 только этому origin. Его срок и повторное использование проверяет сервер внутри
-транзакции enrollment: код непрозрачный, клиент не может достоверно извлечь его
-срок или доказать, что он уже использован. QR-контракт пока не определён и QR
-не считается поддержанным способом передачи.
+транзакции enrollment: код непрозрачный, клиент не может доказать, что он уже
+использован. QR приглашение имеет пять полей: kind=rtrust_enrollment, version=1,
+origin, code и expires_at. Панель генерирует его локально без внешнего QR
+сервиса, только для HTTPS origin браузера. Rust клиент принимает invitation JSON
+в поле кода и проверяет совпадение с независимо выбранным origin до запроса.
+Android сканирует камерой/изображением и показывает origin в диалоге enrollment;
+смена адреса пользователем не меняет origin приглашения и отклоняется. Известный
+истёкший или более чем 5 минут оставшегося срока QR отклоняется локально;
+сервер всё равно проверяет реальный TTL и одноразовость кода. QR не содержит
+постоянных endpoint credentials или admin secret.
 
 Ответ существующего API `/portal/v2/enroll` содержит токен, `device_id` и
 `expires_in`. Срок считается от начала запроса, чтобы сетевое ожидание не
@@ -37,7 +44,13 @@ VPN credentials и исходные версии профилей хранятс
 настольный клиент дополнительно ограничивает получение 30 секундами.
 Новый API версии 3 не интерпретируется как совместимый v2.
 
-Сервер v2 не выдаёт общую транзакционную ревизию профилей и политики.
+При capability `snapshot: 1` клиент получает `/portal/v2/snapshot` одной
+партией с непрозрачной ревизией. Сервер фиксирует профили, настройки, grants,
+актуальность токена и routing в одной SQLite read transaction. WebView и native
+используют одну функцию подготовки vault: конфликт отклоняет профили и маршруты
+вместе. Изменение содержимого без изменения ревизии также отклоняется.
+
+Legacy-сервер v2 без capability snapshot не выдаёт общую транзакционную ревизию профилей и политики.
 Повторная проверка обнаруживает наблюдаемые изменения, но не доказывает
 существование единого server snapshot и не обнаруживает изменение туда и обратно
 между запросами. Для строгой серверной атомарности нужен новый контракт.
@@ -50,7 +63,7 @@ VPN credentials и исходные версии профилей хранятс
 клиент не объявляет её доступ подтверждённым или актуальным. Срок API-токена
 не равен сроку VPN credentials. Ответ 401 означает «токен истёк или API-доступ
 отозван»; он не позволяет отличить причины и не доказывает отзыв на endpoint.
-Протокол v2 не определяет максимальную свежесть offline-policy, renewal,
+Протокол v2 не определяет максимальную свежесть offline-policy,
 credential rotation или серверную обязательную остановку локального туннеля.
 
 ## Источник и ownership
@@ -69,20 +82,55 @@ ownership, обязательности профильной политики и
 
 | Возможность | Windows/Linux/macOS native | Android/iOS | Сервер v2 |
 | --- | --- | --- | --- |
-| HTTPS enrollment, keyring, bounded sync | реализовано | общая Rust API; интеграция UI не подтверждена | one_time_code, profile_json |
-| Group IPv4 routes | TUN, include/exclude/LAN | применение device policy не подтверждено | routing v1 или legacy 404 |
-| Profile-embedded policy + group reconciliation | контракт отсутствует | контракт отсутствует | отсутствует |
+| HTTPS enrollment, keyring, bounded sync | native и WebView | Android: Keystore, срок токена, snapshot; iOS отложен | one_time_code, profile_json, snapshot v1 |
+| Group IPv4 routes | TUN, include/exclude/LAN | Android: include/exclude + наблюдаемый LAN; iOS отложен | routing v1 или legacy 404 |
+| Profile-embedded policy + group reconciliation | separate immutable layers | Android: единый evaluator, старые owners завершаются | atomic snapshot |
 | Device-specific VPN rotation | не подтверждено | не подтверждено | зависит от tunnel#22 |
 | Endpoint revoke + active-session SLA | не подтверждено | не подтверждено | зависит от tunnel#22 |
-| QR, renewal, freshness deadline | контракт отсутствует | контракт отсутствует | контракт отсутствует |
+| QR invitation | JSON paste с origin fence | Android camera/image + confirmation; iOS отложен | short-lived one_time_qr на HTTPS |
+| Portal token renewal | явное продление до expiry | Android: явное продление; iOS отложен | device-only token/renew, ещё действующий токен |
+| Mandatory offline freshness deadline | Linux/Windows TUN/full, IPC v5; SOCKS/постоянный Always-on отклонены | Android: boot/elapsed receipt + блокирующий TUN | offline_freshness v1 |
 
 «Забыть локально» удаляет привязку keyring. Серверное удаление устройства
-отзывает API tokens/grants/routing membership; уже скачанный VPN-пароль
-существующая реализация не делает недействительным. Приёмка endpoint revocation
+отзывает API tokens/grants/routing membership; legacy/shared VPN-пароль
+это действие не делает недействительным. Приёмка endpoint revocation
 требует реальной новой попытки VPN-соединения со старыми credentials при
 заблокированном portal API, а также отдельно определённой политики активных
 сессий. До такой серверной реализации issue #35 нельзя считать полностью
 закрытым.
+
+## Индивидуальные credentials
+
+Серверная main использует единственного владельца `rtrust_credentials` и
+capability `managed_credentials`. Его provision/rotate/revoke сохраняют
+принадлежность устройства, сериализацию и применение endpoint. Подробный
+контракт — [tunnel device credentials](https://github.com/onixus/tunnel/blob/main/docs/device-credentials.md).
+Клиентская диагностика не превращает серверное состояние applied в
+подтверждение доступности сети. Импортированные и legacy/shared пароли
+остаются вне обещания managed revoke.
+
+Snapshot, QR, `/token/renew` и freshness добавляются поверх этого владельца,
+без второго supervisor или параллельной таблицы credentials. Предыдущая
+лаборатория альтернативного verifier остаётся историческим результатом,
+а не доказательством совмещённого server head. Физическая приёмка активных
+сессий и SLA ещё требуется.
+
+## Продление API-доступа
+
+Кнопка продления в native/WebView/Android вызывает device-only
+`/portal/v2/token/renew` с явным consent. Сервер повторно проверяет статус,
+revocation и expiry токена внутри write transaction, затем продлевает API
+доступ на 30 дней без изменения самого токена, профилей, grants или VPN
+credentials. Клиент отсчитывает срок от начала запроса; Android меняет только
+срок существующей привязки и отклоняет ответ после её смены или более нового
+renewal. Невозможность сохранить новый срок оставляет прежний консервативный
+срок. Известный истёкший токен не отправляется для продления; необходим новый
+одноразовый enrollment. Отозванный токен сервер не продлевает.
+
+Android snapshot имеет общий 30-секундный deadline; отдельный запрос — 25 секунд,
+с принудительным disconnect по deadline и проверкой после чтения. Это отдельные
+лимиты от connect/read timeout и размера ответа. Сетевая ошибка не пишет часть
+batch в Keystore vault.
 
 Клиент автоматически не отправляет telemetry о посещённых адресах или трафике.
 Обновление состояния/версии политики по согласию не реализовано: согласованного

@@ -29,7 +29,7 @@ public final class PortalSyncWorker extends Worker {
             if (session == null || !session.optBoolean("background_sync")) return Result.success();
             synchronized (SYNC) {
                 if (isStopped()) return Result.retry();
-                JSONArray remote = new PortalClient(session.getString("origin"), session.getString("token")).download();
+                JSONArray remote = new PortalClient(getApplicationContext(),session).download();
                 if (isStopped()) return Result.retry();
                 vault.syncPortalBackground(session, remote);
             }

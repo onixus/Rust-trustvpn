@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="recovery_title">Разрешённые резервы для этого профиля</string>
+    <string name="recovery_enable">Включить автоматическое восстановление</string>
+    <string name="recovery_disable">Отключить резервы</string>
+    <string name="recovery_invalid">Выберите 1–3 совместимых профиля. Перед изменением резервов отключите VPN.</string>
+    <string name="access_refresh_required">Доступ устарел. Трафик заблокирован; обновите профили через панель.</string>
+    <string name="recovery_backup_active">Активен разрешённый резерв %1$d</string>
+    <string name="routing_admin">Маршруты администратора</string>
+    <string name="routing_user">Маршруты владельца</string>
     <string name="portal_title">"Профили сервера"</string>
     <string name="portal_working">"Обращение к серверу…"</string>
     <string name="portal_expired">"Регистрация истекла или отозвана. Удалите регистрацию и зарегистрируйте устройство заново. Локальные профили не изменены."</string>
@@ -115,4 +123,6 @@
     <string name="make_default_profile">По умолчанию для виджетов</string>
     <string name="import_and_select_a_profile">Сначала импортируйте и выберите профиль.</string>
     <string name="no_selected_profile">Профиль не выбран</string>
+    <string name="portal_renew">Продлить доступ панели</string>
+    <string name="portal_renewed">Доступ панели продлён. Срок VPN credentials проверяется отдельно.</string>
 </resources>

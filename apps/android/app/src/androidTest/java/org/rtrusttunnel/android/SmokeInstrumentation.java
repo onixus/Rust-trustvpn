@@ -71,6 +71,7 @@ public final class SmokeInstrumentation extends Instrumentation {
                 result.putString("stream", network ? "PASS: selected second profile connected; IPv4/IPv6 TCP512KiB and UDP1/1472/5000/60000; system DNS and HTTPS; widget uses default; vault restored\n" : "PASS: app selects second profile, service uses its IPv6 plan, widget uses default IPv4 plan, vault restored\n");
                 finish(-1, result); return;
             }
+            DiagnosticsAcceptance.run();
             MobileFeaturesAcceptance.run(this);
             AppRoutingAcceptance.smoke(this);
             String secret = "android-test-synthetic-password";

@@ -17,7 +17,8 @@ import org.json.*;
 
 /** Native Android widgets; no WebView and no remote UI code. */
 public class MainActivity extends Activity {
-    private static final int PICK = 10, SAVE = 11, CONSENT = 12, QR_IMAGE = 13;
+    private static final int PICK = 10, SAVE = 11, CONSENT = 12, QR_IMAGE = 13, DIAGNOSTIC_SAVE = 14;
+    private String diagnosticExport;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private LinearLayout rows;
     private String selectedId, pendingConnectId;
@@ -35,6 +36,7 @@ public class MainActivity extends Activity {
                 int nativeState = state.optInt("state", 0);
                 String message = !TunnelService.problem.isEmpty() ? TunnelService.problem : nativeState == 2 ? getString(R.string.connected) : nativeState == 1 ? getString(R.string.connecting) : nativeState == 3 ? getString(R.string.reconnecting) : nativeState == 4 ? getString(R.string.connection_failed) : "";
                 if (nativeState == 2 && TunnelService.problem.isEmpty()) message = ObservationStatus.summary(MainActivity.this, state.optJSONObject("observations"));
+                JSONObject recovery=state.optJSONObject("recovery");if(nativeState==2 && recovery!=null && recovery.optInt("selected_index")>0)message+=" · "+getString(R.string.recovery_backup_active,recovery.optInt("selected_index"));
                 if (message.isEmpty()) message = TunnelService.active ? getString(R.string.starting_vpn) : getString(R.string.disconnected);
                 if (!status.getText().toString().equals(message)) status.setText(message);
                 String action = TunnelService.active ? getString(R.string.disconnect) : getString(R.string.connect_selected_profile);
@@ -116,10 +118,11 @@ public class MainActivity extends Activity {
         startForegroundService(new Intent(this, TunnelService.class).putExtra(TunnelService.PROFILE_ID, pendingConnectId));
     }
     private void settingsMenu() {
-        new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on), java.util.Locale.getDefault().getLanguage().equals("ru") ? "Наблюдать решения маршрутизации" : "Observe local flow decisions"}, (dialog, which) -> {
+        new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on), java.util.Locale.getDefault().getLanguage().equals("ru") ? "Наблюдать решения маршрутизации" : "Observe local flow decisions", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Проверить путь VPN" : "Check VPN path", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Правила текущего подключения" : "Current connection rules",getString(R.string.recovery_title)}, (dialog, which) -> {
             if (which == 0) new PortalDialog(this, vault, this::reload).show();
             else if (which == 1) vpnSettings();
-            else { if (flowCapture != null) flowCapture.dismiss(); flowCapture = FlowCaptureDialog.show(this); }
+            else if(which==5){try{RecoveryDialog.show(this,vault,selectedId);}catch(Exception e){error(getString(R.string.recovery_invalid));}}
+            else { if (flowCapture != null) flowCapture.dismiss(); flowCapture = which == 2 ? FlowCaptureDialog.show(this) : which == 3 ? DiagnosticsDialog.show(this) : FlowPolicyDialog.show(this); }
         }).show();
     }
     private int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
@@ -205,6 +208,8 @@ public class MainActivity extends Activity {
                 if (id.equals(selectedId)) selectedProfile.setText(name);
                 String host = profile.optJSONObject("endpoint") == null ? "" : profile.getJSONObject("endpoint").optString("hostname");
                 String detail = protocolName(profile) + (host.isEmpty() ? "" : " · " + host);
+                JSONObject managed=item.optJSONObject("managed_routing");
+                if (managed!=null) detail += " · " + getString(managed.getString("revision").startsWith("admin:") ? R.string.routing_admin : R.string.routing_user) + " · " + managed.getString("group");
                 rows.addView(profileRow(id, name, detail, isDefault, id.equals(selectedId)));
             }
             if (profiles.length() == 0) {
@@ -307,6 +312,16 @@ public class MainActivity extends Activity {
             else startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE), QR_IMAGE);
         }).show();
     }
+    private void qrPayload(String raw) {
+        try {
+            JSONObject data=new JSONObject(raw);
+            if (data.optString("kind").equals("rtrust_enrollment")) {
+                new PortalDialog(this,vault,this::reload).enroll(raw);
+                return;
+            }
+        } catch (JSONException ignored) { }
+        preview(raw);
+    }
     private void vpnSettings() {
         String state = TunnelService.active ? getString(R.string.always_status, TunnelService.alwaysOn, TunnelService.lockdown) : getString(R.string.always_status_unknown);
         new AlertDialog.Builder(this).setTitle(R.string.always_on).setMessage(state + "\n\n" + getString(R.string.always_help))
@@ -333,16 +348,29 @@ public class MainActivity extends Activity {
         Intent consent = VpnService.prepare(this);
         if (consent != null) startActivityForResult(consent, CONSENT); else startSelectedConnection();
     }
+    void saveDiagnostic(String report) {
+        if (report.getBytes(StandardCharsets.UTF_8).length > 65536) { error("Report exceeds 64 KiB"); return; }
+        diagnosticExport = report;
+        startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/json")
+            .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,"vpn-diagnostic.json"), DIAGNOSTIC_SAVE);
+    }
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == DIAGNOSTIC_SAVE) {
+            String report = diagnosticExport; diagnosticExport = null;
+            if (result == RESULT_OK && data != null && report != null) try (OutputStream out = getContentResolver().openOutputStream(data.getData(), "wt")) {
+                if (out == null) throw new IOException(); out.write(report.getBytes(StandardCharsets.UTF_8));
+            } catch (Exception ignored) { error(getString(R.string.could_not_write_export)); }
+            return;
+        }
         com.google.zxing.integration.android.IntentResult qr = com.google.zxing.integration.android.IntentIntegrator.parseActivityResult(request, result, data);
-        if (qr != null) { if (qr.getContents() != null) preview(qr.getContents()); return; }
+        if (qr != null) { if (qr.getContents() != null) qrPayload(qr.getContents()); return; }
         if (request == QR_IMAGE && result == RESULT_OK && data != null) {
             android.net.Uri uri = data.getData();
             new Thread(() -> {
                 try (InputStream in = getContentResolver().openInputStream(uri)) {
                     if (in == null) throw new IOException(); String raw = QrImport.decode(in);
-                    runOnUiThread(() -> { if (!isDestroyed()) preview(raw); });
+                    runOnUiThread(() -> { if (!isDestroyed()) qrPayload(raw); });
                 } catch (Exception e) { runOnUiThread(() -> { if (!isDestroyed()) error(getString(R.string.qr_failed)); }); }
             }, "qr-import").start();
         }

@@ -28,7 +28,7 @@ public final class TunnelService extends VpnService {
     private boolean cleaned;
     private final Handler widgetHandler = new Handler(Looper.getMainLooper());
     private final Runnable widgetPoll = new Runnable() {
-        public void run() { observeDeepSleep(); VpnWidget.refresh(TunnelService.this, false); widgetHandler.postDelayed(this, 1000); }
+        public void run() { pollAccess(); observeDeepSleep(); VpnWidget.refresh(TunnelService.this, false); widgetHandler.postDelayed(this, 1000); }
     };
     private void observeDeepSleep() {
         synchronized (networkEvents) {
@@ -94,6 +94,7 @@ public final class TunnelService extends VpnService {
             catch (Exception error) {
                 // Never include config, addresses or exception payloads in UI/logs.
                 problem = getString(R.string.cannot_start_vpn_check_the_profile);
+                if(tun!=null){transitioning=true;return;}
                 cleanup(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf();
             }
         });
@@ -110,122 +111,136 @@ public final class TunnelService extends VpnService {
         }
         return null;
     }
-    private void connect(String profileId) throws Exception {
-        ProfileVault vault = new ProfileVault(this);
-        JSONObject profile = profileId == null ? vault.selected() : vault.profile(profileId);
-        JSONObject prepared = new JSONObject(NativeCore.INSTANCE.plan(profile.toString()));
-        if (!prepared.getBoolean("ok")) throw new IllegalArgumentException("Unsupported mobile policy");
-        profile = prepared.getJSONObject("profile");
-        JSONObject plan = prepared.getJSONObject("plan");
-        underlying = availableNetwork();
-        JSONObject endpoint = profile.getJSONObject("endpoint");
-        boolean ipv6 = endpoint.optBoolean("has_ipv6", true);
-        Builder builder = new Builder().setSession("R-TrustTunnel").setMtu(plan.getInt("mtu"))
-            .addAddress("169.254.254.2", 32)
-            .setBlocking(false)
-            .setUnderlyingNetworks(underlying == null ? new Network[]{} : new Network[]{underlying});
-        // Leaving IPv6 unconfigured blocks that family in Android; never allowBypass/allowFamily.
-        // Advertising a local IPv6 route for an IPv4-only endpoint makes browser
-        // connection attempts reach an unusable tunnel instead of falling back to IPv4.
-        if (ipv6) builder.addAddress("fd00:5254::2", 128);
-        JSONArray routes = plan.getJSONArray("routes");
-        for (int i = 0; i < routes.length(); i++) {
-            String[] route = routes.getString(i).split("/"); builder.addRoute(route[0], Integer.parseInt(route[1]));
-        }
-        AppRouting.read(new ProfileVault(this).read()).apply(builder, getPackageManager());
-        // The engine rejects unsupported policy/DNS options; do not silently bypass them.
-        JSONArray dns = plan.getJSONArray("dns");
-        if (dns == null || dns.length() == 0) builder.addDnsServer("1.1.1.1");
-        else for (int i = 0; i < dns.length(); i++) {
-            String server = dns.getString(i);
-            if (!server.matches("[0-9a-fA-F:.]+")) throw new IllegalArgumentException("Numeric DNS required");
-            if (!ipv6 && server.contains(":")) throw new IllegalArgumentException("IPv6 DNS requires an IPv6 endpoint");
-            builder.addDnsServer(server);
-        }
-        if (stopping) return;
-        tun = builder.establish();
-        if (tun == null) throw new IllegalStateException("VPN permission revoked");
-        // Android answers isAlwaysOn/isLockdownEnabled only for an established VPN, so the
-        // values read in onStartCommand are false even for a system Always-on start.
-        // The TUN carries no traffic yet, so the checks below open no bypass.
-        alwaysOn = isAlwaysOn(); lockdown = isLockdownEnabled();
-        rememberAlwaysOn(this, alwaysOn);
-        getSystemService(NotificationManager.class).notify(1, notification());
-        // Recovery is only for the system Always-on VPN.
-        if (recovering && !alwaysOn) { disconnect(); return; }
-        // A refusal closes the TUN through cleanup() and reports "cannot start".
-        if (plan.getBoolean("require_lockdown") && (!alwaysOn || !lockdown)) throw new IllegalArgumentException("System lockdown required");
-        callback = new ConnectivityManager.NetworkCallback() {
-            private LinkProperties selectedProperties;
-            @Override public void onAvailable(Network network) { updateUnderlying(); }
-            @Override public void onLost(Network network) { updateUnderlying(); }
-            @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) { updateUnderlying(); }
-            @Override public void onLinkPropertiesChanged(Network network, LinkProperties properties) {
-                synchronized (networkEvents) {
-                    if (callback != this || stopping || !network.equals(underlying)) return;
-                    LinkProperties previous = selectedProperties;
-                    selectedProperties = properties;
-                    if (previous != null && !previous.equals(properties)) NativeCore.INSTANCE.networkChanged();
-                }
+    private volatile boolean localPolicy;
+    private volatile boolean localSource;
+    public boolean allowPolicyMutation() { return localPolicy && !stopping; }
+    public boolean hasLocalSource() { return localSource; }
+    private volatile boolean transitioning, accessHeld;
+    private volatile java.util.List<ProfileVault.Selection> candidates=java.util.Collections.emptyList();
+    private final java.util.concurrent.atomic.AtomicBoolean refreshQueued=new java.util.concurrent.atomic.AtomicBoolean();
+    private volatile long logicalSession=System.nanoTime() & Long.MAX_VALUE;
+    private volatile long networkEpoch, lastWall;
+    private volatile boolean clockInvalid;
+    private volatile String requestedId, receiptKey="", policyKey="";
+    private String adapterKey="";
+    private int boot;
+    static boolean accessBlocked(){TunnelService s=running;return s!=null && s.accessHeld;}
+    static Network portalRecoveryNetwork(){TunnelService s=running;return s!=null && s.accessHeld && !s.stopping?s.underlying:null;}
+    static void recoverySettingsChanged(){TunnelService s=running;if(s!=null)synchronized(s.networkEvents){s.logicalSession=System.nanoTime() & Long.MAX_VALUE;s.networkEpoch++;s.transitioning=true;s.requestRefresh();}}
+    public synchronized boolean accessValid() {
+        if(stopping || transitioning || accessHeld) return false;
+        long wall=System.currentTimeMillis(),elapsed=SystemClock.elapsedRealtime();
+        boolean managed=false;for(ProfileVault.Selection entry:candidates)if(!entry.localPolicy)managed=true;
+        if(!managed)return true;
+        if(lastWall>0 && wall<lastWall)clockInvalid=true;
+        if(clockInvalid)return false;
+        lastWall=wall;
+        for(ProfileVault.Selection entry:candidates)if(!entry.localPolicy && !OfflineLease.valid(entry.lease,wall,elapsed,boot))return false;
+        return true;
+    }
+    private static String receipts(ProfileVault.ConnectionSet set)throws Exception {
+        JSONArray values=new JSONArray();for(ProfileVault.Selection entry:set.profiles)values.put(new JSONObject().put("id",entry.id).put("revision",entry.revision).put("lease",entry.lease).put("group",entry.managedRouting));
+        return values.toString();
+    }
+    private static String policies(ProfileVault.ConnectionSet set)throws Exception {
+        JSONArray values=new JSONArray();for(ProfileVault.Selection entry:set.profiles)values.put(new JSONObject().put("id",entry.id).put("revision",entry.revision).put("group",entry.managedRouting));
+        return new JSONObject().put("profiles",values).put("apps",set.apps.json()).toString();
+    }
+    private void pollAccess(){
+        if(stopping || !active || candidates.isEmpty())return;
+        if(!transitioning && !accessValid()){transitioning=true;accessHeld=true;problem=getString(R.string.access_refresh_required);requestRefresh();}
+        try{
+            ProfileVault.ConnectionSet next=new ProfileVault(this).connectionSet(requestedId);String key=receipts(next);
+            if(!key.equals(receiptKey)){
+                boolean fresh=true;for(ProfileVault.Selection entry:next.profiles)if(!entry.localPolicy && !OfflineLease.valid(entry.lease,System.currentTimeMillis(),SystemClock.elapsedRealtime(),boot))fresh=false;
+                if(!accessHeld && !transitioning && fresh && policies(next).equals(policyKey)){synchronized(this){candidates=java.util.Collections.unmodifiableList(next.profiles);receiptKey=key;lastWall=System.currentTimeMillis();clockInvalid=false;}}
+                else requestRefresh();
             }
-            private void updateUnderlying() {
-                synchronized (networkEvents) {
-                    if (callback != this || stopping) return;
-                    Network previous = underlying;
-                    Network next = availableNetwork();
-                    underlying = next;
-                    setUnderlyingNetworks(next == null ? new Network[]{} : new Network[]{next});
-                    // Repeated callbacks for another network do not describe a change
-                    // to the selected physical path. No address or visited name is logged.
-                    if (!java.util.Objects.equals(previous, next)) {
-                        selectedProperties = next == null ? null : connectivity.getLinkProperties(next);
-                        NativeCore.INSTANCE.networkChanged();
-                    }
-                }
-            }
+        }catch(Exception invalid){transitioning=true;requestRefresh();}
+    }
+    private void requestRefresh(){
+        if(stopping || !refreshQueued.compareAndSet(false,true))return;
+        worker.execute(()->{
+            long epoch=networkEpoch;
+            try{rebuild(epoch);}catch(Exception error){problem=getString(R.string.cannot_start_vpn_check_the_profile);transitioning=true;}
+            finally{refreshQueued.set(false);if(!stopping && epoch!=networkEpoch)requestRefresh();}
+        });
+    }
+    private void connect(String profileId)throws Exception {
+        requestedId=profileId;boot=OfflineLease.boot(this);
+        callback=new ConnectivityManager.NetworkCallback(){
+            private LinkProperties properties;
+            private void changed(){synchronized(networkEvents){if(callback!=this || stopping)return;underlying=availableNetwork();properties=underlying==null?null:connectivity.getLinkProperties(underlying);networkEpoch++;transitioning=true;NativeCore.INSTANCE.networkChanged();requestRefresh();}}
+            @Override public void onAvailable(Network n){if(!java.util.Objects.equals(underlying,availableNetwork()))changed();}
+            @Override public void onLost(Network n){if(n.equals(underlying))changed();}
+            @Override public void onCapabilitiesChanged(Network n,NetworkCapabilities caps){if(!java.util.Objects.equals(underlying,availableNetwork()))changed();}
+            @Override public void onLinkPropertiesChanged(Network n,LinkProperties next){if(n.equals(underlying) && !java.util.Objects.equals(properties,next))changed();}
         };
-        connectivity.registerNetworkCallback(new NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).addCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND).build(), callback);
-        // Establish the blocking TUN before waiting for connectivity or endpoint DNS.
-        // The system's lockdown policy also protects the interval before service startup.
-        JSONArray addresses = endpoint.getJSONArray("addresses");
-        while (!stopping) {
-            Network network = underlying;
-            if (network != null) try {
-                JSONArray resolved = new JSONArray();
-                for (int i = 0; i < addresses.length(); i++) {
-                    String address = addresses.getString(i);
-                    int colon = address.lastIndexOf(':');
-                    if (colon < 1) throw new IllegalArgumentException("Invalid endpoint");
-                    String host = address.substring(0, colon).replace("[", "").replace("]", "");
-                    int port = Integer.parseInt(address.substring(colon + 1));
-                    for (InetAddress ip : network.getAllByName(host)) {
-                        resolved.put((ip instanceof Inet6Address ? "[" + ip.getHostAddress() + "]" : ip.getHostAddress()) + ":" + port);
-                        if (resolved.length() > 64) throw new IllegalArgumentException("Too many endpoints");
-                    }
-                }
-                if (resolved.length() == 0) throw new UnknownHostException();
-                endpoint.put("addresses", resolved);
-                if (stopping) return;
-                if (!NativeCore.INSTANCE.start(profile.toString(), tun.getFd(), this)) throw new IllegalStateException("Core rejected profile");
-                synchronized (networkEvents) {
-                    if (callback != null && !stopping) {
-                        sleepObserver.start(callback);
-                        observeDeepSleep();
-                    }
-                }
-                problem = "";
-                return;
-            } catch (UnknownHostException unavailable) { /* Network/DNS can be unavailable at boot. */ }
-            Thread.sleep(500);
-            underlying = availableNetwork();
+        connectivity.registerNetworkCallback(new NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).addCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND).build(),callback);
+        underlying=availableNetwork();
+        rebuild(networkEpoch);
+        synchronized(networkEvents){if(callback!=null && !stopping)sleepObserver.start(callback);}
+    }
+    private JSONArray localPrefixes(Network network)throws Exception {
+        LinkProperties properties=network==null?null:connectivity.getLinkProperties(network);if(properties==null)return null;
+        JSONArray result=new JSONArray();for(LinkAddress link:properties.getLinkAddresses())if(link.getAddress() instanceof Inet4Address){if(link.getPrefixLength()==0)return null;result.put(link.getAddress().getHostAddress()+"/"+link.getPrefixLength());if(result.length()>64)throw new IllegalArgumentException("Local prefix limit");}return result;
+    }
+    private ParcelFileDescriptor establish(JSONObject plan,AppRouting apps,boolean guard)throws Exception {
+        Builder builder=new Builder().setSession("R-TrustTunnel").setMtu(plan.getInt("mtu")).addAddress("169.254.254.2",32).setBlocking(false)
+            .setUnderlyingNetworks(underlying==null?new Network[]{}:new Network[]{underlying});
+        if(guard || plan.getBoolean("ipv6"))builder.addAddress("fd00:5254::2",128);
+        if(guard){builder.addRoute("0.0.0.0",0).addRoute("::",0);}else{JSONArray routes=plan.getJSONArray("routes");for(int i=0;i<routes.length();i++){String[] route=routes.getString(i).split("/");builder.addRoute(route[0],Integer.parseInt(route[1]));}}
+        apps.apply(builder,getPackageManager());JSONArray dns=plan.getJSONArray("dns");for(int i=0;i<dns.length();i++)builder.addDnsServer(dns.getString(i));
+        ParcelFileDescriptor next=builder.establish();if(next==null)throw new IllegalStateException("VPN permission revoked");return next;
+    }
+    private void rebuild(long epoch)throws Exception {
+        if(stopping)return;transitioning=true;
+        NativeCore.INSTANCE.suspend(); // joins old owners; retains local session policy and retry budget
+        ProfileVault vault=new ProfileVault(this);
+        ProfileVault.Admission admission=vault.admission(requestedId);requestedId=admission.primary.id;
+        boolean guard=!admission.primary.localPolicy;
+        if(tun==null && guard){
+            JSONObject blocking=new JSONObject().put("mtu",1500).put("ipv6",true).put("dns",new JSONArray().put("198.18.0.53"));
+            tun=establish(blocking,admission.apps,true);adapterKey="";
         }
-
+        ProfileVault.ConnectionSet set=vault.connectionSet(requestedId);
+        if(guard==set.profiles.get(0).localPolicy)throw new IllegalStateException("Ownership changed");
+        String nextReceipts=receipts(set);synchronized(this){if(!nextReceipts.equals(receiptKey)){lastWall=System.currentTimeMillis();clockInvalid=false;}receiptKey=nextReceipts;policyKey=policies(set);candidates=java.util.Collections.unmodifiableList(set.profiles);}
+        long wall=System.currentTimeMillis(),elapsed=SystemClock.elapsedRealtime();
+        if(guard && clockInvalid){accessHeld=true;problem=getString(R.string.access_refresh_required);return;}
+        for(ProfileVault.Selection entry:candidates)if(!entry.localPolicy && !OfflineLease.valid(entry.lease,wall,elapsed,boot)){accessHeld=true;problem=getString(R.string.access_refresh_required);return;}
+        accessHeld=false;Network network=underlying;if(network==null){problem="";return;}
+        JSONArray local=localPrefixes(network), profiles=new JSONArray(), unavailable=new JSONArray();JSONObject firstPlan=null;
+        for(ProfileVault.Selection entry:candidates){
+            JSONObject planned=new JSONObject(entry.managedRouting==null?NativeCore.INSTANCE.plan(entry.profile.toString()):NativeCore.INSTANCE.planManagedOnNetwork(entry.profile.toString(),entry.managedRouting.toString(),local==null?"null":local.toString()));
+            if(!planned.getBoolean("ok"))throw new IllegalArgumentException("Unsupported policy");JSONObject plan=planned.getJSONObject("plan");
+            if(firstPlan==null)firstPlan=plan;else if(!firstPlan.toString().equals(plan.toString()))throw new IllegalArgumentException("Backup cannot change route/DNS/guard policy");
+            JSONObject profile=planned.getJSONObject("profile"), endpoint=profile.getJSONObject("endpoint");JSONArray addresses=endpoint.getJSONArray("addresses"), resolved=new JSONArray();
+            try{for(int i=0;i<addresses.length();i++){String address=addresses.getString(i);int colon=address.lastIndexOf(':');String host=address.substring(0,colon).replace("[","").replace("]","");int port=Integer.parseInt(address.substring(colon+1));for(InetAddress ip:network.getAllByName(host)){resolved.put((ip instanceof Inet6Address?"["+ip.getHostAddress()+"]":ip.getHostAddress())+":"+port);if(resolved.length()>64)throw new IllegalArgumentException("Endpoint limit");}}}catch(UnknownHostException unresolved){ /* Keep an empty candidate: its unavailable DNS cannot block other permitted reserves. */ }
+            if(resolved.length()>0)endpoint.put("addresses",resolved);else unavailable.put(profiles.length());profiles.put(profile);
+        }
+        if(stopping || epoch!=networkEpoch)return;
+        String adapter=new JSONObject().put("mtu",firstPlan.getInt("mtu")).put("dns",firstPlan.getJSONArray("dns")).put("apps",set.apps.json()).put("guard",guard).put("routes",guard?new JSONArray():firstPlan.getJSONArray("routes")).put("ipv6",guard || firstPlan.getBoolean("ipv6")).toString();
+        if(tun==null || !adapter.equals(adapterKey)){ParcelFileDescriptor next=establish(firstPlan,set.apps,guard);ParcelFileDescriptor old=tun;tun=next;if(old!=null)old.close();adapterKey=adapter;}
+        alwaysOn=isAlwaysOn();lockdown=isLockdownEnabled();rememberAlwaysOn(this,alwaysOn);
+        if(recovering && !alwaysOn){disconnect();return;}
+        if(firstPlan.getBoolean("require_lockdown") && (!alwaysOn || !lockdown)) {
+            // Android reports these flags after establish. This is a final refusal,
+            // not a transient network error that should retain the blocking TUN.
+            problem = getString(R.string.cannot_start_vpn_check_the_profile);
+            stopping = true;
+            cleanup(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf();
+            return;
+        }
+        ProfileVault.Selection primary=set.profiles.get(0);localSource=primary.localPolicy;localPolicy=primary.localPolicy && set.profiles.size()==1;
+        JSONObject request=new JSONObject().put("profiles",profiles).put("unavailable",unavailable).put("logical_session",logicalSession);
+        if(guard){JSONObject context=new JSONObject().put("source",primary.managedRouting==null?"managed_unknown":primary.managedRouting.getString("revision").startsWith("admin:")?"admin":"user").put("revision",primary.managedRouting==null?primary.revision:primary.managedRouting.getString("revision"));request.put("selection",new JSONObject().put("routes",firstPlan.getJSONArray("routes")).put("ipv6",firstPlan.getBoolean("ipv6")).put("context",context));}
+        synchronized(networkEvents){if(stopping || epoch!=networkEpoch)return;transitioning=false;problem="";if(!NativeCore.INSTANCE.startProfiles(request.toString(),tun.getFd(),this)){transitioning=true;throw new IllegalStateException("Core rejected candidates");}}
     }
     /** Called from Rust before every endpoint socket connects. Failure always blocks that attempt. */
     public boolean protectSocket(int fd) {
         Network network = underlying;
-        if (network == null || stopping || !protect(fd)) return false;
+        if (network == null || stopping || !accessValid() || !protect(fd)) return false;
         try (ParcelFileDescriptor duplicate = ParcelFileDescriptor.fromFd(fd)) {
             network.bindSocket(duplicate.getFileDescriptor()); return true;
         } catch (Exception error) { return false; }
@@ -246,7 +261,7 @@ public final class TunnelService extends VpnService {
         } catch (IllegalArgumentException ignored) { /* Registration failed or was already removed; token is revoked. */ }
         NativeCore.INSTANCE.stop();
         if (tun != null) { try { tun.close(); } catch (Exception ignored) {} tun = null; }
-        underlying = null; active = false; VpnWidget.refresh(this, true);
+        candidates=java.util.Collections.emptyList(); underlying = null; active = false; VpnWidget.refresh(this, true);
     }
     private void disconnect() {
         if (stopping) return;
