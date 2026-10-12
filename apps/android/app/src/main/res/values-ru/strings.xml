@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="routing_admin">Маршруты администратора</string>
+    <string name="routing_user">Маршруты владельца</string>
     <string name="portal_title">"Профили сервера"</string>
     <string name="portal_working">"Обращение к серверу…"</string>
     <string name="portal_expired">"Регистрация истекла или отозвана. Удалите регистрацию и зарегистрируйте устройство заново. Локальные профили не изменены."</string>

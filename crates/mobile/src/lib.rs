@@ -1,5 +1,6 @@
 //! Explicit mobile adaptation of portable desktop route/DNS policy.
 pub mod flows;
+pub mod managed;
 use ipnet::IpNet;
 pub use rtrust_control::recovery;
 use rtrust_profile::Profile;

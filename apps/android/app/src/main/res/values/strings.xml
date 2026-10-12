@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="routing_admin">Administrator routes</string>
+    <string name="routing_user">Owner routes</string>
     <string name="portal_title">"Server profiles"</string>
     <string name="portal_working">"Contacting server…"</string>
     <string name="portal_expired">"Registration expired or was revoked. Remove the registration and enroll again. Local profiles have not changed."</string>

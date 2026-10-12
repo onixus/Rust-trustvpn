@@ -115,6 +115,18 @@ final class ProfileVault {
     void syncPortal(JSONObject session, JSONArray remote) throws Exception { synchronized (LOCK) {
         JSONObject data = readUnlocked();
         if (!samePortal(data.optJSONObject("portal"), session)) throw new IOException("Registration changed");
+        JSONArray old=data.getJSONArray("profiles");
+        for (int i=0;i<remote.length();i++) {
+            JSONObject next=remote.getJSONObject(i), group=next.optJSONObject("managed_routing");
+            for (int j=0;j<old.length();j++) {
+                JSONObject previous=old.getJSONObject(j), priorGroup=previous.optJSONObject("managed_routing");
+                if (priorGroup!=null && next.optBoolean("routing_unsupported")) throw new IOException("Assigned routing capability disappeared");
+                if (priorGroup!=null && group!=null && priorGroup.getString("revision").equals(group.getString("revision"))
+                    && !priorGroup.toString().equals(group.toString())) throw new IOException("Managed group revision conflict");
+                if (next.getString("id").equals(previous.getString("id")) && next.getString("revision").equals(previous.optString("revision"))
+                    && !next.getJSONObject("profile").toString().equals(previous.getJSONObject("profile").toString())) throw new IOException("Profile revision conflict");
+            }
+        }
         String selected = data.getString("default"); removeRemote(data);
         JSONArray profiles = data.getJSONArray("profiles");
         if (profiles.length() + remote.length() > 64) throw new IOException("Profile limit");
@@ -144,9 +156,11 @@ final class ProfileVault {
         final String id;
         final JSONObject profile;
         final boolean localPolicy;
+        final JSONObject managedRouting;
         Selection(JSONObject entry) throws Exception {
             id = entry.getString("id"); profile = entry.getJSONObject("profile");
             localPolicy = !entry.has("remote_id");
+            managedRouting = entry.optJSONObject("managed_routing");
         }
     }
     Selection selection(String requestedId) throws Exception { synchronized (LOCK) {

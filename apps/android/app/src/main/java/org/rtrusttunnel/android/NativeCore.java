@@ -8,6 +8,7 @@ public final class NativeCore {
     public native String parse(String raw);
     public native String export(String raw, int format);
     public native String plan(String raw);
+    public native String planManaged(String raw, String group);
     public native boolean start(String raw, int fd, Object protector);
     public native void stop();
     /** OS-selected underlying network changed; no address/name crosses JNI. */

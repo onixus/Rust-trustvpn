@@ -206,6 +206,8 @@ public class MainActivity extends Activity {
                 if (id.equals(selectedId)) selectedProfile.setText(name);
                 String host = profile.optJSONObject("endpoint") == null ? "" : profile.getJSONObject("endpoint").optString("hostname");
                 String detail = protocolName(profile) + (host.isEmpty() ? "" : " · " + host);
+                JSONObject managed=item.optJSONObject("managed_routing");
+                if (managed!=null) detail += " · " + getString(managed.getString("revision").startsWith("admin:") ? R.string.routing_admin : R.string.routing_user) + " · " + managed.getString("group");
                 rows.addView(profileRow(id, name, detail, isDefault, id.equals(selectedId)));
             }
             if (profiles.length() == 0) {

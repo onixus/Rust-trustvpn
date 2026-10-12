@@ -19,6 +19,12 @@ Windows и USB Android разрешены для испытаний. Не сле
   Это session-only flow policy; OS route/DNS/guard не меняются. Managed
   policy закрыта от локальной мутации; дополнительный direct authority
   изменением policy не выдаётся.
+- Android group adapter: admin/user IPv4 include/exclude используют desktop
+  subtraction, сохраняют embedded flow/DNS/guard policy и блокируют IPv6 вне
+  IPv4 group contract. Snapshot хранит group/revision с профилями атомарно;
+  конфликт той же ревизии или исчезнувшая capability отвергаются. `exclude_lan`
+  пока отвергается целиком: отсутствует корректный lifecycle обновления
+  локальных префиксов при handoff. Local routes не выдаются за observed egress.
 - Retry Android использует общий jitter/budget/cooldown и лимит установления
   соединения. Budget tests не заменяют измерения на устройстве.
 - Новый server snapshot и индивидуальные credentials описаны в
@@ -69,13 +75,19 @@ retired TCP tasks при drain, раздельные snapshots Android profile/p
 Для исправлений прошли полный Rust workspace/Clippy и 92 scoped server tests.
 Regression startup проверяет данные, видимые исходному владельцу endpoint
 до его старта; он не запускает endpoint и не заменяет physical restart test.
+Дополнительно real endpoint fixture перезапустил сервер в новом Python
+процессе с той же synthetic DB: H2/H3 соседнего устройства приняты,
+retired credentials отклонены. Это isolated startup acceptance, не physical
+installed-package acceptance. Последующие group/session изменения прошли
+полный Rust workspace/Clippy, JNI arm64/x86_64, APK/test APK build и lint.
+Android instrumentation по-прежнему `not_run`.
 
 | Задача | Что ещё нужно |
 | --- | --- |
-| #32 | OS route cutover/rollback и физические старые TCP/UDP flows; mobile group-policy adapter |
+| #32 | OS route cutover/rollback и физические старые TCP/UDP flows; LAN group adapter/handoff |
 | #33 | Реальная UI/системная диагностика full/split, IPv6, outage/control loss на разрешённых устройствах |
 | #34 | Sleep/reboot/handoff/crash/outage, rollback cleanup, измерения retry/CPU/energy |
-| #35 / tunnel#22 | Активные сессии и физический SLA; legacy/shared migration, mobile groups, QR/renewal physical acceptance, обязательная offline freshness |
+| #35 / tunnel#22 | Активные сессии и физический SLA; legacy/shared migration, LAN groups, QR/renewal physical acceptance, обязательная offline freshness |
 | #36 | Exact commit/package hashes, installed update/rollback/vault tests, publisher signatures, 24h soak и budgets |
 
 Новый `PolicyChanged` event отличается от физической смены сети. APK/JNI

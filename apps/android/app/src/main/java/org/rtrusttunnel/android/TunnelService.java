@@ -117,13 +117,14 @@ public final class TunnelService extends VpnService {
         ProfileVault.Selection selected = vault.selection(profileId);
         JSONObject profile = selected.profile;
         localPolicy = selected.localPolicy;
-        JSONObject prepared = new JSONObject(NativeCore.INSTANCE.plan(profile.toString()));
+        JSONObject prepared = new JSONObject(selected.managedRouting == null ? NativeCore.INSTANCE.plan(profile.toString())
+            : NativeCore.INSTANCE.planManaged(profile.toString(),selected.managedRouting.toString()));
         if (!prepared.getBoolean("ok")) throw new IllegalArgumentException("Unsupported mobile policy");
         profile = prepared.getJSONObject("profile");
         JSONObject plan = prepared.getJSONObject("plan");
         underlying = availableNetwork();
         JSONObject endpoint = profile.getJSONObject("endpoint");
-        boolean ipv6 = endpoint.optBoolean("has_ipv6", true);
+        boolean ipv6 = plan.getBoolean("ipv6");
         Builder builder = new Builder().setSession("R-TrustTunnel").setMtu(plan.getInt("mtu"))
             .addAddress("169.254.254.2", 32)
             .setBlocking(false)

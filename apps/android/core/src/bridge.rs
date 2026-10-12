@@ -16,6 +16,7 @@ use tokio::sync::watch;
 use zeroize::Zeroizing;
 
 struct Runner {
+    session: u64,
     policy: rtrust_tun::policy::Controller,
     cancel: watch::Sender<bool>,
     thread: std::thread::JoinHandle<()>,
@@ -93,6 +94,31 @@ fn plan<'a>(
         (|| {
             let profile = Profile::import(&raw).map_err(|e| e.to_string())?;
             let (profile, plan) = super::prepare(profile)?;
+            Ok(Zeroizing::new(
+                serde_json::json!({"ok":true,"profile":profile,"plan":plan}).to_string(),
+            ))
+        })(),
+    )
+}
+const _: jni::NativeMethod = native_method! {java_type="org.rtrusttunnel.android.NativeCore",name="planManaged",extern fn plan_managed(raw:JString,group:JString)->JString,};
+fn plan_managed<'a>(
+    env: &mut Env<'a>,
+    _this: JObject<'a>,
+    raw: JString<'a>,
+    group: JString<'a>,
+) -> jni::errors::Result<JString<'a>> {
+    let raw = input(env, &raw)?;
+    let group = input(env, &group)?;
+    codec_result(
+        env,
+        (|| {
+            if group.len() > 16384 {
+                return Err("Managed group exceeds size limit".into());
+            }
+            let group: rtrust_mobile::managed::Group =
+                serde_json::from_str(&group).map_err(|_| "Invalid managed group")?;
+            let profile = Profile::import(&raw).map_err(|e| e.to_string())?;
+            let (profile, plan) = rtrust_mobile::managed::prepare_group(profile, &group)?;
             Ok(Zeroizing::new(
                 serde_json::json!({"ok":true,"profile":profile,"plan":plan}).to_string(),
             ))
@@ -218,6 +244,7 @@ fn start<'a>(
     match thread {
         Ok(thread) => {
             *slot = Some(Runner {
+                session,
                 policy: policy_control,
                 cancel,
                 thread,
@@ -316,15 +343,18 @@ fn flow_policy<'a>(
     enum Mutation {
         Version,
         Preview {
+            session: u64,
             expected: rtrust_engine::routing::PolicyVersion,
             policy: rtrust_engine::routing::Policy,
             destination: String,
         },
         Apply {
+            session: u64,
             expected: rtrust_engine::routing::PolicyVersion,
             policy: rtrust_engine::routing::Policy,
         },
         Rollback {
+            session: u64,
             expected: rtrust_engine::routing::PolicyVersion,
             previous_revision: String,
         },
@@ -336,12 +366,21 @@ fn flow_policy<'a>(
         }
         let mutation: Mutation =
             serde_json::from_str(&raw).map_err(|_| "Invalid policy request")?;
-        let controller = RUNNER
+        let (session, controller) = RUNNER
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .as_ref()
-            .map(|r| r.policy.clone())
+            .map(|r| (r.session, r.policy.clone()))
             .ok_or("Policy session unavailable")?;
+        let requested_session = match &mutation {
+            Mutation::Version => session,
+            Mutation::Preview { session, .. }
+            | Mutation::Apply { session, .. }
+            | Mutation::Rollback { session, .. } => *session,
+        };
+        if requested_session != session {
+            return Err("Policy session changed; reopen the dialog");
+        }
         if STATE.load(Ordering::SeqCst) != 2 {
             return Err("Wait for the connected policy session");
         }
@@ -349,6 +388,7 @@ fn flow_policy<'a>(
             expected,
             policy,
             destination,
+            ..
         } = &mutation
         {
             let destination = destination
@@ -358,7 +398,7 @@ fn flow_policy<'a>(
                 .preview(expected, policy, destination)
                 .map_err(|_| "Policy preview unavailable or unauthorized")?;
             return Ok(
-                serde_json::json!({"ok":true,"version":controller.version(),"decision":decision}),
+                serde_json::json!({"ok":true,"session":session,"version":controller.version(),"decision":decision}),
             );
         }
         let version = match mutation {
@@ -371,7 +411,9 @@ fn flow_policy<'a>(
                 let version = runtime
                     .block_on(async {
                         match mutation {
-                            Mutation::Apply { expected, policy } => {
+                            Mutation::Apply {
+                                expected, policy, ..
+                            } => {
                                 controller
                                     .apply(
                                         expected,
@@ -383,6 +425,7 @@ fn flow_policy<'a>(
                             Mutation::Rollback {
                                 expected,
                                 previous_revision,
+                                ..
                             } => controller.rollback(expected, previous_revision).await,
                             Mutation::Version | Mutation::Preview { .. } => unreachable!(),
                         }
@@ -398,7 +441,7 @@ fn flow_policy<'a>(
             }
         };
         Ok(
-            serde_json::json!({"ok":true,"version":version,"scope":"flow_policy_only_os_configuration_unchanged"}),
+            serde_json::json!({"ok":true,"session":session,"version":version,"scope":"flow_policy_only_os_configuration_unchanged"}),
         )
     })();
     let value = match result {
