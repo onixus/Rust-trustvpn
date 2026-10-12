@@ -106,7 +106,36 @@ stack: `ci/linux_system_e2e.py`, `ci/linux_host_package_e2e.py`,
 parts of this matrix. Read their authorization/environment requirements first.
 Do not launch them against a personal installation as an incidental self-test.
 
-## Current inventory and owners — 2026-10-11
+## Candidate 0.6.0 inventory — 2026-10-12
+
+Pre-release candidate **0.6.0** (desktop sequence 10, Android
+`0.6.0-preview.1`/60001, iOS 0.6.0/60001) on branch `codex/release-0.6.0`, based
+on main at
+`dee8b141695a82d011da4d578965d2c9896e8a9e`. It is a preview, not a production or `latest` candidate.
+No exact-source artifact has been built yet, so the commit, artifact and
+manifest hashes below are intentionally empty; they are filled in only from the
+completed build's source identity and artifact receipts, never estimated. A
+ledger is created per package set after that build.
+
+| Package / gate | Commit | Artifact SHA-256 | Status | Owner / dependency |
+| --- | --- | --- | --- | --- |
+| Windows x64 installer + service | — | — | `not_run` | Windows lab; exact-source build pending |
+| Windows Authenticode | — | — | `blocked` | Windows publisher |
+| Windows signed update 9 → 10 + rollback | — | — | `blocked` | Windows lab; sequence-9 helper speaks IPC v1, service v6 admits only v5 (see [secure updates](secure-updates.md)) |
+| macOS system package installed acceptance | — | — | `blocked` | Dedicated test Mac required |
+| macOS Developer ID + notarization | — | — | `blocked` | Apple publisher; packages remain ad-hoc sealed |
+| Linux host package + Flatpaks, x86_64/ARM64, reboot/sleep | — | — | `not_run` | Linux lab |
+| Android signed APK, physical device | — | — | `not_run` | Android lab / publisher |
+| iOS signed IPA, physical device | — | — | `blocked` | Apple publisher + iOS lab |
+| Independent physical-interface leak capture | — | — | `not_run` | No runner exists; current evidence is active probes in container/emulator |
+| Recovery/resource budgets, soak ≥24 h | — | — | `blocked` | Budgets not approved |
+| Server contracts (portal 409 limits, profile API) | — | — | `not_run` | onixus/tunnel |
+| Sequence-10 signed update metadata | — | — | `not_run` | Release publisher after exact-source build |
+
+Always-on recovery through backup profiles is claimed for Linux/Windows only;
+macOS and mobile cells for it are `unsupported`, not passed.
+
+## Inventory and owners — 2026-10-11
 
 Initial read-only environment inventory was collected in the issue-work
 checkout at `815458266bc77292d4f6dbfba549771484c33238` on Darwin arm64.

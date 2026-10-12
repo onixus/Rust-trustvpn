@@ -119,6 +119,23 @@ Windows latest is sequence 9. macOS automatic-update promotion remains withheld.
 The rebuild release is:
 https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9
 
+## Candidate sequence 10 — v0.6.0 (not published)
+
+The source tree compiles as version **0.6.0**, `CURRENT_SEQUENCE = 10`;
+`CURRENT_IPC` stays 1. `prepare-signed-release.py` refuses any other sequence for
+this source and runs the signing tool with `--offline --locked`. No sequence-10
+artifact, signed manifest or rollback envelope has been built or published, and
+no target's `latest` points at sequence 10. See [v0.6.0](releases/v0.6.0.md).
+
+Known gap before any Windows promotion: the `VERSION - 1` exception above covers
+one IPC step. The installed sequence-9 helper from v0.5.0-rebuild.9 speaks
+control IPC **v1**, while the 0.6.0 service is v6, so after a failed health
+check the old helper's `PrepareUpdate` is refused and automatic rollback stops
+safely without clearing the guard. The forward 9 → 10 install is unaffected
+because it reserves the running sequence-9 service. A real signed 9 → 10 update
+with injected failure and rollback on the Windows lab is NOT RUN and is required
+before Windows `latest` may move to sequence 10. macOS remains withheld.
+
 ## Версия IPC и gate приёмки (issues #31/#36)
 
 `CURRENT_IPC = 1` — совместимость транзакции обновления в исторических полях
