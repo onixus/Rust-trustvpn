@@ -13,12 +13,125 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite},
     net::UnixListener,
-    sync::Mutex,
+    sync::{Mutex, mpsc, oneshot},
     task::JoinSet,
 };
 
 type RunResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 type Lease = Arc<tokio::sync::OwnedMutexGuard<()>>;
+
+type Actor = mpsc::Sender<Envelope>;
+#[derive(Clone)]
+struct Session {
+    actor: Actor,
+    finished: tokio::sync::watch::Receiver<bool>,
+    shutdown: tokio::sync::watch::Sender<bool>,
+}
+// Synchronous lock: the actor drop guard must clear it during unwind or
+// cancellation, where it cannot await. Never held across an await.
+type Registry = Arc<std::sync::Mutex<Option<Session>>>;
+fn registry_slot(registry: &Registry) -> std::sync::MutexGuard<'_, Option<Session>> {
+    registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+// Forget only this actor's entry; a replacement session stays registered.
+fn forget(registry: &Registry, identity: &Actor) {
+    let mut current = registry_slot(registry);
+    if current
+        .as_ref()
+        .is_some_and(|current| current.actor.same_channel(identity))
+    {
+        *current = None;
+    }
+}
+// Owned by the actor future, so it runs on normal return, panic unwind,
+// cancellation and drop before first poll. It only forgets IPC bookkeeping:
+// the network Guard has no Drop, so PF, routes and DNS stay installed until an
+// explicit Stop or Recover releases them.
+struct Finish {
+    registry: Registry,
+    identity: Actor,
+    lease: Option<Lease>,
+    finished: tokio::sync::watch::Sender<bool>,
+}
+impl Drop for Finish {
+    fn drop(&mut self) {
+        forget(&self.registry, &self.identity);
+        drop(self.lease.take());
+        self.finished.send_replace(true);
+    }
+}
+fn supervise(
+    finish: Finish,
+    actor: impl std::future::Future<Output = ()> + Send + 'static,
+) -> ActorTask {
+    Box::pin(async move {
+        let _finish = finish;
+        actor.await;
+    })
+}
+struct Control {
+    commands: mpsc::Receiver<Envelope>,
+    initial: Option<oneshot::Sender<Response>>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+}
+type ActorTask = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+struct Envelope {
+    command: Command,
+    response: oneshot::Sender<Response>,
+}
+
+const SESSION_ENDED: &str = "Tunnel session ended";
+async fn ask(actor: &Actor, command: Command) -> Result<Response, String> {
+    let (response, receive) = oneshot::channel();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        actor.send(Envelope { command, response }),
+    )
+    .await
+    .map_err(|_| "Supervisor queue timed out")?
+    .map_err(|_| SESSION_ENDED)?;
+    tokio::time::timeout(Duration::from_secs(45), receive)
+        .await
+        .map_err(|_| "Supervisor response timed out")?
+        .map_err(|_| SESSION_ENDED.into())
+}
+// Durable state, independent of the bounded IPC command queue. Losing the
+// service owner also requests fail-closed shutdown, even before first poll.
+fn shutdown_requested(shutdown: &tokio::sync::watch::Receiver<bool>) -> bool {
+    *shutdown.borrow() || shutdown.has_changed().is_err()
+}
+async fn shutting_down(shutdown: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if shutdown_requested(shutdown) {
+            return;
+        }
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn write_response(
+    stream: &mut (impl AsyncWrite + Unpin),
+    response: &Response,
+) -> Result<(), String> {
+    tokio::time::timeout(Duration::from_secs(5), write(stream, response))
+        .await
+        .map_err(|_| "IPC write timed out")?
+}
+async fn publish(
+    initial: &mut Option<oneshot::Sender<Response>>,
+    state: State,
+    message: &str,
+) -> Result<(), String> {
+    if let Some(response) = initial.take() {
+        // A vanished GUI is not a reason to stop service-owned work.
+        let _ = response.send(Response::new(state, message));
+    }
+    Ok(())
+}
 
 async fn guarded_connect<T>(
     lease: Lease,
@@ -156,6 +269,9 @@ pub async fn run() -> Result<(), String> {
     let power = power::Monitor::new()?;
     events::record("service_started native_power_monitor=registered");
     let mut tasks = JoinSet::new();
+    let mut actors = JoinSet::new();
+    let registry: Registry = Arc::new(std::sync::Mutex::new(None));
+    let (spawn, mut spawned) = mpsc::channel::<ActorTask>(16);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|_| "Cannot register signal")?;
     loop {
@@ -165,8 +281,10 @@ pub async fn run() -> Result<(), String> {
                 if stream.peer_cred().map_err(|_| "IPC identity failed")?.uid() != uid || tasks.len() >= 16 { continue; }
                 let lease = lease.clone();
                 let power = power.events.clone();
+                let registry = registry.clone();
+                let spawn = spawn.clone();
                 tasks.spawn(async move {
-                    if serve(stream, uid, lease, power).await.is_err() {
+                    if serve(stream, uid, lease, power, registry, spawn).await.is_err() {
                         events::record("ipc_session_ended");
                         if let Ok(error) = std::ffi::CString::new("redacted IPC failure") {
                         // launchd discards our stderr; retain redacted IPC
@@ -179,12 +297,24 @@ pub async fn run() -> Result<(), String> {
                 });
             }
             _ = tasks.join_next(), if !tasks.is_empty() => {},
+            task = spawned.recv() => { if let Some(task) = task { actors.spawn(task); } },
+            _ = actors.join_next(), if !actors.is_empty() => {},
             _ = terminate.recv() => break,
             _ = tokio::signal::ctrl_c() => break,
         }
     }
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
+    // Start may have queued its actor immediately before termination. Register
+    // those futures too, then drain workers without releasing the network guard.
+    while let Ok(task) = spawned.try_recv() {
+        actors.spawn(task);
+    }
+    let current = registry_slot(&registry).clone();
+    if let Some(actor) = current {
+        actor.shutdown.send_replace(true);
+    }
+    while actors.join_next().await.is_some() {}
     fs::remove_file(rtrust_control::SOCKET).map_err(|_| "Cannot remove service socket")?;
     Ok(())
 }
@@ -200,25 +330,13 @@ async fn reply(
     .await
     .map_err(|_| "IPC write timed out")?
 }
-async fn reply_observed(
-    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
-    state: State,
-    message: &str,
-    monitor: &mut rtrust_control::observations::Monitor,
-    active_profile: Option<u8>,
-) -> Result<(), String> {
-    let mut response = Response::new(state, message);
-    response.active_profile = active_profile;
-    response.observations = monitor.sample(rtrust_control::observations::now_ms());
-    tokio::time::timeout(Duration::from_secs(5), write(stream, &response))
-        .await
-        .map_err(|_| "IPC write timed out")?
-}
 async fn serve(
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
     uid: u32,
     lease: Arc<Mutex<()>>,
-    mut power: tokio::sync::watch::Receiver<power::State>,
+    power: tokio::sync::watch::Receiver<power::State>,
+    registry: Registry,
+    spawn: mpsc::Sender<ActorTask>,
 ) -> Result<(), String> {
     let request: Request = tokio::time::timeout(Duration::from_secs(5), read(&mut stream))
         .await
@@ -227,9 +345,42 @@ async fn serve(
         return reply(&mut stream, State::Error, "IPC version mismatch").await;
     }
     if matches!(request.command, Command::Capabilities) {
-        return write(&mut stream, &Response::new(State::Idle, "Capabilities")).await;
+        return reply(&mut stream, State::Idle, "Capabilities").await;
     }
-    let Ok(_lease) = lease.try_lock_owned() else {
+    let current = registry_slot(&registry).clone();
+    if matches!(request.command, Command::Status | Command::Recover)
+        && let Some(session) = current
+    {
+        let stopping = matches!(request.command, Command::Recover);
+        let command = if stopping {
+            Command::Stop
+        } else {
+            Command::Status
+        };
+        match ask(&session.actor, command).await {
+            Ok(response) => {
+                if stopping && let Err(error) = wait_finished(session.finished).await {
+                    return reply(&mut stream, State::Error, &error).await;
+                }
+                // Status is read-only and does not adopt the active session.
+                return write_response(&mut stream, &response).await;
+            }
+            // A live but unresponsive actor keeps its lease and guard.
+            Err(error) if error != SESSION_ENDED => {
+                return reply(&mut stream, State::Error, &error).await;
+            }
+            // The actor ended (returned, panicked or was cancelled) before it
+            // answered. Wait for its cleanup, then answer like no session is
+            // registered: the lease still serialises any recovery below.
+            Err(_) => {
+                if let Err(error) = wait_finished(session.finished).await {
+                    return reply(&mut stream, State::Error, &error).await;
+                }
+                forget(&registry, &session.actor);
+            }
+        }
+    }
+    let Ok(held) = lease.try_lock_owned() else {
         return reply(
             &mut stream,
             State::Error,
@@ -237,9 +388,25 @@ async fn serve(
         )
         .await;
     };
-    let held_lease = Arc::new(_lease);
-    power.borrow_and_update();
-    let (profile, selection, dns, split_dns, fallbacks) = match request.command {
+    match request.command {
+        Command::Status => {
+            return reply(
+                &mut stream,
+                if state::pending() {
+                    State::Blocked
+                } else {
+                    State::Idle
+                },
+                "Нет активной сессии VPN",
+            )
+            .await;
+        }
+        Command::Recover => {
+            return match state::recover(uid) {
+                Ok(()) => reply(&mut stream, State::Idle, "Блокировка снята").await,
+                Err(e) => reply(&mut stream, State::Blocked, &e).await,
+            };
+        }
         Command::PrepareUpdate => {
             if state::pending() {
                 return reply(
@@ -258,12 +425,139 @@ async fn serve(
             let _ = read::<Request>(&mut stream).await;
             return Ok(());
         }
-        Command::Recover => {
-            return match state::recover(uid) {
-                Ok(()) => reply(&mut stream, State::Idle, "Блокировка снята").await,
-                Err(e) => reply(&mut stream, State::Blocked, &e).await,
-            };
+        Command::Start { .. } | Command::StartFull { .. } => {}
+        _ => return reply(&mut stream, State::Error, "Start or Recover required").await,
+    }
+    let held_lease = Arc::new(held);
+    let (actor, commands) = mpsc::channel(16);
+    let (shutdown_signal, shutdown_events) = tokio::sync::watch::channel(false);
+    let (initial, response) = oneshot::channel();
+    let (finished, completion) = tokio::sync::watch::channel(false);
+    *registry_slot(&registry) = Some(Session {
+        actor: actor.clone(),
+        finished: completion.clone(),
+        shutdown: shutdown_signal,
+    });
+    let finish = Finish {
+        registry: registry.clone(),
+        identity: actor.clone(),
+        lease: Some(held_lease.clone()),
+        finished,
+    };
+    let task = supervise(finish, async move {
+        let _ = start(
+            request,
+            uid,
+            held_lease,
+            power,
+            Control {
+                commands,
+                initial: Some(initial),
+                shutdown: shutdown_events,
+            },
+        )
+        .await;
+    });
+    // A rejected task is dropped here; its Finish forgets the registration.
+    if spawn.send(task).await.is_err() {
+        return Err("Service is stopping".into());
+    }
+    let mut unexpected = [0];
+    let initial = tokio::select! {
+        response = response => response.map_err(|_| "Tunnel startup stopped")?,
+        _ = stream.read(&mut unexpected) => return Err("IPC closed during connect".into()),
+    };
+    let active = initial.state == State::Connected;
+    write_response(&mut stream, &initial).await?;
+    if !active {
+        return Ok(());
+    }
+    bridge(stream, actor, Some(completion)).await
+}
+
+async fn wait_finished(mut completion: tokio::sync::watch::Receiver<bool>) -> Result<(), String> {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        while !*completion.borrow_and_update() {
+            completion
+                .changed()
+                .await
+                .map_err(|_| "Supervisor completion lost")?;
         }
+        Ok(())
+    })
+    .await
+    .map_err(|_| "Supervisor completion timed out")?
+}
+
+async fn bridge(
+    mut stream: impl AsyncRead + AsyncWrite + Unpin,
+    actor: Actor,
+    completion: Option<tokio::sync::watch::Receiver<bool>>,
+) -> Result<(), String> {
+    loop {
+        let request: Request = read(&mut stream).await?;
+        if request.version != VERSION {
+            return Err("IPC version mismatch".into());
+        }
+        if !matches!(request.command, Command::Status | Command::Stop) {
+            return Err("Invalid operation during lease".into());
+        }
+        let stop = matches!(request.command, Command::Stop);
+        let response = ask(&actor, request.command).await?;
+        if stop && let Some(completion) = completion.clone() {
+            wait_finished(completion).await?;
+        }
+        write_response(&mut stream, &response).await?;
+        if stop {
+            return Ok(());
+        }
+    }
+}
+
+// Before guard installation the caller can still cancel Start. Recovery can
+// also cancel this preparation without waiting for endpoint/TLS deadlines.
+async fn prepare<T>(
+    future: impl std::future::Future<Output = Result<T, String>>,
+    initial: &mut oneshot::Sender<Response>,
+    commands: &mut mpsc::Receiver<Envelope>,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<T, String> {
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutting_down(shutdown) => return Err("Service is stopping".into()),
+            _ = initial.closed() => return Err("Start cancelled".into()),
+            result = &mut future => return result,
+            command = commands.recv() => match command {
+                Some(Envelope { command: Command::Stop, response, .. }) => {
+                    let _ = response.send(Response::new(State::Idle, "Подключение отменено"));
+                    return Err("Start cancelled".into());
+                }
+                Some(command) => { let _ = command.response.send(Response::new(State::Blocked, "Подключение подготавливается")); }
+                None => return Err("Service is stopping".into()),
+            }
+        }
+    }
+}
+
+async fn start(
+    request: Request,
+    uid: u32,
+    held_lease: Lease,
+    mut power: tokio::sync::watch::Receiver<power::State>,
+    control: Control,
+) -> Result<(), String> {
+    let Control {
+        mut commands,
+        mut initial,
+        mut shutdown,
+    } = control;
+    if shutdown_requested(&shutdown) {
+        return Ok(());
+    }
+    power.borrow_and_update();
+    let (profile, selection, dns, split_dns, fallbacks) = match request.command {
         Command::Start {
             profile,
             networks,
@@ -278,7 +572,7 @@ async fn serve(
                 exclude_lan,
             };
             if let Err(error) = selection.validate() {
-                return reply(&mut stream, State::Error, &error).await;
+                return publish(&mut initial, State::Error, &error).await;
             }
             (profile, selection, None, dns, fallbacks)
         }
@@ -287,13 +581,13 @@ async fn serve(
             dns,
             fallbacks,
         } => (profile, Default::default(), Some(dns), None, fallbacks),
-        _ => return reply(&mut stream, State::Error, "Start or Recover required").await,
+        _ => return publish(&mut initial, State::Error, "Start or Recover required").await,
     };
     let full = dns.is_some();
     if state::pending() {
         // A retained guard blocks DNS; report it before resolving the endpoint.
-        return reply(
-            &mut stream,
+        return publish(
+            &mut initial,
             State::Error,
             "Recovery is required before connecting",
         )
@@ -302,23 +596,28 @@ async fn serve(
     // Both modes pin IPv4 endpoint addresses: PF blocks selected networks
     // outside the tunnel, so the endpoint must be known and left out of them.
     // Every allowed backup is pinned now: the guard covers all candidates.
-    let mut failover =
-        match crate::failover::Failover::pin(*profile, fallbacks, crate::failover::Pin::Ipv4).await
-        {
-            Ok(failover) => failover,
-            _ => {
-                return reply(
-                    &mut stream,
-                    State::Error,
-                    "Не удалось разрешить адрес VPN-сервера",
-                )
-                .await;
-            }
-        };
+    let mut failover = match prepare(
+        crate::failover::Failover::pin(*profile, fallbacks, crate::failover::Pin::Ipv4),
+        initial.as_mut().unwrap(),
+        &mut commands,
+        &mut shutdown,
+    )
+    .await
+    {
+        Ok(failover) => failover,
+        _ => {
+            return publish(
+                &mut initial,
+                State::Error,
+                "Не удалось разрешить адрес VPN-сервера",
+            )
+            .await;
+        }
+    };
     let profile = failover.guard_profile();
     let endpoints = match state::endpoints(&profile) {
         Ok(e) => e,
-        Err(e) => return reply(&mut stream, State::Error, &e).await,
+        Err(e) => return publish(&mut initial, State::Error, &e).await,
     };
     let networks = if full {
         vec![]
@@ -331,7 +630,7 @@ async fn serve(
         };
         match local.and_then(|local| selection.routes(&ips, &local)) {
             Ok(networks) => networks,
-            Err(e) => return reply(&mut stream, State::Error, &e).await,
+            Err(e) => return publish(&mut initial, State::Error, &e).await,
         }
     };
     // A split selection that carries the resolver (e.g. everything but the
@@ -341,26 +640,42 @@ async fn serve(
     let resolver = dns.or(rtrust_control::tunneled_resolver(&networks, split_dns)
         .filter(|_| super::dns::preflight().is_ok()));
     if let Err(error) = Guard::preflight(&networks, full, resolver) {
-        return reply(&mut stream, State::Error, &error).await;
+        return publish(&mut initial, State::Error, &error).await;
     }
     if !power.borrow().awake {
-        return reply(
-            &mut stream,
+        return publish(
+            &mut initial,
             State::Blocked,
             "macOS ещё не завершила пробуждение",
         )
         .await;
     }
-    let prepared = {
-        let mut unexpected = [0];
-        tokio::select! {
-            result = failover.connect_initial(|profile| async move { device::Prepared::connect(&profile).await }) => match result {
-                Ok(prepared) => prepared,
-                _ => return reply(&mut stream, State::Error, "Не удалось открыть TUN: проверьте профиль, TLS и доступность endpoint").await,
-            },
-            _ = stream.read(&mut unexpected) => return Err("IPC closed during connect".into()),
+    let prepared = match prepare(
+        async {
+            failover
+                .connect_initial(|profile| async move { device::Prepared::connect(&profile).await })
+                .await
+                .map_err(|_| "Initial connection failed".to_owned())
+        },
+        initial.as_mut().unwrap(),
+        &mut commands,
+        &mut shutdown,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        _ => {
+            return publish(
+                &mut initial,
+                State::Error,
+                "Не удалось открыть TUN: проверьте профиль, TLS и доступность endpoint",
+            )
+            .await;
         }
     };
+    if shutdown_requested(&shutdown) || initial.as_ref().is_some_and(oneshot::Sender::is_closed) {
+        return Ok(());
+    }
     let guard = match Guard::install(
         uid,
         networks,
@@ -370,7 +685,7 @@ async fn serve(
         &failover.permits()?,
     ) {
         Ok(guard) => guard,
-        Err(error) => return reply(&mut stream, State::Blocked, &error).await,
+        Err(error) => return publish(&mut initial, State::Blocked, &error).await,
     };
     let device = prepared.device();
     let workers = Workers {
@@ -379,7 +694,11 @@ async fn serve(
     };
     let retry_guard = guard.clone();
     connected(
-        stream,
+        Control {
+            commands,
+            initial,
+            shutdown,
+        },
         workers,
         full,
         power,
@@ -392,11 +711,11 @@ async fn serve(
     .await
 }
 
-// Keep all IPC and worker completion events in one supervisor. In particular,
+// Keep all actor commands and worker completion events in one supervisor. In particular,
 // a wake must never await cancellation inside a select branch: block_in_place
 // route mutations cannot be cancelled until they return.
 async fn connected(
-    mut stream: impl AsyncRead + AsyncWrite + Unpin,
+    control: Control,
     mut workers: Workers,
     full: bool,
     mut power: tokio::sync::watch::Receiver<power::State>,
@@ -404,6 +723,15 @@ async fn connected(
     mut retry: impl FnMut(&mut Workers, &rtrust_profile::Profile, &mut rtrust_control::recovery::Budget),
     release: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
+    let Control {
+        mut commands,
+        mut initial,
+        mut shutdown,
+    } = control;
+    if shutdown_requested(&shutdown) {
+        workers.stop().await;
+        return Ok(());
+    }
     events::record("tunnel_connected");
     let mut retry_delay = rtrust_control::recovery::Budget::default();
     let mut connected_since = Instant::now();
@@ -419,8 +747,7 @@ async fn connected(
     if failover.active().is_some_and(|index| index > 0) {
         monitor.failed_over(rtrust_control::observations::now_ms());
     }
-    reply_observed(
-        &mut stream,
+    let mut response = Response::new(
         State::Connected,
         &format!(
             "{}{}",
@@ -431,10 +758,12 @@ async fn connected(
             },
             failover.note()
         ),
-        &mut monitor,
-        failover.active(),
-    )
-    .await?;
+    );
+    response.active_profile = failover.active();
+    response.observations = monitor.sample(rtrust_control::observations::now_ms());
+    if let Some(initial) = initial.take() {
+        let _ = initial.send(response);
+    }
     let mut state = State::Connected;
     monitor.transition(true, rtrust_control::observations::now_ms());
     let mut netwatch = crate::netwatch::Watch::new(super::device::DEVICE);
@@ -442,17 +771,23 @@ async fn connected(
     let mut restart_pending = false;
     let mut awake = power.borrow().awake;
     loop {
-        let mut pending = Box::pin(read::<Request>(&mut stream));
         let request = loop {
             // Aborted block_in_place work can still own route mutations. Join
             // completion in select below, keeping Status and EOF responsive.
+            if shutdown_requested(&shutdown) {
+                workers.stop().await;
+                return Ok(());
+            }
             if awake && workers.idle() {
                 events::record("reconnect_scheduled");
                 retry(&mut workers, failover.current(), &mut retry_delay);
                 restart_pending = false;
             }
             tokio::select! {
-                request = &mut pending => break request?,
+                _ = shutting_down(&mut shutdown) => {
+                    workers.stop().await;
+                    return Ok(());
+                },
                 event = power.changed() => {
                     event.map_err(|_| "macOS power monitor stopped")?;
                     let event = *power.borrow_and_update();
@@ -488,6 +823,7 @@ async fn connected(
                 }
                 result = async { workers.reconnect.as_mut().unwrap().await }, if workers.reconnect.is_some() => {
                     workers.reconnect = None;
+                    if shutdown_requested(&shutdown) { workers.stop().await; return Ok(()); }
                     // A task can complete just before abort. Do not resurrect
                     // its pre-wake transport even if its result was successful.
                     if restart_pending { continue; }
@@ -511,16 +847,19 @@ async fn connected(
                         monitor.failed_over(rtrust_control::observations::now_ms());
                     }
                 }
+                request = commands.recv() => {
+                    if let Some(request) = request { break request; }
+                    return Err("Service supervisor stopped".into());
+                },
             }
         };
-        drop(pending);
-        if request.version != VERSION {
-            return Err("IPC version mismatch".into());
+        if shutdown_requested(&shutdown) {
+            workers.stop().await;
+            return Ok(());
         }
         match request.command {
             Command::Status => {
-                reply_observed(
-                    &mut stream,
+                let mut response = Response::new(
                     state.clone(),
                     if state == State::Connected {
                         if full {
@@ -531,24 +870,41 @@ async fn connected(
                     } else {
                         &last_failure
                     },
-                    &mut monitor,
-                    failover.active(),
-                )
-                .await?
+                );
+                response.active_profile = failover.active();
+                response.observations = monitor.sample(rtrust_control::observations::now_ms());
+                let _ = request.response.send(response);
             }
             Command::Stop => {
                 events::record("stop_requested");
                 workers.stop().await;
-                return match release() {
+                // Shutdown can arrive after Stop was admitted while route work
+                // is draining. Process termination must retain the guard.
+                if shutdown_requested(&shutdown) {
+                    let _ = request.response.send(Response::new(
+                        State::Blocked,
+                        "Служба остановлена; защита сохранена",
+                    ));
+                    return Ok(());
+                }
+                let response = match release() {
                     Ok(()) => {
                         monitor.stop(rtrust_control::observations::now_ms());
-                        reply_observed(&mut stream, State::Idle, "Отключено", &mut monitor, None)
-                            .await
+                        let mut response = Response::new(State::Idle, "Отключено");
+                        response.observations =
+                            monitor.sample(rtrust_control::observations::now_ms());
+                        response
                     }
-                    Err(e) => reply(&mut stream, State::Blocked, &e).await,
+                    Err(e) => Response::new(State::Blocked, &e),
                 };
+                let _ = request.response.send(response);
+                return Ok(());
             }
-            _ => return Err("Invalid operation during lease".into()),
+            _ => {
+                let _ = request
+                    .response
+                    .send(Response::new(State::Error, "Invalid supervisor operation"));
+            }
         }
     }
 }
@@ -556,6 +912,797 @@ async fn connected(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    async fn connected(
+        mut stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        workers: Workers,
+        full: bool,
+        power: tokio::sync::watch::Receiver<power::State>,
+        failover: crate::failover::Failover,
+        retry: impl FnMut(&mut Workers, &rtrust_profile::Profile, &mut rtrust_control::recovery::Budget)
+        + Send
+        + 'static,
+        release: impl FnOnce() -> Result<(), String> + Send + 'static,
+    ) -> Result<(), String> {
+        let (actor, commands) = mpsc::channel(16);
+        let (_shutdown_signal, shutdown_events) = tokio::sync::watch::channel(false);
+        let (initial, response) = oneshot::channel();
+        let supervisor = tokio::spawn(super::connected(
+            Control {
+                commands,
+                initial: Some(initial),
+                shutdown: shutdown_events,
+            },
+            workers,
+            full,
+            power,
+            failover,
+            retry,
+            release,
+        ));
+        write_response(&mut stream, &response.await.unwrap()).await?;
+        let result = bridge(stream, actor, None).await;
+        if result.is_err() {
+            supervisor.abort();
+        }
+        let _ = supervisor.await;
+        result
+    }
+
+    async fn serve(
+        stream: impl AsyncRead + AsyncWrite + Unpin,
+        uid: u32,
+        lease: Arc<Mutex<()>>,
+        power: tokio::sync::watch::Receiver<power::State>,
+    ) -> Result<(), String> {
+        let (spawn, _spawned) = mpsc::channel(16);
+        super::serve(
+            stream,
+            uid,
+            lease,
+            power,
+            Arc::new(std::sync::Mutex::new(None)),
+            spawn,
+        )
+        .await
+    }
+
+    struct TestActor {
+        actor: Actor,
+        initial: oneshot::Receiver<Response>,
+        task: tokio::task::JoinHandle<Result<(), String>>,
+        power: tokio::sync::watch::Sender<power::State>,
+        lease: Arc<Mutex<()>>,
+        released: Arc<std::sync::atomic::AtomicBool>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+        retries: Arc<std::sync::atomic::AtomicUsize>,
+        shutdown: tokio::sync::watch::Sender<bool>,
+    }
+    struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    async fn test_actor() -> TestActor {
+        let lease = Arc::new(Mutex::new(()));
+        let held = lease.clone().lock_owned().await;
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = released.clone();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drop_signal = Dropped(dropped.clone());
+        let (ready, entered) = oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _drop_signal = drop_signal;
+            let _ = ready.send(());
+            std::future::pending::<RunResult>().await
+        });
+        entered.await.unwrap();
+        let (power, receiver) = tokio::sync::watch::channel(power::State::default());
+        let (actor, commands) = mpsc::channel(16);
+        let (shutdown_signal, shutdown_events) = tokio::sync::watch::channel(false);
+        let (initial, response) = oneshot::channel();
+        let retries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let retry_count = retries.clone();
+        let task = tokio::spawn(super::connected(
+            Control {
+                commands,
+                initial: Some(initial),
+                shutdown: shutdown_events,
+            },
+            Workers {
+                tunnel: Some(worker),
+                reconnect: None,
+            },
+            false,
+            receiver,
+            failover().await,
+            move |workers, _, _| {
+                retry_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                workers.reconnect = Some(tokio::spawn(std::future::pending()));
+            },
+            move || {
+                drop(held);
+                release.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        ));
+        TestActor {
+            actor,
+            initial: response,
+            task,
+            power,
+            lease,
+            released,
+            dropped,
+            retries,
+            shutdown: shutdown_signal,
+        }
+    }
+
+    #[tokio::test]
+    async fn vanished_initial_reply_and_eof_do_not_drop_workers_or_lease() {
+        let fixture = test_actor().await;
+        drop(fixture.initial);
+        let (client, server) = tokio::io::duplex(4096);
+        let bridge = tokio::spawn(super::bridge(server, fixture.actor.clone(), None));
+        drop(client);
+        assert!(bridge.await.unwrap().is_err());
+        assert_eq!(
+            ask(&fixture.actor, Command::Status).await.unwrap().state,
+            State::Connected
+        );
+        assert!(!fixture.task.is_finished());
+        assert!(fixture.lease.try_lock().is_err());
+        assert!(!fixture.dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!fixture.released.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            ask(&fixture.actor, Command::Stop).await.unwrap().state,
+            State::Idle
+        );
+        fixture.task.await.unwrap().unwrap();
+        assert!(fixture.lease.try_lock().is_ok());
+        assert!(fixture.dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn malformed_version_command_and_oversized_frames_only_detach_ipc() {
+        let fixture = test_actor().await;
+        fixture.initial.await.unwrap();
+        for bad in 0..4 {
+            let (mut client, server) = tokio::io::duplex(4096);
+            let bridge = tokio::spawn(super::bridge(server, fixture.actor.clone(), None));
+            match bad {
+                0 => write(
+                    &mut client,
+                    &Request {
+                        version: VERSION + 1,
+                        command: Command::Stop,
+                    },
+                )
+                .await
+                .unwrap(),
+                1 => write(
+                    &mut client,
+                    &Request {
+                        version: VERSION,
+                        command: Command::Recover,
+                    },
+                )
+                .await
+                .unwrap(),
+                2 => {
+                    client.write_all(&[0, 0, 0, 1, b'{']).await.unwrap();
+                }
+                _ => {
+                    client.write_all(&u32::MAX.to_be_bytes()).await.unwrap();
+                }
+            }
+            assert!(bridge.await.unwrap().is_err());
+            assert_eq!(
+                ask(&fixture.actor, Command::Status).await.unwrap().state,
+                State::Connected
+            );
+            assert!(fixture.lease.try_lock().is_err());
+            assert!(!fixture.dropped.load(std::sync::atomic::Ordering::SeqCst));
+        }
+        ask(&fixture.actor, Command::Stop).await.unwrap();
+        fixture.task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_status_write_and_read_only_observer_cannot_end_actor() {
+        let fixture = test_actor().await;
+        fixture.initial.await.unwrap();
+        let (mut client, server) = tokio::io::duplex(4096);
+        write(
+            &mut client,
+            &Request {
+                version: VERSION,
+                command: Command::Status,
+            },
+        )
+        .await
+        .unwrap();
+        drop(client);
+        assert!(
+            super::bridge(server, fixture.actor.clone(), None)
+                .await
+                .is_err()
+        );
+        let (_finished, completion) = tokio::sync::watch::channel(false);
+        let registry = Arc::new(std::sync::Mutex::new(Some(Session {
+            actor: fixture.actor.clone(),
+            finished: completion,
+            shutdown: fixture.shutdown.clone(),
+        })));
+        let (spawn, _spawned) = mpsc::channel(16);
+        let (mut observer, server) = tokio::io::duplex(4096);
+        let task = tokio::spawn(super::serve(
+            server,
+            501,
+            fixture.lease.clone(),
+            fixture.power.subscribe(),
+            registry,
+            spawn,
+        ));
+        write(
+            &mut observer,
+            &Request {
+                version: VERSION,
+                command: Command::Status,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read::<Response>(&mut observer).await.unwrap().state,
+            State::Connected
+        );
+        task.await.unwrap().unwrap();
+        // The observer socket has no adopted mutation rights.
+        assert!(
+            write(
+                &mut observer,
+                &Request {
+                    version: VERSION,
+                    command: Command::Stop
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            ask(&fixture.actor, Command::Status).await.unwrap().state,
+            State::Connected
+        );
+        assert!(fixture.lease.try_lock().is_err());
+        ask(&fixture.actor, Command::Stop).await.unwrap();
+        fixture.task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn frozen_reader_does_not_block_detached_power_recovery() {
+        let fixture = test_actor().await;
+        fixture.initial.await.unwrap();
+        let (mut client, server) = tokio::io::duplex(64);
+        let bridge = tokio::spawn(super::bridge(server, fixture.actor.clone(), None));
+        write(
+            &mut client,
+            &Request {
+                version: VERSION,
+                command: Command::Status,
+            },
+        )
+        .await
+        .unwrap();
+        fixture.power.send_modify(|state| {
+            state.awake = false;
+            state.generation += 1;
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while ask(&fixture.actor, Command::Status).await.unwrap().state != State::Blocked {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        fixture.power.send_modify(|state| {
+            state.awake = true;
+            state.generation += 1;
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while fixture.retries.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(fixture.lease.try_lock().is_err());
+        assert!(!fixture.released.load(std::sync::atomic::Ordering::SeqCst));
+        // Do not consume the response: exercise the actual five-second write deadline.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(6), bridge)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        ask(&fixture.actor, Command::Stop).await.unwrap();
+        fixture.task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_sender_cannot_stop_replacement_session() {
+        let old = test_actor().await;
+        old.initial.await.unwrap();
+        let captured = old.actor.clone();
+        ask(&old.actor, Command::Stop).await.unwrap();
+        old.task.await.unwrap().unwrap();
+        let new = test_actor().await;
+        new.initial.await.unwrap();
+        assert!(ask(&captured, Command::Stop).await.is_err());
+        assert_eq!(
+            ask(&new.actor, Command::Status).await.unwrap().state,
+            State::Connected
+        );
+        assert!(!new.dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(new.lease.try_lock().is_err());
+        ask(&new.actor, Command::Stop).await.unwrap();
+        new.task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn preparation_cancellation_never_commits_abandoned_start() {
+        let (initial, response) = oneshot::channel();
+        let mut initial = initial;
+        let (_actor, mut commands) = mpsc::channel(16);
+        let (_shutdown_signal, mut shutdown_events) = tokio::sync::watch::channel(false);
+        drop(response);
+        assert!(
+            prepare(
+                std::future::pending::<Result<(), String>>(),
+                &mut initial,
+                &mut commands,
+                &mut shutdown_events
+            )
+            .await
+            .is_err()
+        );
+        let (initial, _response) = oneshot::channel();
+        let mut initial = initial;
+        let (actor, mut commands) = mpsc::channel(16);
+        let (_shutdown_signal, mut shutdown_events) = tokio::sync::watch::channel(false);
+        let stopping = tokio::spawn(async move { ask(&actor, Command::Stop).await });
+        assert!(
+            prepare(
+                std::future::pending::<Result<(), String>>(),
+                &mut initial,
+                &mut commands,
+                &mut shutdown_events
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(stopping.await.unwrap().unwrap().state, State::Idle);
+    }
+
+    #[tokio::test]
+    async fn normal_service_shutdown_drains_workers_and_retains_guard() {
+        let fixture = test_actor().await;
+        fixture.initial.await.unwrap();
+        fixture.shutdown.send_replace(true);
+        fixture.task.await.unwrap().unwrap();
+        assert!(fixture.dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!fixture.released.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn active_actor_blocks_start_and_update_without_adoption() {
+        let fixture = test_actor().await;
+        fixture.initial.await.unwrap();
+        let (_finished, completion) = tokio::sync::watch::channel(false);
+        let registry = Arc::new(std::sync::Mutex::new(Some(Session {
+            actor: fixture.actor.clone(),
+            finished: completion,
+            shutdown: fixture.shutdown.clone(),
+        })));
+        let profile = rtrust_profile::Profile::import("hostname='test.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='synthetic'\n").unwrap();
+        for command in [
+            Command::PrepareUpdate,
+            Command::StartFull {
+                profile: Box::new(profile),
+                dns: "192.0.2.53".parse().unwrap(),
+                fallbacks: vec![],
+            },
+        ] {
+            let (spawn, _spawned) = mpsc::channel(16);
+            let (mut client, server) = tokio::io::duplex(4096);
+            let task = tokio::spawn(super::serve(
+                server,
+                501,
+                fixture.lease.clone(),
+                fixture.power.subscribe(),
+                registry.clone(),
+                spawn,
+            ));
+            write(
+                &mut client,
+                &Request {
+                    version: VERSION,
+                    command,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                read::<Response>(&mut client).await.unwrap().state,
+                State::Error
+            );
+            task.await.unwrap().unwrap();
+        }
+        assert!(!fixture.dropped.load(std::sync::atomic::Ordering::SeqCst));
+        ask(&fixture.actor, Command::Stop).await.unwrap();
+        fixture.task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn saturated_command_queue_has_deadline_and_does_not_retarget_stop() {
+        let (actor, mut commands) = mpsc::channel(1);
+        let (response, _receive) = oneshot::channel();
+        actor
+            .send(Envelope {
+                command: Command::Status,
+                response,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            ask(&actor, Command::Stop).await.unwrap_err(),
+            "Supervisor queue timed out"
+        );
+        assert!(matches!(
+            commands.recv().await.unwrap().command,
+            Command::Status
+        ));
+        assert!(
+            commands.try_recv().is_err(),
+            "timed-out Stop must not enter the queue later"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actor_stop_and_shutdown_drain_inflight_route_mutations() {
+        for shutdown in [false, true] {
+            let lease = Arc::new(Mutex::new(()));
+            let held = Arc::new(lease.clone().lock_owned().await);
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let signal = entered.clone();
+            let (unblock, wait) = std::sync::mpsc::channel();
+            let wait = std::sync::Mutex::new(wait);
+            let worker = tokio::spawn(guarded_connect(
+                held.clone(),
+                move || {
+                    signal.notify_one();
+                    wait.lock().unwrap().recv().unwrap();
+                    Ok(())
+                },
+                std::future::pending::<Result<device::Prepared, String>>(),
+            ));
+            entered.notified().await;
+            let (actor, commands) = mpsc::channel(16);
+            let (shutdown_signal, shutdown_events) = tokio::sync::watch::channel(false);
+            let (initial, response) = oneshot::channel();
+            let (power, receiver) = tokio::sync::watch::channel(power::State::default());
+            let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let release = released.clone();
+            let task = tokio::spawn(super::connected(
+                Control {
+                    commands,
+                    initial: Some(initial),
+                    shutdown: shutdown_events,
+                },
+                Workers {
+                    tunnel: None,
+                    reconnect: Some(worker),
+                },
+                false,
+                receiver,
+                failover().await,
+                |_, _, _| panic!("must drain before retry"),
+                move || {
+                    drop(held);
+                    release.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            ));
+            response.await.unwrap();
+            let stopping = if shutdown {
+                shutdown_signal.send_replace(true);
+                None
+            } else {
+                Some(tokio::spawn(
+                    async move { ask(&actor, Command::Stop).await },
+                ))
+            };
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let ack_before_drain =
+                stopping.as_ref().is_some_and(|task| task.is_finished()) || task.is_finished();
+            let lease_before_drain = lease.try_lock().is_err();
+            let released_before_drain = released.load(std::sync::atomic::Ordering::SeqCst);
+            unblock.send(()).unwrap();
+            let result = if let Some(stopping) = stopping {
+                Some(stopping.await.unwrap().unwrap())
+            } else {
+                None
+            };
+            task.await.unwrap().unwrap();
+            drop(power);
+            assert!(!ack_before_drain);
+            assert!(lease_before_drain);
+            assert!(!released_before_drain);
+            if let Some(result) = result {
+                assert_eq!(result.state, State::Idle);
+            }
+            assert_eq!(
+                released.load(std::sync::atomic::Ordering::SeqCst),
+                !shutdown
+            );
+            assert!(lease.try_lock().is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_ready_and_pending_preparation_even_without_owner() {
+        for already_set in [false, true] {
+            let (signal, mut shutdown) = tokio::sync::watch::channel(already_set);
+            let (initial, _response) = oneshot::channel();
+            let mut initial = initial;
+            let (_actor, mut commands) = mpsc::channel(16);
+            if already_set {
+                assert!(
+                    prepare(
+                        async { Ok::<_, String>(()) },
+                        &mut initial,
+                        &mut commands,
+                        &mut shutdown
+                    )
+                    .await
+                    .is_err()
+                );
+            } else {
+                let task = tokio::spawn(async move {
+                    prepare(
+                        std::future::pending::<Result<(), String>>(),
+                        &mut initial,
+                        &mut commands,
+                        &mut shutdown,
+                    )
+                    .await
+                });
+                signal.send_replace(true);
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(1), task)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .is_err()
+                );
+            }
+        }
+        let (signal, mut shutdown) = tokio::sync::watch::channel(false);
+        drop(signal);
+        let (initial, _response) = oneshot::channel();
+        let mut initial = initial;
+        let (_actor, mut commands) = mpsc::channel(16);
+        assert!(
+            prepare(
+                async { Ok::<_, String>(()) },
+                &mut initial,
+                &mut commands,
+                &mut shutdown
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_before_first_poll_bypasses_full_queue_and_drains_owned_workers() {
+        let lease = Arc::new(Mutex::new(()));
+        let held = Arc::new(lease.clone().lock_owned().await);
+        let owner = held.clone();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let signal = entered.clone();
+        let (unblock, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let worker = tokio::spawn(guarded_connect(
+            held.clone(),
+            move || {
+                signal.notify_one();
+                wait.lock().unwrap().recv().unwrap();
+                Ok(())
+            },
+            std::future::pending::<Result<device::Prepared, String>>(),
+        ));
+        entered.notified().await;
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drop_signal = Dropped(dropped.clone());
+        let tunnel = tokio::spawn(async move {
+            let _drop_signal = drop_signal;
+            std::future::pending::<RunResult>().await
+        });
+        let (actor, commands) = mpsc::channel(16);
+        let mut replies = Vec::new();
+        for index in 0..16 {
+            let (response, receive) = oneshot::channel();
+            actor
+                .send(Envelope {
+                    command: if index == 0 {
+                        Command::Stop
+                    } else {
+                        Command::Status
+                    },
+                    response,
+                })
+                .await
+                .unwrap();
+            replies.push(receive);
+        }
+        let (shutdown, shutdown_events) = tokio::sync::watch::channel(false);
+        let (power, receiver) = tokio::sync::watch::channel(power::State::default());
+        power.send_modify(|state| state.generation += 1);
+        let (initial, response) = oneshot::channel();
+        let (started, startup) = oneshot::channel();
+        let (finished, completion) = tokio::sync::watch::channel(false);
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = released.clone();
+        let failover = failover().await;
+        let task = tokio::spawn(async move {
+            startup.await.unwrap();
+            let result = super::connected(
+                Control {
+                    commands,
+                    initial: Some(initial),
+                    shutdown: shutdown_events,
+                },
+                Workers {
+                    tunnel: Some(tunnel),
+                    reconnect: Some(worker),
+                },
+                false,
+                receiver,
+                failover,
+                |_, _, _| panic!("shutdown must outrank retry and pending power event"),
+                move || {
+                    drop(held);
+                    release.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await;
+            drop(owner);
+            finished.send_replace(true);
+            result
+        });
+        // Exceed the obsolete enqueue deadline while the actor is still queued.
+        shutdown.send_replace(true);
+        tokio::time::sleep(Duration::from_millis(5100)).await;
+        assert_eq!(actor.capacity(), 0);
+        started.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let completed_before_drain = task.is_finished();
+        let lease_before_drain = lease.try_lock().is_err();
+        let release_before_drain = released.load(std::sync::atomic::Ordering::SeqCst);
+        unblock.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        wait_finished(completion).await.unwrap();
+        assert!(!completed_before_drain);
+        assert!(lease_before_drain);
+        assert!(!release_before_drain);
+        assert!(!released.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(lease.try_lock().is_ok());
+        assert!(
+            response.await.is_err(),
+            "shutdown must not report Connected"
+        );
+        for reply in replies {
+            assert!(
+                reply.await.is_err(),
+                "queued requests must not defeat shutdown"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_during_admitted_stop_drain_retains_guard_and_reports_blocked() {
+        let lease = Arc::new(Mutex::new(()));
+        let held = Arc::new(lease.clone().lock_owned().await);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let signal = entered.clone();
+        let (unblock, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let worker_lease = held.clone();
+        let tunnel = tokio::spawn(async move {
+            let _lease = worker_lease;
+            tokio::task::block_in_place(|| {
+                signal.notify_one();
+                wait.lock().unwrap().recv().unwrap();
+            });
+            std::future::pending::<RunResult>().await
+        });
+        entered.notified().await;
+        struct StopEntered(Arc<tokio::sync::Notify>);
+        impl Drop for StopEntered {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+        let cancelled = Arc::new(tokio::sync::Notify::new());
+        let stop_entered = StopEntered(cancelled.clone());
+        let reconnect = tokio::spawn(async move {
+            let _stop_entered = stop_entered;
+            std::future::pending::<Result<device::Prepared, String>>().await
+        });
+        let (actor, commands) = mpsc::channel(16);
+        let (shutdown, shutdown_events) = tokio::sync::watch::channel(false);
+        let (_power, receiver) = tokio::sync::watch::channel(power::State::default());
+        let (initial, response) = oneshot::channel();
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = released.clone();
+        let task = tokio::spawn(super::connected(
+            Control {
+                commands,
+                initial: Some(initial),
+                shutdown: shutdown_events,
+            },
+            Workers {
+                tunnel: Some(tunnel),
+                reconnect: Some(reconnect),
+            },
+            false,
+            receiver,
+            failover().await,
+            |_, _, _| panic!("must drain before retry"),
+            move || {
+                drop(held);
+                release.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        ));
+        response.await.unwrap();
+        let (response, stopped) = oneshot::channel();
+        actor
+            .send(Envelope {
+                command: Command::Stop,
+                response,
+            })
+            .await
+            .unwrap();
+        // Workers::stop first aborts and joins reconnect. Its destructor is
+        // observable proof that Stop entered worker drain, rather than merely
+        // dequeuing a command before a competing shutdown branch won.
+        let admitted = tokio::time::timeout(Duration::from_secs(1), cancelled.notified()).await;
+        shutdown.send_replace(true);
+        let lease_before_drain = lease.try_lock().is_err();
+        unblock.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(1), stopped)
+            .await
+            .unwrap()
+            .unwrap();
+        task.await.unwrap().unwrap();
+        assert!(admitted.is_ok());
+        assert!(lease_before_drain);
+        assert_eq!(response.state, State::Blocked);
+        assert!(!released.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(lease.try_lock().is_ok());
+    }
 
     async fn failover() -> crate::failover::Failover {
         let profile = rtrust_profile::Profile::import("hostname='test.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='synthetic'\n").unwrap();
@@ -938,5 +2085,159 @@ mod tests {
         assert_eq!(response.state, State::Error);
         task.await.unwrap().unwrap();
         drop(held);
+    }
+
+    async fn serve_once(
+        registry: &Registry,
+        lease: &Arc<Mutex<()>>,
+        command: Command,
+    ) -> (Option<Response>, Result<(), String>) {
+        let (spawn, _spawned) = mpsc::channel(16);
+        let (mut client, server) = tokio::io::duplex(4096);
+        let task = tokio::spawn(super::serve(
+            server,
+            501,
+            lease.clone(),
+            tokio::sync::watch::channel(power::State::default()).1,
+            registry.clone(),
+            spawn,
+        ));
+        write(
+            &mut client,
+            &Request {
+                version: VERSION,
+                command,
+            },
+        )
+        .await
+        .unwrap();
+        let response = read::<Response>(&mut client).await.ok();
+        (response, task.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn registered_recover_drains_actor_then_falls_back_to_journal_path() {
+        let fixture = test_actor().await;
+        fixture.initial.await.unwrap();
+        let (finished, completion) = tokio::sync::watch::channel(false);
+        let registry: Registry = Arc::new(std::sync::Mutex::new(Some(Session {
+            actor: fixture.actor.clone(),
+            finished: completion,
+            shutdown: fixture.shutdown.clone(),
+        })));
+        let task = fixture.task;
+        let supervisor = tokio::spawn(supervise(
+            Finish {
+                registry: registry.clone(),
+                identity: fixture.actor.clone(),
+                lease: None,
+                finished,
+            },
+            async move { task.await.unwrap().unwrap() },
+        ));
+        let (response, result) = serve_once(&registry, &fixture.lease, Command::Recover).await;
+        assert_eq!(response.unwrap().state, State::Idle);
+        result.unwrap();
+        // Idle is acknowledged only after Stop released the guard and drained workers.
+        assert!(fixture.released.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(fixture.dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(registry_slot(&registry).is_none());
+        supervisor.await.unwrap();
+        // The next Recover takes the no-session path, which needs the lease
+        // before state::recover; hold it so the test never touches host state.
+        let held = fixture.lease.clone().try_lock_owned().unwrap();
+        let (response, result) = serve_once(&registry, &fixture.lease, Command::Recover).await;
+        let response = response.unwrap();
+        assert_eq!(response.state, State::Error);
+        assert_eq!(response.message, "Служба уже обслуживает подключение");
+        result.unwrap();
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn panicked_actor_is_forgotten_and_recover_status_start_still_answer() {
+        let lease = Arc::new(Mutex::new(()));
+        let held: Lease = Arc::new(lease.clone().lock_owned().await);
+        let (actor, commands) = mpsc::channel::<Envelope>(16);
+        let (finished, completion) = tokio::sync::watch::channel(false);
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let session = Session {
+            actor: actor.clone(),
+            finished: completion,
+            shutdown,
+        };
+        let registry: Registry = Arc::new(std::sync::Mutex::new(Some(session.clone())));
+        let (trigger, fired) = oneshot::channel::<()>();
+        let task = tokio::spawn(supervise(
+            Finish {
+                registry: registry.clone(),
+                identity: actor.clone(),
+                lease: Some(held),
+                finished,
+            },
+            async move {
+                let _commands = commands;
+                let _ = fired.await;
+                panic!("synthetic actor panic");
+            },
+        ));
+        trigger.send(()).unwrap();
+        assert!(task.await.unwrap_err().is_panic());
+        assert!(registry_slot(&registry).is_none());
+        assert!(*session.finished.borrow());
+        assert!(lease.try_lock().is_ok());
+        // Recreate the window between actor exit and registry cleanup: a dead
+        // registration must still produce an answer, never an IPC EOF.
+        for command in [Command::Recover, Command::Status] {
+            *registry_slot(&registry) = Some(session.clone());
+            let held = lease.clone().try_lock_owned().unwrap();
+            let (response, result) = serve_once(&registry, &lease, command).await;
+            let response = response.expect("dead actor must not cause EOF");
+            assert_eq!(response.state, State::Error);
+            assert_eq!(response.message, "Служба уже обслуживает подключение");
+            result.unwrap();
+            assert!(registry_slot(&registry).is_none());
+            drop(held);
+        }
+        // Read-only Status with a free lease reports the journal state.
+        let (response, result) = serve_once(&registry, &lease, Command::Status).await;
+        assert!(matches!(
+            response.unwrap().state,
+            State::Idle | State::Blocked
+        ));
+        result.unwrap();
+        // Start is admitted again: not rejected by a stale registration or lease.
+        let profile = rtrust_profile::Profile::import("hostname='test.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='synthetic'\n").unwrap();
+        let (spawn, mut spawned) = mpsc::channel(16);
+        let (mut client, server) = tokio::io::duplex(4096);
+        let serving = tokio::spawn(super::serve(
+            server,
+            501,
+            lease.clone(),
+            tokio::sync::watch::channel(power::State::default()).1,
+            registry.clone(),
+            spawn,
+        ));
+        write(
+            &mut client,
+            &Request {
+                version: VERSION,
+                command: Command::StartFull {
+                    profile: Box::new(profile),
+                    dns: "192.0.2.53".parse().unwrap(),
+                    fallbacks: vec![],
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let admitted = spawned.recv().await.unwrap();
+        assert!(registry_slot(&registry).is_some());
+        assert!(lease.try_lock().is_err());
+        // Dropping the unpolled actor still runs its cleanup.
+        drop(admitted);
+        assert!(serving.await.unwrap().is_err());
+        assert!(registry_slot(&registry).is_none());
+        assert!(lease.try_lock().is_ok());
     }
 }

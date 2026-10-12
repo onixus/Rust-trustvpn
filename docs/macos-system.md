@@ -125,3 +125,43 @@ Other platforms retain their existing software renderer. This changes the Native
 frontend only; the optional WebView frontend retains its current appearance.
 
 The Native Settings screen includes “Стекло — прозрачный фон окна”. It updates the window immediately and persists in NSUserDefaults, separately from VPN profiles. `--appearance-preview` opens this screen without accessing the vault or connecting VPN.
+
+## IPC attachment lifetime (#55)
+
+The running service owns the active tunnel, utun device, guard, reconnect
+budget and native power/network supervision. Once guard installation commits
+Start, closing or crashing the GUI, a malformed IPC attachment or a failed/frozen
+response writer only detaches that control connection. Traffic and reconnect
+continue under the existing guard. Before installation, an abandoned Start is
+cancelled; it cannot create a late tunnel after its caller disappears.
+
+A fresh authenticated Status request observes the current session once and
+does not acquire mutation rights. The original Start connection keeps its
+particular session sender, so a late Stop cannot affect a replacement session.
+There is no automatic GUI adoption without a wire session token. A GUI which
+loses IPC reports ControlLost; reopening it does not prove control was recovered.
+Use explicit Recover to stop and drain the current service-owned session,
+release its guard, then Start again. Recover and Stop acknowledge Idle only
+after session cleanup and lease release. Start and PrepareUpdate cannot run
+concurrently with the current tunnel. If the session supervisor ends
+unexpectedly (including a panic or cancellation), its registration and lease
+are dropped but the network guard is retained; Status and Recover then answer
+from the no-session path, so Recover can still release the retained guard.
+
+Normal service termination uses a durable signal outside the bounded IPC
+queue. An actor queued before termination observes the signal on its first
+poll; pending preparation is cancelled and committed worker route mutations
+are drained while retaining the fail-closed journal/guard for explicit recovery.
+Shutdown takes priority over queued requests and reconnect; if it arrives
+while explicit Stop drains workers, the Stop response is Blocked and the guard
+is retained. Service crash and launchd
+restart continue to require recovery as before. None of these lifecycle
+observations establish DNS/IPv6 leak freedom or kill-switch enforcement.
+
+Deterministic synthetic actor/IPC tests cover attachment loss, failed writes,
+power events, stale senders and cancellation. The opt-in live driver
+`ci/macos_system_e2e.py` additionally checks at least 65 seconds of repeated
+fixture traffic after dropping IPC in full and selected IPv4 split mode,
+with route checks, fresh read-only Status and explicit Recover cleanup.
+This issue's installed-package/device acceptance has NOT RUN; earlier #61
+evidence does not validate the new binary.
