@@ -51,8 +51,15 @@ final class AlwaysOnAcceptance {
                 long end = SystemClock.elapsedRealtime() + 20000;
                 while (SystemClock.elapsedRealtime() < end && !(expected.equals(TunnelService.problem) && !TunnelService.active)) Thread.sleep(100);
                 check(expected.equals(TunnelService.problem) && !TunnelService.active, "require_lockdown refused without system lockdown");
-                Thread.sleep(500);
+                // The service closes its TUN at once, but ConnectivityService lists the
+                // agent until its own teardown finishes (seen ~700 ms later under system
+                // Always-on). Wait for that, then require that it stays gone: a restart
+                // loop re-establishing the TUN must still fail here.
+                long gone = SystemClock.elapsedRealtime() + 5000;
+                while (vpnNetwork(context) && SystemClock.elapsedRealtime() < gone) Thread.sleep(100);
                 check(!vpnNetwork(context), "Refused profile leaves no VPN network");
+                Thread.sleep(1500);
+                check(!vpnNetwork(context) && !TunnelService.active, "Refused profile stays down");
                 check(state() == 0, "Core never started");
                 return;
             }
