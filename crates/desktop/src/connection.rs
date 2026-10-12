@@ -30,6 +30,39 @@ pub enum Session {
     Tun(rtrust_control::Client),
 }
 impl Session {
+    pub async fn start_authorized(
+        profile: rtrust_profile::Profile,
+        fallbacks: Vec<rtrust_profile::Profile>,
+        mode: Mode,
+        port: u16,
+        selection: rtrust_control::Selection,
+        dns: String,
+        lease: Option<rtrust_control::freshness::Lease>,
+    ) -> Result<Self, String> {
+        let Some(lease) = lease else {
+            return Self::start(profile, fallbacks, mode, port, selection, dns).await;
+        };
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+        if mode != Mode::Socks {
+            return rtrust_control::Client::start_managed(
+                profile,
+                fallbacks,
+                if mode == Mode::Full {
+                    None
+                } else {
+                    Some(selection)
+                },
+                dns.parse().map_err(|_| "Invalid IPv4 DNS")?,
+                lease,
+            )
+            .await
+            .map(Self::Tun);
+        }
+        Err(
+            "Managed freshness requires a compatible system TUN service; SOCKS is unsupported"
+                .into(),
+        )
+    }
     pub async fn start(
         profile: rtrust_profile::Profile,
         fallbacks: Vec<rtrust_profile::Profile>,

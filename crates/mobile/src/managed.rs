@@ -22,37 +22,38 @@ impl Group {
         {
             return Err("Invalid managed routing identity".into());
         }
-        // LAN subtraction depends on live local prefixes and their handoff.
-        // Refuse that capability until Android owns its route refresh lifecycle.
-        if self.exclude_lan {
-            return Err("Managed LAN exclusion is not supported on Android".into());
-        }
         let selection = Selection {
             include: self.include.clone(),
             exclude: self.exclude.clone(),
-            exclude_lan: false,
+            exclude_lan: self.exclude_lan,
         };
         selection.validate()?;
         Ok(selection)
     }
 }
 pub fn prepare_group(profile: Profile, group: &Group) -> Result<(Profile, Plan), String> {
+    prepare_group_on_network(profile, group, Some(&[]))
+}
+pub fn prepare_group_on_network(
+    profile: Profile,
+    group: &Group,
+    local: Option<&[ipnet::Ipv4Net]>,
+) -> Result<(Profile, Plan), String> {
     let selection = group.validate()?;
+    if group.exclude_lan && local.is_none() {
+        return Err("Local network prefixes not observed".into());
+    }
+    let local = local.unwrap_or_default();
+    if local.len() > 64 {
+        return Err("Local prefix limit exceeded".into());
+    }
     // Preserve and validate the embedded flow/DNS/guard policy first. The device
     // group's selected IPv4 prefixes override only OS route selection.
     let (mut profile, mut plan) = prepare(profile)?;
-    let endpoints = profile
-        .endpoint
-        .addresses
-        .iter()
-        .filter_map(
-            |value| match value.parse::<std::net::SocketAddr>().ok()?.ip() {
-                std::net::IpAddr::V4(ip) => Some(ip),
-                _ => None,
-            },
-        )
-        .collect::<Vec<_>>();
-    let mut routes = selection.routes(&endpoints, &[])?;
+    let local = local.iter().map(|n| n.trunc()).collect::<Vec<_>>();
+    // Endpoint sockets use VpnService.protect + underlying-network binding;
+    // application flows to those IPs still follow the assigned selection.
+    let mut routes = selection.routes(&[], &local)?;
     for dns in &plan.dns {
         let ip: std::net::Ipv4Addr = dns
             .parse()
@@ -110,6 +111,18 @@ mod tests {
         );
         let mut unsupported = group;
         unsupported.exclude_lan = true;
-        assert!(unsupported.validate().is_err());
+        assert!(unsupported.validate().is_ok());
+        assert!(prepare_group_on_network(runtime.clone(), &unsupported, None).is_err());
+        let (_, lan) = prepare_group_on_network(
+            runtime,
+            &unsupported,
+            Some(&["10.1.0.4/24".parse().unwrap()]),
+        )
+        .unwrap();
+        assert!(!lan.routes.iter().any(|r| {
+            r.parse::<ipnet::Ipv4Net>()
+                .unwrap()
+                .contains(&"10.1.0.3".parse::<std::net::Ipv4Addr>().unwrap())
+        }));
     }
 }

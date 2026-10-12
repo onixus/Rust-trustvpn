@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="recovery_title">Permitted backups for this profile</string>
+    <string name="recovery_enable">Enable automatic recovery</string>
+    <string name="recovery_disable">Disable backups</string>
+    <string name="recovery_invalid">Choose 1–3 compatible profiles. Disconnect before changing backups.</string>
+    <string name="access_refresh_required">Access is out of date. Traffic is blocked; refresh profiles from the portal.</string>
+    <string name="recovery_backup_active">Permitted backup %1$d is active</string>
     <string name="routing_admin">Administrator routes</string>
     <string name="routing_user">Owner routes</string>
     <string name="portal_title">"Server profiles"</string>

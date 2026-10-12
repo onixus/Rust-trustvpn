@@ -92,13 +92,57 @@ label различает подтверждённый transport и непров�
 
 | Задача | Что ещё нужно |
 | --- | --- |
-| #32 | OS route cutover/rollback и физические старые TCP/UDP flows; LAN group adapter/handoff |
+| #32 | OS route cutover/rollback и физические старые TCP/UDP flows; физическая проверка LAN group handoff |
 | #33 | Реальная UI/системная диагностика full/split, IPv6, outage/control loss на разрешённых устройствах |
-| #34 | Mobile opt-in reserve selection; sleep/reboot/handoff/crash/outage, rollback cleanup, измерения retry/CPU/energy |
-| #35 / tunnel#22 | Активные сессии и физический SLA; legacy/shared migration, LAN groups, QR/renewal physical acceptance, обязательная offline freshness |
+| #34 | Physical mobile reserve selection; sleep/reboot/handoff/crash/outage, rollback cleanup, измерения retry/CPU/energy |
+| #35 / tunnel#22 | Активные сессии и физический SLA; legacy/shared migration, LAN/QR/renewal/freshness physical acceptance |
 | #36 | Exact commit/package hashes, installed update/rollback/vault tests, publisher signatures, 24h soak и budgets |
 
 Новый `PolicyChanged` event отличается от физической смены сети. APK/JNI
 собираются парой; старые клиенты не должны получать новый observation kind без
 проверки совместимости. Endpoint verifier не подключается к сторонним адресам:
 каждый адрес stdin-profile должен быть числовым loopback, TLS остаётся проверенным.
+
+## Мобильные резервы, LAN и ограниченный offline доступ
+
+Android позволяет явно выбрать до трёх резервов для выбранного основного
+профиля. Общий бюджет — 12 попыток на логическую сессию; смена сети, LAN
+и обновление подтверждения срока его не обнуляют. Ошибка доверия/авторизации
+исключает только соответствующий разрешённый профиль. Все кандидаты должны
+иметь одинаковые маршруты, DNS и защиту. Самостоятельного выбора другого
+протокола нет. Изменение набора резервов требует явного действия пользователя.
+
+LAN исключения используют IPv4 префиксы текущего Android LinkProperties.
+Без наблюдения локальной сети план с exclude_lan не запускается. Старые
+владельцы TCP/UDP завершаются до установки нового плана. Для managed профилей
+сохраняется блокирующий TUN на весь IPv4/IPv6; выбор tunnel/direct выполняет
+тот же evaluator, который объясняет маршруты. IPv6 managed group не поддержан
+и блокируется. Исключения приложений остаются явной настройкой пользователя.
+
+Сервер сообщает offline_freshness=1 и возвращает срок по согласованному запросу
+freshness_version=1. Максимальный возраст — 24 часа по умолчанию, настройка
+RTRUST_OFFLINE_MAX_AGE_SECONDS допускает 60–86400 секунд. Срок также ограничен
+остатком portal token. Клиент отсчитывает его от начала запроса; отсутствие
+или исчезновение согласованного подтверждения запрещает новый доступ.
+Старые запросы snapshot сохраняют прежнюю форму ответа.
+
+Android хранит receipt вместе с профилями в encrypted vault. Время сна
+учитывается; после перезагрузки или отката часов требуется синхронизация.
+Истечение/известный отказ доступа останавливают dataplane, сохраняя TUN.
+В этом состоянии только запрос к сохранённому HTTPS origin портала может
+использовать underlying network для восстановления; редиректы запрещены.
+Успешное обновление одного receipt не меняет действующий policy и retry budget.
+
+Linux/Windows обычные TUN/full соединения передают service конечную lease.
+Истечение завершает workers и сохраняет принадлежащую сессии защиту до Stop.
+Sleep-aware clocks не позволяют продлить срок сном или откатом часов. Новый
+IPC v5 требует совместного обновления UI/service: клиенты v4 несовместимы.
+Managed SOCKS и постоянный service-owned Always-on пока не имеют этого
+контракта и отклоняются; Mac/iPhone отложены. Desktop обновляет подтверждение
+при синхронизации перед переподключением, без фонового продления активной lease.
+
+Это конечная клиентская авторизация кешированного managed доступа. Она не
+заменяет endpoint revoke/rotation, не отменяет явно созданные независимые
+локальные копии и не является защитой от владельца устройства с root.
+Наблюдения LAN/boot и отчёты диагностики не отправляются на сервер.
+Сборка APK не считается физической проверкой переключения или 24h soak.

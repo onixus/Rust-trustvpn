@@ -192,17 +192,22 @@ impl Controller {
         };
         let selection = c.effective_selection();
         let fallbacks = c.fallbacks_for(&self.vault.profiles, Some(&p));
+        let authorized = std::iter::once(p.clone())
+            .chain(fallbacks.iter().cloned())
+            .collect::<Vec<_>>();
+        let lease = c.sync.lease_for(c.managed_routes.is_some(), &authorized)?;
         let ipv4_only = mode == connection::Mode::Full && !p.endpoint.has_ipv6;
         self.diagnostics.cancel();
         self.session_epoch = self.session_epoch.wrapping_add(1);
         self.session = Some(
-            connection::Session::start(
+            connection::Session::start_authorized(
                 p,
                 fallbacks,
                 mode,
                 c.socks_port,
                 selection,
                 c.dns.to_string(),
+                lease,
             )
             .await?,
         );

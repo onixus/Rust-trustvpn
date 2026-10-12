@@ -19,6 +19,7 @@ pub(super) enum Action {
 }
 #[derive(Clone)]
 pub(super) struct Batch {
+    freshness: Option<rtrust_control::freshness::Lease>,
     origin: String,
     client: Client,
     changed: Vec<(RemoteProfile, Profile)>,
@@ -119,10 +120,6 @@ impl App {
                     }
                 }
                 self.saved_connection.sync.enabled = enabled;
-                if !enabled {
-                    // Without sync nothing would update or revoke a server policy.
-                    self.saved_connection.managed_routes = None;
-                }
                 self.sync_state = State::default();
                 self.dirty = true;
                 return self.update(Message::Save);
@@ -153,6 +150,9 @@ impl App {
                         );
                     }
                     let snapshot = client.snapshot().await?;
+                    if settings.access_lease.is_some() && snapshot.freshness.is_none() {
+                        return Err("Панель больше не подтверждает свежесть доступа".into());
+                    }
                     let available = snapshot
                         .profiles
                         .iter()
@@ -161,6 +161,7 @@ impl App {
                     let changed = changed_profiles(&settings, snapshot.profiles)?;
                     let routing = managed_update(snapshot.routing, previously_managed)?;
                     Ok(Box::new(Batch {
+                        freshness: snapshot.freshness,
                         origin: settings.origin,
                         client,
                         changed,
@@ -232,6 +233,8 @@ impl App {
                         self.portal.client = Some(batch.client);
                         let previous_profiles = self.profiles.clone();
                         let previous_sync = self.saved_connection.sync.clone();
+                        let lease_changed = previous_sync.access_lease != batch.freshness;
+                        self.saved_connection.sync.access_lease = batch.freshness;
                         let previous_routes = self.saved_connection.managed_routes.clone();
                         let routing_error = batch.routing.as_ref().err().cloned();
                         if let Ok(routing) = batch.routing {
@@ -311,7 +314,7 @@ impl App {
                         if updated > 0 {
                             self.reset_editor();
                         }
-                        if updated > 0 || routes_changed {
+                        if updated > 0 || routes_changed || lease_changed {
                             self.dirty = true;
                             return self.update(Message::Save);
                         }
@@ -401,6 +404,7 @@ mod tests {
     fn configured() -> App {
         let mut app = crate::tests::app();
         app.saved_connection.sync = rtrust_store::SyncSettings {
+            access_lease: None,
             enabled: true,
             origin: "https://example.test/".into(),
             tracked: vec![TrackedProfile {
@@ -413,6 +417,7 @@ mod tests {
     }
     fn batch(profile: Profile) -> Batch {
         Batch {
+            freshness: None,
             origin: "https://example.test/".into(),
             client: Client::new("https://example.test").unwrap(),
             changed: vec![(meta(), profile)],
@@ -553,7 +558,7 @@ mod tests {
         app.dirty = false;
         app.busy = false; // the save started by the previous batch has finished
         let _ = app.sync_update(Action::Enable(false));
-        assert!(app.saved_connection.managed_routes.is_none());
+        assert!(app.saved_connection.managed_routes.is_some());
     }
     #[test]
     fn conflict_defers_entire_policy_and_profile_batch() {

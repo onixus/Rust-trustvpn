@@ -172,6 +172,8 @@ struct Capabilities {
     routing: Option<u64>,
     #[serde(default)]
     snapshot: Option<u64>,
+    #[serde(default)]
+    offline_freshness: Option<u64>,
 }
 impl Capabilities {
     fn validate(&self) -> Result<(), String> {
@@ -316,6 +318,7 @@ impl DeviceAccess {
 pub struct Snapshot {
     pub profiles: Vec<(RemoteProfile, Profile)>,
     pub routing: RoutingState,
+    pub freshness: Option<rtrust_control::freshness::Lease>,
 }
 fn same_revisions(before: &[RemoteProfile], after: &[RemoteProfile]) -> bool {
     before.len() == after.len()
@@ -666,7 +669,12 @@ impl Client {
         let capabilities: Capabilities = self.request(Method::GET, "capabilities", None).await?;
         capabilities.validate()?;
         if capabilities.snapshot == Some(1) {
-            return self.atomic_snapshot().await;
+            if capabilities.offline_freshness.is_some_and(|v| v != 1) {
+                return Err("Unsupported freshness contract".into());
+            }
+            return self
+                .atomic_snapshot(capabilities.offline_freshness == Some(1))
+                .await;
         }
         let profiles = self.list().await?;
         let routing = self.routing_state().await?;
@@ -693,9 +701,17 @@ impl Client {
         Ok(Snapshot {
             profiles: downloaded,
             routing,
+            freshness: None,
         })
     }
-    async fn atomic_snapshot(&self) -> Result<Snapshot, String> {
+    async fn atomic_snapshot(&self, freshness_supported: bool) -> Result<Snapshot, String> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Freshness {
+            version: u32,
+            max_age_seconds: u64,
+            token_remaining_seconds: u64,
+        }
         #[derive(Deserialize, zeroize::ZeroizeOnDrop)]
         #[serde(deny_unknown_fields)]
         struct Item {
@@ -710,13 +726,16 @@ impl Client {
             revision: String,
             profiles: Vec<Item>,
             routing: Routing,
+            #[serde(default)]
+            freshness: Option<Freshness>,
+        }
+        let requested_at = rtrust_control::freshness::now();
+        let mut consent = json!({"include_secrets":true});
+        if freshness_supported {
+            consent["freshness_version"] = json!(1);
         }
         let batch: Batch = self
-            .request(
-                Method::POST,
-                "snapshot",
-                Some(json!({"include_secrets":true})),
-            )
+            .request(Method::POST, "snapshot", Some(consent))
             .await?;
         if batch.version != 1
             || batch.revision.len() != 64
@@ -726,6 +745,25 @@ impl Client {
             return Err("Некорректная атомарная партия панели".into());
         }
         let routing = RoutingState::Available(routing_policy(batch.routing)?);
+        let freshness = match batch.freshness {
+            Some(value)
+                if freshness_supported
+                    && value.version == 1
+                    && (60..=86400).contains(&value.max_age_seconds)
+                    && (1..=30 * 86400).contains(&value.token_remaining_seconds) =>
+            {
+                Some(rtrust_control::freshness::Lease {
+                    issued_at_ms: requested_at,
+                    expires_at_ms: requested_at
+                        .checked_add(
+                            value.max_age_seconds.min(value.token_remaining_seconds) * 1000,
+                        )
+                        .ok_or("Invalid freshness lease")?,
+                })
+            }
+            None if !freshness_supported => None,
+            _ => return Err("Invalid or missing freshness lease".into()),
+        };
         let mut profiles = Vec::with_capacity(batch.profiles.len());
         let mut total = 0usize;
         let mut ids = std::collections::HashSet::new();
@@ -753,7 +791,14 @@ impl Client {
             let profile = Profile::import(&content).map_err(|_| "Получен недопустимый профиль")?;
             profiles.push((item.metadata.clone(), profile));
         }
-        Ok(Snapshot { profiles, routing })
+        if let Some(lease) = &freshness {
+            lease.validate_at(rtrust_control::freshness::now())?;
+        }
+        Ok(Snapshot {
+            profiles,
+            routing,
+            freshness,
+        })
     }
     pub async fn download(&self, profile: &RemoteProfile) -> Result<Profile, String> {
         #[derive(Deserialize)]

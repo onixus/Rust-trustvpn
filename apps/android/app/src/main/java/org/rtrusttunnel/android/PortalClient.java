@@ -8,6 +8,9 @@ import org.json.*;
 
 /** The same v2 one-time enrollment / revision contract as the server UI. */
 class PortalClient {
+    private android.content.Context context;
+    private JSONObject lease;
+    private long issuedWall,issuedElapsed;
     final String origin, token;
     private Long expiresAt;
     private long batchDeadline;
@@ -30,6 +33,7 @@ class PortalClient {
         this(session.getString("origin"), session.getString("token"));
         if (session.has("expires_at")) { expiresAt = session.getLong("expires_at"); if (expiresAt <= 0) throw new IOException(); }
     }
+    PortalClient(android.content.Context context,JSONObject session) throws Exception {this(session);this.context=context.getApplicationContext();}
     static String id(String id) {
         if (!id.matches("[A-Za-z0-9_-]{1,80}")) throw new IllegalArgumentException("Invalid identifier");
         return id;
@@ -40,7 +44,8 @@ class PortalClient {
         long deadline=batchDeadline==0?System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(25):batchDeadline;
         long remaining=java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadline-System.nanoTime());
         if (remaining<=0) throw new IOException();
-        HttpsURLConnection connection = (HttpsURLConnection) new URL(origin + path).openConnection();
+        android.net.Network control=context==null?null:TunnelService.portalRecoveryNetwork();
+        HttpsURLConnection connection = (HttpsURLConnection)(control==null?new URL(origin+path).openConnection():control.openConnection(new URL(origin+path)));
         connection.setInstanceFollowRedirects(false); connection.setConnectTimeout((int)Math.min(15000,remaining)); connection.setReadTimeout((int)Math.min(20000,remaining));
         connection.setUseCaches(false); connection.setRequestProperty("Accept", "application/json");
         if (!token.isEmpty()) connection.setRequestProperty("Authorization", "Bearer " + token);
@@ -97,6 +102,7 @@ class PortalClient {
         return deadline;
     }
     JSONArray download() throws Exception {
+        issuedWall=System.currentTimeMillis();issuedElapsed=android.os.SystemClock.elapsedRealtime();lease=null;
         batchDeadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
         try { return downloadBatch(); } finally { batchDeadline=0; }
     }
@@ -105,8 +111,12 @@ class PortalClient {
         if (capabilities.getInt("version") != 2 || capabilities.has("routing") && capabilities.getInt("routing") != 1
             || capabilities.has("snapshot") && capabilities.getInt("snapshot") != 1) throw new IOException();
         JSONArray result = new JSONArray();
+        if (context!=null && capabilities.optInt("offline_freshness")!=1) throw new IOException("Panel freshness contract required");
         if (capabilities.optInt("snapshot") == 1) {
-            JSONObject batch = request("/portal/v2/snapshot",new JSONObject().put("include_secrets",true));
+            JSONObject consent=new JSONObject().put("include_secrets",true);
+            if(context!=null) consent.put("freshness_version",1);
+            JSONObject batch = request("/portal/v2/snapshot",consent);
+            if(context!=null) lease=OfflineLease.issue(context,batch.getJSONObject("freshness"),issuedWall,issuedElapsed);
             if (batch.getInt("version") != 1 || !batch.getString("revision").matches("[0-9a-f]{64}")) throw new IOException();
             JSONObject routing=batch.getJSONObject("routing"); requireSupportedRouting(routing);
             JSONArray items = batch.getJSONArray("profiles");
@@ -146,12 +156,9 @@ class PortalClient {
     private static void requireSupportedRouting(JSONObject routing) throws Exception {
         if (routing.optBoolean("unsupported")) return;
         if (!routing.has("policy")) throw new IOException();
-        if (!routing.isNull("policy")) {
-            JSONObject group=routing.getJSONObject("policy");
-            if (group.getBoolean("exclude_lan")) throw new IOException("Managed LAN exclusion unsupported");
-        }
+        if (!routing.isNull("policy")) routing.getJSONObject("policy");
     }
-    private static JSONObject downloaded(JSONObject meta, String content, JSONObject routing) throws Exception {
+    private JSONObject downloaded(JSONObject meta, String content, JSONObject routing) throws Exception {
         String remoteId = id(meta.getString("id")), revision = meta.getString("revision");
         if (revision.isEmpty() || revision.length() > 256 || content.getBytes(StandardCharsets.UTF_8).length > 1024*1024) throw new IOException();
         JSONObject parsed = new JSONObject(NativeCore.INSTANCE.parse(content));
@@ -160,6 +167,7 @@ class PortalClient {
         if (group!=null && !new JSONObject(NativeCore.INSTANCE.planManaged(profile.toString(),group.toString())).getBoolean("ok")) throw new IOException();
         JSONObject result=new JSONObject().put("id", "portal:" + remoteId).put("remote_id", remoteId).put("revision", revision).put("profile",profile);
         if (group!=null) result.put("managed_routing",group);
+        if(lease!=null) result.put("access_lease",new JSONObject(lease.toString()));
         if (routing.optBoolean("unsupported")) result.put("routing_unsupported",true);
         return result;
     }

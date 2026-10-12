@@ -149,7 +149,7 @@ def main():
 import socket,struct,json,time
 
 def request(s):
-    data=json.dumps({"version":4,"command":{"op":"PrepareUpdate"}}).encode()
+    data=json.dumps({"version":5,"command":{"op":"PrepareUpdate"}}).encode()
     s.sendall(struct.pack("!I",len(data))+data)
     header=s.recv(4);size=struct.unpack("!I",header)[0]
     raw=b""
@@ -177,6 +177,41 @@ for request in (None, {"version":3,"command":{"op":"Capabilities"}}, {"version":
             data=json.dumps(request).encode(); s.sendall(struct.pack("!I",len(data))+data)
             size=struct.unpack("!I",s.recv(4))[0]; response=json.loads(s.recv(size)); assert response["state"]=="Error"
 ''')
+                # A finite portal receipt owns the same guard through expiry.
+                app(1000, "python3", "-c", '''
+import socket,struct,json,sys,time,subprocess,pathlib
+
+def exact(s,n):
+    data=b""
+    while len(data)<n:
+        part=s.recv(n-len(data));assert part,"IPC closed";data+=part
+    return data
+
+def request(s,command):
+    data=json.dumps({"version":5,"command":command}).encode()
+    s.sendall(struct.pack("!I",len(data))+data)
+    size=struct.unpack("!I",exact(s,4))[0]
+    return json.loads(exact(s,size))
+with socket.socket(socket.AF_UNIX) as s:
+    s.settimeout(10);s.connect("/run/rtrust/control.sock")
+    now=int(time.time()*1000)
+    result=request(s,{"op":"StartLeased","lease":{"issued_at_ms":now,"expires_at_ms":now+8000},"command":{"op":"Start","profile":json.load(open(sys.argv[1])),"networks":["198.18.0.1/32"]}})
+    assert result["state"]=="Connected",result
+    curl=["curl","--noproxy","*","-sSf","--max-time","2",sys.argv[2]]
+    assert subprocess.run(curl,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+    deadline=time.monotonic()+12
+    while time.monotonic()<deadline:
+        result=request(s,{"op":"Status"})
+        if result["state"]=="Blocked":break
+        time.sleep(.1)
+    assert result["state"]=="Blocked",result
+    assert pathlib.Path("/run/rtrust/lease.json").exists(),"expiry released owned guard"
+    assert subprocess.run(curl,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode!=0,"expired traffic remained usable"
+    assert request(s,{"op":"Stop"})["state"]=="Idle"
+''', str(profile),url)
+                assert not pathlib.Path("/run/rtrust/lease.json").exists()
+                fetch(1000,"10.99.0.2")
+                print("PASS finite access expiry stops traffic, retains guard until explicit Stop, restores routes",flush=True)
                 with client(profile) as (process, _):
                     fetch(1000, "198.18.0.1")
                     fetch(1001, "10.99.0.2")
@@ -185,7 +220,7 @@ for request in (None, {"version":3,"command":{"op":"Capabilities"}}, {"version":
 import socket,struct,json,sys
 with socket.socket(socket.AF_UNIX) as s:
     s.settimeout(5); s.connect("/run/rtrust/control.sock")
-    request={"version":4,"command":{"op":"Start","profile":json.load(open(sys.argv[1])),"networks":["198.18.0.1/32"]}}
+    request={"version":5,"command":{"op":"Start","profile":json.load(open(sys.argv[1])),"networks":["198.18.0.1/32"]}}
     data=json.dumps(request).encode(); s.sendall(struct.pack("!I",len(data))+data)
     size=struct.unpack("!I",s.recv(4))[0]; assert json.loads(s.recv(size))["state"]=="Error"
 ''', str(profile))

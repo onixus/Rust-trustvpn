@@ -41,7 +41,12 @@ final class AppRoutingAcceptance {
         JSONObject grouped=new JSONObject(NativeCore.INSTANCE.planManaged(portable.toString(),group.toString()));
         check(grouped.getBoolean("ok") && !grouped.getJSONObject("plan").getBoolean("ipv6"), "Managed IPv4 group plans through JNI and blocks IPv6");
         group.put("exclude_lan",true);
-        check(!new JSONObject(NativeCore.INSTANCE.planManaged(portable.toString(),group.toString())).getBoolean("ok"), "Unimplemented LAN group never silently loses exclusions");
+        check(!new JSONObject(NativeCore.INSTANCE.planManagedOnNetwork(portable.toString(),group.toString(),"null")).getBoolean("ok"), "Unobserved LAN never becomes an empty exclusion");
+        check(new JSONObject(NativeCore.INSTANCE.planManagedOnNetwork(portable.toString(),group.toString(),"[\"10.1.0.7/24\"]")).getBoolean("ok"), "Observed LAN prefix compiles through JNI");
+        JSONObject lease=new JSONObject().put("version",1).put("issued_wall",1000).put("issued_elapsed",100).put("duration_ms",5000).put("boot",7);
+        check(OfflineLease.valid(lease,2000,1100,7), "Fresh lease accepted");
+        check(!OfflineLease.valid(lease,2000,5100,7), "Sleep elapsed time expires lease");
+        check(!OfflineLease.valid(lease,999,1100,7) && !OfflineLease.valid(lease,2000,1100,8), "Clock rollback and reboot need fresh receipt");
         AppRouting missing = new AppRouting(true, Collections.singletonList("org.rtrusttunnel.nonexistent.fixture"));
         boolean rejected = false; try { missing.validateInstalled(context.getPackageManager()); } catch (PackageManager.NameNotFoundException expected) { rejected = true; }
         check(rejected, "Missing selected package is rejected");

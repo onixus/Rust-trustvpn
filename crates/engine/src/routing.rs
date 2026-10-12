@@ -64,6 +64,7 @@ pub struct PreparedPolicy {
 }
 
 pub struct Router {
+    selection: Option<(Vec<IpNet>, bool, Context)>,
     policy: RwLock<RuntimePolicy>,
     learned: Mutex<HashMap<(IpAddr, String), Instant>>,
     observed: tokio::sync::broadcast::Sender<ObservedDecision>,
@@ -168,6 +169,7 @@ impl Policy {
         let direct_permitted = current.selective || !current.rules.is_empty();
         let (observed, _) = tokio::sync::broadcast::channel(32);
         Ok(Router {
+            selection: None,
             policy: RwLock::new(RuntimePolicy {
                 current,
                 previous: None,
@@ -181,6 +183,49 @@ impl Policy {
     }
 }
 impl Router {
+    /// Immutable OS-prefix equivalent for a mobile blocking TUN. Changes require
+    /// replacing the owning runner after joining its old flows.
+    pub fn with_prefix_selection(
+        mut self,
+        routes: Vec<IpNet>,
+        ipv6: bool,
+        context: Context,
+    ) -> Result<Self> {
+        if routes.is_empty()
+            || routes.len() > 256
+            || routes.iter().any(|n| n.trunc() != *n)
+            || context
+                .revision
+                .as_ref()
+                .is_none_or(|r| r.is_empty() || r.len() > 256 || r.chars().any(char::is_control))
+        {
+            return Err(Error::Unsupported("mobile prefix selection"));
+        }
+        self.selection = Some((routes, ipv6, context));
+        Ok(self)
+    }
+    fn selected(&self, destination: SocketAddr, prediction: bool) -> Option<Decision> {
+        let (routes, ipv6, context) = self.selection.as_ref()?;
+        if destination.port() == 53 {
+            return None;
+        }
+        let (action, reason) = if destination.is_ipv6() && !ipv6 {
+            (Action::Block, Reason::UnsupportedFamily)
+        } else if routes.iter().any(|n| n.contains(&destination.ip())) {
+            return None;
+        } else {
+            (Action::Direct, Reason::OutsideSelection)
+        };
+        Some(Decision {
+            action,
+            scope: rtrust_profile::routing::Scope::SelectedIpv4,
+            rules: vec![],
+            context: context.clone(),
+            reason,
+            basis: Basis::NumericDestination,
+            prediction,
+        })
+    }
     fn token(policy: &RuntimePolicy) -> PolicyVersion {
         PolicyVersion {
             revision: policy
@@ -320,10 +365,16 @@ impl Router {
         self.commit_local(expected, candidate)
     }
     pub fn needs_direct(&self) -> bool {
+        if self.selection.is_some() {
+            return true;
+        }
         let policy = self.policy.read().unwrap_or_else(|p| p.into_inner());
         policy.current.selective || !policy.current.rules.is_empty()
     }
     pub fn tunneled(&self, destination: SocketAddr) -> bool {
+        if let Some(decision) = self.selected(destination, true) {
+            return decision.action == Action::Tunnel;
+        }
         let policy = self.policy.read().unwrap_or_else(|p| p.into_inner());
         self.evaluate(&policy.current, destination).0 == Action::Tunnel
     }
@@ -341,6 +392,17 @@ impl Router {
     /// The unobserved hot path avoids cloning revision metadata/rule ids.
     pub fn route_flow(&self, destination: SocketAddr) -> Action {
         let policy = self.policy.read().unwrap_or_else(|p| p.into_inner());
+        if let Some(decision) = self.selected(destination, false) {
+            let action = decision.action;
+            if self.observed.receiver_count() > 0 {
+                let _ = self.observed.send(ObservedDecision {
+                    version: Self::token(&policy),
+                    observed_at: Instant::now(),
+                    decision,
+                });
+            }
+            return action;
+        }
         let evaluation = self.evaluate(&policy.current, destination);
         if self.observed.receiver_count() > 0 {
             let _ = self.observed.send(ObservedDecision {
@@ -376,6 +438,9 @@ impl Router {
     /// Same evaluator used by the dataplane. DNS cache names are evidence of
     /// resolver answers, not proof of the application/hostname of this flow.
     pub fn decide(&self, destination: SocketAddr) -> Decision {
+        if let Some(decision) = self.selected(destination, true) {
+            return decision;
+        }
         let policy = self.policy.read().unwrap_or_else(|p| p.into_inner());
         Self::decision(
             &policy.current,
@@ -578,6 +643,46 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mobile_prefix_scope_and_flow_scope_share_dataplane_explanation() {
+        let router = Policy {
+            mode: "general".into(),
+            exclusions: vec!["10.2.0.0/16".into()],
+        }
+        .compile()
+        .unwrap()
+        .with_prefix_selection(
+            vec!["10.0.0.0/8".parse().unwrap()],
+            false,
+            Context {
+                source: rtrust_profile::routing::Source::Admin,
+                revision: Some("admin:1:2".into()),
+            },
+        )
+        .unwrap();
+        for (address, action) in [
+            ("10.1.0.1:443", Action::Tunnel),
+            ("10.2.0.1:443", Action::Direct),
+            ("192.0.2.1:443", Action::Direct),
+            ("192.0.2.1:53", Action::Tunnel),
+            ("[2001:db8::1]:443", Action::Block),
+        ] {
+            let destination = address.parse().unwrap();
+            assert_eq!(router.route_flow(destination), action);
+            assert_eq!(router.decide(destination).action, action);
+        }
+        assert_eq!(
+            router
+                .decide("192.0.2.1:443".parse().unwrap())
+                .context
+                .source,
+            rtrust_profile::routing::Source::Admin
+        );
+        assert_eq!(
+            router.decide("10.2.0.1:443".parse().unwrap()).scope,
+            rtrust_profile::routing::Scope::FlowPolicy
+        );
+    }
     #[test]
     fn cname_evidence_is_bounded_by_chain_ttl_and_ignores_unrelated_records() {
         use hickory_proto::{

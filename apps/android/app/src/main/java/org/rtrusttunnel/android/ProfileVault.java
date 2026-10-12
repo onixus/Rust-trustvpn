@@ -87,6 +87,8 @@ final class ProfileVault {
     void expirePortalSync(JSONObject session) throws Exception { synchronized (LOCK) {
         JSONObject data = readUnlocked(), current = data.optJSONObject("portal");
         if (!samePortal(current, session)) return;
+        JSONArray entries=data.getJSONArray("profiles");
+        for(int i=0;i<entries.length();i++){JSONObject entry=entries.getJSONObject(i);if(entry.has("remote_id"))entry.remove("access_lease");}
         current.put("background_sync", false).put("sync_auth_expired", true); writeUnlocked(data);
     } }
     private static boolean samePortal(JSONObject a, JSONObject b) {
@@ -154,15 +156,44 @@ final class ProfileVault {
     } }
     static final class Selection {
         final String id;
+        final String revision;
         final JSONObject profile;
         final boolean localPolicy;
         final JSONObject managedRouting;
+        final JSONObject lease;
         Selection(JSONObject entry) throws Exception {
             id = entry.getString("id"); profile = entry.getJSONObject("profile");
+            revision=entry.optString("revision","local");
             localPolicy = !entry.has("remote_id");
             managedRouting = entry.optJSONObject("managed_routing");
+            lease=entry.optJSONObject("access_lease");
         }
     }
+    static final class Admission {
+        final Selection primary;
+        final AppRouting apps;
+        Admission(JSONObject data,String id)throws Exception {primary=resolveSelection(data,id);apps=AppRouting.read(data);}
+    }
+    Admission admission(String id)throws Exception {synchronized(LOCK){return new Admission(readUnlocked(),id);}}
+    static final class ConnectionSet {
+        final java.util.ArrayList<Selection> profiles=new java.util.ArrayList<>();
+        final AppRouting apps;
+        ConnectionSet(JSONObject data,String id) throws Exception {
+            Selection primary=resolveSelection(data,id);profiles.add(primary);apps=AppRouting.read(data);
+            JSONObject settings=data.optJSONObject("mobile_recovery");
+            if(settings==null || !settings.getBoolean("enabled") || !primary.id.equals(settings.getString("primary"))) return;
+            JSONArray ids=settings.getJSONArray("backups");
+            if(ids.length()<1 || ids.length()>3) throw new IOException("Select 1 to 3 backups");
+            java.util.HashSet<String> seen=new java.util.HashSet<>();seen.add(primary.id);
+            for(int i=0;i<ids.length();i++) {
+                String backupId=ids.getString(i);if(!seen.add(backupId)) throw new IOException("Duplicate backup");
+                Selection backup=resolveSelection(data,backupId);
+                if(backup.localPolicy!=primary.localPolicy || !java.util.Objects.equals(primary.managedRouting==null?null:primary.managedRouting.toString(),backup.managedRouting==null?null:backup.managedRouting.toString())) throw new IOException("Backup policy ownership differs");
+                profiles.add(backup);
+            }
+        }
+    }
+    ConnectionSet connectionSet(String id) throws Exception {synchronized(LOCK){return new ConnectionSet(readUnlocked(),id);}}
     Selection selection(String requestedId) throws Exception { synchronized (LOCK) {
         return resolveSelection(readUnlocked(), requestedId);
     } }

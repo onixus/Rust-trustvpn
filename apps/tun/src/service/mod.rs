@@ -235,7 +235,8 @@ async fn serve(
         )
         .await;
     };
-    let (profile, networks, dns, split_dns, fallbacks) = match request.command {
+    let (mut freshness, command) = rtrust_control::freshness::start(request.command)?;
+    let (profile, networks, dns, split_dns, fallbacks) = match command {
         Command::PrepareUpdate => {
             if FullRoutes::pending() || Routes::pending() {
                 return reply(
@@ -333,7 +334,7 @@ async fn serve(
     let prepared = {
         let mut unexpected = [0];
         tokio::select! {
-            result = failover.connect_initial(|profile| async move { crate::linux::Prepared::connect_mode(&profile, routes::DEVICE, routes::ADDRESS.parse().unwrap(), full).await }) => match result {
+            result = rtrust_control::freshness::while_valid(freshness.as_mut(),failover.connect_initial(|profile| async move { crate::linux::Prepared::connect_mode(&profile, routes::DEVICE, routes::ADDRESS.parse().unwrap(), full).await })) => match result {
                 Ok(prepared) => prepared,
                 Err(_) => return reply(&mut stream, State::Error, "Не удалось открыть TUN: проверьте профиль, TLS и доступность endpoint").await,
             },
@@ -391,6 +392,7 @@ async fn serve(
         failover.active(),
     )
     .await?;
+    let mut access_expired = false;
     let mut state = State::Connected;
     monitor.transition(true, rtrust_control::observations::now_ms());
     let mut netwatch = crate::netwatch::Watch::new(routes::DEVICE);
@@ -398,6 +400,8 @@ async fn serve(
         let mut pending = Box::pin(read::<Request>(&mut stream));
         let request = loop {
             tokio::select! {
+                biased;
+                _=async{freshness.as_mut().unwrap().expired().await},if freshness.is_some() && !access_expired=>{endpoint_lease.suspend();workers.stop().await;access_expired=true;state=State::Blocked;monitor.transition(false,rtrust_control::observations::now_ms());},
                 request = &mut pending => break request?,
                 change = netwatch.next() => match change {
                     crate::netwatch::Change::Network => {
@@ -464,7 +468,7 @@ async fn serve(
                 reply_observed(
                 &mut stream,
                 state.clone(),
-                if state == State::Connected {
+                if access_expired { "Access confirmation expired; protection retained. Synchronize before reconnecting." } else if state == State::Connected {
                     if full {
                         "Весь компьютер: IPv4, IPv6 и DNS через VPN"
                     } else {

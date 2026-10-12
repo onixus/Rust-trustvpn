@@ -132,6 +132,16 @@ impl App {
             }
             _ => return Task::none(),
         };
+        if matches!(
+            command,
+            rtrust_control::Command::EnableAlwaysOn { .. }
+                | rtrust_control::Command::EnableRecovery { .. }
+        ) && (self.saved_connection.managed_routes.is_some()
+            || !self.saved_connection.sync.tracked.is_empty())
+        {
+            self.always_on.status="Управляемый доступ требует ограниченной lease; постоянный системный Always-on для него пока не поддерживается. Используйте обычное TUN-подключение.".into();
+            return Task::none();
+        }
         self.always_on.generation = self.always_on.generation.wrapping_add(1);
         let generation = self.always_on.generation;
         self.always_on.enabling = matches!(

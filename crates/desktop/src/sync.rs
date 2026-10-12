@@ -6,6 +6,10 @@ use rtrust_store::{ManagedRoutes, TrackedProfile, Vault};
 /// intact. Persist the returned vault once, using the caller's storage fence.
 pub fn prepare(vault: &Vault, snapshot: Snapshot) -> Result<Vault, String> {
     let mut next = vault.clone();
+    if vault.connection.sync.access_lease.is_some() && snapshot.freshness.is_none() {
+        return Err("Portal freshness capability disappeared".into());
+    }
+    next.connection.sync.access_lease = snapshot.freshness;
     let managed = match snapshot.routing {
         RoutingState::Unsupported if vault.connection.managed_routes.is_some() => {
             return Err("Portal no longer supports the assigned routing policy".into());
@@ -143,6 +147,7 @@ mod tests {
             prepare(
                 &v,
                 Snapshot {
+                    freshness: None,
                     profiles: vec![(remote("2"), profile("new"))],
                     routing: RoutingState::Available(Some(routes()))
                 }
@@ -158,6 +163,7 @@ mod tests {
         let next = prepare(
             &v,
             Snapshot {
+                freshness: None,
                 profiles: vec![(remote("2"), profile("new"))],
                 routing: RoutingState::Available(Some(routes())),
             },
@@ -175,6 +181,7 @@ mod tests {
             prepare(
                 &v,
                 Snapshot {
+                    freshness: None,
                     profiles: vec![(remote("1"), profile("new"))],
                     routing: RoutingState::Unsupported
                 }
@@ -184,6 +191,7 @@ mod tests {
         let mut v = prepare(
             &v,
             Snapshot {
+                freshness: None,
                 profiles: vec![],
                 routing: RoutingState::Available(Some(routes())),
             },
@@ -193,6 +201,7 @@ mod tests {
             prepare(
                 &v,
                 Snapshot {
+                    freshness: None,
                     profiles: vec![],
                     routing: RoutingState::Unsupported
                 }
@@ -205,6 +214,7 @@ mod tests {
             prepare(
                 &v,
                 Snapshot {
+                    freshness: None,
                     profiles: vec![],
                     routing: RoutingState::Available(Some(changed))
                 }
@@ -214,6 +224,7 @@ mod tests {
         v = prepare(
             &v,
             Snapshot {
+                freshness: None,
                 profiles: vec![],
                 routing: RoutingState::Available(None),
             },

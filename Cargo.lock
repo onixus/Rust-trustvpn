@@ -5382,6 +5382,7 @@ dependencies = [
  "keyring",
  "rcgen",
  "reqwest 0.12.28",
+ "rtrust-control",
  "rtrust-profile",
  "rustls",
  "serde",

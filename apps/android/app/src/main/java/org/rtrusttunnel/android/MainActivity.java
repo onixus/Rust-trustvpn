@@ -36,6 +36,7 @@ public class MainActivity extends Activity {
                 int nativeState = state.optInt("state", 0);
                 String message = !TunnelService.problem.isEmpty() ? TunnelService.problem : nativeState == 2 ? getString(R.string.connected) : nativeState == 1 ? getString(R.string.connecting) : nativeState == 3 ? getString(R.string.reconnecting) : nativeState == 4 ? getString(R.string.connection_failed) : "";
                 if (nativeState == 2 && TunnelService.problem.isEmpty()) message = ObservationStatus.summary(MainActivity.this, state.optJSONObject("observations"));
+                JSONObject recovery=state.optJSONObject("recovery");if(nativeState==2 && recovery!=null && recovery.optInt("selected_index")>0)message+=" · "+getString(R.string.recovery_backup_active,recovery.optInt("selected_index"));
                 if (message.isEmpty()) message = TunnelService.active ? getString(R.string.starting_vpn) : getString(R.string.disconnected);
                 if (!status.getText().toString().equals(message)) status.setText(message);
                 String action = TunnelService.active ? getString(R.string.disconnect) : getString(R.string.connect_selected_profile);
@@ -117,9 +118,10 @@ public class MainActivity extends Activity {
         startForegroundService(new Intent(this, TunnelService.class).putExtra(TunnelService.PROFILE_ID, pendingConnectId));
     }
     private void settingsMenu() {
-        new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on), java.util.Locale.getDefault().getLanguage().equals("ru") ? "Наблюдать решения маршрутизации" : "Observe local flow decisions", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Проверить путь VPN" : "Check VPN path", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Правила текущего подключения" : "Current connection rules"}, (dialog, which) -> {
+        new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on), java.util.Locale.getDefault().getLanguage().equals("ru") ? "Наблюдать решения маршрутизации" : "Observe local flow decisions", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Проверить путь VPN" : "Check VPN path", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Правила текущего подключения" : "Current connection rules",getString(R.string.recovery_title)}, (dialog, which) -> {
             if (which == 0) new PortalDialog(this, vault, this::reload).show();
             else if (which == 1) vpnSettings();
+            else if(which==5){try{RecoveryDialog.show(this,vault,selectedId);}catch(Exception e){error(getString(R.string.recovery_invalid));}}
             else { if (flowCapture != null) flowCapture.dismiss(); flowCapture = which == 2 ? FlowCaptureDialog.show(this) : which == 3 ? DiagnosticsDialog.show(this) : FlowPolicyDialog.show(this); }
         }).show();
     }
