@@ -238,26 +238,26 @@ impl Controller {
 }
 
 /// Localize stable machine outcomes at the UI boundary; never parse service messages.
+/// Checks that never produced a result are omitted instead of listed as unchecked.
 pub fn observation_summary(
     snapshot: &rtrust_control::observations::Snapshot,
     russian: bool,
 ) -> String {
     use rtrust_control::observations::Outcome;
-    fn label(outcome: Outcome, ru: bool) -> &'static str {
-        match (outcome, ru) {
+    fn label(outcome: Outcome, ru: bool) -> Option<&'static str> {
+        Some(match (outcome, ru) {
             (Outcome::Passed, true) => "проверено",
             (Outcome::Passed, false) => "verified",
             (Outcome::Failed, true) => "сбой",
             (Outcome::Failed, false) => "failed",
-            (Outcome::Configured, true) => "запущен, доступность не проверена",
-            (Outcome::Configured, false) => "running, availability unchecked",
+            (Outcome::Configured, true) => "запущен",
+            (Outcome::Configured, false) => "running",
             (Outcome::Stale, true) => "устарело",
             (Outcome::Stale, false) => "stale",
             (Outcome::Unsupported, true) => "проверка не поддерживается",
             (Outcome::Unsupported, false) => "check unsupported",
-            (Outcome::Unknown, true) => "не проверено",
-            (Outcome::Unknown, false) => "unchecked",
-        }
+            (Outcome::Unknown, _) => return None,
+        })
     }
     let names = if russian {
         ["Транспорт", "маршрут", "DNS", "защита", "доступность"]
@@ -273,7 +273,7 @@ pub fn observation_summary(
             &snapshot.guard,
             &snapshot.connectivity,
         ])
-        .map(|(name, o)| format!("{name}: {}", label(o.outcome, russian)))
+        .filter_map(|(name, o)| Some(format!("{name}: {}", label(o.outcome, russian)?)))
         .chain(recent_change(
             snapshot,
             russian,
@@ -312,6 +312,21 @@ fn recent_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn summary_lists_only_checks_with_a_result() {
+        use rtrust_control::observations::{Mode, Monitor, Outcome, Source};
+        let now = rtrust_control::observations::now_ms();
+        let mut running = Monitor::new(Mode::Full, Source::ServiceLifecycle, now).sample(now);
+        assert_eq!(observation_summary(&running, true), "Транспорт: запущен");
+        assert_eq!(observation_summary(&running, false), "Transport: running");
+        running.dns.outcome = Outcome::Failed;
+        assert_eq!(
+            observation_summary(&running, true),
+            "Транспорт: запущен · DNS: сбой"
+        );
+        let proxy = Monitor::new(Mode::Proxy, Source::ProxyLifecycle, now).sample(now);
+        assert!(!observation_summary(&proxy, true).contains("не проверено"));
+    }
     #[test]
     fn a_recent_network_change_or_resume_is_shown_then_ages_out() {
         use rtrust_control::observations::{Mode, Monitor, Source};

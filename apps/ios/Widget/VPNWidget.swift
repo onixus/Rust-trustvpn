@@ -24,7 +24,7 @@ struct VPNWidgetView: View {
     let entry: VPNEntry
     private var label: String {
         switch entry.status {
-        case .connected: return "Transport running · availability unchecked"
+        case .connected: return "Transport running"
         case .connecting, .reasserting: return "Connecting"
         case .disconnecting: return "Disconnecting"
         case .disconnected, .invalid: return "Disconnected"

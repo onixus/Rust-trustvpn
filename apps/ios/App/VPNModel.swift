@@ -16,9 +16,10 @@ final class VPNModel: ObservableObject {
     private var observationEpoch: UInt64 = 0
     @Published private var observations: [String: Any]?
     private var observationReceived = Date.distantPast
-    private func observationLabel(_ key: String) -> String {
+    /// nil when the check never produced a result: such checks are omitted, not listed as unchecked.
+    private func observationLabel(_ key: String) -> String? {
         guard Date().timeIntervalSince(observationReceived) <= 6,
-              let o = observations?[key] as? [String: Any], let outcome = o["outcome"] as? String else { return tr("unchecked", "не проверено") }
+              let o = observations?[key] as? [String: Any], let outcome = o["outcome"] as? String else { return nil }
         if outcome == "passed" || outcome == "configured" {
             let time = (o["observed_at_ms"] as? NSNumber)?.doubleValue ?? 0
             let age = Date().timeIntervalSince1970 * 1000 - time
@@ -26,11 +27,11 @@ final class VPNModel: ObservableObject {
         }
         switch outcome {
         case "passed": return tr("verified", "проверено")
-        case "configured": return tr("running, availability unchecked", "запущен, доступность не проверена")
+        case "configured": return tr("running", "запущен")
         case "failed": return tr("failed", "сбой")
         case "stale": return tr("stale", "устарело")
         case "unsupported": return tr("check unsupported", "проверка не поддерживается")
-        default: return tr("unchecked", "не проверено")
+        default: return nil
         }
     }
     private func refreshObservations() {
@@ -142,9 +143,11 @@ final class VPNModel: ObservableObject {
     var canEdit: Bool { !busy && !active && !onDemand }
     var status: String {
         switch state {
-        case .connected: return [tr("Transport", "Транспорт") + ": " + observationLabel("transport"),
-            tr("route", "маршрут") + ": " + observationLabel("route"), "DNS: " + observationLabel("dns"),
-            tr("guard", "защита") + ": " + observationLabel("guard"), tr("connectivity", "доступность") + ": " + observationLabel("connectivity")].joined(separator: " · ")
+        case .connected:
+            let checks = [(tr("Transport", "Транспорт"), "transport"), (tr("route", "маршрут"), "route"), ("DNS", "dns"),
+                          (tr("guard", "защита"), "guard"), (tr("connectivity", "доступность"), "connectivity")]
+                .compactMap { name, key in observationLabel(key).map { name + ": " + $0 } }
+            return checks.isEmpty ? tr("Transport running", "Транспорт запущен") : checks.joined(separator: " · ")
         case .connecting: return tr("Connecting", "Подключение")
         case .reasserting: return tr("Reconnecting", "Восстановление")
         case .disconnecting: return tr("Disconnecting", "Отключение")
