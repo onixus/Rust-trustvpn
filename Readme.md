@@ -170,7 +170,7 @@ See [desktop lifecycle](docs/desktop-lifecycle.md) and [Always-on](docs/always-o
 5. For fail-closed behaviour after process death, enable Android **Always-on VPN** and **Block connections without VPN**.
 6. Server profiles can be enrolled and synchronized through the portal integration.
 
-The source tree currently declares Android minSdk 29, targetSdk 36, versionCode 60001 and versionName 0.6.0-preview.1 (unpublished candidate; the published APK is still 0.5.0).
+The source tree currently declares Android minSdk 29, targetSdk 36, versionCode 60002 and versionName 0.6.0-preview.2, published with the v0.6.0 pre-release under a new signing key (it does not update APKs from v0.5.0 or earlier).
 
 See [Android documentation](docs/android.md) and [profile exchange](docs/portal.md).
 
