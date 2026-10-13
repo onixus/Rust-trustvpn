@@ -135,6 +135,10 @@ final class NetworkAcceptance {
      *  and the VPN declares its transports. Metering is not compared: the Builder leaves
      *  the VPN metered by default. */
     private static android.net.Network awaitDeclared(android.net.ConnectivityManager cm, android.net.Network previous, String stage, long timeout) throws Exception {
+        return awaitDeclared(cm, previous, -1, stage, timeout);
+    }
+    /** {@code required} (a transport, or -1 for any) is required of the network the VPN must ride. */
+    private static android.net.Network awaitDeclared(android.net.ConnectivityManager cm, android.net.Network previous, int required, String stage, long timeout) throws Exception {
         long end = SystemClock.elapsedRealtime() + timeout;
         String last = "no VPN";
         while (SystemClock.elapsedRealtime() < end) {
@@ -143,7 +147,7 @@ final class NetworkAcceptance {
             if (physicalCaps != null && vpnCaps != null && vpnCaps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) {
                 last = "VPN " + vpnCaps + " over " + physicalCaps;
                 // Wait for validation too: later checks open direct sockets on this network.
-                boolean declared = !current.equals(previous) && physicalCaps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+                boolean declared = !current.equals(previous) && (required < 0 || physicalCaps.hasTransport(required)) && physicalCaps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED);
                 for (int transport : PHYSICAL_TRANSPORTS) declared &= vpnCaps.hasTransport(transport) == physicalCaps.hasTransport(transport);
                 if (declared) return current;
             }
@@ -171,8 +175,10 @@ final class NetworkAcceptance {
             check(!before.equals(physical(cm)), "Handoff prerequisite: " + radio + " disabled");
             if (physical(cm) != null) previous = awaitDeclared(cm, before, "after losing " + radio, 30000);
         } finally { shell(test, "svc " + radio + " enable"); }
+        // Restored Wi-Fi is preferred again; restored mobile data stays behind any Wi-Fi.
         // The emulator can take over a minute to rejoin its Wi-Fi network.
-        awaitDeclared(cm, previous, "after restoring " + radio, 120000);
+        if (radio.equals("wifi")) awaitDeclared(cm, previous, android.net.NetworkCapabilities.TRANSPORT_WIFI, "after restoring wifi", 120000);
+        else awaitDeclared(cm, before, "after restoring data", 120000);
         await(2, 75000); // the TUN and its VPN network are retained
     }
     /** The user setting switches the VPN between Android's always-metered default and the
