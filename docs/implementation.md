@@ -1,7 +1,7 @@
 # Состояние реализации — 12 октября 2026
 
 Текущая версия workspace: **0.6.0** — неопубликованный pre-release кандидат
-(desktop update sequence 10, Android 0.6.0-preview.1 / 60001, iOS 0.6.0 / 60001).
+(desktop update sequence 10, Android 0.6.0-preview.2 / 60002, iOS 0.6.0 / 60002).
 Кандидат не собран как exact-source пакет, не подписан, не опубликован и не
 объявлен production-ready; `latest` не продвигается. Состав и статус приёмки:
 [v0.6.0](releases/v0.6.0.md).
@@ -24,7 +24,7 @@
 | Windows | Native desktop, Wintun/SCM service, WFP fail-closed, full-tunnel acceptance, sleep/wake recovery и signed metadata updater. |
 | Linux | Wayland desktop, TUN host service, nftables/systemd-resolved, Native/WebView/Both Flatpak, signed install/update/rollback flow. |
 | macOS | Native/WebView/Both packaging, LaunchDaemon/utun system path, glass UI toggle, live TrustTunnel acceptance; часть system-VPN/update acceptance ещё открыта. |
-| Android | VpnService, encrypted vault, file/text/QR import, app routing, portal sync, Always-on/lockdown, resizable widget и Quick Settings tile, managed recovery; minSdk 29, targetSdk 36, versionCode 60001, versionName 0.6.0-preview.1 (опубликованный APK — 0.5.0, 50001). |
+| Android | VpnService, encrypted vault, file/text/QR import, app routing, portal sync, Always-on/lockdown, resizable widget и Quick Settings tile, managed recovery; minSdk 29, targetSdk 36, versionCode 60002, versionName 0.6.0-preview.2 (опубликован в pre-release v0.6.0 с новым ключом подписи). |
 | iOS | Preview на Swift/Network Extension: import/export, QR, portal sync, On Demand, widget; device archive требует Apple signing. |
 | Routing | Desktop IPv4 TUN include/exclude, LAN bypass, profile routing и server-assigned route groups. Route groups не используются Android/iOS. |
 | Proxy | SOCKS5 и HTTP-запросы на mixed desktop proxy port. |
