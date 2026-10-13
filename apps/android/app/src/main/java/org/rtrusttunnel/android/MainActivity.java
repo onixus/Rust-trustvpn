@@ -34,18 +34,19 @@ public class MainActivity extends Activity {
                 JSONObject state = new JSONObject(NativeCore.INSTANCE.status());
                 TunnelService.refreshPolicy();
                 int nativeState = state.optInt("state", 0);
-                String message = !TunnelService.problem.isEmpty() ? TunnelService.problem : nativeState == 2 ? getString(R.string.connected) : nativeState == 1 ? getString(R.string.connecting) : nativeState == 3 ? getString(R.string.reconnecting) : nativeState == 4 ? getString(R.string.connection_failed) : "";
-                if (nativeState == 2 && TunnelService.problem.isEmpty()) message = ObservationStatus.summary(MainActivity.this, state.optJSONObject("observations"));
-                JSONObject recovery=state.optJSONObject("recovery");if(nativeState==2 && recovery!=null && recovery.optInt("selected_index")>0)message+=" · "+getString(R.string.recovery_backup_active,recovery.optInt("selected_index"));
-                if (message.isEmpty()) message = TunnelService.active ? getString(R.string.starting_vpn) : getString(R.string.disconnected);
-                if (!status.getText().toString().equals(message)) status.setText(message);
+                CharSequence message = !TunnelService.problem.isEmpty() ? TunnelService.problem : nativeState == 2 ? getString(R.string.connected) : nativeState == 1 ? getString(R.string.connecting) : nativeState == 3 ? getString(R.string.reconnecting) : nativeState == 4 ? getString(R.string.connection_failed) : "";
+                boolean detailed = nativeState == 2 && TunnelService.problem.isEmpty();
+                if (detailed) message = ObservationStatus.summary(MainActivity.this, state.optJSONObject("observations"));
+                JSONObject recovery=state.optJSONObject("recovery");if(nativeState==2 && recovery!=null && recovery.optInt("selected_index")>0)message=android.text.TextUtils.concat(message," · "+getString(R.string.recovery_backup_active,recovery.optInt("selected_index")));
+                if (message.length() == 0) message = TunnelService.active ? getString(R.string.starting_vpn) : getString(R.string.disconnected);
+                showStatus(message, detailed);
                 String action = TunnelService.active ? getString(R.string.disconnect) : getString(R.string.connect_selected_profile);
                 connect.setEnabled(!TunnelService.active || !TunnelService.alwaysOn);
                 if (!connect.getText().toString().equals(action)) connect.setText(action);
                 paintConnection(connectionColor(TunnelService.active, state.optInt("state", -1), !TunnelService.problem.isEmpty()), TunnelService.active || !TunnelService.problem.isEmpty());
             } catch (Exception ignored) {
                 paintConnection(connectionColor(false, 0, true), true);
-                if (!status.getText().toString().equals(getString(R.string.vpn_status_unavailable))) status.setText(getString(R.string.vpn_status_unavailable));
+                showStatus(getString(R.string.vpn_status_unavailable), false);
             }
             handler.postDelayed(this, 500);
         }
@@ -117,6 +118,15 @@ public class MainActivity extends Activity {
         if (pendingConnectId == null || pendingConnectId.isEmpty()) { error(getString(R.string.import_and_select_a_profile)); return; }
         startForegroundService(new Intent(this, TunnelService.class).putExtra(TunnelService.PROFILE_ID, pendingConnectId));
     }
+    /** A short state is a large bold headline; the per-check summary is smaller and styles itself. */
+    private void showStatus(CharSequence message, boolean detailed) {
+        if (detailed != statusDetailed) {
+            statusDetailed = detailed;
+            status.setTextSize(detailed ? 14 : 20); status.setTypeface(null, detailed ? Typeface.NORMAL : Typeface.BOLD);
+            status.setText(message);
+        } else if (!status.getText().toString().equals(message.toString())) status.setText(message);
+    }
+    private boolean statusDetailed;
     private void settingsMenu() {
         new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on), java.util.Locale.getDefault().getLanguage().equals("ru") ? "Наблюдать решения маршрутизации" : "Observe local flow decisions", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Проверить путь VPN" : "Check VPN path", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Правила текущего подключения" : "Current connection rules",getString(R.string.recovery_title),getString(R.string.metering_title)}, (dialog, which) -> {
             if (which == 0) new PortalDialog(this, vault, this::reload).show();

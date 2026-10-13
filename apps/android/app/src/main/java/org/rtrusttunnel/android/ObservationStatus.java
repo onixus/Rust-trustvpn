@@ -1,6 +1,12 @@
 package org.rtrusttunnel.android;
 
 import android.content.Context;
+import android.graphics.Typeface;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.StyleSpan;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.json.JSONObject;
 
 /** Rendering only: the Rust core supplies all decisions and reason codes. */
@@ -24,11 +30,26 @@ final class ObservationStatus {
         }
         return context.getString(id);
     }
-    static String summary(Context context, JSONObject snapshot) {
+    private static final Pattern ARGUMENT = Pattern.compile("%(\\d)\\$s");
+    private static final String SEPARATOR = " · ";
+    /** The check names of the localized summary in bold, their outcomes in regular weight. */
+    static CharSequence summary(Context context, JSONObject snapshot) {
         if (snapshot == null || snapshot.optInt("schema") != 2) snapshot = new JSONObject();
-        return context.getString(R.string.observation_summary,
-            label(context, snapshot.optJSONObject("transport")), label(context, snapshot.optJSONObject("route")),
+        String[] outcomes = {label(context, snapshot.optJSONObject("transport")), label(context, snapshot.optJSONObject("route")),
             label(context, snapshot.optJSONObject("dns")), label(context, snapshot.optJSONObject("guard")),
-            label(context, snapshot.optJSONObject("connectivity")));
+            label(context, snapshot.optJSONObject("connectivity"))};
+        String format = context.getString(R.string.observation_summary);
+        SpannableStringBuilder text = new SpannableStringBuilder();
+        Matcher argument = ARGUMENT.matcher(format);
+        int literal = 0;
+        while (argument.find()) {
+            String name = format.substring(literal, argument.start());
+            if (name.startsWith(SEPARATOR)) { text.append(SEPARATOR); name = name.substring(SEPARATOR.length()); }
+            int start = text.length();
+            text.append(name).setSpan(new StyleSpan(Typeface.BOLD), start, text.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            text.append(outcomes[Integer.parseInt(argument.group(1)) - 1]);
+            literal = argument.end();
+        }
+        return text.append(format.substring(literal));
     }
 }
