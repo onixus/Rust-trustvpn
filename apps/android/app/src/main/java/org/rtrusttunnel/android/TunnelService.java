@@ -28,7 +28,9 @@ public final class TunnelService extends VpnService {
     private boolean cleaned;
     private final Handler widgetHandler = new Handler(Looper.getMainLooper());
     private final Runnable widgetPoll = new Runnable() {
-        public void run() { pollAccess(); observeDeepSleep(); VpnWidget.refresh(TunnelService.this, false); widgetHandler.postDelayed(this, 1000); }
+        // Always-on is switched in system Settings while the app UI is usually closed: record it
+        // here too, or a session that loses its process is not recovered when the app next runs.
+        public void run() { refreshPolicy(); pollAccess(); observeDeepSleep(); VpnWidget.refresh(TunnelService.this, false); widgetHandler.postDelayed(this, 1000); }
     };
     private void observeDeepSleep() {
         synchronized (networkEvents) {
