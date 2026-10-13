@@ -118,9 +118,10 @@ public class MainActivity extends Activity {
         startForegroundService(new Intent(this, TunnelService.class).putExtra(TunnelService.PROFILE_ID, pendingConnectId));
     }
     private void settingsMenu() {
-        new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on), java.util.Locale.getDefault().getLanguage().equals("ru") ? "Наблюдать решения маршрутизации" : "Observe local flow decisions", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Проверить путь VPN" : "Check VPN path", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Правила текущего подключения" : "Current connection rules",getString(R.string.recovery_title)}, (dialog, which) -> {
+        new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on), java.util.Locale.getDefault().getLanguage().equals("ru") ? "Наблюдать решения маршрутизации" : "Observe local flow decisions", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Проверить путь VPN" : "Check VPN path", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Правила текущего подключения" : "Current connection rules",getString(R.string.recovery_title),getString(R.string.metering_title)}, (dialog, which) -> {
             if (which == 0) new PortalDialog(this, vault, this::reload).show();
             else if (which == 1) vpnSettings();
+            else if(which==6)meteringSettings();
             else if(which==5){try{RecoveryDialog.show(this,vault,selectedId);}catch(Exception e){error(getString(R.string.recovery_invalid));}}
             else { if (flowCapture != null) flowCapture.dismiss(); flowCapture = which == 2 ? FlowCaptureDialog.show(this) : which == 3 ? DiagnosticsDialog.show(this) : FlowPolicyDialog.show(this); }
         }).show();
@@ -321,6 +322,18 @@ public class MainActivity extends Activity {
             }
         } catch (JSONException ignored) { }
         preview(raw);
+    }
+    private void meteringSettings() {
+        int[] choice = {TunnelService.inheritMetering(this) ? 1 : 0};
+        new AlertDialog.Builder(this).setTitle(R.string.metering_title)
+            .setSingleChoiceItems(new String[]{getString(R.string.metering_always), getString(R.string.metering_inherit)}, choice[0], (d, w) -> choice[0] = w)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(android.R.string.ok, (d, w) -> {
+                boolean inherit = choice[0] == 1;
+                if (inherit == TunnelService.inheritMetering(this)) return;
+                TunnelService.setInheritMetering(this, inherit);
+                if (TunnelService.active) Toast.makeText(this, R.string.metering_next_connection, Toast.LENGTH_LONG).show();
+            }).show();
     }
     private void vpnSettings() {
         String state = TunnelService.active ? getString(R.string.always_status, TunnelService.alwaysOn, TunnelService.lockdown) : getString(R.string.always_status_unknown);

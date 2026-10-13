@@ -128,4 +128,8 @@
     <string name="no_selected_profile">No profile selected</string>
     <string name="portal_renew">Renew portal access</string>
     <string name="portal_renewed">Portal access renewed. VPN credentials have an independent lifetime.</string>
+    <string name="metering_title">VPN data usage</string>
+    <string name="metering_always">Always metered (Android default): apps save data on any network</string>
+    <string name="metering_inherit">Same as the current network: unmetered over Wi-Fi, metered over mobile data</string>
+    <string name="metering_next_connection">Applies the next time the VPN connects.</string>
 </resources>

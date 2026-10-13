@@ -175,6 +175,28 @@ final class NetworkAcceptance {
         awaitDeclared(cm, previous, "after restoring " + radio, 120000);
         await(2, 75000); // the TUN and its VPN network are retained
     }
+    /** The user setting switches the VPN between Android's always-metered default and the
+     *  metering of its underlying network. Android fixes metering when it registers the VPN
+     *  network, so each value is checked on a new connection. */
+    private static void meteringFollowsSetting(Instrumentation test) throws Exception {
+        Context context = test.getTargetContext();
+        android.net.ConnectivityManager cm = context.getSystemService(android.net.ConnectivityManager.class);
+        try {
+            for (boolean inherit : new boolean[]{true, false}) {
+                TunnelService.setInheritMetering(context, inherit);
+                context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP));
+                await(0, 10000);
+                for (int i = 0; i < 100 && TunnelService.active; i++) Thread.sleep(100);
+                Thread.sleep(300);
+                connect(context);
+                android.net.Network network = physical(cm), vpn = cm.getActiveNetwork();
+                android.net.NetworkCapabilities physicalCaps = network == null ? null : cm.getNetworkCapabilities(network), vpnCaps = vpn == null ? null : cm.getNetworkCapabilities(vpn);
+                check(physicalCaps != null && vpnCaps != null && vpnCaps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN), "Metering prerequisite: VPN over a physical network");
+                boolean expected = inherit && physicalCaps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+                check(vpnCaps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == expected, "VPN metering follows the setting (inherit=" + inherit + "): VPN " + vpnCaps + " over " + physicalCaps);
+            }
+        } finally { TunnelService.setInheritMetering(context, false); }
+    }
     static void run(Instrumentation test) throws Exception {
         Context context = test.getTargetContext();
         File source = new File(context.getCacheDir(), "vpn-fixture.json");
@@ -275,7 +297,7 @@ final class NetworkAcceptance {
             check(!TunnelService.active, "Offline startup can be cancelled");
             // Last: the handoff replaces the emulator's network for later checks.
             vault.write(new JSONObject().put("default", "acceptance").put("profiles", new JSONArray().put(new JSONObject().put("id", "acceptance").put("profile", profile)))); connect(context);
-            underlyingFollowsHandoff(test); verifyTraffic(fixture);
+            meteringFollowsSetting(test); underlyingFollowsHandoff(test); verifyTraffic(fixture);
             context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP));
             await(0, 10000);
 

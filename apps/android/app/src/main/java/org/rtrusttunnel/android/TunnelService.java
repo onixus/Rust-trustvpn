@@ -13,7 +13,7 @@ public final class TunnelService extends VpnService {
     static final String STOP = "org.rtrusttunnel.android.STOP";
     /** Reconnect only while this app is still the system Always-on VPN; see alwaysOnSessionLost. */
     static final String RECOVER = "org.rtrusttunnel.android.RECOVER";
-    private static final String STATE = "tunnel", ALWAYS_ON_SESSION = "always_on_session";
+    private static final String STATE = "tunnel", ALWAYS_ON_SESSION = "always_on_session", INHERIT_METERING = "inherit_metering";
     static volatile String problem = "";
     static volatile boolean active;
     static volatile boolean alwaysOn, lockdown;
@@ -60,6 +60,17 @@ public final class TunnelService extends VpnService {
      */
     static boolean alwaysOnSessionLost(Context context) {
         return !active && context.getSharedPreferences(STATE, MODE_PRIVATE).getBoolean(ALWAYS_ON_SESSION, false);
+    }
+    /** Android treats a VPN as metered unless it opts out. The opt-out makes the VPN
+     *  follow its underlying network: unmetered over Wi-Fi, metered over mobile data. */
+    static boolean inheritMetering(Context context) {
+        return context.getSharedPreferences(STATE, MODE_PRIVATE).getBoolean(INHERIT_METERING, false);
+    }
+    /** Android fixes metering when it registers the VPN network and updates a re-established
+     *  TUN in place, so this applies from the next connection. Reconnecting here would open
+     *  a window without the tunnel. */
+    static void setInheritMetering(Context context, boolean value) {
+        context.getSharedPreferences(STATE, MODE_PRIVATE).edit().putBoolean(INHERIT_METERING, value).apply();
     }
     private static void rememberAlwaysOn(Context context, boolean value) {
         context.getSharedPreferences(STATE, MODE_PRIVATE).edit().putBoolean(ALWAYS_ON_SESSION, value).apply();
@@ -138,6 +149,7 @@ public final class TunnelService extends VpnService {
     private volatile boolean clockInvalid;
     private volatile String requestedId, receiptKey="", policyKey="";
     private String adapterKey="";
+    private boolean meteringInherited;
     private int boot;
     static boolean accessBlocked(){TunnelService s=running;return s!=null && s.accessHeld;}
     static Network portalRecoveryNetwork(){TunnelService s=running;return s!=null && s.accessHeld && !s.stopping?s.underlying:null;}
@@ -182,7 +194,7 @@ public final class TunnelService extends VpnService {
         });
     }
     private void connect(String profileId)throws Exception {
-        requestedId=profileId;boot=OfflineLease.boot(this);
+        requestedId=profileId;boot=OfflineLease.boot(this);meteringInherited=inheritMetering(this);
         callback=new ConnectivityManager.NetworkCallback(){
             private LinkProperties properties;
             private void changed(){changed(null);}
@@ -208,7 +220,7 @@ public final class TunnelService extends VpnService {
     private Network[] underlyingNetworks(){Network network=underlying;return network==null?new Network[]{}:new Network[]{network};}
     private ParcelFileDescriptor establish(JSONObject plan,AppRouting apps,boolean guard)throws Exception {
         Builder builder=new Builder().setSession("R-TrustTunnel").setMtu(plan.getInt("mtu")).addAddress("169.254.254.2",32).setBlocking(false)
-            .setUnderlyingNetworks(underlyingNetworks());
+            .setUnderlyingNetworks(underlyingNetworks()).setMetered(!meteringInherited);
         if(guard || plan.getBoolean("ipv6"))builder.addAddress("fd00:5254::2",128);
         if(guard){builder.addRoute("0.0.0.0",0).addRoute("::",0);}else{JSONArray routes=plan.getJSONArray("routes");for(int i=0;i<routes.length();i++){String[] route=routes.getString(i).split("/");builder.addRoute(route[0],Integer.parseInt(route[1]));}}
         apps.apply(builder,getPackageManager());JSONArray dns=plan.getJSONArray("dns");for(int i=0;i<dns.length();i++)builder.addDnsServer(dns.getString(i));
