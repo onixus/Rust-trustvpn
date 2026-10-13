@@ -277,13 +277,18 @@ To sign a release without exposing the private key to CI:
 python3 scripts/sign-android.py \
   --input dist/android/R-TrustTunnel-Android-unsigned.apk \
   --output dist/android/R-TrustTunnel-Android-preview.apk \
-  --keystore /private/signing/android.p12 \
-  --password-file /private/signing/android-password.txt \
+  --keystore-properties apps/android/keystore.properties \
   --apksigner-jar /path/to/android-sdk/build-tools/36.0.0/lib/apksigner.jar
 ```
 
-The key and password files must be owner-only regular files. The script verifies
-the APK signature and writes a SHA256 sidecar. Keep an encrypted offline backup
+`keystore.properties` is the same file Gradle uses (`storeFile`, `storePassword`,
+`keyAlias`, `keyPassword`); `storeFile` is relative to its directory. Both files
+must be owner-only regular files and stay untracked. Passwords reach apksigner
+only through its environment. The script verifies the signature, requires the
+release certificate (SHA-256 `4aa431cd…77306af`, used since 0.6.0) and writes a
+SHA256 sidecar. Releases up to 0.5.x were signed with a retired key: those
+installations cannot update in place and must be reinstalled, which removes
+their local profiles. Keep an encrypted offline backup
 of the signing key and password; losing them prevents updates to that app identity.
 
 ## Home Screen widget
