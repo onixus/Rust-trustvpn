@@ -36,7 +36,7 @@ public class MainActivity extends Activity {
                 int nativeState = state.optInt("state", 0);
                 CharSequence message = !TunnelService.problem.isEmpty() ? TunnelService.problem : nativeState == 2 ? getString(R.string.connected) : nativeState == 1 ? getString(R.string.connecting) : nativeState == 3 ? getString(R.string.reconnecting) : nativeState == 4 ? getString(R.string.connection_failed) : "";
                 boolean detailed = nativeState == 2 && TunnelService.problem.isEmpty();
-                if (detailed) message = ObservationStatus.summary(MainActivity.this, state.optJSONObject("observations"));
+                if (detailed) { CharSequence checks = ObservationStatus.summary(MainActivity.this, state.optJSONObject("observations")); if (checks.length() > 0) message = checks; }
                 JSONObject recovery=state.optJSONObject("recovery");if(nativeState==2 && recovery!=null && recovery.optInt("selected_index")>0)message=android.text.TextUtils.concat(message,detailed?"\n":" · ",getString(R.string.recovery_backup_active,recovery.optInt("selected_index")));
                 if (message.length() == 0) message = TunnelService.active ? getString(R.string.starting_vpn) : getString(R.string.disconnected);
                 showStatus(message, detailed);
