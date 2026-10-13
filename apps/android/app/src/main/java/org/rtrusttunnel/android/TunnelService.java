@@ -45,8 +45,10 @@ public final class TunnelService extends VpnService {
     static void refreshPolicy() {
         TunnelService service = running;
         if (service == null) return;
-        boolean previous = alwaysOn;
+        boolean previous = alwaysOn, previousLockdown = lockdown;
         alwaysOn = service.isAlwaysOn(); lockdown = service.isLockdownEnabled();
+        // Lockdown decides whether a managed TUN routes only the selection or everything.
+        if (previousLockdown != lockdown && active) service.lockdownChanged();
         if (previous == alwaysOn || !active) return;
         rememberAlwaysOn(service, alwaysOn);
         service.getSystemService(NotificationManager.class).notify(1, service.notification());
@@ -155,6 +157,7 @@ public final class TunnelService extends VpnService {
     private int boot;
     static boolean accessBlocked(){TunnelService s=running;return s!=null && s.accessHeld;}
     static Network portalRecoveryNetwork(){TunnelService s=running;return s!=null && s.accessHeld && !s.stopping?s.underlying:null;}
+    private void lockdownChanged(){synchronized(networkEvents){if(callback==null || stopping)return;networkEpoch++;transitioning=true;requestRefresh();}}
     static void recoverySettingsChanged(){TunnelService s=running;if(s!=null)synchronized(s.networkEvents){s.logicalSession=System.nanoTime() & Long.MAX_VALUE;s.networkEpoch++;s.transitioning=true;s.requestRefresh();}}
     public synchronized boolean accessValid() {
         if(stopping || transitioning || accessHeld) return false;
@@ -220,13 +223,19 @@ public final class TunnelService extends VpnService {
     }
     /** Android derives the VPN's transports, bandwidth and roaming state from this declaration. */
     private Network[] underlyingNetworks(){Network network=underlying;return network==null?new Network[]{}:new Network[]{network};}
-    private ParcelFileDescriptor establish(JSONObject plan,AppRouting apps,boolean guard)throws Exception {
+    private ParcelFileDescriptor establish(JSONObject plan,AppRouting apps,boolean full)throws Exception {
         Builder builder=new Builder().setSession("R-TrustTunnel").setMtu(plan.getInt("mtu")).addAddress("169.254.254.2",32).setBlocking(false)
             .setUnderlyingNetworks(underlyingNetworks()).setMetered(!meteringInherited);
-        if(guard || plan.getBoolean("ipv6"))builder.addAddress("fd00:5254::2",128);
-        if(guard){builder.addRoute("0.0.0.0",0).addRoute("::",0);}else{JSONArray routes=plan.getJSONArray("routes");for(int i=0;i<routes.length();i++){String[] route=routes.getString(i).split("/");builder.addRoute(route[0],Integer.parseInt(route[1]));}}
+        if(full || plan.getBoolean("ipv6"))builder.addAddress("fd00:5254::2",128);
+        if(full){builder.addRoute("0.0.0.0",0).addRoute("::",0);}else{JSONArray routes=plan.getJSONArray("routes");for(int i=0;i<routes.length();i++){String[] route=routes.getString(i).split("/");builder.addRoute(route[0],Integer.parseInt(route[1]));}}
         apps.apply(builder,getPackageManager());JSONArray dns=plan.getJSONArray("dns");for(int i=0;i<dns.length();i++)builder.addDnsServer(dns.getString(i));
         ParcelFileDescriptor next=builder.establish();if(next==null)throw new IllegalStateException("VPN permission revoked");return next;
+    }
+    /** Managed access is unknown or held: every routed family goes to a TUN nobody reads. */
+    private void holdBlocked(AppRouting apps)throws Exception {
+        if(tun!=null && adapterKey.isEmpty())return;
+        JSONObject blocking=new JSONObject().put("mtu",1500).put("ipv6",true).put("dns",new JSONArray().put("198.18.0.53"));
+        ParcelFileDescriptor next=establish(blocking,apps,true),old=tun;tun=next;adapterKey="";if(old!=null)old.close();
     }
     private void rebuild(long epoch)throws Exception {
         if(stopping)return;transitioning=true;
@@ -234,16 +243,13 @@ public final class TunnelService extends VpnService {
         ProfileVault vault=new ProfileVault(this);
         ProfileVault.Admission admission=vault.admission(requestedId);requestedId=admission.primary.id;
         boolean guard=!admission.primary.localPolicy;
-        if(tun==null && guard){
-            JSONObject blocking=new JSONObject().put("mtu",1500).put("ipv6",true).put("dns",new JSONArray().put("198.18.0.53"));
-            tun=establish(blocking,admission.apps,true);adapterKey="";
-        }
+        if(tun==null && guard)holdBlocked(admission.apps);
         ProfileVault.ConnectionSet set=vault.connectionSet(requestedId);
         if(guard==set.profiles.get(0).localPolicy)throw new IllegalStateException("Ownership changed");
         String nextReceipts=receipts(set);synchronized(this){if(!nextReceipts.equals(receiptKey)){lastWall=System.currentTimeMillis();clockInvalid=false;}receiptKey=nextReceipts;policyKey=policies(set);candidates=java.util.Collections.unmodifiableList(set.profiles);}
         long wall=System.currentTimeMillis(),elapsed=SystemClock.elapsedRealtime();
-        if(guard && clockInvalid){accessHeld=true;problem=getString(R.string.access_refresh_required);return;}
-        for(ProfileVault.Selection entry:candidates)if(!entry.localPolicy && !OfflineLease.valid(entry.lease,wall,elapsed,boot)){accessHeld=true;problem=getString(R.string.access_refresh_required);return;}
+        if(guard && clockInvalid){holdBlocked(set.apps);accessHeld=true;problem=getString(R.string.access_refresh_required);return;}
+        for(ProfileVault.Selection entry:candidates)if(!entry.localPolicy && !OfflineLease.valid(entry.lease,wall,elapsed,boot)){if(guard)holdBlocked(set.apps);accessHeld=true;problem=getString(R.string.access_refresh_required);return;}
         accessHeld=false;Network network=underlying;if(network==null){problem="";return;}
         JSONArray local=localPrefixes(network), profiles=new JSONArray(), unavailable=new JSONArray();JSONObject firstPlan=null;
         for(ProfileVault.Selection entry:candidates){
@@ -255,8 +261,13 @@ public final class TunnelService extends VpnService {
             if(resolved.length()>0)endpoint.put("addresses",resolved);else unavailable.put(profiles.length());profiles.put(profile);
         }
         if(stopping || epoch!=networkEpoch)return;
-        String adapter=new JSONObject().put("mtu",firstPlan.getInt("mtu")).put("dns",firstPlan.getJSONArray("dns")).put("apps",set.apps.json()).put("guard",guard).put("routes",guard?new JSONArray():firstPlan.getJSONArray("routes")).put("ipv6",guard || firstPlan.getBoolean("ipv6")).toString();
-        if(tun==null || !adapter.equals(adapterKey)){ParcelFileDescriptor next=establish(firstPlan,set.apps,guard);ParcelFileDescriptor old=tun;tun=next;if(old!=null)old.close();adapterKey=adapter;}
+        // Connected managed sessions install the selected prefixes as OS routes, so
+        // traffic outside the selection keeps the native network path (DNS stays on the VPN).
+        // Under system lockdown Android drops that path, so the full TUN stays and
+        // the engine relays outside-selection flows over protected sockets.
+        boolean full=guard && isLockdownEnabled();
+        String adapter=new JSONObject().put("mtu",firstPlan.getInt("mtu")).put("dns",firstPlan.getJSONArray("dns")).put("apps",set.apps.json()).put("full",full).put("routes",full?new JSONArray():firstPlan.getJSONArray("routes")).put("ipv6",full || firstPlan.getBoolean("ipv6")).toString();
+        if(tun==null || !adapter.equals(adapterKey)){ParcelFileDescriptor next=establish(firstPlan,set.apps,full);ParcelFileDescriptor old=tun;tun=next;if(old!=null)old.close();adapterKey=adapter;}
         alwaysOn=isAlwaysOn();lockdown=isLockdownEnabled();rememberAlwaysOn(this,alwaysOn);
         if(recovering && !alwaysOn){disconnect();return;}
         if(firstPlan.getBoolean("require_lockdown") && (!alwaysOn || !lockdown)) {

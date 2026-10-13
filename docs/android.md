@@ -45,6 +45,12 @@ do not disable that protection or publish real profiles to create documentation.
   There is no direct resolver fallback. Mixed numeric/encrypted resolver lists,
   DoQ and DNS stamps are currently rejected. Domain routing uses correlated DNS
   answers; conflicting shared-IP identities conservatively stay on VPN.
+- Managed (portal) profiles keep a blocking full TUN while access is unknown or
+  held. Once connected, the planned prefixes are installed as OS routes, so
+  destinations outside the selection use the normal network path, as with
+  local profiles; DNS still goes to the VPN resolvers. Under system lockdown the full TUN stays,
+  because Android would drop that path; the engine then relays outside-selection
+  flows over protected sockets.
 - Hysteria 2 links and client YAML/JSON are detected automatically; see
   [protocol support and limits](hysteria2.md). JSON preserves the complete profile.
 - AmneziaWG `awg-quick` configurations are detected automatically; see
