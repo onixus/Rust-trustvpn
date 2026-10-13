@@ -38,7 +38,22 @@ final class NetworkAcceptance {
     }
     private static void connect(Context context) throws Exception {
         context.startForegroundService(new Intent(context, TunnelService.class));
-        await(2, 45000); awaitVpn(context);
+        await(2, 45000); awaitVpn(context); settle(context);
+    }
+    /** The emulator's Wi-Fi can pass validation only after the tunnel is up. Android then
+     *  makes it the default network and the service follows it with a reconnect, so traffic
+     *  checks wait for a validated physical network and a connected tunnel. */
+    static void settle(Context context) throws Exception {
+        android.net.ConnectivityManager cm = context.getSystemService(android.net.ConnectivityManager.class);
+        long end = SystemClock.elapsedRealtime() + 30000;
+        while (SystemClock.elapsedRealtime() < end) {
+            android.net.Network network = physical(cm);
+            android.net.NetworkCapabilities caps = network == null ? null : cm.getNetworkCapabilities(network);
+            if (caps != null && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)) break;
+            Thread.sleep(200);
+        }
+        Thread.sleep(1000); // the default switch and the service's network callback follow validation
+        await(2, 75000);
     }
     private static byte[] request(String address, int port, String request) throws Exception { return request(address, port, request, 5000); }
     private static byte[] request(String address, int port, String request, int connectTimeout) throws Exception {
