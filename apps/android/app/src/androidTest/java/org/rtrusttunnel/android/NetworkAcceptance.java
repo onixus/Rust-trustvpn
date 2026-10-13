@@ -118,14 +118,17 @@ final class NetworkAcceptance {
         try (ParcelFileDescriptor out = test.getUiAutomation().executeShellCommand(command);
              InputStream in = new ParcelFileDescriptor.AutoCloseInputStream(out)) { while (in.read() >= 0) { } }
     }
+    /** The physical network the service should use: the same ranking as TunnelService. */
     private static android.net.Network physical(android.net.ConnectivityManager cm) {
+        android.net.Network best = null; int bestRank = -1;
         for (android.net.Network n : cm.getAllNetworks()) {
             android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(n);
             if (caps != null && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_FOREGROUND)) return n;
+                && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_FOREGROUND)
+                && TunnelService.preference(caps) > bestRank) { best = n; bestRank = TunnelService.preference(caps); }
         }
-        return null;
+        return best;
     }
     private static final int[] PHYSICAL_TRANSPORTS = {android.net.NetworkCapabilities.TRANSPORT_WIFI, android.net.NetworkCapabilities.TRANSPORT_CELLULAR, android.net.NetworkCapabilities.TRANSPORT_ETHERNET};
     /** Waits until a validated physical network other than {@code previous} is in use
@@ -155,8 +158,9 @@ final class NetworkAcceptance {
      *  Wi-Fi to background mobile data and back to a new Wi-Fi network. */
     private static void underlyingFollowsHandoff(Instrumentation test) throws Exception {
         android.net.ConnectivityManager cm = test.getTargetContext().getSystemService(android.net.ConnectivityManager.class);
-        android.net.Network before = physical(cm);
-        android.net.NetworkCapabilities caps = before == null ? null : cm.getNetworkCapabilities(before);
+        // With Wi-Fi and mobile data both up, the VPN must ride the preferred network.
+        android.net.Network before = awaitDeclared(cm, null, "before handoff", 30000);
+        android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(before);
         check(caps != null && (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)), "Handoff prerequisite: Wi-Fi or mobile data in use, got " + caps);
         String radio = caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) ? "wifi" : "data";
         android.net.Network previous = before;

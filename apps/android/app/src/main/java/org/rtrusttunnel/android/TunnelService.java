@@ -103,6 +103,7 @@ public final class TunnelService extends VpnService {
     private Network availableNetwork() { return availableNetwork(null); }
     /** {@code lost} is skipped: getAllNetworks can still list a network while its onLost runs. */
     private Network availableNetwork(Network lost) {
+        Network best = null; int bestRank = -1;
         for (Network network : connectivity.getAllNetworks()) {
             if (network.equals(lost)) continue;
             NetworkCapabilities caps = connectivity.getNetworkCapabilities(network);
@@ -110,9 +111,20 @@ public final class TunnelService extends VpnService {
             // one (e.g. mobile data kept up next to Wi-Fi) rejects bindSocket with EPERM.
             if (caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND)) return network;
+                && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND)) {
+                int rank = preference(caps);
+                if (rank > bestRank) { best = network; bestRank = rank; }
+            }
         }
-        return null;
+        return best;
+    }
+    /** Mobile data can stay foreground next to Wi-Fi (e.g. for an MMS or carrier request),
+     *  and getAllNetworks has no order. Prefer what Android makes the default network:
+     *  validated, then unmetered, then not cellular. */
+    static int preference(NetworkCapabilities caps) {
+        return (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ? 4 : 0)
+            + (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) ? 2 : 0)
+            + (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ? 0 : 1);
     }
     private volatile boolean localPolicy;
     private volatile boolean localSource;
