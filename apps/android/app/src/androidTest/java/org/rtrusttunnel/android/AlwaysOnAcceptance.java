@@ -71,7 +71,7 @@ final class AlwaysOnAcceptance {
                 while (SystemClock.elapsedRealtime() < end && state() != 2) Thread.sleep(100);
                 check(state() == 2, "require_lockdown connects under Always-on with lockdown, got " + NativeCore.INSTANCE.status());
                 check(TunnelService.active && TunnelService.alwaysOn && TunnelService.lockdown && TunnelService.problem.isEmpty(), "Service reports Always-on and lockdown");
-                NetworkAcceptance.verifyTraffic(fixture);
+                NetworkAcceptance.settle(context); NetworkAcceptance.verifyTraffic(fixture);
                 return;
             }
             case "finish": {

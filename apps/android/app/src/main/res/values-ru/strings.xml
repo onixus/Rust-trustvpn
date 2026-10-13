@@ -128,4 +128,8 @@
     <string name="no_selected_profile">Профиль не выбран</string>
     <string name="portal_renew">Продлить доступ панели</string>
     <string name="portal_renewed">Доступ панели продлён. Срок VPN credentials проверяется отдельно.</string>
+    <string name="metering_title">Учёт трафика VPN</string>
+    <string name="metering_always">Всегда лимитный (по умолчанию в Android): приложения экономят трафик в любой сети</string>
+    <string name="metering_inherit">Как у текущей сети: безлимитный по Wi-Fi, лимитный по мобильной сети</string>
+    <string name="metering_next_connection">Применится при следующем подключении VPN.</string>
 </resources>

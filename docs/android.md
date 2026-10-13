@@ -165,6 +165,13 @@ IPv6 acceptance on the phone or support for every Huawei firmware.
 
 ## Configuration and remaining release work
 
+**Settings → VPN data usage** controls how other apps see the VPN's metering.
+The default keeps Android's behavior for VPNs: always metered, so apps save data
+even over Wi-Fi. "Same as the current network" calls `setMetered(false)`: the VPN
+is then unmetered over unmetered Wi-Fi and metered over mobile data. Android fixes
+metering when it registers the VPN network, so a change applies from the next
+connection; the app does not drop a running tunnel to apply it.
+
 The native UI supports English and Russian system locales, offline camera/image
 QR import, and the existing HTTPS portal v2 enrollment and profile exchange API.
 Use **Server profiles** to enter a one-time code created in the server UI, grant
