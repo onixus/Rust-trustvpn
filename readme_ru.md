@@ -8,7 +8,7 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 
 > **Статус проекта: development preview, 7 октября 2026 года.**
 >
-> Исходники workspace — неопубликованный preview-кандидат **0.6.0** (update sequence 10, не production-ready; см. [кандидат v0.6.0](docs/releases/v0.6.0.md)). Последняя опубликованная desktop-пересборка — **v0.5.0-rebuild.9** от 6 октября; Android и iOS артефакты остаются в исходном релизе **v0.5.0**. Rebuild исправляет идентичность desktop update/rollback sequence и собран уже после разделения клиентского и серверного репозиториев. См. [описание v0.5.0](docs/releases/v0.5.0.md).
+> Исходники workspace — **0.6.1** (update sequence 11, не production-ready; см. [v0.6.1](docs/releases/v0.6.1.md) и [кандидат v0.6.0](docs/releases/v0.6.0.md)). Последняя опубликованная desktop-пересборка — **v0.5.0-rebuild.9** от 6 октября; Android и iOS артефакты остаются в исходном релизе **v0.5.0**. Rebuild исправляет идентичность desktop update/rollback sequence и собран уже после разделения клиентского и серверного репозиториев. См. [описание v0.5.0](docs/releases/v0.5.0.md).
 
 ## Скачать
 
@@ -171,7 +171,7 @@ SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS
 5. Для fail-closed поведения после гибели процесса включите в Android **Always-on VPN** и **Block connections without VPN**.
 6. Server profiles можно регистрировать и синхронизировать через portal integration.
 
-В текущих исходниках заданы Android minSdk 29, targetSdk 36, versionCode 60001 и versionName 0.6.0-preview.1 (неопубликованный кандидат; опубликованный APK по-прежнему 0.5.0).
+В текущих исходниках заданы Android minSdk 29, targetSdk 36, versionCode 60101 и versionName 0.6.1-preview.1 ([v0.6.1](docs/releases/v0.6.1.md)); APK подписывается релизным ключом, введённым в v0.6.0, и не обновляет установки 0.5.0 и старше.
 
 См. [Android](docs/android.md) и [обмен профилями](docs/portal.md).
 
