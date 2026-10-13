@@ -100,8 +100,11 @@ public final class TunnelService extends VpnService {
         });
         return START_STICKY;
     }
-    private Network availableNetwork() {
+    private Network availableNetwork() { return availableNetwork(null); }
+    /** {@code lost} is skipped: getAllNetworks can still list a network while its onLost runs. */
+    private Network availableNetwork(Network lost) {
         for (Network network : connectivity.getAllNetworks()) {
+            if (network.equals(lost)) continue;
             NetworkCapabilities caps = connectivity.getNetworkCapabilities(network);
             // Only a foreground network accepts sockets from an ordinary app: a background
             // one (e.g. mobile data kept up next to Wi-Fi) rejects bindSocket with EPERM.
@@ -170,9 +173,13 @@ public final class TunnelService extends VpnService {
         requestedId=profileId;boot=OfflineLease.boot(this);
         callback=new ConnectivityManager.NetworkCallback(){
             private LinkProperties properties;
-            private void changed(){synchronized(networkEvents){if(callback!=this || stopping)return;underlying=availableNetwork();properties=underlying==null?null:connectivity.getLinkProperties(underlying);networkEpoch++;transitioning=true;NativeCore.INSTANCE.networkChanged();requestRefresh();}}
+            private void changed(){changed(null);}
+            private void changed(Network lost){synchronized(networkEvents){if(callback!=this || stopping)return;underlying=availableNetwork(lost);properties=underlying==null?null:connectivity.getLinkProperties(underlying);
+                // A retained TUN keeps the network declared at establish. Redeclare at once:
+                // the rebuild may wait for the old session to stop. Before establish this is a no-op.
+                setUnderlyingNetworks(underlyingNetworks());networkEpoch++;transitioning=true;NativeCore.INSTANCE.networkChanged();requestRefresh();}}
             @Override public void onAvailable(Network n){if(!java.util.Objects.equals(underlying,availableNetwork()))changed();}
-            @Override public void onLost(Network n){if(n.equals(underlying))changed();}
+            @Override public void onLost(Network n){if(n.equals(underlying))changed(n);}
             @Override public void onCapabilitiesChanged(Network n,NetworkCapabilities caps){if(!java.util.Objects.equals(underlying,availableNetwork()))changed();}
             @Override public void onLinkPropertiesChanged(Network n,LinkProperties next){if(n.equals(underlying) && !java.util.Objects.equals(properties,next))changed();}
         };
@@ -185,9 +192,11 @@ public final class TunnelService extends VpnService {
         LinkProperties properties=network==null?null:connectivity.getLinkProperties(network);if(properties==null)return null;
         JSONArray result=new JSONArray();for(LinkAddress link:properties.getLinkAddresses())if(link.getAddress() instanceof Inet4Address){if(link.getPrefixLength()==0)return null;result.put(link.getAddress().getHostAddress()+"/"+link.getPrefixLength());if(result.length()>64)throw new IllegalArgumentException("Local prefix limit");}return result;
     }
+    /** Android derives the VPN's transports, bandwidth and roaming state from this declaration. */
+    private Network[] underlyingNetworks(){Network network=underlying;return network==null?new Network[]{}:new Network[]{network};}
     private ParcelFileDescriptor establish(JSONObject plan,AppRouting apps,boolean guard)throws Exception {
         Builder builder=new Builder().setSession("R-TrustTunnel").setMtu(plan.getInt("mtu")).addAddress("169.254.254.2",32).setBlocking(false)
-            .setUnderlyingNetworks(underlying==null?new Network[]{}:new Network[]{underlying});
+            .setUnderlyingNetworks(underlyingNetworks());
         if(guard || plan.getBoolean("ipv6"))builder.addAddress("fd00:5254::2",128);
         if(guard){builder.addRoute("0.0.0.0",0).addRoute("::",0);}else{JSONArray routes=plan.getJSONArray("routes");for(int i=0;i<routes.length();i++){String[] route=routes.getString(i).split("/");builder.addRoute(route[0],Integer.parseInt(route[1]));}}
         apps.apply(builder,getPackageManager());JSONArray dns=plan.getJSONArray("dns");for(int i=0;i<dns.length();i++)builder.addDnsServer(dns.getString(i));

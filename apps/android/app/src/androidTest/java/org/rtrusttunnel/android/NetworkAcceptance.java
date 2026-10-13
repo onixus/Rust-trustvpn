@@ -2,6 +2,7 @@ package org.rtrusttunnel.android;
 
 import android.app.*;
 import android.content.*;
+import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import java.io.*;
 import java.net.*;
@@ -113,6 +114,63 @@ final class NetworkAcceptance {
         }
         vault.write(new JSONObject().put("default","acceptance").put("profiles",new JSONArray().put(new JSONObject().put("id","acceptance").put("profile",base))));
     }
+    private static void shell(Instrumentation test, String command) throws Exception {
+        try (ParcelFileDescriptor out = test.getUiAutomation().executeShellCommand(command);
+             InputStream in = new ParcelFileDescriptor.AutoCloseInputStream(out)) { while (in.read() >= 0) { } }
+    }
+    private static android.net.Network physical(android.net.ConnectivityManager cm) {
+        for (android.net.Network n : cm.getAllNetworks()) {
+            android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(n);
+            if (caps != null && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_FOREGROUND)) return n;
+        }
+        return null;
+    }
+    private static final int[] PHYSICAL_TRANSPORTS = {android.net.NetworkCapabilities.TRANSPORT_WIFI, android.net.NetworkCapabilities.TRANSPORT_CELLULAR, android.net.NetworkCapabilities.TRANSPORT_ETHERNET};
+    /** Waits until a validated physical network other than {@code previous} is in use
+     *  and the VPN declares its transports. Metering is not compared: the Builder leaves
+     *  the VPN metered by default. */
+    private static android.net.Network awaitDeclared(android.net.ConnectivityManager cm, android.net.Network previous, String stage, long timeout) throws Exception {
+        long end = SystemClock.elapsedRealtime() + timeout;
+        String last = "no VPN";
+        while (SystemClock.elapsedRealtime() < end) {
+            android.net.Network current = physical(cm), vpn = cm.getActiveNetwork();
+            android.net.NetworkCapabilities physicalCaps = current == null ? null : cm.getNetworkCapabilities(current), vpnCaps = vpn == null ? null : cm.getNetworkCapabilities(vpn);
+            if (physicalCaps != null && vpnCaps != null && vpnCaps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) {
+                last = "VPN " + vpnCaps + " over " + physicalCaps;
+                // Wait for validation too: later checks open direct sockets on this network.
+                boolean declared = !current.equals(previous) && physicalCaps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+                for (int transport : PHYSICAL_TRANSPORTS) declared &= vpnCaps.hasTransport(transport) == physicalCaps.hasTransport(transport);
+                if (declared) return current;
+            }
+            Thread.sleep(200);
+        }
+        throw new AssertionError("VPN does not declare the underlying network " + stage + ": " + last);
+    }
+    /** Android derives the VPN's transports, bandwidth and roaming state from its declared
+     *  underlying network. A TUN retained across a handoff must not keep declaring the
+     *  lost one: the VPN then reports no physical transport.
+     *  Turning the current network off and on again hands off twice: on the emulator from
+     *  Wi-Fi to background mobile data and back to a new Wi-Fi network. */
+    private static void underlyingFollowsHandoff(Instrumentation test) throws Exception {
+        android.net.ConnectivityManager cm = test.getTargetContext().getSystemService(android.net.ConnectivityManager.class);
+        android.net.Network before = physical(cm);
+        android.net.NetworkCapabilities caps = before == null ? null : cm.getNetworkCapabilities(before);
+        check(caps != null && (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)), "Handoff prerequisite: Wi-Fi or mobile data in use, got " + caps);
+        String radio = caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) ? "wifi" : "data";
+        android.net.Network previous = before;
+        try {
+            shell(test, "svc " + radio + " disable");
+            long end = SystemClock.elapsedRealtime() + 15000;
+            while (before.equals(physical(cm)) && SystemClock.elapsedRealtime() < end) Thread.sleep(100);
+            check(!before.equals(physical(cm)), "Handoff prerequisite: " + radio + " disabled");
+            if (physical(cm) != null) previous = awaitDeclared(cm, before, "after losing " + radio, 30000);
+        } finally { shell(test, "svc " + radio + " enable"); }
+        // The emulator can take over a minute to rejoin its Wi-Fi network.
+        awaitDeclared(cm, previous, "after restoring " + radio, 120000);
+        await(2, 75000); // the TUN and its VPN network are retained
+    }
     static void run(Instrumentation test) throws Exception {
         Context context = test.getTargetContext();
         File source = new File(context.getCacheDir(), "vpn-fixture.json");
@@ -211,6 +269,11 @@ final class NetworkAcceptance {
             context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP));
             for (int i = 0; i < 100 && TunnelService.active; i++) Thread.sleep(100);
             check(!TunnelService.active, "Offline startup can be cancelled");
+            // Last: the handoff replaces the emulator's network for later checks.
+            vault.write(new JSONObject().put("default", "acceptance").put("profiles", new JSONArray().put(new JSONObject().put("id", "acceptance").put("profile", profile)))); connect(context);
+            underlyingFollowsHandoff(test); verifyTraffic(fixture);
+            context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP));
+            await(0, 10000);
 
         } finally {
             if (TunnelService.active) { context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP)); await(0, 10000); }
