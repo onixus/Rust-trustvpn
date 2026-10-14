@@ -51,7 +51,8 @@ final class SlideButton extends View {
     void set(String text, int knob, int iconTint, boolean outline, boolean reverse, int track, int trackStroke, int labelColor) {
         if (text.equals(this.text) && knob == this.knob && iconTint == this.iconTint && outline == this.outline && reverse == this.reverse
             && track == this.track && trackStroke == this.trackStroke && labelColor == this.labelColor) return;
-        if (reverse != this.reverse) { stop(); progress = 0; }
+        // A direction change mid-drag must not turn the partial drag into a full one.
+        if (reverse != this.reverse) { stop(); progress = 0; dragging = false; }
         this.text = text; this.knob = knob; this.iconTint = iconTint; this.outline = outline; this.reverse = reverse;
         this.track = track; this.trackStroke = trackStroke; this.labelColor = labelColor;
         setContentDescription(text);

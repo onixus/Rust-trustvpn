@@ -504,7 +504,7 @@ public class MainActivity extends Activity {
         } else {
             // Unfolded: one half holds the state and the five checks, the other the profiles
             // and the slider. The halves follow the fold: side by side when it runs top to
-            // bottom, stacked when it runs across. The border sits on the screen's middle.
+            // bottom, stacked when it runs across. The border sits on the window's middle.
             boolean sideBySide = foldVertical();
             if (sideBySide) root.setOrientation(LinearLayout.HORIZONTAL);
             LinearLayout first = column(); first.addView(top);
@@ -526,7 +526,7 @@ public class MainActivity extends Activity {
         fillStrip();
         return root;
     }
-    /** Ends the first half 12 dp before the screen's middle along the split axis. */
+    /** Ends the first half 12 dp before the window's middle along the split axis (full screen: the fold). */
     private void alignToFold(View root, View first, boolean sideBySide) {
         int[] at = new int[2]; first.getLocationOnScreen(at);
         android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
