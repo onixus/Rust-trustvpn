@@ -26,7 +26,7 @@ try:
     command(str(python),'-I','-c','import ctypes,http.server,socket,json')
     shutil.copytree(ROOT/'dist/native-preview-windows',WORK/'payload')
     shutil.copy2(ROOT/'scripts/install-windows-service.ps1',WORK/'payload/install-windows-service.ps1')
-    for name in ['windows_full_e2e.py','windows_service_e2e.py']:shutil.copy2(ROOT/'ci'/name,WORK/name)
+    for name in ['windows_full_e2e.py','windows_service_e2e.py','windows_recovery.py']:shutil.copy2(ROOT/'ci'/name,WORK/name)
     shutil.copy2(sys.argv[1],WORK/'fixture.json')
     sid=ps('[Security.Principal.WindowsIdentity]::GetCurrent().User.Value')
     installer=WORK/'payload/install-windows-service.ps1'
