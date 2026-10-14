@@ -2,6 +2,7 @@ mod boot;
 mod broker;
 mod endpoint;
 mod full;
+mod probe;
 mod routes;
 use full::FullRoutes;
 enum Guard {
@@ -396,19 +397,30 @@ async fn serve(
     let mut state = State::Connected;
     monitor.transition(true, rtrust_control::observations::now_ms());
     let mut netwatch = crate::netwatch::Watch::new(routes::DEVICE);
+    let plan = dns.map(|dns| probe::Plan {
+        dns,
+        endpoints: failover
+            .endpoint_addresses()
+            .iter()
+            .filter_map(|a| a.parse::<std::net::SocketAddr>().ok().map(|a| a.ip()))
+            .collect(),
+    });
+    let mut probes = crate::sysprobe::Runner::default();
     loop {
         let mut pending = Box::pin(read::<Request>(&mut stream));
         let request = loop {
             tokio::select! {
                 biased;
-                _=async{freshness.as_mut().unwrap().expired().await},if freshness.is_some() && !access_expired=>{endpoint_lease.suspend();workers.stop().await;access_expired=true;state=State::Blocked;monitor.transition(false,rtrust_control::observations::now_ms());},
+                _=async{freshness.as_mut().unwrap().expired().await},if freshness.is_some() && !access_expired=>{endpoint_lease.suspend();workers.stop().await;access_expired=true;state=State::Blocked;monitor.transition(false,rtrust_control::observations::now_ms());probes.cancel();},
                 request = &mut pending => break request?,
                 change = netwatch.next() => match change {
                     crate::netwatch::Change::Network => {
+                        probes.cancel();
                         monitor.network_changed(rtrust_control::observations::now_ms());
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     },
                     crate::netwatch::Change::Resumed => {
+                        probes.cancel();
                         monitor.resumed(rtrust_control::observations::now_ms());
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     },
@@ -416,6 +428,7 @@ async fn serve(
                 result = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() => {
                     endpoint_lease.suspend();
                     workers.tunnel = None;
+                    probes.cancel();
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
                     endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     // A flapping endpoint must not reset the backoff indefinitely.
@@ -438,6 +451,7 @@ async fn serve(
                             workers.tunnel = Some(tokio::spawn(prepared.run()));
                             endpoint_lease.resume();
                             connected_since = Instant::now();
+                            probes.cancel();
                             state = State::Connected; monitor.transition(true, rtrust_control::observations::now_ms());
                             endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                             continue;
@@ -450,6 +464,15 @@ async fn serve(
                     }
                     workers.retry(failover.current(), &mut retry_delay, full);
                 }
+                // Started only by this timer while connected in full mode; Status never probes.
+                tick = probes.next(), if plan.is_some() => match tick {
+                    crate::sysprobe::Tick::Due => if state == State::Connected && !access_expired {
+                        probes.start(monitor.generation(), probe::collect(plan.clone().unwrap()));
+                    },
+                    crate::sysprobe::Tick::Done(generation, result) => {
+                        monitor.apply_system(generation, result, rtrust_control::observations::now_ms());
+                    },
+                },
             }
         };
         drop(pending);
@@ -545,7 +568,7 @@ mod observation_tests {
         .unwrap();
         let response: Response = read(&mut client).await.unwrap();
         assert_eq!(response.state, State::Idle);
-        assert!(!response.capabilities.system_probes);
+        assert!(response.capabilities.system_probes);
         task.await.unwrap().unwrap();
     }
 }

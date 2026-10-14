@@ -5,6 +5,7 @@ pub mod dns;
 mod events;
 mod firewall;
 mod power;
+mod probe;
 mod route_table;
 mod routes;
 mod service;

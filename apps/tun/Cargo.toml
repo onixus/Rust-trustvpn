@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 rtrust-profile.workspace = true
 rtrust-engine.workspace = true
-tokio = { workspace = true, features = ["signal"] }
+tokio = { workspace = true, features = ["signal", "process"] }
 smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp"] }
 futures-util = "0.3"
 rand = "0.9"
@@ -40,3 +40,6 @@ system-configuration-sys = "0.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

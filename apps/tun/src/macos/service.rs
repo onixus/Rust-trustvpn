@@ -89,6 +89,8 @@ struct Control {
     commands: mpsc::Receiver<Envelope>,
     initial: Option<oneshot::Sender<Response>>,
     shutdown: tokio::sync::watch::Receiver<bool>,
+    /// Whole-computer sessions only; tests never probe the host.
+    probe: Option<super::probe::Plan>,
 }
 type ActorTask = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 struct Envelope {
@@ -488,6 +490,7 @@ async fn serve(
                 commands,
                 initial: Some(initial),
                 shutdown: shutdown_events,
+                probe: None,
             },
         )
         .await;
@@ -594,6 +597,7 @@ async fn start(
         mut commands,
         mut initial,
         mut shutdown,
+        probe: _,
     } = control;
     if shutdown_requested(&shutdown) {
         return Ok(());
@@ -718,14 +722,14 @@ async fn start(
     if shutdown_requested(&shutdown) || initial.as_ref().is_some_and(oneshot::Sender::is_closed) {
         return Ok(());
     }
-    let guard = match Guard::install(
+    let permits = failover.permits()?;
+    let probe = resolver.filter(|_| full).map(|dns| super::probe::Plan {
         uid,
-        networks,
-        full,
-        resolver,
-        endpoints,
-        &failover.permits()?,
-    ) {
+        dns,
+        permits: permits.clone(),
+        endpoints: endpoints.iter().map(|e| (*e.ip()).into()).collect(),
+    });
+    let guard = match Guard::install(uid, networks, full, resolver, endpoints, &permits) {
         Ok(guard) => guard,
         Err(error) => return publish(&mut initial, State::Blocked, &error).await,
     };
@@ -741,6 +745,7 @@ async fn start(
             commands,
             initial,
             shutdown,
+            probe,
         },
         workers,
         full,
@@ -804,6 +809,7 @@ async fn connected(
         mut commands,
         mut initial,
         mut shutdown,
+        probe: plan,
     } = control;
     if shutdown_requested(&shutdown) {
         workers.stop().await;
@@ -847,6 +853,7 @@ async fn connected(
     let mut last_failure = String::new();
     let mut restart_pending = false;
     let mut awake = power.borrow().awake;
+    let mut probes = crate::sysprobe::Runner::default();
     loop {
         let request = loop {
             // Aborted block_in_place work can still own route mutations. Join
@@ -871,18 +878,23 @@ async fn connected(
                     awake = event.awake;
                     events::record(&format!("power_event awake={awake} generation={}", event.generation));
                     workers.cancel();
+                    probes.cancel();
                     restart_pending = true;
                     state = State::Blocked;
                     last_failure = if awake { "Восстановление VPN после сна" } else { "VPN приостановлен на время сна" }.into();
                     if awake { monitor.resumed(rtrust_control::observations::now_ms()); }
                     monitor.transition(false, rtrust_control::observations::now_ms());
                 }
-                change = netwatch.next() => match change {
-                    crate::netwatch::Change::Network => monitor.network_changed(rtrust_control::observations::now_ms()),
-                    crate::netwatch::Change::Resumed => monitor.resumed(rtrust_control::observations::now_ms()),
+                change = netwatch.next() => {
+                    probes.cancel();
+                    match change {
+                        crate::netwatch::Change::Network => monitor.network_changed(rtrust_control::observations::now_ms()),
+                        crate::netwatch::Change::Resumed => monitor.resumed(rtrust_control::observations::now_ms()),
+                    }
                 },
                 result = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() => {
                     workers.tunnel = None;
+                    probes.cancel();
                     if restart_pending { continue; }
                     let degraded = result.as_ref().ok().and_then(crate::dataplane::degraded);
                     if let Some(proven) = degraded { events::record(&format!("transport_degraded proven={proven}")); }
@@ -918,6 +930,7 @@ async fn connected(
                         workers.tunnel = Some(tokio::spawn(prepared.run()));
                         connected_since = Instant::now();
                         state = State::Connected;
+                        probes.cancel();
                         monitor.transition(true, rtrust_control::observations::now_ms());
                         events::record("reconnect_complete");
                         continue;
@@ -929,6 +942,15 @@ async fn connected(
                 request = commands.recv() => {
                     if let Some(request) = request { break request; }
                     return Err("Service supervisor stopped".into());
+                },
+                // Started only by this timer while awake and connected; Status never probes.
+                tick = probes.next(), if plan.is_some() => match tick {
+                    crate::sysprobe::Tick::Due => if awake && state == State::Connected {
+                        probes.start(monitor.generation(), super::probe::collect(plan.clone().unwrap()));
+                    },
+                    crate::sysprobe::Tick::Done(generation, result) => {
+                        monitor.apply_system(generation, result, rtrust_control::observations::now_ms());
+                    },
                 },
             }
         };
@@ -956,6 +978,7 @@ async fn connected(
             }
             Command::Stop => {
                 events::record("stop_requested");
+                probes.cancel();
                 monitor.transition(false, rtrust_control::observations::now_ms());
                 let mut waiters = vec![request.response];
                 {
@@ -1067,6 +1090,7 @@ mod tests {
                 commands,
                 initial: Some(initial),
                 shutdown: shutdown_events,
+                probe: None,
             },
             workers,
             full,
@@ -1144,6 +1168,7 @@ mod tests {
                 commands,
                 initial: Some(initial),
                 shutdown: shutdown_events,
+                probe: None,
             },
             Workers {
                 tunnel: Some(worker),
@@ -1538,6 +1563,7 @@ mod tests {
                     commands,
                     initial: Some(initial),
                     shutdown: shutdown_events,
+                    probe: None,
                 },
                 Workers {
                     tunnel: None,
@@ -1624,6 +1650,7 @@ mod tests {
                     commands,
                     initial: Some(initial),
                     shutdown: shutdown_events,
+                    probe: None,
                 },
                 Workers {
                     tunnel: Some(tokio::spawn(std::future::pending())),
@@ -1843,6 +1870,7 @@ mod tests {
                     commands,
                     initial: Some(initial),
                     shutdown: shutdown_events,
+                    probe: None,
                 },
                 Workers {
                     tunnel: Some(tunnel),
@@ -1938,6 +1966,7 @@ mod tests {
                 commands,
                 initial: Some(initial),
                 shutdown: shutdown_events,
+                probe: None,
             },
             Workers {
                 tunnel: Some(tunnel),
@@ -2311,7 +2340,7 @@ mod tests {
             response.capabilities.observations_schema,
             rtrust_control::observations::SCHEMA
         );
-        assert!(!response.capabilities.system_probes);
+        assert!(response.capabilities.system_probes);
         assert!(!response.observations.verified());
         task.await.unwrap().unwrap();
     }

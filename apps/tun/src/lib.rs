@@ -20,6 +20,8 @@ pub mod linux;
 mod netwatch;
 #[cfg(target_os = "linux")]
 pub mod service;
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+mod sysprobe;
 
 #[cfg(any(
     target_os = "linux",

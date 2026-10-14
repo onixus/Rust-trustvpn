@@ -133,6 +133,19 @@ pub fn ensure(uid: u32, dns: Ipv4Addr) -> Result<(), String> {
         Err("VPN DNS state changed externally; protection retained".into())
     }
 }
+/// Read-only half of `ensure`: never installs a missing entry.
+pub fn matches(uid: u32, dns: Ipv4Addr) -> Result<bool, String> {
+    let store = Store::open()?;
+    let key = CFString::new(KEY);
+    let existing = unsafe { SCDynamicStoreCopyValue(store.0, key.as_concrete_TypeRef()) };
+    if existing.is_null() {
+        return Ok(false);
+    }
+    let expected = value(uid, dns);
+    let ours = unsafe { CFEqual(existing, expected.as_CFTypeRef()) != 0 };
+    unsafe { CFRelease(existing) };
+    Ok(ours)
+}
 pub fn remove(uid: u32, dns: Ipv4Addr) -> Result<(), String> {
     let store = Store::open()?;
     let key = CFString::new(KEY);
