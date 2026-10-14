@@ -83,6 +83,10 @@ final class AppRoutingAcceptance {
             && VpnWidget.button(R.string.disconnected) == R.drawable.widget_button_off, "Widget separates off, connecting and running");
         check("p".equals(MainActivity.badgeProfile(true, 0, "p")) && MainActivity.badgeProfile(false, 0, "p") == null
             && MainActivity.badgeProfile(true, 1, "p") == null, "Connected badge only on a connected primary");
+        JSONObject saved = new JSONObject("{\"name\":\"Office\",\"endpoint\":{\"hostname\":\"vpn.example\",\"addresses\":[\"192.0.2.1:443\"]}}");
+        JSONObject stored = new JSONObject().put("profiles", new JSONArray().put(new JSONObject().put("id", "a").put("profile", saved)));
+        check("Office".equals(MainActivity.duplicateOf(stored, new JSONObject("{\"endpoint\":{\"addresses\":[\"192.0.2.1:443\"],\"hostname\":\"vpn.example\"},\"name\":\"Office\"}"))), "Identical profile in another key order is a duplicate");
+        check(MainActivity.duplicateOf(stored, new JSONObject("{\"name\":\"Office\",\"endpoint\":{\"hostname\":\"vpn.example\",\"addresses\":[\"192.0.2.2:443\"]}}")) == null, "A different endpoint is not a duplicate");
         long now = System.currentTimeMillis();
         JSONObject passed = new JSONObject().put("outcome", "passed").put("observed_at_ms", now).put("valid_for_ms", 5000);
         JSONObject checks = new JSONObject().put("schema", 2);

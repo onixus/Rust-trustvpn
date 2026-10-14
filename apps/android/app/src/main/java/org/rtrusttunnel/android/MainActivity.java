@@ -344,7 +344,7 @@ public class MainActivity extends Activity {
         tagText = text("", 12, p.muted, true); tagText.setLetterSpacing(0.08f); tagText.setMaxLines(1); tagText.setEllipsize(TextUtils.TruncateAt.END); tag.addView(tagText);
         LinearLayout.LayoutParams tagParams = new LinearLayout.LayoutParams(0, -2, 1); tagParams.setMarginEnd(dp(12));
         LinearLayout tagWrap = new LinearLayout(this); tagWrap.addView(tag); top.addView(tagWrap, tagParams);
-        top.addView(circle(R.drawable.ic_search, R.string.v3_search_actions, () -> show(ACTIONS)), new LinearLayout.LayoutParams(dp(44), dp(44)));
+        top.addView(circle(R.drawable.ic_settings, R.string.v3_settings, () -> show(ACTIONS)), new LinearLayout.LayoutParams(dp(44), dp(44)));
         root.addView(top);
 
         ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false); scroll.setFillViewport(true);
@@ -362,8 +362,7 @@ public class MainActivity extends Activity {
         TextView all = text(getString(R.string.v3_all_profiles) + "  →", 13, p.blueText, true); all.setPadding(dp(8), dp(6), 0, dp(6));
         all.setOnClickListener(v -> show(PROFILES)); header.addView(all);
         body.addView(header);
-        HorizontalScrollView stripScroll = new HorizontalScrollView(this); stripScroll.setHorizontalScrollBarEnabled(false); stripScroll.setClipToPadding(false);
-        strip = new LinearLayout(this); stripScroll.addView(strip); body.addView(stripScroll);
+        strip = column(); body.addView(strip);
         scroll.addView(body); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
         slider = new SlideButton(this); slider.setAction(this::toggle);
@@ -372,6 +371,8 @@ public class MainActivity extends Activity {
         fillStrip();
         return root;
     }
+    /** Up to this many profiles on Home; the rest are one tap away on the Profiles screen. */
+    private static final int HOME_PROFILES = 5;
     /** Selected profile first, then its backups, then the rest; tap selects, long press opens actions. */
     private void fillStrip() {
         if (strip == null) return;
@@ -381,34 +382,42 @@ public class MainActivity extends Activity {
             empty.addView(text(getString(R.string.import_a_profile_to_get_started), 15, p.text, true));
             TextView hint = text(getString(R.string.empty_hint), 12, p.muted, false); hint.setPadding(0, dp(4), 0, 0); empty.addView(hint);
             empty.setClickable(true); empty.setOnClickListener(v -> show(ADD));
-            strip.addView(empty, new LinearLayout.LayoutParams(dp(260), -2));
+            strip.addView(empty, new LinearLayout.LayoutParams(-1, -2));
         }
         List<Info> ordered = new ArrayList<>();
         Info selected = info(selectedId); if (selected != null) ordered.add(selected);
         for (Info info : profiles) if (info != selected && backups.contains(info.id)) ordered.add(info);
         for (Info info : profiles) if (info != selected && !backups.contains(info.id)) ordered.add(info);
-        for (Info info : ordered) {
+        for (Info info : ordered.subList(0, Math.min(HOME_PROFILES, ordered.size()))) {
             boolean isSelected = info == selected, live = info.id.equals(liveProfileId);
-            LinearLayout card = new LinearLayout(this); card.setPadding(dp(14), dp(14), dp(14), dp(14));
+            LinearLayout card = new LinearLayout(this); card.setGravity(Gravity.CENTER_VERTICAL); card.setPadding(dp(12), dp(12), dp(14), dp(12));
             GradientDrawable bg = glass(dp(22), isSelected ? (p.light ? 0xB3FFFFFF : p.blueSoft) : p.card);
             if (isSelected) bg.setStroke(dp(1), Color.argb(140, Color.red(p.blueText), Color.green(p.blueText), Color.blue(p.blueText)));
             card.setBackground(rippled(bg)); card.setClickable(true); card.setFocusable(true);
+            card.addView(badge(info), iconParams());
             LinearLayout texts = column();
-            String label = isSelected ? getString(R.string.v3_label_profile) : backups.contains(info.id) ? getString(R.string.v3_label_backup) : info.protocol.toUpperCase(Locale.getDefault());
-            if (live) label += " · " + getString(R.string.v3_state_running).toUpperCase(Locale.getDefault());
-            TextView caption = text(label, 11, isSelected || live ? p.blueText : p.muted, true); caption.setLetterSpacing(0.08f); caption.setMaxLines(1); caption.setEllipsize(TextUtils.TruncateAt.END); texts.addView(caption);
-            TextView title = text(info.name, 16, p.text, true); title.setMaxLines(1); title.setEllipsize(TextUtils.TruncateAt.END); title.setPadding(0, dp(6), 0, dp(4)); texts.addView(title);
-            TextView detail = text(info.host.isEmpty() ? info.protocol : info.host, 12, p.muted, false); detail.setMaxLines(1); detail.setEllipsize(TextUtils.TruncateAt.MIDDLE); texts.addView(detail);
-            card.addView(texts, new LinearLayout.LayoutParams(-1, -2));
+            TextView title = text(info.name, 16, p.text, true); title.setMaxLines(1); title.setEllipsize(TextUtils.TruncateAt.END); texts.addView(title);
+            TextView detail = text(info.protocol + (info.host.isEmpty() ? "" : " · " + info.host), 12, p.muted, false); detail.setMaxLines(1); detail.setEllipsize(TextUtils.TruncateAt.MIDDLE); detail.setPadding(0, dp(2), 0, 0); texts.addView(detail);
+            card.addView(texts, new LinearLayout.LayoutParams(0, -2, 1));
+            String label = live ? getString(R.string.v3_state_running) : isSelected ? getString(R.string.v3_state_selected) : backups.contains(info.id) ? getString(R.string.v3_label_backup).toLowerCase(Locale.getDefault()) : null;
+            if (label != null) {
+                TextView chip = text(label, 12, isSelected || live ? p.blueText : p.muted, true);
+                chip.setPadding(dp(10), dp(5), dp(10), dp(5)); chip.setBackground(round(isSelected || live ? (p.light ? p.blueSoft : 0xFF1B3354) : p.chip, dp(12)));
+                LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(-2, -2); chipParams.setMarginStart(dp(8)); card.addView(chip, chipParams);
+            }
             card.setOnClickListener(v -> { selectedId = info.id; reload(); });
             card.setOnLongClickListener(v -> { profileActions(info); return true; });
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(isSelected ? 168 : 150), -1); params.setMarginEnd(dp(10));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.bottomMargin = dp(8);
             strip.addView(card, params);
         }
-        LinearLayout add = column(); add.setGravity(Gravity.CENTER); add.setBackground(rippled(glass(dp(22), p.card)));
-        ImageView plus = new ImageView(this); plus.setImageDrawable(tinted(R.drawable.ic_add, p.text)); add.addView(plus, new LinearLayout.LayoutParams(dp(24), dp(24)));
-        add.setClickable(true); add.setFocusable(true); add.setContentDescription(getString(R.string.add_profile)); add.setOnClickListener(v -> show(ADD));
-        strip.addView(add, new LinearLayout.LayoutParams(dp(60), -1));
+        if (ordered.size() > HOME_PROFILES) {
+            TextView more = text(getResources().getQuantityString(R.plurals.v3_more_profiles, ordered.size() - HOME_PROFILES, ordered.size() - HOME_PROFILES), 14, p.blueText, true);
+            more.setGravity(Gravity.CENTER); more.setPadding(0, dp(12), 0, dp(12)); more.setBackground(rippled(glass(dp(22), p.card)));
+            more.setOnClickListener(v -> show(PROFILES));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.bottomMargin = dp(8); strip.addView(more, params);
+        }
+        LinearLayout add = row(R.drawable.ic_add, getString(R.string.add_profile), getString(R.string.v3_add_detail), () -> show(ADD), true);
+        strip.addView(add, new LinearLayout.LayoutParams(-1, -2));
     }
 
     // ---- Profiles ---------------------------------------------------------------------
@@ -1046,12 +1055,15 @@ public class MainActivity extends Activity {
             JSONObject parsed = new JSONObject(NativeCore.INSTANCE.parse(raw));
             if (!parsed.getBoolean("ok")) { error(getString(R.string.invalid_profile)); return; }
             JSONObject profile = parsed.getJSONObject("profile"), endpoint = profile.getJSONObject("endpoint");
+            String existing = duplicateOf(vault.read(), profile);
+            if (existing != null) { error(getString(R.string.v3_duplicate, existing)); return; }
             String warning = endpoint.optBoolean("skip_verification") ? getString(R.string.nwarning_certificate_verification_is_disabled_in) : "";
             new AlertDialog.Builder(this).setTitle(getString(R.string.import_profile_text)).setMessage(profile.optString("name", "") + "\n" + endpoint.getString("hostname") + " · " + protocolName(profile) + warning + getString(R.string.ncredentials_will_be_encrypted_on_this))
                 .setNegativeButton(getString(R.string.cancel), null).setPositiveButton(getString(R.string.import_confirm), (d, w) -> {
                     try {
                         vault.edit(data -> { JSONArray list = data.getJSONArray("profiles");
                         if (list.length() >= 64) throw new IOException("Profile limit");
+                        if (duplicateOf(data, profile) != null) throw new IOException("Duplicate profile");
                         String id = UUID.randomUUID().toString(); list.put(new JSONObject().put("id", id).put("profile", profile));
                         if (data.getString("default").isEmpty()) data.put("default", id);
                         }); reload();
@@ -1059,6 +1071,31 @@ public class MainActivity extends Activity {
                     } catch (Exception e) { error(getString(R.string.could_not_save_encrypted_profile)); }
                 }).show();
         } catch (Exception e) { error(getString(R.string.invalid_or_oversized_profile)); }
+    }
+    /** Name of a saved profile identical to {@code profile} (key order ignored), or null. */
+    static String duplicateOf(JSONObject vaultData, JSONObject profile) throws JSONException {
+        String wanted = canonical(profile);
+        JSONArray list = vaultData.getJSONArray("profiles");
+        for (int i = 0; i < list.length(); i++) {
+            JSONObject saved = list.getJSONObject(i).getJSONObject("profile");
+            if (canonical(saved).equals(wanted)) { String name = saved.optString("name"); return name.trim().isEmpty() ? "Profile " + (i + 1) : name; }
+        }
+        return null;
+    }
+    private static String canonical(Object value) throws JSONException {
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value; List<String> keys = new ArrayList<>();
+            for (Iterator<String> it = object.keys(); it.hasNext(); ) keys.add(it.next());
+            Collections.sort(keys); StringBuilder out = new StringBuilder("{");
+            for (String key : keys) out.append(JSONObject.quote(key)).append(':').append(canonical(object.get(key))).append(',');
+            return out.append('}').toString();
+        }
+        if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value; StringBuilder out = new StringBuilder("[");
+            for (int i = 0; i < array.length(); i++) out.append(canonical(array.get(i))).append(',');
+            return out.append(']').toString();
+        }
+        return value instanceof String ? JSONObject.quote((String) value) : String.valueOf(value);
     }
     private static String protocolName(JSONObject profile) {
         String protocol = profile.optString("protocol");

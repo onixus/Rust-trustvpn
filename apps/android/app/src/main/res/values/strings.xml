@@ -179,7 +179,6 @@
     <string name="v3_no_data">no data</string>
     <string name="v3_check_connecting">connecting…</string>
     <string name="v3_check_off">off</string>
-    <string name="v3_label_profile">PROFILE</string>
     <string name="v3_label_backup">BACKUP</string>
     <string name="v3_all_profiles">All profiles</string>
     <string name="v3_profiles">Profiles</string>
@@ -223,7 +222,12 @@
     <string name="v3_theme_light">Light (frosted glass)</string>
     <string name="v3_back">Back</string>
     <string name="v3_close">Close</string>
-    <string name="v3_search_actions">Search actions</string>
     <string name="v3_apps_loading">Loading apps…</string>
     <string name="v3_apps_all_detail">Every app uses the tunnel. Choose “Only selected apps” to limit it.</string>
+    <string name="v3_settings">Settings</string>
+    <string name="v3_duplicate">This profile is already saved as “%1$s”. Nothing was imported.</string>
+    <plurals name="v3_more_profiles">
+        <item quantity="one">%1$d more profile</item>
+        <item quantity="other">%1$d more profiles</item>
+    </plurals>
 </resources>

@@ -179,7 +179,6 @@
     <string name="v3_no_data">нет данных</string>
     <string name="v3_check_connecting">подключение…</string>
     <string name="v3_check_off">выключен</string>
-    <string name="v3_label_profile">ПРОФИЛЬ</string>
     <string name="v3_label_backup">РЕЗЕРВ</string>
     <string name="v3_all_profiles">Все профили</string>
     <string name="v3_profiles">Профили</string>
@@ -223,7 +222,14 @@
     <string name="v3_theme_light">Светлая (матовое стекло)</string>
     <string name="v3_back">Назад</string>
     <string name="v3_close">Закрыть</string>
-    <string name="v3_search_actions">Поиск действий</string>
     <string name="v3_apps_loading">Загружаем приложения…</string>
     <string name="v3_apps_all_detail">Весь трафик всех приложений идёт через туннель. Выберите «Только выбранные», чтобы ограничить.</string>
+    <string name="v3_settings">Настройки</string>
+    <string name="v3_duplicate">Такой профиль уже сохранён: «%1$s». Импорт не выполнен.</string>
+    <plurals name="v3_more_profiles">
+        <item quantity="one">Ещё %1$d профиль</item>
+        <item quantity="few">Ещё %1$d профиля</item>
+        <item quantity="many">Ещё %1$d профилей</item>
+        <item quantity="other">Ещё %1$d профиля</item>
+    </plurals>
 </resources>
