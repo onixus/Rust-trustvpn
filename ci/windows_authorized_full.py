@@ -64,7 +64,7 @@ for item in base.iterdir():
     if item.is_file() and (item.name=='python.exe' or item.suffix.lower()=='.dll'):shutil.copy2(item,runtime/item.name)
 for name in ['Lib','DLLs']:
     shutil.copytree(base/name,runtime/name,ignore=shutil.ignore_patterns('site-packages','__pycache__','test','tests','idlelib','ensurepip','tkinter'))
-for name in [a.worker,'windows_service_e2e.py']:shutil.copy2(ROOT/'ci'/name,WORK/name)
+for name in [a.worker,'windows_service_e2e.py','windows_recovery.py']:shutil.copy2(ROOT/'ci'/name,WORK/name)
 fixture_data=json.loads(a.fixture.read_text())
 physical=json.loads(ps("ConvertTo-Json -Compress -InputObject @(Get-NetAdapter -Physical | Where-Object Status -eq Up | Select-Object -ExpandProperty Name)"))
 def configure_handoff(data, adapters, enabled):

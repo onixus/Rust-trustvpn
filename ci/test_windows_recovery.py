@@ -56,5 +56,25 @@ class RecoveryTests(unittest.TestCase):
         exec(compile(ast.Module(body=[cls],type_ignores=[]),'fixture-class','exec'),namespace)
         pipe=namespace['Pipe'].__new__(namespace['Pipe']);pipe.handle=1
         with self.assertRaises(TimeoutError):pipe.read(4,deadline=10)
+    def test_runners_copy_every_local_worker_import(self):
+        # Workers run from an isolated copy; a missing sibling module fails only on the lab host.
+        ci=pathlib.Path(__file__).parent
+        def local_imports(name):
+            found=set()
+            for node in ast.walk(ast.parse((ci/name).read_text(encoding='utf-8'))):
+                names=[a.name for a in node.names] if isinstance(node,ast.Import) else [node.module] if isinstance(node,ast.ImportFrom) and node.module else []
+                found.update(n+'.py' for n in names if (ci/(n+'.py')).exists())
+            return found
+        def copied(runner):
+            for node in ast.walk(ast.parse((ci/runner).read_text(encoding='utf-8'))):
+                if isinstance(node,ast.For) and isinstance(node.iter,ast.List) and any(isinstance(e,ast.Constant) and e.value=='windows_service_e2e.py' for e in node.iter.elts):
+                    return {e.value for e in node.iter.elts if isinstance(e,ast.Constant)}
+            self.fail('Copy list not found in '+runner)
+        authorized=copied('windows_authorized_full.py')
+        for worker in ['windows_full_e2e.py','windows_selected_e2e.py','windows_production_e2e.py','windows_sleep_e2e.py','windows_service_e2e.py']:
+            with self.subTest(worker=worker):self.assertLessEqual(local_imports(worker),authorized|{worker})
+        full=copied('windows_full_runner.py')
+        for worker in ['windows_full_e2e.py','windows_service_e2e.py']:
+            with self.subTest(runner='windows_full_runner.py',worker=worker):self.assertLessEqual(local_imports(worker),full)
 
 if __name__=='__main__':unittest.main()
