@@ -683,4 +683,172 @@ mod tests {
         value["dns"]["resolver"] = "198.51.100.53".into();
         assert!(serde_json::from_value::<Snapshot>(value).is_err());
     }
+
+    // ---- tester (issue #81): independent regression checks ----
+    fn tester_probe(outcome: Outcome, at: u64) -> SystemProbe {
+        SystemProbe {
+            transport_proven_at: Some(at),
+            dns: Observation::system(outcome, Mode::Full, at),
+            guard: Observation::system(outcome, Mode::Full, at),
+        }
+    }
+    #[test]
+    fn tester_failed_probe_rows_never_survive_any_invalidation() {
+        type Invalidate = fn(&mut Monitor, u64);
+        let cases: [(&str, Invalidate); 5] = [
+            ("network", |m, t| m.network_changed(t)),
+            ("resume", |m, t| m.resumed(t)),
+            ("policy", |m, t| m.policy_changed(t)),
+            ("worker down", |m, t| m.transition(false, t)),
+            ("stop", |m, t| m.stop(t)),
+        ];
+        for (name, invalidate) in cases {
+            let mut m = Monitor::new(Mode::Full, Source::ServiceLifecycle, 100);
+            assert!(m.apply_system(m.generation(), tester_probe(Outcome::Failed, 101), 101));
+            assert_eq!(m.sample(102).guard.outcome, Outcome::Failed, "{name}");
+            let before = m.generation();
+            invalidate(&mut m, 103);
+            let s = m.sample(104);
+            assert_ne!(s.generation, before, "{name}: generation must move");
+            for o in [&s.dns, &s.guard] {
+                assert!(
+                    matches!(o.outcome, Outcome::Stale | Outcome::Unknown),
+                    "{name}: {o:?}"
+                );
+            }
+            assert_ne!(s.transport.outcome, Outcome::Passed, "{name}");
+            // The run started before the invalidation can no longer land.
+            assert!(
+                !m.apply_system(before, tester_probe(Outcome::Passed, 104), 104),
+                "{name}"
+            );
+        }
+    }
+    #[test]
+    fn tester_probe_rows_expire_exactly_after_the_probe_ttl() {
+        let mut m = Monitor::new(Mode::Full, Source::ServiceLifecycle, 1_000);
+        m.transition(true, 1_000);
+        assert!(m.apply_system(m.generation(), tester_probe(Outcome::Passed, 1_000), 1_000));
+        let mut now = 1_000;
+        // Poll often enough that no lifecycle gap is detected.
+        while now + FRESH_MS - 1 < 1_000 + PROBE_TTL_MS {
+            now += FRESH_MS - 1;
+            m.sample(now);
+        }
+        let s = m.sample(1_000 + PROBE_TTL_MS);
+        for o in [&s.transport, &s.dns, &s.guard] {
+            assert_eq!(o.outcome, Outcome::Passed, "{o:?}");
+            assert!(o.valid_for_ms <= PROBE_TTL_MS);
+        }
+        let s = m.sample(1_000 + PROBE_TTL_MS + 1);
+        assert_eq!(s.dns.outcome, Outcome::Stale);
+        assert_eq!(s.guard.outcome, Outcome::Stale);
+        assert_eq!(s.transport.outcome, Outcome::Configured);
+        assert_eq!(s.transport.source, Source::ServiceLifecycle);
+    }
+    #[test]
+    fn tester_old_or_foreign_generation_proof_never_marks_transport_passed() {
+        let mut m = Monitor::new(Mode::Full, Source::ServiceLifecycle, 100);
+        // A proof older than the TTL at apply time does not prove the transport now.
+        let mut old = tester_probe(Outcome::Passed, 101);
+        old.transport_proven_at = Some(101);
+        let late = 101 + PROBE_TTL_MS + 1;
+        // Keep polling so no gap is detected before the late apply.
+        let mut now = 100;
+        while now + FRESH_MS - 1 < late {
+            now += FRESH_MS - 1;
+            m.sample(now);
+        }
+        assert!(m.apply_system(m.generation(), old, late));
+        assert_ne!(m.sample(late).transport.outcome, Outcome::Passed);
+        // A proof from the previous generation is not carried over.
+        let mut m = Monitor::new(Mode::Full, Source::ServiceLifecycle, 100);
+        assert!(m.apply_system(m.generation(), tester_probe(Outcome::Passed, 101), 101));
+        assert_eq!(m.sample(102).transport.outcome, Outcome::Passed);
+        m.network_changed(103);
+        let s = m.sample(104);
+        assert_ne!(s.transport.outcome, Outcome::Passed);
+        assert!(!s.verified());
+    }
+    #[test]
+    fn tester_generation_tag_is_read_only() {
+        let mut m = Monitor::new(Mode::Full, Source::ServiceLifecycle, 100);
+        let g = m.generation();
+        // Reading the tag never detects a gap or moves the generation.
+        for _ in 0..3 {
+            assert_eq!(m.generation(), g);
+        }
+        assert_eq!(m.sample(101).generation, g);
+        // Unlike sample(), a long silence seen through generation() changes nothing.
+        assert_eq!(m.generation(), g);
+        assert_ne!(m.sample(101 + FRESH_MS + 1).generation, g);
+    }
+    #[test]
+    fn tester_split_dns_and_guard_stay_unsupported_never_failed_or_passed() {
+        let mut m = Monitor::new(Mode::Split, Source::ServiceLifecycle, 100);
+        let check = |s: &Snapshot| {
+            for o in [&s.dns, &s.guard] {
+                assert_eq!(o.outcome, Outcome::Unsupported, "{o:?}");
+                assert_eq!(o.reason, Reason::CheckUnavailable);
+            }
+            assert!(!s.verified());
+        };
+        check(&m.sample(101));
+        m.network_changed(102);
+        check(&m.sample(103));
+        m.resumed(104);
+        check(&m.sample(105));
+        m.transition(false, 106);
+        check(&m.sample(107));
+        m.transition(true, 108);
+        check(&m.sample(109));
+        // Even a full-mode tagged probe is refused for a split session.
+        assert!(!m.apply_system(m.generation(), tester_probe(Outcome::Failed, 110), 110));
+        check(&m.sample(111));
+    }
+    const TESTER_CANARIES: [&str; 6] = [
+        "198.51.100.53",
+        "203.0.113.7",
+        "2001:db8::53",
+        "rtcanary0",
+        "Ethernet-CANARY",
+        "canary.example.test",
+    ];
+    #[test]
+    fn tester_snapshot_and_response_never_carry_canaries_and_reject_injected_keys() {
+        let mut m = Monitor::new(Mode::Full, Source::ServiceLifecycle, 100);
+        assert!(m.apply_system(m.generation(), tester_probe(Outcome::Failed, 101), 101));
+        let mut response = crate::Response::new(crate::State::Connected, "Весь компьютер");
+        response.observations = m.sample(102);
+        let text = serde_json::to_string(&response).unwrap();
+        let debug = format!("{response:?}");
+        for canary in TESTER_CANARIES {
+            assert!(!text.contains(canary), "{canary}");
+            assert!(!debug.contains(canary), "{canary}");
+        }
+        let value = serde_json::to_value(&response).unwrap();
+        assert!(serde_json::from_value::<crate::Response>(value.clone()).is_ok());
+        let injected: [(&[&str], &str, &str); 8] = [
+            (&["observations", "dns"], "resolver", "198.51.100.53"),
+            (&["observations", "dns"], "server", "2001:db8::53"),
+            (&["observations", "guard"], "interface", "Ethernet-CANARY"),
+            (&["observations", "guard"], "device", "rtcanary0"),
+            (&["observations", "transport"], "endpoint", "203.0.113.7"),
+            (&["observations"], "resolvers", "198.51.100.53"),
+            (&["observations"], "query", "canary.example.test"),
+            (&[], "interface", "rtcanary0"),
+        ];
+        for (path, key, canary) in injected {
+            let mut value = value.clone();
+            let mut target = &mut value;
+            for step in path {
+                target = &mut target[*step];
+            }
+            target[key] = canary.into();
+            assert!(
+                serde_json::from_value::<crate::Response>(value).is_err(),
+                "{path:?}.{key} must be refused"
+            );
+        }
+    }
 }

@@ -1206,4 +1206,587 @@ mod tests {
         );
         assert!(wfp::servers("").is_empty());
     }
+
+    // ---- tester (issue #81): independent fail-closed tables ----
+    const ALL_ATTEMPTS: [Attempt; 4] = [
+        Attempt::Blocked,
+        Attempt::Leaked,
+        Attempt::Absent,
+        Attempt::Unknown,
+    ];
+    const ALL_AUDITS: [Audit; 3] = [Audit::Match, Audit::Mismatch, Audit::Unknown];
+    #[test]
+    fn tester_guard_verdict_invariants_over_every_combination() {
+        let mut sets: Vec<Vec<Attempt>> = vec![vec![]];
+        for _ in 0..3 {
+            let mut next = sets.clone();
+            for set in &sets {
+                if set.len() == 2 || set.is_empty() {
+                    for a in ALL_ATTEMPTS {
+                        let mut s = set.clone();
+                        s.push(a);
+                        next.push(s);
+                    }
+                }
+            }
+            sets = next;
+        }
+        for audit in ALL_AUDITS {
+            for attempts in &sets {
+                let outcome = guard(audit, attempts);
+                let leaked = attempts.contains(&Attempt::Leaked);
+                // A send that got out or a mismatched rule set is never hidden.
+                if leaked || audit == Audit::Mismatch {
+                    assert_eq!(outcome, Outcome::Failed, "{audit:?} {attempts:?}");
+                    continue;
+                }
+                if outcome == Outcome::Passed {
+                    assert_eq!(audit, Audit::Match, "{attempts:?}");
+                    assert!(attempts.contains(&Attempt::Blocked), "{attempts:?}");
+                    assert!(!attempts.contains(&Attempt::Unknown), "{attempts:?}");
+                } else {
+                    assert_eq!(outcome, Outcome::Unknown, "{audit:?} {attempts:?}");
+                }
+            }
+        }
+        // IPv4 refused, IPv6 inconclusive (either order): not Passed.
+        use Attempt::*;
+        for attempts in [[Blocked, Unknown], [Unknown, Blocked]] {
+            assert_ne!(guard(Audit::Match, &attempts), Outcome::Passed);
+        }
+        // Several interfaces: one inconclusive or leaking interface spoils all.
+        assert_eq!(
+            guard(Audit::Match, &[Blocked, Absent, Blocked, Unknown]),
+            Outcome::Unknown
+        );
+        assert_eq!(
+            guard(Audit::Match, &[Blocked, Absent, Absent, Leaked]),
+            Outcome::Failed
+        );
+    }
+    #[test]
+    fn tester_dns_verdict_invariants_over_every_combination() {
+        let paths = [Path::Tunnel, Path::Outside, Path::Unknown];
+        let replies = [Reply::Answered, Reply::Responded, Reply::None];
+        let foreigns = [Foreign::None, Foreign::Present, Foreign::Unknown];
+        let guards = [
+            Outcome::Passed,
+            Outcome::Failed,
+            Outcome::Unknown,
+            Outcome::Stale,
+        ];
+        for config in ALL_AUDITS {
+            for path in paths {
+                for reply in replies {
+                    for foreign in foreigns {
+                        for g in guards {
+                            let facts = Dns {
+                                config,
+                                path,
+                                reply,
+                                foreign,
+                            };
+                            let outcome = dns(facts, g);
+                            let leak = config == Audit::Mismatch
+                                || path == Path::Outside
+                                || (foreign == Foreign::Present && g != Outcome::Passed);
+                            if leak {
+                                assert_eq!(outcome, Outcome::Failed, "{facts:?} {g:?}");
+                            } else if outcome == Outcome::Passed {
+                                assert_eq!(config, Audit::Match);
+                                assert_eq!(path, Path::Tunnel);
+                                assert_eq!(reply, Reply::Answered, "{facts:?}");
+                                assert!(
+                                    foreign == Foreign::None || g == Outcome::Passed,
+                                    "{facts:?} {g:?}"
+                                );
+                            } else {
+                                assert_eq!(outcome, Outcome::Unknown, "{facts:?} {g:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn tester_errno_tables_per_platform_are_fail_closed() {
+        // (blocked, absent) lists as used by each backend; every other result is Unknown.
+        const EPERM: i32 = 1;
+        const EAGAIN_LINUX: i32 = 11;
+        const EACCES: i32 = 13;
+        const ENETUNREACH_LINUX: i32 = 101;
+        const ETIMEDOUT_LINUX: i32 = 110;
+        const EHOSTUNREACH_LINUX: i32 = 113;
+        const EADDRNOTAVAIL_LINUX: i32 = 99;
+        const EHOSTUNREACH_MAC: i32 = 65;
+        const ENETUNREACH_MAC: i32 = 51;
+        const ETIMEDOUT_MAC: i32 = 60;
+        const WSAEACCES: i32 = 10013;
+        const WSAENETUNREACH: i32 = 10051;
+        const WSAETIMEDOUT: i32 = 10060;
+        const WSAEHOSTUNREACH: i32 = 10065;
+        let linux_v4: (&[i32], &[i32]) = (&[EPERM], &[]);
+        for code in [
+            EAGAIN_LINUX,
+            EACCES,
+            ENETUNREACH_LINUX,
+            ETIMEDOUT_LINUX,
+            EHOSTUNREACH_LINUX,
+            -1,
+        ] {
+            assert_eq!(
+                attempt(Err(code), linux_v4.0, linux_v4.1),
+                Attempt::Unknown,
+                "linux v4 {code}"
+            );
+        }
+        assert_eq!(
+            attempt(Err(EPERM), linux_v4.0, linux_v4.1),
+            Attempt::Blocked
+        );
+        let linux_v6: (&[i32], &[i32]) = (
+            &[EPERM],
+            &[ENETUNREACH_LINUX, EHOSTUNREACH_LINUX, EADDRNOTAVAIL_LINUX],
+        );
+        assert_eq!(
+            attempt(Err(ETIMEDOUT_LINUX), linux_v6.0, linux_v6.1),
+            Attempt::Unknown
+        );
+        let mac_v4: (&[i32], &[i32]) = (&[EHOSTUNREACH_MAC], &[]);
+        for code in [ENETUNREACH_MAC, ETIMEDOUT_MAC, EPERM, -1] {
+            assert_eq!(
+                attempt(Err(code), mac_v4.0, mac_v4.1),
+                Attempt::Unknown,
+                "mac {code}"
+            );
+        }
+        let windows: (&[i32], &[i32]) = (&[WSAEACCES], &[]);
+        for code in [WSAENETUNREACH, WSAETIMEDOUT, WSAEHOSTUNREACH, -1] {
+            assert_eq!(
+                attempt(Err(code), windows.0, windows.1),
+                Attempt::Unknown,
+                "windows {code}"
+            );
+        }
+        // A send that succeeded is a leak whatever the lists say.
+        for (blocked, absent) in [linux_v4, linux_v6, mac_v4, windows] {
+            assert_eq!(attempt(Ok(()), blocked, absent), Attempt::Leaked);
+            assert_eq!(
+                guard(Audit::Match, &[attempt(Ok(()), blocked, absent)]),
+                Outcome::Failed
+            );
+        }
+    }
+    fn tester_reply(id: u16, flags: [u8; 2], counts: [u16; 4], question: &[u8]) -> Vec<u8> {
+        let mut r = id.to_be_bytes().to_vec();
+        r.extend(flags);
+        for c in counts {
+            r.extend(c.to_be_bytes());
+        }
+        r.extend(question);
+        r
+    }
+    const ROOT_NS_IN: [u8; 5] = [0, 0, 2, 0, 1];
+    #[test]
+    fn tester_dns_reply_matching_table() {
+        let id = 0x5a5a;
+        let ok = tester_reply(id, [0x81, 0x80], [1, 1, 0, 0], &ROOT_NS_IN);
+        assert_eq!(reply(id, &ok), Reply::Answered);
+        let cases: [(&str, Vec<u8>, Reply); 12] = [
+            (
+                "wrong id",
+                tester_reply(id ^ 1, [0x81, 0x80], [1, 1, 0, 0], &ROOT_NS_IN),
+                Reply::None,
+            ),
+            (
+                "not a response",
+                tester_reply(id, [0x01, 0x80], [1, 1, 0, 0], &ROOT_NS_IN),
+                Reply::None,
+            ),
+            (
+                "opcode status",
+                tester_reply(id, [0x91, 0x80], [1, 1, 0, 0], &ROOT_NS_IN),
+                Reply::None,
+            ),
+            (
+                "two questions",
+                tester_reply(id, [0x81, 0x80], [2, 1, 0, 0], &ROOT_NS_IN),
+                Reply::None,
+            ),
+            (
+                "no question",
+                tester_reply(id, [0x81, 0x80], [0, 1, 0, 0], &[]),
+                Reply::None,
+            ),
+            (
+                "type A",
+                tester_reply(id, [0x81, 0x80], [1, 1, 0, 0], &[0, 0, 1, 0, 1]),
+                Reply::None,
+            ),
+            (
+                "class CH",
+                tester_reply(id, [0x81, 0x80], [1, 1, 0, 0], &[0, 0, 2, 0, 3]),
+                Reply::None,
+            ),
+            (
+                "other name",
+                tester_reply(
+                    id,
+                    [0x81, 0x80],
+                    [1, 1, 0, 0],
+                    b"\x06canary\x07example\x04test\x00\x00\x02\x00\x01",
+                ),
+                Reply::None,
+            ),
+            (
+                "no answers",
+                tester_reply(id, [0x81, 0x80], [1, 0, 0, 0], &ROOT_NS_IN),
+                Reply::Responded,
+            ),
+            (
+                "nxdomain",
+                tester_reply(id, [0x81, 0x83], [1, 1, 0, 0], &ROOT_NS_IN),
+                Reply::Responded,
+            ),
+            (
+                "refused",
+                tester_reply(id, [0x81, 0x85], [1, 0, 0, 0], &ROOT_NS_IN),
+                Reply::Responded,
+            ),
+            ("garbage", vec![0xff; 600], Reply::None),
+        ];
+        for (name, bytes, expected) in cases {
+            assert_eq!(reply(id, &bytes), expected, "{name}");
+            // Only an answered NOERROR reply can make DNS Passed.
+            let facts = Dns {
+                config: Audit::Match,
+                path: Path::Tunnel,
+                reply: reply(id, &bytes),
+                foreign: Foreign::None,
+            };
+            assert_ne!(dns(facts, Outcome::Passed), Outcome::Passed, "{name}");
+        }
+        for len in 0..ok.len() {
+            assert_eq!(reply(id, &ok[..len]), Reply::None, "truncated to {len}");
+        }
+    }
+    /// Loopback-only fake resolver: synthetic, no system state touched.
+    #[tokio::test]
+    async fn tester_exchange_ignores_spoofed_and_mismatched_replies() {
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let spoof = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let client = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let task = tokio::spawn(async move {
+            let mut buffer = [0u8; 512];
+            let (_, from) = server.recv_from(&mut buffer).await.unwrap();
+            let id = u16::from_be_bytes([buffer[0], buffer[1]]);
+            // A full answer from the wrong source port, then a wrong ID, then
+            // the real (empty) reply: only the last may count.
+            let full = tester_reply(id, [0x81, 0x80], [1, 1, 0, 0], &ROOT_NS_IN);
+            spoof.send_to(&full, from).await.unwrap();
+            let wrong = tester_reply(id ^ 0xffff, [0x81, 0x80], [1, 1, 0, 0], &ROOT_NS_IN);
+            server.send_to(&wrong, from).await.unwrap();
+            let empty = tester_reply(id, [0x81, 0x80], [1, 0, 0, 0], &ROOT_NS_IN);
+            server.send_to(&empty, from).await.unwrap();
+        });
+        assert_eq!(exchange(client, address).await, Reply::Responded);
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn tester_exchange_retries_once_then_gives_up() {
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let client = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let task = tokio::spawn(async move {
+            let mut ids = Vec::new();
+            let mut buffer = [0u8; 512];
+            for _ in 0..2 {
+                let (len, _) = server.recv_from(&mut buffer).await.unwrap();
+                assert_eq!(len, 17);
+                assert_eq!(&buffer[12..17], &ROOT_NS_IN, "root NS query only");
+                ids.push(u16::from_be_bytes([buffer[0], buffer[1]]));
+            }
+            ids
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(exchange(client, address).await, Reply::None);
+        // Two bounded attempts, well inside the per-run deadline.
+        assert!(started.elapsed() < Duration::from_millis(PROBE_DEADLINE_MS));
+        let _ids = task.await.unwrap();
+    }
+    #[tokio::test(start_paused = true)]
+    async fn tester_runner_due_ticks_do_not_queue_and_drop_aborts() {
+        let mut runner = Runner::default();
+        // A long silence (no one polling) yields one due tick, not a burst.
+        tokio::time::advance(Duration::from_secs(120)).await;
+        assert!(matches!(runner.next().await, Tick::Due));
+        let before = tokio::time::Instant::now();
+        assert!(matches!(runner.next().await, Tick::Due));
+        assert!(
+            before.elapsed() >= SETTLE,
+            "an unused due tick must not refire at once"
+        );
+        // Dropping the runner (lease EOF/Stop) drops the pending run.
+        struct Flag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Flag {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Flag(dropped.clone());
+        runner.start(9, async move {
+            let _flag = flag;
+            std::future::pending::<()>().await;
+            unreachable!()
+        });
+        drop(runner);
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        // A run that ends after cancel never surfaces: the next tick is Due.
+        let mut runner = Runner::default();
+        runner.start(1, async { passing(1) });
+        runner.cancel();
+        assert!(matches!(runner.next().await, Tick::Due));
+    }
+    #[test]
+    fn tester_nft_audit_fail_closed_table() {
+        let expected = nft_expected();
+        let base = nft_fixture("");
+        let empty = r#"{"nftables":[{"metainfo":{"version":"1.0.6","json_schema_version":1}},{"table":{"family":"inet","name":"rtrust_full","handle":7}}]}"#;
+        let duplicate = r#",{"rule":{"family":"inet","table":"rtrust_full","chain":"output","handle":11,"expr":[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"lo"}},{"accept":null}]}}"#;
+        let counter = base.replacen(
+            r#"{"accept":null}"#,
+            r#"{"counter":{"packets":0,"bytes":0}},{"accept":null}"#,
+            1,
+        );
+        let mangle = r#",{"rule":{"family":"inet","table":"rtrust_full","chain":"output","handle":12,"expr":[{"mangle":{"key":{"meta":{"key":"mark"}},"value":21076}}]}}"#;
+        let jump = r#",{"chain":{"family":"inet","table":"rtrust_full","name":"canary","handle":13}},{"rule":{"family":"inet","table":"rtrust_full","chain":"output","handle":14,"expr":[{"jump":{"target":"canary"}}]}}"#;
+        let forward_accept = r#",{"rule":{"family":"inet","table":"rtrust_full","chain":"forward","handle":15,"expr":[{"accept":null}]}}"#;
+        let mismatches: [(&str, String); 9] = [
+            ("empty own table", empty.to_owned()),
+            ("duplicate rule", nft_fixture(duplicate)),
+            ("counter added", counter),
+            ("mark set", nft_fixture(mangle)),
+            ("jump to extra chain", nft_fixture(jump)),
+            ("forward accept", nft_fixture(forward_accept)),
+            (
+                "priority",
+                base.replacen(r#""prio":-10"#, r#""prio":100"#, 1),
+            ),
+            (
+                "hook",
+                base.replacen(r#""hook":"output""#, r#""hook":"postrouting""#, 1),
+            ),
+            (
+                "device",
+                base.replace(r#""right":"rtrust0""#, r#""right":"rtcanary0""#),
+            ),
+        ];
+        for (name, text) in mismatches {
+            assert_eq!(
+                linux::audit(text.as_bytes(), &expected),
+                Audit::Mismatch,
+                "{name}"
+            );
+            assert_eq!(
+                guard(
+                    linux::audit(text.as_bytes(), &expected),
+                    &[Attempt::Blocked]
+                ),
+                Outcome::Failed,
+                "{name}"
+            );
+        }
+        let unknowns: [(&str, Vec<u8>); 5] = [
+            ("non-utf8", b"\xff\xfe\x00{\"nftables\":[]}".to_vec()),
+            ("garbage", b"Error: No such file or directory".to_vec()),
+            ("array root", b"[]".to_vec()),
+            ("empty entry", br#"{"nftables":[{}]}"#.to_vec()),
+            (
+                "rule without expr",
+                br#"{"nftables":[{"rule":{"chain":"output"}}]}"#.to_vec(),
+            ),
+        ];
+        for (name, bytes) in unknowns {
+            assert_eq!(linux::audit(&bytes, &expected), Audit::Unknown, "{name}");
+        }
+        for bytes in [&b"\xff\xfe"[..], b"", b"{\"nftables\":{}}"] {
+            assert_eq!(linux::has_table(bytes, "rtrust_full"), None);
+        }
+    }
+    #[test]
+    fn tester_resolver_and_route_parsers_on_garbage_are_unknown() {
+        assert_eq!(linux::foreign_links("no colon here\n", "rtcanary0"), None);
+        assert_eq!(linux::link_values("", "rtcanary0"), None);
+        assert_eq!(linux::route_device(b"\xff\xfe"), None);
+        assert_eq!(
+            linux::route_device(br#"[{"dev":"rtcanary0"},{"dev":"rtcanary0"}]"#),
+            None,
+            "an ambiguous route is not a path"
+        );
+        assert_eq!(linux::route_device(br#"[{"dev":"Ethernet CANARY"}]"#), None);
+        assert_eq!(linux::default_devices(b"garbage", "rtcanary0"), None);
+        let many: Vec<String> = (0..9)
+            .map(|i| format!(r#"{{"dst":"default","dev":"eth{i}"}}"#))
+            .collect();
+        assert_eq!(
+            linux::default_devices(format!("[{}]", many.join(",")).as_bytes(), "x"),
+            None
+        );
+        assert_eq!(
+            linux::default_devices(
+                br#"[{"dst":"default","dev":"Ethernet-CANARY-name-too-long"}]"#,
+                "x"
+            ),
+            None
+        );
+        let dns: Ipv4Addr = "198.51.100.53".parse().unwrap();
+        assert!(linux::resolv_conf_foreign("nameserver 2001:db8::53\n", dns));
+        assert!(!macos::pf_enabled("garbage").is_some_and(|v| v));
+        assert_eq!(macos::pf_enabled("Status: Unknown\n"), None);
+        assert_eq!(macos::route_interface("interface: Ethernet CANARY\n"), None);
+        assert_eq!(
+            macos::resolvers("resolver #1\n  nameserver[0] : 198.51.100.53\n  if_index : 15 en0\n"),
+            None
+        );
+        let ours = "pass out quick on lo0 all no state label \"rtrust-501\"\nblock drop out quick all label \"rtrust-501\"\n";
+        let label = "label \"rtrust-501\"";
+        let extra_own = format!("pass out quick all label \"rtrust-501\"\n{ours}");
+        assert_eq!(macos::same_rules(&extra_own, ours, label), Audit::Mismatch);
+        assert_eq!(macos::same_rules("", "", label), Audit::Unknown);
+    }
+    #[test]
+    fn tester_wfp_audit_rejects_duplicates_flags_and_actions() {
+        use wfp::{Layer, audit, filter_specs};
+        let permits = [crate::failover::Permit {
+            address: "203.0.113.7:443".parse().unwrap(),
+            udp: false,
+            ports: vec![],
+        }];
+        let specs = filter_specs(42, &permits, false);
+        let mut duplicate = specs.clone();
+        duplicate.push(specs[0].clone());
+        assert_eq!(audit(duplicate, specs.clone()), Audit::Mismatch);
+        let mut boot = specs.clone();
+        boot[0].boottime = true;
+        assert_eq!(audit(boot, specs.clone()), Audit::Mismatch);
+        let mut permitted = specs.clone();
+        let block = permitted
+            .iter_mut()
+            .find(|s| !s.permit && s.layer == Layer::ConnectV4)
+            .unwrap();
+        block.permit = true;
+        assert_eq!(audit(permitted, specs.clone()), Audit::Mismatch);
+        assert_eq!(audit(vec![], specs.clone()), Audit::Mismatch);
+        // The neutral probe target is never a permitted destination.
+        for spec in &specs {
+            assert!(
+                !spec
+                    .conditions
+                    .contains(&wfp::Condition::RemoteAddress(u32::from(Ipv4Addr::new(
+                        192, 0, 2, 1
+                    ))))
+            );
+        }
+    }
+    #[test]
+    fn tester_probe_result_debug_and_json_carry_no_canaries() {
+        for facts in [
+            Dns {
+                config: Audit::Match,
+                path: Path::Tunnel,
+                reply: Reply::Answered,
+                foreign: Foreign::Present,
+            },
+            Dns::UNKNOWN,
+        ] {
+            for audit in ALL_AUDITS {
+                let probe = result(facts, audit, &[Attempt::Blocked, Attempt::Leaked], 7);
+                let text = format!(
+                    "{probe:?}{}{}",
+                    serde_json::to_string(&probe.dns).unwrap(),
+                    serde_json::to_string(&probe.guard).unwrap()
+                );
+                for canary in [
+                    "198.51.100.53",
+                    "203.0.113.7",
+                    "2001:db8::53",
+                    "rtcanary0",
+                    "Ethernet-CANARY",
+                    "canary.example.test",
+                ] {
+                    assert!(!text.contains(canary), "{canary}");
+                }
+            }
+        }
+    }
+    #[cfg(unix)]
+    mod tester_run {
+        use super::super::run;
+        use std::time::{Duration, Instant};
+        #[tokio::test]
+        async fn bounded_exec_is_fail_closed() {
+            // Oversized output is refused, not truncated into a verdict.
+            assert_eq!(run("/usr/bin/yes", &[], 1024).await, None);
+            // A failing tool proves nothing.
+            assert_eq!(run("/usr/bin/false", &[], 1024).await, None);
+            // A missing tool is not an error to surface, only None.
+            assert_eq!(run("/nonexistent/rtcanary0", &[], 1024).await, None);
+            // A hanging tool is cut at the step budget.
+            let started = Instant::now();
+            assert_eq!(run("/bin/sleep", &["30"], 1024).await, None);
+            assert!(started.elapsed() < Duration::from_secs(4));
+            // Exactly the cap is fine; one byte over is not.
+            assert_eq!(
+                run("/bin/echo", &["abc"], 4).await.as_deref(),
+                Some(&b"abc\n"[..])
+            );
+            assert_eq!(run("/bin/echo", &["abcd"], 4).await, None);
+        }
+        #[tokio::test]
+        async fn bounded_exec_clears_the_environment() {
+            // The test process always has HOME/USER-like variables; none may pass through.
+            assert!(std::env::vars().count() > 2);
+            let env = run("/usr/bin/env", &[], 64 * 1024).await.unwrap();
+            let env = String::from_utf8(env).unwrap();
+            let mut keys: Vec<_> = env
+                .lines()
+                .filter_map(|l| l.split_once('='))
+                .map(|(k, _)| k)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["LC_ALL", "PATH"], "{env}");
+        }
+        #[tokio::test]
+        async fn dropping_a_run_kills_the_child() {
+            let dir = tempfile::tempdir().unwrap();
+            let pidfile = dir.path().join("pid");
+            let script = format!("echo $$ > {}; exec /bin/sleep 30", pidfile.display());
+            let args = ["-c", script.as_str()];
+            let _ =
+                tokio::time::timeout(Duration::from_millis(500), run("/bin/sh", &args, 1024)).await;
+            let pid: i32 = std::fs::read_to_string(&pidfile)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            // Killed: gone, or a zombie awaiting the reaper; never still sleeping.
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let alive = unsafe { libc::kill(pid, 0) } == 0;
+                let state = std::process::Command::new("/bin/ps")
+                    .args(["-o", "stat=", "-p", &pid.to_string()])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                    .unwrap_or_default();
+                if !alive || state.is_empty() || state.starts_with('Z') {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "child {pid} still {state}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
 }

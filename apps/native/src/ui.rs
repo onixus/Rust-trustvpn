@@ -3225,6 +3225,102 @@ mod tests {
         apply_probe(&mut shown, &report, now + PROBE_TTL_MS + 1);
         assert_eq!(shown.route.source, Source::AppProbe);
     }
+    // ---- tester (issue #81): green needs five fresh passes; probe rows win ----
+    fn tester_full_green(now: u64) -> Snapshot {
+        let mut s = all_passed(now);
+        for o in [&mut s.transport, &mut s.dns, &mut s.guard] {
+            *o = system(Outcome::Passed, now);
+        }
+        for o in [&mut s.route, &mut s.connectivity] {
+            o.source = Source::AppProbe;
+            o.valid_for_ms = PROBE_FRESH_MS;
+        }
+        s
+    }
+    #[test]
+    fn tester_green_only_with_five_fresh_passes() {
+        let now = 1_000_000;
+        assert_eq!(tunnel_level(&tester_full_green(now), now), Level::Verified);
+        for check in CHECKS {
+            for (outcome, level) in [
+                (Outcome::Unknown, Level::Running),
+                (Outcome::Configured, Level::Running),
+                (Outcome::Stale, Level::Running),
+                (Outcome::Unsupported, Level::Running),
+                (Outcome::Failed, Level::Warning),
+            ] {
+                let mut s = tester_full_green(now);
+                let o = match check {
+                    Check::Transport => &mut s.transport,
+                    Check::Route => &mut s.route,
+                    Check::Dns => &mut s.dns,
+                    Check::Guard => &mut s.guard,
+                    Check::Connectivity => &mut s.connectivity,
+                };
+                o.outcome = outcome;
+                assert_eq!(tunnel_level(&s, now), level, "{check:?} {outcome:?}");
+            }
+            // An untimed or future pass is not fresh.
+            for at in [None, Some(now + 1)] {
+                let mut s = tester_full_green(now);
+                let o = match check {
+                    Check::Transport => &mut s.transport,
+                    Check::Route => &mut s.route,
+                    Check::Dns => &mut s.dns,
+                    Check::Guard => &mut s.guard,
+                    Check::Connectivity => &mut s.connectivity,
+                };
+                o.observed_at_ms = at;
+                assert_eq!(tunnel_level(&s, now), Level::Running, "{check:?} {at:?}");
+            }
+        }
+        // Split never turns green, even with five passes.
+        let mut split = tester_full_green(now);
+        for o in [
+            &mut split.transport,
+            &mut split.route,
+            &mut split.dns,
+            &mut split.guard,
+            &mut split.connectivity,
+        ] {
+            o.mode = ObsMode::Split;
+        }
+        assert_eq!(tunnel_level(&split, now), Level::Running);
+        // Green holds up to the probe TTL and is blue one millisecond later.
+        let s = tester_full_green(now);
+        assert_eq!(tunnel_level(&s, now + PROBE_TTL_MS), Level::Verified);
+        assert_eq!(tunnel_level(&s, now + PROBE_TTL_MS + 1), Level::Running);
+        // A lifecycle row claiming the probe TTL keeps the 6 s cap.
+        let mut lifecycle = s.clone();
+        lifecycle.dns = passed(now);
+        lifecycle.dns.valid_for_ms = PROBE_TTL_MS;
+        assert_eq!(tunnel_level(&lifecycle, now + FRESH_MS + 1), Level::Running);
+    }
+    #[test]
+    fn tester_apply_probe_never_overrides_a_current_service_probe_row() {
+        use rtrust_desktop::diagnostics::{Fact, Report};
+        let now = 1_000_000;
+        for outcome in [Outcome::Failed, Outcome::Passed, Outcome::Unknown] {
+            let mut shown = Snapshot::unknown(ObsMode::Full);
+            shown.route = system(outcome, now);
+            shown.connectivity = system(outcome, now);
+            let mut report = Report::new(shown.clone());
+            report.route = if outcome == Outcome::Passed {
+                Fact::RouteMismatch
+            } else {
+                Fact::Passed
+            };
+            report.https = Fact::Passed;
+            report.finished_at_ms = now;
+            let before = shown.clone();
+            apply_probe(&mut shown, &report, now + PROBE_TTL_MS);
+            assert_eq!(shown.route, before.route, "{outcome:?}");
+            assert_eq!(shown.connectivity, before.connectivity, "{outcome:?}");
+            // Once expired, the app's own check may fill the row again.
+            apply_probe(&mut shown, &report, now + PROBE_TTL_MS + 1);
+            assert_eq!(shown.connectivity.source, Source::AppProbe, "{outcome:?}");
+        }
+    }
     #[test]
     fn split_dns_and_guard_read_not_applicable_and_off_and_stay_blue() {
         let now = rtrust_control::observations::now_ms();

@@ -171,3 +171,89 @@ async fn dns(server: Ipv4Addr) -> Dns {
         },
     }
 }
+
+#[cfg(test)]
+mod tester_tests {
+    // tester (issue #81): Linux-only checks; nothing here sends a datagram.
+    use super::*;
+    #[test]
+    fn probe_sockets_are_never_marked_and_unknown_devices_fail_closed() {
+        assert!(socket(false, "rtcanary0").is_none());
+        assert!(socket(true, "rtcanary0").is_none());
+        assert!(socket(false, "bad\0name").is_none());
+        // SO_BINDTODEVICE needs CAP_NET_RAW; when granted, the mark must be 0.
+        if let Some(s) = socket(false, "lo") {
+            let mut mark = u32::MAX;
+            let mut len = std::mem::size_of_val(&mark) as libc::socklen_t;
+            assert_eq!(
+                unsafe {
+                    libc::getsockopt(
+                        s.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_MARK,
+                        (&mut mark as *mut u32).cast(),
+                        &mut len,
+                    )
+                },
+                0
+            );
+            assert_eq!(mark, 0);
+        }
+    }
+    #[tokio::test]
+    async fn a_colliding_endpoint_makes_the_bypass_check_inconclusive() {
+        let plan = Plan {
+            dns: "198.51.100.53".parse().unwrap(),
+            endpoints: vec![sysprobe::TARGET_V4.ip(), "203.0.113.7".parse().unwrap()],
+        };
+        assert_eq!(attempts(&plan).await, vec![Attempt::Unknown]);
+    }
+    /// Runs the real collector. Only for an isolated network namespace
+    /// (e.g. `docker run --network none`): it reads host tools and could send
+    /// one-byte datagrams to documentation addresses on a real host.
+    #[tokio::test]
+    #[ignore = "isolated network namespace only"]
+    async fn collector_in_an_empty_namespace_is_unproven_and_anonymous() {
+        let plan = Plan {
+            dns: "198.51.100.53".parse().unwrap(),
+            endpoints: vec![
+                "203.0.113.7".parse().unwrap(),
+                "2001:db8::53".parse().unwrap(),
+            ],
+        };
+        let started = std::time::Instant::now();
+        let probe = collect(plan).await;
+        assert!(
+            started.elapsed()
+                < std::time::Duration::from_millis(rtrust_control::observations::PROBE_DEADLINE_MS)
+        );
+        assert_eq!(probe.transport_proven_at, None);
+        assert_ne!(
+            probe.dns.outcome,
+            rtrust_control::observations::Outcome::Passed
+        );
+        assert_ne!(
+            probe.guard.outcome,
+            rtrust_control::observations::Outcome::Passed
+        );
+        let mut monitor = rtrust_control::observations::Monitor::new(
+            rtrust_control::observations::Mode::Full,
+            rtrust_control::observations::Source::ServiceLifecycle,
+            now_ms(),
+        );
+        assert!(monitor.apply_system(monitor.generation(), probe, now_ms()));
+        let mut response = rtrust_control::Response::new(rtrust_control::State::Connected, "full");
+        response.observations = monitor.sample(now_ms());
+        let text = serde_json::to_string(&response).unwrap();
+        for canary in [
+            "198.51.100.53",
+            "203.0.113.7",
+            "2001:db8::53",
+            "rtrust0",
+            "rtcanary0",
+        ] {
+            assert!(!text.contains(canary), "{canary}");
+        }
+        assert!(!response.observations.verified());
+    }
+}

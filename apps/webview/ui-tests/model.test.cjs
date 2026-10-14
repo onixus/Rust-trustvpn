@@ -82,4 +82,42 @@ assert.deepEqual(line, { text: 'Pending import: Office. Confirm it under Profile
 // Without a notice: service status, else the last connect error while disconnected.
 assert.equal(M.statusLine({ notice: '', status: '', connected: false, connectError: 'refused' }).text, 'refused');
 assert.equal(M.statusLine({ notice: '', status: '', connected: true, connectError: 'refused' }).text, '');
+// tester (issue #81): green only with five fresh passes; probe TTL boundaries.
+{
+ const sysAt = (outcome, age, ttl = 25000) => ({ outcome, source: 'system_probe', observed_at_ms: now - age, valid_for_ms: ttl, mode: 'full', reason: 'configuration_applied' });
+ const green = () => { const s = allPassed(); s.transport = sysAt('passed', 1000); s.dns = sysAt('passed', 1000); s.guard = sysAt('passed', 1000); return s; };
+ assert.equal(M.derive({ ...base, snapshot: green() }), 'verified');
+ for (const key of M.KEYS) {
+  for (const [out, want] of [['unknown', 'running'], ['configured', 'running'], ['stale', 'running'], ['unsupported', 'running'], ['failed', 'warning'], ['bogus', 'running']]) {
+   const s = green(); s[key] = { ...s[key], outcome: out };
+   assert.equal(M.derive({ ...base, snapshot: s }), want, `${key} ${out}`);
+  }
+  const s = green(); s[key] = { ...s[key], observed_at_ms: null };
+  assert.equal(M.derive({ ...base, snapshot: s }), 'running', `${key} untimed`);
+ }
+ // Probe rows: passed up to exactly 25 s, stale one millisecond later; future never trusted.
+ assert.equal(M.outcome(sysAt('passed', 25000), now), 'passed');
+ assert.equal(M.outcome(sysAt('passed', 25001), now), 'stale');
+ assert.equal(M.outcome(sysAt('passed', -1), now), 'stale');
+ assert.equal(M.outcome(sysAt('passed', 1000, 0), now), 'stale');
+ assert.equal(M.outcome(sysAt('passed', 1000, 'x'), now), 'stale');
+ // Lifecycle/app rows claiming the probe TTL keep the 6 s cap.
+ assert.equal(M.outcome({ ...obs('passed', 7000, 25000), source: 'app_probe' }, now), 'stale');
+ // A probe failure is yellow while current and no longer counts after its TTL (yellow -> blue).
+ const failing = green(); failing.dns = sysAt('failed', 1000);
+ assert.equal(M.derive({ ...base, snapshot: failing }), 'warning');
+ assert.equal(M.derive({ ...base, snapshot: failing, now: now + 25000 }), 'running');
+ assert.equal(M.outcome(sysAt('failed', 1000, 25000), now), 'failed');
+ assert.equal(M.outcome({ ...sysAt('failed', 0), observed_at_ms: null }, now), 'stale');
+ // Green -> blue after the TTL without a new fetch.
+ assert.equal(M.derive({ ...base, snapshot: green(), now: now + 24000 }), 'running', 'route/connectivity 6 s rows expire first');
+ // Split: DNS/guard rows are grey labels, never failed or passed, status stays blue.
+ const unsup = { outcome: 'unsupported', source: 'service_lifecycle', observed_at_ms: null, valid_for_ms: 6000, mode: 'split', reason: 'check_unavailable' };
+ const split = snap({ transport: { ...obs('configured'), mode: 'split' }, route: { ...obs('passed'), mode: 'split' }, dns: unsup, guard: unsup, connectivity: { ...obs('passed'), mode: 'split' } });
+ const values = M.rows({ ...base, full: false, snapshot: split }, 'running').map(r => r.value);
+ assert.deepEqual([values[2], values[3]], ['na', 'guard_off']);
+ assert.equal(M.failed(split, now).length, 0);
+ assert.equal(M.derive({ ...base, full: false, snapshot: split }), 'running');
+ assert.notEqual(M.ROW_TONE.na, 'green'); assert.notEqual(M.ROW_TONE.guard_off, 'yellow');
+}
 console.log('PASS webview state model');
