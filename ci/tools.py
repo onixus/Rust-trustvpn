@@ -88,29 +88,38 @@ def extract_verified(archive,directory,name,sha256,attempts=3):
                         shutil.rmtree(staging)
                 raise RuntimeError('Tool extraction validation exhausted: '+name)
 
+def _read(path):
+    try:return path.read_bytes()
+    except OSError:return None
+
+def _publish(path,data):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent,delete=False) as f:
+        temporary=pathlib.Path(f.name);f.write(data)
+    temporary.replace(path)
+
 def install(name):
     key=platform.system()+'-'+platform.machine()
     item=json.loads((ROOT/'ci/tools.lock.json').read_text())[name][key]
     directory=ROOT/'.ci-tools'/name;directory.mkdir(parents=True,exist_ok=True)
     archive=directory/'download.tar.gz'
     cache=pathlib.Path(os.environ['RTRUST_TOOL_CACHE'])/item['sha256'] if os.environ.get('RTRUST_TOOL_CACHE') else None
-    # Jobs share the cache and run this concurrently: read it once, and treat a
-    # file that another job is replacing as a miss.
-    cached=None
-    if cache:
-        try:cached=cache.read_bytes()
-        except OSError:pass
-    cached=cached if cached is not None and hashlib.sha256(cached).hexdigest()==item['sha256'] else None
-    if cached is not None:archive.write_bytes(cached)
-    if not archive.exists() or hashlib.sha256(archive.read_bytes()).hexdigest()!=item['sha256']:
-        subprocess.run(['curl','-fLsS','--connect-timeout','15','--max-time','120','--retry','2',item['url'],'-o',str(archive)],check=True)
-    # Publish only what the cache lacks. Rewriting a valid entry on every run made
-    # it vanish for a moment under a concurrent job (rename is not atomic on VirtioFS).
-    if cache and cached is None and hashlib.sha256(archive.read_bytes()).hexdigest()==item['sha256']:
-        cache.parent.mkdir(parents=True,exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=cache.parent,delete=False) as f:
-            temporary=pathlib.Path(f.name);f.write(archive.read_bytes())
-        temporary.replace(cache)
-    if hashlib.sha256(archive.read_bytes()).hexdigest()!=item['sha256']:raise RuntimeError('Tool checksum mismatch: '+name)
-    return extract_verified(archive,directory,name,item['sha256'])
+    valid=lambda data:data is not None and hashlib.sha256(data).hexdigest()==item['sha256']
+    # Jobs share the cache and the workspace archive and run this concurrently:
+    # read each once, treat a file another job is replacing as a miss, and never
+    # rewrite a valid shared entry (rename is not atomic on VirtioFS).
+    cached=_read(cache) if cache else None
+    data=cached if valid(cached) else _read(archive)
+    if not valid(data):
+        with tempfile.TemporaryDirectory(prefix='download-',dir=directory) as temporary:
+            target=pathlib.Path(temporary)/'download.tar.gz'
+            subprocess.run(['curl','-fLsS','--connect-timeout','15','--max-time','120','--retry','2',item['url'],'-o',str(target)],check=True)
+            data=target.read_bytes()
+        if not valid(data):raise RuntimeError('Tool checksum mismatch: '+name)
+        _publish(archive,data)
+    if cache and not valid(cached):_publish(cache,data)
+    # Extract from a private copy of the verified bytes, not the shared archive.
+    with tempfile.TemporaryDirectory(prefix='archive-',dir=directory) as temporary:
+        private=pathlib.Path(temporary)/'download.tar.gz';private.write_bytes(data)
+        return extract_verified(private,directory,name,item['sha256'])
 if __name__=='__main__': print(install(sys.argv[1]))

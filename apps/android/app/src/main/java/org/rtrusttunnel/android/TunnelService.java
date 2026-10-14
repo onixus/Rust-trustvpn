@@ -98,11 +98,14 @@ public final class TunnelService extends VpnService {
     static final String PROFILE_ID = "org.rtrusttunnel.android.PROFILE_ID";
     @Override public int onStartCommand(Intent intent, int flags, int id) {
         alwaysOn = isAlwaysOn(); lockdown = isLockdownEnabled();
-        if (intent != null && STOP.equals(intent.getAction()) && !alwaysOn) {
+        boolean stopIntent = intent != null && STOP.equals(intent.getAction());
+        if (stopIntent && !alwaysOn) {
             rememberAlwaysOn(this, false);
             if (lifecycle.stop(id)) scheduleDisconnect();
             return START_NOT_STICKY;
         }
+        // Always-on refuses STOP; it must not replace a queued START's profile.
+        if (stopIntent && lifecycle.acknowledgeIfBusy(id)) return START_STICKY;
         TunnelLifecycle.Start request = new TunnelLifecycle.Start(id,
             intent == null ? null : intent.getStringExtra(PROFILE_ID),
             intent != null && RECOVER.equals(intent.getAction()));
@@ -351,7 +354,7 @@ public final class TunnelService extends VpnService {
     }
     @Override public void onDestroy() {
         lifecycle.destroy(); widgetHandler.removeCallbacksAndMessages(null);
-        if (running == this) { running = null; active = false; }
+        if (running == this) { running = null; active = false; VpnWidget.refresh(this, true); }
         stopping = true; lifecycleEpoch++; worker.execute(this::cleanup); super.onDestroy();
     }
 }

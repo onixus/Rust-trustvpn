@@ -44,7 +44,16 @@ impl Route {
                     && (row.gateway == self.interface
                         || row.gateway.strip_prefix("link#").is_some_and(|v| {
                             !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit())
-                        }))
+                        })
+                        // netstat may print an IPv6 interface route's gateway as
+                        // the interface's own link-local address, scoped to it.
+                        || (self.v6
+                            && row.gateway.split_once('%').is_some_and(|(address, scope)| {
+                                scope == self.interface
+                                    && address
+                                        .parse::<std::net::Ipv6Addr>()
+                                        .is_ok_and(|a| a.segments()[0] & 0xffc0 == 0xfe80)
+                            })))
             } else {
                 row.flags.contains('G') && row.gateway == self.gateway
             }
@@ -482,6 +491,27 @@ mod tests {
         let mut malformed = row(&route);
         malformed.gateway = "192.0.2.1".into();
         assert!(!route.owns(&malformed));
+    }
+    #[test]
+    fn ipv6_interface_route_accepts_only_own_scoped_link_local_gateway() {
+        let route = fixture(true, "::/1");
+        let mut owned = row(&route);
+        owned.gateway = "fe80::1234:5678%utun5254".into();
+        assert!(route.owns(&owned));
+        for gateway in [
+            "fe80::1234:5678%en0",
+            "fe80::1234:5678",
+            "2001:db8::1%utun5254",
+            "not-an-address%utun5254",
+        ] {
+            let mut foreign = row(&route);
+            foreign.gateway = gateway.into();
+            assert!(!route.owns(&foreign), "{gateway}");
+        }
+        let v4 = fixture(false, "0.0.0.0/1");
+        let mut scoped = row(&v4);
+        scoped.gateway = "fe80::1%utun5254".into();
+        assert!(!v4.owns(&scoped));
     }
     #[test]
     fn recovery_requires_interface_and_protocol_marker_and_gateway() {

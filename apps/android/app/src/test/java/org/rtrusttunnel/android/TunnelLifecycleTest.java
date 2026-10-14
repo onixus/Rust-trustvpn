@@ -39,6 +39,15 @@ public final class TunnelLifecycleTest {
         lifecycle.destroy();
         check(lifecycle.completeStop() == null && !lifecycle.start(start(16)),
             "destroyed instance cannot restart from stale completion");
+        TunnelLifecycle alwaysOn = new TunnelLifecycle();
+        check(!alwaysOn.acknowledgeIfBusy(1), "idle Always-on STOP may start the service");
+        check(alwaysOn.start(start(2)) && alwaysOn.stop(3) && !alwaysOn.start(start(4)), "queued START");
+        check(alwaysOn.acknowledgeIfBusy(5) && alwaysOn.latestId() == 5,
+            "Always-on STOP during cleanup is ignored but fences stopSelfResult");
+        TunnelLifecycle.Start kept = alwaysOn.completeStop();
+        check(kept != null && kept.id == 4 && "synthetic-4".equals(kept.profileId),
+            "Always-on STOP never replaces the queued profile");
+        check(alwaysOn.acknowledgeIfBusy(6), "Always-on STOP during session is ignored");
         for (int i = 0; i < 1000; i++) {
             TunnelLifecycle toggles = new TunnelLifecycle();
             check(toggles.start(start(1)) && toggles.stop(2), "toggle start stop");

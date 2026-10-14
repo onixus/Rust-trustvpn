@@ -30,6 +30,15 @@ class RecoveryTests(unittest.TestCase):
         for response in [{'state':'Error','message':'other'},{'state':'Blocked','message':LEASE_BUSY},{},None,[],{'state':'Error','message':LEASE_BUSY+' '}]:
             with self.subTest(response=response),self.assertRaises(AssertionError):self.run_recovery([response])
             self.assertEqual(len(self.pipes),1);self.assertEqual(self.now,0)
+    def test_idle_reply_at_deadline_is_success(self):
+        # Reply completes exactly at the deadline: the guard was already released.
+        self.now=0;self.pipes=[];test=self
+        class Pipe:
+            def __init__(self):test.pipes.append(self)
+            def request(self,command,deadline):test.now=deadline;return {'state':'Idle'}
+            def close(self):pass
+        result=recover_after_crash(Pipe,lambda:None,timeout=1,interval=.2,clock=lambda:self.now,sleep=lambda d:None)
+        self.assertEqual(result['state'],'Idle');self.assertEqual(len(self.pipes),1)
     def test_transport_exception_closes_without_retry(self):
         with self.assertRaises(OSError):self.run_recovery([OSError('synthetic')])
         self.assertEqual(len(self.pipes),1)

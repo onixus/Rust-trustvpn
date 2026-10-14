@@ -71,6 +71,23 @@ class ExtractionTests(unittest.TestCase):
             self.assertEqual(output.stat().st_mtime_ns,metadata.st_mtime_ns)
         self.assertEqual(list(directory.glob('extract-*')),[])
         self.assertEqual(len(list(directory.glob('verified-*'))),1)
+    def test_shared_archive_rewritten_during_install_is_not_read(self):
+        sha=self.archive_with();directory=self.root/'.ci-tools/trivy';directory.mkdir(parents=True)
+        shared=directory/'download.tar.gz';shared.write_bytes(self.archive.read_bytes())
+        cache=self.root/'cache';cache.mkdir();(cache/sha).write_bytes(self.archive.read_bytes())
+        (self.root/'ci').mkdir()
+        (self.root/'ci/tools.lock.json').write_text(json.dumps({'trivy':{platform.system()+'-'+platform.machine():{'sha256':sha,'url':'synthetic-invalid'}}}))
+        original=tools.extract_verified
+        def concurrent_rewrite(archive,*args):
+            # Another job truncates the shared workspace archive mid-install.
+            self.assertNotEqual(archive,shared);shared.write_bytes(b'partial')
+            return original(archive,*args)
+        with patch.object(tools,'ROOT',self.root),patch.dict(os.environ,{'RTRUST_TOOL_CACHE':str(cache)}),\
+                patch.object(tools,'extract_verified',concurrent_rewrite),patch.object(tools.subprocess,'run') as download:
+            self.assertEqual(pathlib.Path(tools.install('trivy')).read_bytes(),b'good-tool')
+            download.assert_not_called()
+        self.assertEqual(shared.read_bytes(),b'partial','valid cache hit must not rewrite the shared archive')
+        self.assertEqual(list(directory.glob('archive-*'))+list(directory.glob('download-*')),[])
     def test_corrupt_reused_output_repaired(self):
         sha=self.archive_with();output=pathlib.Path(self.extract(sha));output.write_bytes(b'evil-tool')
         self.assertEqual(self.extract(sha),str(output));self.assertEqual(output.read_bytes(),b'good-tool')

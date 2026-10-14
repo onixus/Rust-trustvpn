@@ -22,6 +22,11 @@ final class TunnelLifecycle {
         running = true;
         return true;
     }
+    /** Records a non-request intent; true while a session or cleanup owns the service. */
+    synchronized boolean acknowledgeIfBusy(int id) {
+        latestId = id;
+        return running || stopping || destroyed;
+    }
     synchronized boolean stop(int id) {
         latestId = id;
         pending = null;
