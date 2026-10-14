@@ -1,4 +1,4 @@
-import contextlib,hashlib,io,pathlib,tarfile,tempfile,unittest
+import contextlib,hashlib,io,pathlib,tarfile,tempfile,unittest,json,platform,threading,concurrent.futures,os
 from unittest.mock import patch
 import tools
 
@@ -56,5 +56,58 @@ class ExtractionTests(unittest.TestCase):
         with patch.object(tarfile.TarFile,'extractall',side_effect=OSError('synthetic')):
             with self.assertRaises(OSError):self.extract(sha)
         self.assertEqual(list(self.root.glob('extract-*')),[])
+
+    def test_repeated_install_reuses_output_without_mutating_active_reader(self):
+        sha=self.archive_with();directory=self.root/'.ci-tools/trivy';directory.mkdir(parents=True)
+        (directory/'download.tar.gz').write_bytes(self.archive.read_bytes())
+        (self.root/'ci').mkdir()
+        (self.root/'ci/tools.lock.json').write_text(json.dumps({'trivy':{platform.system()+'-'+platform.machine():{'sha256':sha,'url':'synthetic-invalid'}}}))
+        with patch.object(tools,'ROOT',self.root),patch.dict(os.environ,{'RTRUST_TOOL_CACHE':''}):
+            output=pathlib.Path(tools.install('trivy'));metadata=output.stat()
+            with output.open('rb') as reader,patch.object(tarfile.TarFile,'extractall') as extraction:
+                for _ in range(5):self.assertEqual(tools.install('trivy'),str(output))
+                self.assertEqual(reader.read(),b'good-tool');extraction.assert_not_called()
+            self.assertEqual(output.stat().st_ino,metadata.st_ino)
+            self.assertEqual(output.stat().st_mtime_ns,metadata.st_mtime_ns)
+        self.assertEqual(list(directory.glob('extract-*')),[])
+        self.assertEqual(len(list(directory.glob('verified-*'))),1)
+    def test_corrupt_reused_output_repaired(self):
+        sha=self.archive_with();output=pathlib.Path(self.extract(sha));output.write_bytes(b'evil-tool')
+        self.assertEqual(self.extract(sha),str(output));self.assertEqual(output.read_bytes(),b'good-tool')
+        self.assertEqual(list(self.root.glob('extract-*')),[])
+    def test_post_publication_corruption_retries_and_exhausts(self):
+        for persistent in [False,True]:
+            with self.subTest(persistent=persistent):
+                sha=self.archive_with();output=self.root/('verified-'+sha)/'trivy'
+                output.unlink(missing_ok=True);original=pathlib.Path.replace;calls=[]
+                def corrupt(path,destination):
+                    result=original(path,destination);calls.append(destination)
+                    if persistent or len(calls)==1:destination.write_bytes(b'evil-tool')
+                    return result
+                with patch.object(pathlib.Path,'replace',corrupt),contextlib.redirect_stderr(io.StringIO()):
+                    if persistent:
+                        with self.assertRaisesRegex(RuntimeError,'exhausted'):self.extract(sha)
+                        self.assertEqual(len(calls),3)
+                    else:
+                        self.assertEqual(self.extract(sha),str(output));self.assertEqual(len(calls),2)
+                        self.assertEqual(output.read_bytes(),b'good-tool')
+                self.assertEqual(list(self.root.glob('extract-*')),[])
+    def test_concurrent_installers_publish_once(self):
+        sha=self.archive_with();original=tarfile.TarFile.extractall
+        started=threading.Event();resume=threading.Event();calls=[]
+        def delayed(tar,path,**kwargs):
+            calls.append(path);started.set()
+            if not resume.wait(3):raise TimeoutError('synthetic synchronization')
+            original(tar,path,**kwargs)
+        with patch.object(tarfile.TarFile,'extractall',delayed),concurrent.futures.ThreadPoolExecutor(2) as pool:
+            first=pool.submit(self.extract,sha);self.assertTrue(started.wait(3))
+            second=pool.submit(self.extract,sha);resume.set()
+            self.assertEqual(first.result(timeout=3),second.result(timeout=3))
+        self.assertEqual(len(calls),1);self.assertEqual(list(self.root.glob('extract-*')),[])
+    def test_busy_file_replacement_fails_closed_and_cleans(self):
+        sha=self.archive_with();output=pathlib.Path(self.extract(sha));output.write_bytes(b'evil-tool')
+        with patch.object(pathlib.Path,'replace',side_effect=PermissionError('synthetic busy executable')):
+            with self.assertRaises(PermissionError):self.extract(sha)
+        self.assertEqual(output.read_bytes(),b'evil-tool');self.assertEqual(list(self.root.glob('extract-*')),[])
 
 if __name__=='__main__':unittest.main()
