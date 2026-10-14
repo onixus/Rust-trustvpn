@@ -12,6 +12,8 @@ pub(super) struct State {
     recovery_confirm: bool,
     enabling: bool,
     enable_task: Option<iced::task::Handle>,
+    /// Last reported service state and observations; presentation only.
+    pub(super) service: crate::ui::ServiceState,
 }
 #[derive(Clone)]
 pub(super) enum Action {
@@ -199,6 +201,10 @@ impl App {
                 )
             })
             .unwrap_or_default();
+        self.always_on.service = self
+            .always_on
+            .enabled
+            .then(|| (response.state, response.observations.clone()));
         self.always_on.status = format!(
             "{}\n{}{}",
             response.message,

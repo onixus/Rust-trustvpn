@@ -43,11 +43,7 @@ pub unsafe fn install(window: *mut AnyObject) -> bool {
             return false;
         };
         let _: () = msg_send![&*wrapper, setAutoresizingMask: 18usize]; // width + height
-        // The Rust UI uses a dark palette regardless of the system appearance.
-        let appearance_class = AnyClass::get(c"NSAppearance").unwrap();
-        let name = NSString::from_str("NSAppearanceNameDarkAqua");
-        let appearance: *mut AnyObject = msg_send![appearance_class, appearanceNamed: &*name];
-        let _: () = msg_send![&*wrapper, setAppearance: appearance];
+        // The material inherits the window appearance chosen by `set_appearance`.
         if glass.is_some() {
             let _: () = msg_send![&*wrapper, setCornerRadius: 12.0f64];
             let _: () = msg_send![&*wrapper, setStyle: 0isize]; // regular glass preserves text contrast
@@ -72,6 +68,27 @@ pub unsafe fn install(window: *mut AnyObject) -> bool {
             );
         }
         true
+    }
+}
+
+/// Match AppKit chrome and the glass material to the app theme (dark or frosted light).
+pub unsafe fn set_appearance(window: *mut AnyObject, dark: bool) {
+    if window.is_null() {
+        return;
+    }
+    unsafe {
+        let Some(class) = AnyClass::get(c"NSAppearance") else {
+            return;
+        };
+        let name = NSString::from_str(if dark {
+            "NSAppearanceNameDarkAqua"
+        } else {
+            "NSAppearanceNameAqua"
+        });
+        let appearance: *mut AnyObject = msg_send![class, appearanceNamed: &*name];
+        if !appearance.is_null() {
+            let _: () = msg_send![window, setAppearance: appearance];
+        }
     }
 }
 
