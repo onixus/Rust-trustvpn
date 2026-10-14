@@ -66,6 +66,20 @@ public class MainActivity extends Activity {
     private LinearLayout checksBox, strip, list, results;
     private SlideButton slider;
     private EditText search;
+    private TextView checkedAt;
+
+    /**
+     * Path check run automatically on connect, on every app open, after a session or
+     * network change and every 5 minutes while open: DNS, route and one HTTPS request,
+     * only through this app's VPN network (DiagnosticsDialog.check). The target is the
+     * host Android itself probes for connectivity.
+     */
+    static final String PATH_TARGET = "connectivitycheck.gstatic.com";
+    private static final long PATH_REFRESH_MS = 5 * 60_000, PATH_MIN_GAP_MS = 5_000, PATH_DEADLINE_MS = 15_000;
+    private JSONObject pathResult;
+    private DiagnosticsDialog.Job pathJob;
+    private long sessionGeneration = -1, pathGeneration = -1, pathAt, pathStarted = -PATH_MIN_GAP_MS;
+    private boolean pathForce = true;
 
     private final Runnable poll = new Runnable() {
         public void run() {
@@ -75,7 +89,9 @@ public class MainActivity extends Activity {
                 int nativeState = state.optInt("state", 0);
                 boolean problem = !TunnelService.problem.isEmpty(), running = nativeState == 2 && !problem;
                 observations = running ? ObservationStatus.snapshot(state.optJSONObject("observations")) : null;
-                int level = running ? ObservationStatus.level(observations) : ObservationStatus.RUNNING;
+                sessionGeneration = running && state.optJSONObject("observations") != null ? state.getJSONObject("observations").optLong("generation", -1) : -1;
+                if (running) maybeCheckPath(); else stopPathCheck(true);
+                int level = running ? level() : ObservationStatus.RUNNING;
                 JSONObject recovery = state.optJSONObject("recovery");
                 backupIndex = recovery == null ? 0 : recovery.optInt("selected_index");
                 if (problem || nativeState == 4 || nativeState < 0 || nativeState > 4) {
@@ -157,7 +173,7 @@ public class MainActivity extends Activity {
     }
     private void build() {
         host.removeAllViews();
-        tagText = headline = description = stateChip = null; tagDot = null;
+        tagText = headline = description = stateChip = checkedAt = null; tagDot = null;
         checksBox = strip = list = results = appsList = null; slider = null; search = null; appsMessage = appsCount = null; renderKey = "";
         View view;
         switch (screen) {
@@ -186,26 +202,96 @@ public class MainActivity extends Activity {
     }
     private Info info(String id) { for (Info info : profiles) if (info.id.equals(id)) return info; return null; }
 
-    /** Five checks for the current state. Checks without a result say so plainly. */
+    /** Index of each check in ObservationStatus.KEYS. */
+    private static final int TRANSPORT = 0, ROUTE = 1, DNS = 2, GUARD = 3, CONNECTIVITY = 4;
+    private static final int PASSED = 1, FAILED = -1, UNKNOWN = 0;
+
+    private boolean pathRunning() { return pathJob != null; }
+    private boolean pathFresh() { return pathResult != null && pathGeneration == sessionGeneration && sessionGeneration >= 0; }
+    private void maybeCheckPath() {
+        long now = SystemClock.elapsedRealtime();
+        if (pathRunning() || now - pathStarted < PATH_MIN_GAP_MS) return;
+        boolean stale = !pathFresh() || System.currentTimeMillis() - pathAt > PATH_REFRESH_MS;
+        if (!stale && !pathForce) return;
+        pathForce = false; pathStarted = now;
+        DiagnosticsDialog.Job job = new DiagnosticsDialog.Job(); pathJob = job;
+        long generation = sessionGeneration;
+        Runnable deadline = () -> { if (pathJob == job) { job.cancel(); pathJob = null; renderKey = ""; } };
+        handler.postDelayed(deadline, PATH_DEADLINE_MS);
+        try {
+            DiagnosticsDialog.WORKER.execute(() -> {
+                JSONObject result = DiagnosticsDialog.check(this, PATH_TARGET, job);
+                handler.post(() -> {
+                    handler.removeCallbacks(deadline);
+                    if (pathJob != job || isDestroyed()) return;
+                    pathJob = null;
+                    // A result from an earlier session or network says nothing about this one.
+                    if (result.optLong("generation", -2) == generation && generation == sessionGeneration && !"session_changed".equals(result.optString("cause"))) {
+                        pathResult = result; pathGeneration = generation; pathAt = System.currentTimeMillis();
+                    }
+                    renderKey = ""; renderState();
+                });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException busy) { handler.removeCallbacks(deadline); pathJob = null; }
+    }
+    private void stopPathCheck(boolean forget) {
+        if (pathJob != null) { pathJob.cancel(); pathJob = null; }
+        if (forget) { pathResult = null; pathGeneration = -1; }
+    }
+    private void recheck() { pathForce = true; pathStarted = -PATH_MIN_GAP_MS; renderKey = ""; }
+
+    /** PASSED, FAILED or UNKNOWN for a check, from the app's path check or the core. */
+    private int verdict(int check) {
+        if (check == GUARD) return TunnelService.active && TunnelService.alwaysOn && TunnelService.lockdown ? PASSED : UNKNOWN;
+        if (pathFresh()) {
+            String value = check == ROUTE ? pathResult.optString("route") : check == DNS ? pathResult.optString("dns") : check == CONNECTIVITY ? pathResult.optString("https") : "";
+            if (check == ROUTE && value.equals("configured") || check != ROUTE && value.equals("passed")) return PASSED;
+            if (check == ROUTE && value.equals("route_mismatch") || check == DNS && value.equals("failed")
+                || check == CONNECTIVITY && (value.equals("tls_failed") || value.equals("timeout") || value.equals("connection_failed"))) return FAILED;
+        }
+        if (observations == null) return UNKNOWN;
+        String outcome = ObservationStatus.outcome(observations.optJSONObject(ObservationStatus.KEYS[check]));
+        return outcome.equals("passed") || check == TRANSPORT && outcome.equals("configured") ? PASSED : outcome.equals("failed") ? FAILED : UNKNOWN;
+    }
+    /** Green needs route, DNS and internet access passed; the guard is reported, not required. */
+    private int level() {
+        if (ObservationStatus.level(observations) == ObservationStatus.WARNING) return ObservationStatus.WARNING;
+        boolean all = true;
+        for (int check : new int[]{TRANSPORT, ROUTE, DNS, CONNECTIVITY}) {
+            int v = verdict(check);
+            if (v == FAILED) return ObservationStatus.WARNING;
+            if (v != PASSED) all = false;
+        }
+        return all ? ObservationStatus.VERIFIED : ObservationStatus.RUNNING;
+    }
+    private String failedName() {
+        for (int check : new int[]{TRANSPORT, ROUTE, DNS, CONNECTIVITY}) if (verdict(check) == FAILED) return getString(ObservationStatus.NAMES[check]);
+        return getString(ObservationStatus.NAMES[CONNECTIVITY]);
+    }
+    private String ago(long at) {
+        long minutes = (System.currentTimeMillis() - at) / 60_000;
+        return minutes < 1 ? getString(R.string.v3_just_now) : getString(R.string.v3_minutes_ago, minutes);
+    }
+
+    /** Five checks for the current state, each in plain words. */
     private List<Row> rows() {
         int[] notes = {R.string.v3_note_transport, R.string.v3_note_route, R.string.v3_note_dns, R.string.v3_note_guard, R.string.v3_note_connectivity};
+        int[][] words = {{R.string.v3_transport_ok, R.string.observation_failed}, {R.string.v3_route_ok, R.string.v3_route_bad},
+            {R.string.v3_dns_ok, R.string.v3_dns_bad}, {R.string.v3_guard_on, R.string.v3_guard_off}, {R.string.v3_net_ok, R.string.v3_net_bad}};
+        boolean live = uiState == S_RUNNING || uiState == S_VERIFIED || uiState == S_WARNING;
         List<Row> rows = new ArrayList<>();
         for (int i = 0; i < ObservationStatus.KEYS.length; i++) {
             Row row = new Row(); row.name = getString(ObservationStatus.NAMES[i]); row.note = getString(notes[i]);
-            row.ring = true; row.color = p.empty; row.value = getString(R.string.v3_no_data);
-            if (i == 0 && uiState == S_OFF) row.value = getString(R.string.v3_check_off);
-            else if (i == 0 && (uiState == S_CONNECTING || uiState == S_RECONNECTING)) { row.value = getString(R.string.v3_check_connecting); row.color = p.blue; }
-            else if (i == 0 && uiState == S_ERROR) { row.value = getString(R.string.observation_failed); row.color = p.red; row.ring = false; }
-            else if (observations != null) {
-                String outcome = ObservationStatus.outcome(observations.optJSONObject(ObservationStatus.KEYS[i]));
-                String label = ObservationStatus.label(this, outcome);
-                if (label != null) row.value = label;
-                switch (outcome) {
-                    case "passed": row.color = p.green; row.ring = false; break;
-                    case "failed": row.color = p.yellow; row.ring = false; break;
-                    case "configured": row.color = p.blue; row.ring = false; break;
-                    default: row.color = p.empty;
-                }
+            row.ring = true; row.color = p.empty; row.value = getString(R.string.v3_not_checked);
+            if (i == TRANSPORT && uiState == S_OFF) row.value = getString(R.string.v3_check_off);
+            else if (i == TRANSPORT && (uiState == S_CONNECTING || uiState == S_RECONNECTING)) { row.value = getString(R.string.v3_check_connecting); row.color = p.blue; }
+            else if (i == TRANSPORT && uiState == S_ERROR) { row.value = getString(R.string.observation_failed); row.color = p.red; row.ring = false; }
+            else if (live) {
+                int v = verdict(i);
+                if (v == PASSED) { row.value = getString(words[i][0]); row.color = p.green; row.ring = false; }
+                else if (v == FAILED) { row.value = getString(words[i][1]); row.color = p.yellow; row.ring = false; }
+                else if (i == GUARD) row.value = getString(R.string.v3_guard_off);
+                else if (pathRunning()) { row.value = getString(R.string.v3_checking); row.color = p.blue; }
             }
             row.valueColor = row.ring ? (row.color == p.blue ? p.blueText : p.muted) : p.textFor(row.color);
             rows.add(row);
@@ -224,6 +310,7 @@ public class MainActivity extends Activity {
         String key = uiState + "|" + name + "|" + backupIndex + "|" + problemText + "|" + TunnelService.active + TunnelService.alwaysOn;
         List<Row> rows = rows();
         for (Row row : rows) key += "|" + row.value + row.color;
+        if (pathFresh()) key += "|" + ago(pathAt);
         if (key.equals(renderKey)) return;
         renderKey = key;
         if (tagDot != null) ((GradientDrawable) tagDot.getBackground()).setColor(color);
@@ -250,17 +337,22 @@ public class MainActivity extends Activity {
             switch (uiState) {
                 case S_CONNECTING: text = getString(R.string.v3_connecting_desc, host); break;
                 case S_RECONNECTING: text = getString(R.string.v3_reconnecting_desc); break;
-                case S_RUNNING: text = getString(R.string.v3_running_desc); break;
-                case S_VERIFIED: text = getString(R.string.v3_verified_desc); break;
-                case S_WARNING: text = getString(R.string.v3_warning_desc); break;
+                case S_RUNNING: text = getString(pathRunning() || pathForce ? R.string.v3_running_desc : R.string.v3_running_unchecked_desc); break;
+                case S_VERIFIED: text = getString(R.string.v3_verified_desc, ago(pathAt)); break;
+                case S_WARNING: text = getString(R.string.v3_warning_desc, failedName()); break;
                 case S_ERROR: text = problemText; break;
                 default: text = name == null ? getString(R.string.v3_off_desc_none) : getString(R.string.v3_off_desc, name);
             }
+            if ((uiState == S_VERIFIED || uiState == S_WARNING) && verdict(GUARD) != PASSED) text += getString(R.string.v3_guard_off_note);
             if (backupIndex > 0 && (uiState == S_RUNNING || uiState == S_VERIFIED || uiState == S_WARNING))
                 text = getString(R.string.recovery_backup_active, backupIndex) + ". " + text;
             description.setText(text);
         }
         if (checksBox != null) fillChecks(checksBox, rows, screen == CHECKS);
+        if (checkedAt != null) {
+            checkedAt.setText(pathFresh() ? getString(R.string.v3_checked_via, ago(pathAt), PATH_TARGET) : pathRunning() ? getString(R.string.v3_running_desc) : getString(R.string.v3_running_unchecked_desc));
+            checkedAt.setVisibility(uiState == S_RUNNING || uiState == S_VERIFIED || uiState == S_WARNING ? View.VISIBLE : View.GONE);
+        }
         if (stateChip != null) {
             stateChip.setText(headlineWord());
             stateChip.setTextColor(p.textFor(color));
@@ -556,8 +648,10 @@ public class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false);
         LinearLayout body = column(); body.setPadding(0, dp(14), 0, dp(16));
         checksBox = column(); checksBox.setPadding(dp(16), dp(2), dp(16), dp(2)); checksBox.setBackground(glass(dp(24), p.card)); body.addView(checksBox);
+        checkedAt = text("", 12, p.muted, false); checkedAt.setPadding(dp(4), dp(10), dp(4), 0); body.addView(checkedAt);
         String live = TunnelService.active ? null : getString(R.string.needs_connection);
         LinearLayout actions = column(); actions.setPadding(dp(4), dp(4), dp(4), dp(4)); actions.setBackground(glass(dp(24), p.card));
+        actions.addView(row(R.drawable.ic_sync, getString(R.string.v3_recheck), live != null ? live : getString(R.string.v3_recheck_detail), this::recheck, false));
         actions.addView(row(R.drawable.ic_search, getString(R.string.diagnostics_title), live != null ? live : getString(R.string.diagnostics_detail), () -> live(DiagnosticsDialog::show), false));
         actions.addView(row(R.drawable.ic_eye, getString(R.string.flow_capture_title), live != null ? live : getString(R.string.flow_capture_detail), () -> live(FlowCaptureDialog::show), false));
         actions.addView(row(R.drawable.ic_tune, getString(R.string.flow_policy_title), live != null ? live : getString(R.string.flow_policy_detail), () -> live(FlowPolicyDialog::show), false));
@@ -1040,9 +1134,10 @@ public class MainActivity extends Activity {
         // The service re-checks that this app is still the system Always-on VPN before connecting.
         if (TunnelService.alwaysOnSessionLost(this))
             try { startService(new Intent(this, TunnelService.class).setAction(TunnelService.RECOVER)); } catch (Exception ignored) { /* Retry on next resume. */ }
+        recheck(); // every app open re-runs the checks on a live tunnel
         handler.post(poll);
     }
-    @Override public void onPause() { if (flowCapture != null) {flowCapture.dismiss(); flowCapture=null;} handler.removeCallbacks(poll); super.onPause(); }
+    @Override public void onPause() { if (flowCapture != null) {flowCapture.dismiss(); flowCapture=null;} stopPathCheck(false); handler.removeCallbacks(poll); super.onPause(); }
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); setIntent(intent); incoming(intent); }
     private void incoming(Intent intent) {
         if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null && java.util.Arrays.asList("tt", "hy2", "hysteria2").contains(intent.getData().getScheme())) {
