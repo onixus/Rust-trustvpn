@@ -101,8 +101,10 @@ final class AppRoutingAcceptance {
         try {
             test.runOnMainSync(() -> {
                 ViewGroup content = activity.findViewById(android.R.id.content);
-                LinearLayout root = (LinearLayout) ((ViewGroup) content.getChildAt(0)).getChildAt(0);
+                // Phone: the slider is the home column's last child; unfolded, the lower half's.
+                ViewGroup root = (ViewGroup) ((ViewGroup) content.getChildAt(0)).getChildAt(0);
                 View last = root.getChildAt(root.getChildCount() - 1);
+                if (!(last instanceof SlideButton) && last instanceof ViewGroup) { ViewGroup half = (ViewGroup) last; last = half.getChildAt(half.getChildCount() - 1); }
                 String label = last instanceof SlideButton ? last.getContentDescription().toString() : "";
                 // An earlier test may leave a service problem behind, which offers a retry instead.
                 check(label.equals(activity.getString(R.string.connect_selected_profile)) || label.equals(activity.getString(R.string.v3_slide_retry)), "Connect control is fixed below the home content");

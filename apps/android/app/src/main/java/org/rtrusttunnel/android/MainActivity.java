@@ -424,14 +424,15 @@ public class MainActivity extends Activity {
         slider.set(text, knob, icon, ring, TunnelService.active, p.card, p.cardStroke, p.muted);
         slider.setContentDescription(getString(label));
     }
-    /** The two-line headline shrinks until its longer line fits, from 44 sp down to 26 sp. */
+    private float headlineMax = 44;
+    /** The two-line headline shrinks until its longer line fits, from headlineMax down to 26 sp. */
     private void fitHeadline() {
         TextView view = headline;
         if (view == null) return;
         int width = view.getWidth() - view.getPaddingLeft() - view.getPaddingRight();
         if (width <= 0) { view.post(this::fitHeadline); return; }
         android.text.TextPaint paint = new android.text.TextPaint(view.getPaint());
-        float size = 44;
+        float size = headlineMax;
         for (; size > 26; size -= 2) {
             paint.setTextSize(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, size, getResources().getDisplayMetrics()));
             float widest = 0;
@@ -444,7 +445,8 @@ public class MainActivity extends Activity {
         box.removeAllViews();
         for (int i = 0; i < rows.size(); i++) {
             Row row = rows.get(i);
-            LinearLayout line = new LinearLayout(this); line.setGravity(notes ? Gravity.TOP : Gravity.CENTER_VERTICAL); line.setPadding(0, dp(11), 0, dp(11));
+            int gap = !notes && screen == HOME && unfolded() ? 7 : 11; // the unfolded upper half must hold all five
+            LinearLayout line = new LinearLayout(this); line.setGravity(notes ? Gravity.TOP : Gravity.CENTER_VERTICAL); line.setPadding(0, dp(gap), 0, dp(gap));
             View dot = new View(this); GradientDrawable shape = new GradientDrawable(); shape.setShape(GradientDrawable.OVAL);
             if (row.ring) shape.setStroke(dp(2), row.color); else shape.setColor(row.color);
             dot.setBackground(shape);
@@ -478,29 +480,52 @@ public class MainActivity extends Activity {
         root.addView(top);
 
         ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false); scroll.setFillViewport(true);
-        LinearLayout body = column(); body.setPadding(0, dp(18), 0, dp(8));
-        headline = new TextView(this); headline.setTypeface(display()); headline.setTextSize(44); headline.setTextColor(p.text); headline.setLineSpacing(0, 0.95f); headline.setLetterSpacing(-0.02f);
+        LinearLayout body = column(); body.setPadding(0, dp(unfolded() ? 12 : 18), 0, dp(8));
+        headlineMax = unfolded() ? 34 : 44;
+        headline = new TextView(this); headline.setTypeface(display()); headline.setTextSize(headlineMax); headline.setTextColor(p.text); headline.setLineSpacing(0, 0.95f); headline.setLetterSpacing(-0.02f);
         headline.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> { if (r - l != or - ol) v.post(this::fitHeadline); });
         body.addView(headline);
-        description = text("", 14, p.muted, false); description.setLineSpacing(0, 1.2f); description.setPadding(0, dp(12), 0, dp(18)); body.addView(description);
+        description = text("", 14, p.muted, false); description.setLineSpacing(0, 1.2f); description.setPadding(0, dp(unfolded() ? 8 : 12), 0, dp(unfolded() ? 12 : 18)); body.addView(description);
         checksBox = column(); checksBox.setPadding(dp(16), dp(2), dp(16), dp(2)); checksBox.setBackground(rippled(glass(dp(24), p.card)));
         checksBox.setClickable(true); checksBox.setFocusable(true); checksBox.setOnClickListener(v -> show(CHECKS));
         body.addView(checksBox);
-        LinearLayout header = new LinearLayout(this); header.setGravity(Gravity.CENTER_VERTICAL); header.setPadding(dp(4), dp(20), 0, dp(10));
+        // Unfolded (large) screen: state and checks fill the upper half, profiles and the
+        // slider the lower half, with a gap where a horizontal hinge would be.
+        boolean split = unfolded();
+        LinearLayout lower = body;
+        if (split) {
+            scroll.addView(body); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+            scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false); scroll.setFillViewport(true);
+            lower = column(); lower.setPadding(0, dp(24), 0, dp(8));
+        }
+        LinearLayout header = new LinearLayout(this); header.setGravity(Gravity.CENTER_VERTICAL); header.setPadding(dp(4), split ? 0 : dp(20), 0, dp(10));
         TextView label = text(getString(R.string.v3_section_profiles).toUpperCase(Locale.getDefault()), 11, p.muted, true); label.setLetterSpacing(0.1f);
         header.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
         TextView all = text(getString(R.string.v3_all_profiles) + "  →", 13, p.blueText, true); all.setPadding(dp(8), dp(6), 0, dp(6));
         all.setOnClickListener(v -> show(PROFILES)); header.addView(all);
-        body.addView(header);
-        strip = column(); body.addView(strip);
-        scroll.addView(body); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        lower.addView(header);
+        strip = column(); lower.addView(strip);
+        scroll.addView(lower);
 
         slider = new SlideButton(this); slider.setAction(this::toggle);
         LinearLayout.LayoutParams sliderParams = new LinearLayout.LayoutParams(-1, dp(64)); sliderParams.topMargin = dp(12);
-        root.addView(slider, sliderParams);
+        if (split) {
+            LinearLayout bottom = column();
+            bottom.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+            bottom.addView(slider, sliderParams);
+            root.addView(bottom, new LinearLayout.LayoutParams(-1, 0, 1));
+        } else {
+            root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+            root.addView(slider, sliderParams);
+        }
         fillStrip();
         return root;
     }
+    /**
+     * Unfolded foldable or tablet: the window's shorter side is at least 600 dp. Folding
+     * or unfolding recreates the activity, so the layout follows the posture.
+     */
+    private boolean unfolded() { return getResources().getConfiguration().smallestScreenWidthDp >= 600; }
     /** Up to this many profiles on Home; the rest are one tap away on the Profiles screen. */
     private static final int HOME_PROFILES = 5;
     /** Selected profile first, then its backups, then the rest; tap selects, long press opens actions. */
