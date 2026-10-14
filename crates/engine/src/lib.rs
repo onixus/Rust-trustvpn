@@ -268,7 +268,7 @@ impl Session {
             Transport::Hysteria(s) => s.open_tcp(target).await,
             Transport::Amnezia(s) => s.open_tcp(target).await,
         };
-        self.track(opened, target, true)
+        self.track(opened, Some(target))
     }
     pub async fn open_icmp(&self) -> Result<Tunnel> {
         let opened = match &self.0 {
@@ -279,7 +279,7 @@ impl Session {
             }
             Transport::Amnezia(_) => return Err(Error::Unsupported("ICMP relay over AmneziaWG")),
         };
-        self.track(opened, "_icmp", false)
+        self.track(opened, None)
     }
     pub async fn open_udp(&self) -> Result<Tunnel> {
         let opened = match &self.0 {
@@ -288,15 +288,16 @@ impl Session {
             Transport::Hysteria(s) => s.open_udp().await,
             Transport::Amnezia(s) => s.open_udp().await,
         };
-        self.track(opened, "_udp2", false)
+        self.track(opened, None)
     }
-    /// See `Liveness::opened`; the target is hashed, never kept.
-    fn track(&self, opened: Result<Tunnel>, target: &str, flow: bool) -> Result<Tunnel> {
-        self.2.opened(
-            &opened.as_ref().map(|_| ()).map_err(Clone::clone),
-            target,
-            flow,
-        );
+    /// `flow`: the target of a per-destination TCP CONNECT, the only open
+    /// that counts as evidence (see `Liveness::opened`). Every tunnel still
+    /// records its traffic.
+    fn track(&self, opened: Result<Tunnel>, flow: Option<&str>) -> Result<Tunnel> {
+        if let Some(target) = flow {
+            self.2
+                .opened(&opened.as_ref().map(|_| ()).map_err(Clone::clone), target);
+        }
         opened.map(|mut tunnel| {
             tunnel.liveness = Some(self.2.clone());
             tunnel

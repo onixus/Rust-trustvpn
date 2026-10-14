@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// In-process HTTP/3 CONNECT endpoint: the first `_check` answers 200, any
 /// other target echoes the request body after the client's FIN. Like endpoint
-/// 1.1.0 with a blocked stream, it finishes `lost*.invalid` and every later
+/// 1.1.0 with a blocked stream, it finishes `lost*.invalid`, `_icmp` and every later
 /// `_check` without a response.
 async fn endpoint() -> (Profile, tokio::task::JoinHandle<()>) {
     let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -65,6 +65,7 @@ async fn endpoint() -> (Profile, tokio::task::JoinHandle<()>) {
                         let authority = request.uri().authority().unwrap().as_str().to_owned();
                         let lost = (authority.starts_with("lost")
                             && authority.ends_with(".invalid:1"))
+                            || authority == "_icmp"
                             || (authority == "_check"
                                 && checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0);
                         if lost {
@@ -219,6 +220,17 @@ async fn unanswered_traffic_degrades_only_its_own_session() {
             Err(Error::Protocol)
         ));
     }
+    // Nor do two dead hosts while shared relay streams keep failing too.
+    let relays = Session::connect(&p).await.unwrap().with_silence(silence);
+    relays.health().await.unwrap();
+    for i in 0..10 {
+        assert!(matches!(
+            relays.open_tcp(&format!("lost{}.invalid:1", i % 2)).await,
+            Err(Error::Protocol)
+        ));
+        assert!(matches!(relays.open_icmp().await, Err(Error::Protocol)));
+        let _udp = relays.open_udp().await.unwrap();
+    }
     let old = Session::connect(&p).await.unwrap();
     old.health().await.unwrap();
     let mut answered = old.open_tcp("192.0.2.1:7").await.unwrap();
@@ -238,6 +250,7 @@ async fn unanswered_traffic_degrades_only_its_own_session() {
     assert_eq!(echoed, b"ping");
     tokio::time::sleep(silence).await;
     single.health().await.unwrap();
+    relays.health().await.unwrap();
     // Inbound on the previous session's flow cannot vouch for this one.
     assert!(matches!(
         session.health().await,

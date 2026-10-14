@@ -1,5 +1,7 @@
-//! Per-session data-plane liveness. Fixed-size counters only: no flow,
-//! destination or address is kept. Each session owns its own instance, so a
+//! Per-session data-plane liveness, held in memory as fixed-size atomics:
+//! counters, a demand timestamp and a 64-bit set of host hashes keyed per
+//! session. No flow, destination or address is kept, and the hash bits are
+//! never stored, logged or exposed. Each session owns its own instance, so a
 //! stale flow of a previous session can never vouch for a newer one.
 use std::{
     hash::BuildHasher,
@@ -129,15 +131,16 @@ impl Liveness {
             self.demand.store(0, Relaxed);
         }
     }
-    /// `target` is hashed by host only (ports of one host are one
-    /// destination) and never stored. `flow`: one CONNECT per flow, not a
-    /// shared UDP/ICMP relay stream that the endpoint may recycle silently.
-    pub fn opened(&self, outcome: &crate::Result<()>, target: &str, flow: bool) {
+    /// A per-destination TCP CONNECT outcome. `target` is hashed by host only
+    /// (ports of one host are one destination) and never stored. Shared
+    /// UDP/ICMP relay streams are not reported: the endpoint may recycle
+    /// them, and they name no destination.
+    pub fn opened(&self, outcome: &crate::Result<()>, target: &str) {
         use crate::Error;
         let host = target.rsplit_once(':').map_or(target, |(host, _)| host);
         let bit = 1u64 << (self.keys.hash_one(host) % 64);
         match outcome {
-            Ok(()) if flow => self.silent.add(bit),
+            Ok(()) => self.silent.add(bit),
             Err(Error::Protocol | Error::Timeout | Error::Io) => self.failed.add(bit),
             // Rejected, authentication or destination: the endpoint answered.
             _ => {}
@@ -212,8 +215,8 @@ mod tests {
                 if t % 2 == 0 {
                     for (port, target) in dead.iter().enumerate() {
                         let other = target.replace(":443", &format!(":{}", 80 + port));
-                        l.opened(&Err(crate::Error::Timeout), target, true);
-                        l.opened(&Err(crate::Error::Protocol), &other, true);
+                        l.opened(&Err(crate::Error::Timeout), target);
+                        l.opened(&Err(crate::Error::Protocol), &other);
                     }
                 }
             });
@@ -224,11 +227,11 @@ mod tests {
     fn upload_and_long_poll_on_one_silent_flow_are_healthy() {
         let l = Liveness::new(SILENCE);
         let [one] = hosts(&l, 1).try_into().unwrap();
-        l.opened(&Ok(()), &one, true);
+        l.opened(&Ok(()), &one);
         // Outbound progress, checks losing responses, no inbound byte.
         assert_eq!(run(&l, 60, |l, _| l.outbound()), None);
         let l = Liveness::new(SILENCE);
-        l.opened(&Ok(()), &one, true);
+        l.opened(&Ok(()), &one);
         assert_eq!(run(&l, 60, |_, _| {}), None);
     }
     #[test]
@@ -243,7 +246,7 @@ mod tests {
             } else {
                 crate::Error::Protocol
             };
-            l.opened(&Err(error), target, true);
+            l.opened(&Err(error), target);
         });
         assert_eq!(degraded, Some(SILENCE.as_secs()));
     }
@@ -254,16 +257,27 @@ mod tests {
         let degraded = run(&l, 60, |l, t| {
             l.outbound();
             if t < 5 {
-                l.opened(&Ok(()), &targets[t as usize % 3], true);
+                l.opened(&Ok(()), &targets[t as usize % 3]);
             }
         });
         assert_eq!(degraded, Some(SILENCE.as_secs()));
-        // Shared UDP/ICMP relay streams are not individual flows.
+    }
+    #[test]
+    fn relay_stream_failures_do_not_add_breadth() {
+        // Relay opens (`_udp2`, `_icmp`) never reach `opened`; the session
+        // path is covered in tests/h3_transport.rs. Two dead TCP hosts for a
+        // minute stay below the breadth threshold.
         let l = Liveness::new(SILENCE);
-        for target in hosts(&l, 10) {
-            l.opened(&Ok(()), &target, false);
-        }
-        assert_eq!(l.snapshot().silent.opens, 0);
+        let dead = hosts(&l, 2);
+        let degraded = run(&l, 60, |l, t| {
+            l.outbound();
+            if t % 2 == 0 {
+                for target in &dead {
+                    l.opened(&Err(crate::Error::Timeout), target);
+                }
+            }
+        });
+        assert_eq!(degraded, None);
     }
     #[test]
     fn thresholds_need_both_count_and_spread() {
@@ -290,8 +304,8 @@ mod tests {
         let l = Liveness::new(SILENCE);
         l.outbound();
         for target in hosts(&l, 6) {
-            l.opened(&Err(crate::Error::Timeout), &target, true);
-            l.opened(&Ok(()), &target, true);
+            l.opened(&Err(crate::Error::Timeout), &target);
+            l.opened(&Ok(()), &target);
         }
         l.inbound();
         let s = l.snapshot();
@@ -301,7 +315,7 @@ mod tests {
         // Proof of delivery outlives the counters it reset.
         assert!(l.delivered());
         l.outbound();
-        l.opened(&Err(crate::Error::Timeout), "192.0.2.1:443", true);
+        l.opened(&Err(crate::Error::Timeout), "192.0.2.1:443");
         assert!(l.delivered());
         assert!(!Liveness::new(SILENCE).delivered());
     }
@@ -315,7 +329,7 @@ mod tests {
                 crate::Error::Destination,
                 crate::Error::Unsupported("x"),
             ] {
-                l.opened(&Err(error), &target, true);
+                l.opened(&Err(error), &target);
             }
         }
         let s = l.snapshot();
@@ -327,7 +341,7 @@ mod tests {
         let new = Liveness::new(SILENCE);
         new.outbound();
         for target in hosts(&new, 5) {
-            new.opened(&Err(crate::Error::Protocol), &target, true);
+            new.opened(&Err(crate::Error::Protocol), &target);
         }
         old.inbound();
         let s = new.snapshot();
