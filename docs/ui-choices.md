@@ -16,9 +16,21 @@ frontend-owned session is not claimed.
 
 ## Everyday navigation
 
-The default profile and connect/disconnect action stay at the top of desktop
-windows. Native highlights the active sidebar section; network mode, DNS and
-proxy settings live in Settings. WebView separates Profiles, Settings and Sync,
+Native follows UI variant 3: a left sidebar (Home, Profiles, Checks, Network,
+Sync, Settings, and Updates on Windows) and dark or frosted light themes that
+follow the system unless chosen in Settings (stored outside the vault). Home
+shows the state chip, a two-line headline, the five service observations
+(transport, route, DNS, guard, connectivity), the selected and backup profiles,
+mode/DNS/sync/auto-connect tiles and a large connect pill. Green means every
+observation passed and is fresh in whole-computer mode (split TUN and SOCKS stay
+blue); any failure is yellow; otherwise a live tunnel is blue, and a check
+without a result reads "no data". After failover the backup carrying traffic
+is named. Lost contact with an Always-on service shows an unknown state. Network holds mode,
+routes, backups and Always-on; Settings holds appearance, startup and storage
+recovery. Real blur exists only with the macOS glass material. The shell,
+Home, Profiles, Add profile and Checks follow the system language (Russian or
+English); deeper section and status messages remain Russian. In WebView the
+default profile and connect action stay at the top of the window. WebView separates Profiles, Settings and Sync,
 shows only mode-relevant network fields, and asks for a second click before
 removing a profile. Its import options are grouped under Add a profile.
 

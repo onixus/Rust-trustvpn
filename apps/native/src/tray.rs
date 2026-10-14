@@ -1,4 +1,5 @@
 //! All native handles stay on the window event-loop thread, including on macOS.
+use crate::ui::t;
 use std::cell::RefCell;
 #[derive(Clone, Copy, Debug)]
 pub enum Action {
@@ -29,9 +30,12 @@ pub fn initialize() -> bool {
         let make = || -> Result<Handle, Box<dyn std::error::Error>> {
             let menu = Menu::new();
             for (id, label) in [
-                ("show", "Открыть"),
-                ("toggle", "Подключить / отключить"),
-                ("exit", "Выход"),
+                ("show", t("Открыть", "Open")),
+                (
+                    "toggle",
+                    t("Подключить / отключить", "Connect / disconnect"),
+                ),
+                ("exit", t("Выход", "Quit")),
             ] {
                 menu.append(&MenuItem::with_id(id, label, true, None))?;
             }
@@ -117,9 +121,12 @@ impl ksni::Tray for LinuxTray {
     }
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         [
-            ("Открыть", Action::Show),
-            ("Подключить / отключить", Action::Toggle),
-            ("Выход", Action::Exit),
+            (t("Открыть", "Open"), Action::Show),
+            (
+                t("Подключить / отключить", "Connect / disconnect"),
+                Action::Toggle,
+            ),
+            (t("Выход", "Quit"), Action::Exit),
         ]
         .into_iter()
         .map(|(label, action)| {

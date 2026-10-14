@@ -16,6 +16,7 @@ mod open_url;
 mod portal;
 mod sync;
 mod tray;
+mod ui;
 #[cfg(target_os = "windows")]
 mod updates;
 use connection::{Mode, Session};
@@ -31,7 +32,8 @@ use zeroize::Zeroizing;
 
 fn window_settings() -> iced::window::Settings {
     let window = iced::window::Settings {
-        size: iced::Size::new(860.0, 620.0),
+        size: iced::Size::new(1180.0, 780.0),
+        min_size: Some(iced::Size::new(760.0, 560.0)),
         exit_on_close_request: false,
         transparent: cfg!(target_os = "macos"),
         icon: iced::window::icon::from_rgba(
@@ -65,6 +67,7 @@ fn open_window() -> Task<Message> {
                         let view = handle.ns_view.as_ptr() as *mut objc2::runtime::AnyObject;
                         let window = objc2::msg_send![view, window];
                         let installed = glass::install(window);
+                        glass::set_appearance(window, ui::dark_now());
                         if std::env::args().any(|arg| arg == "--ci-glass-smoke") {
                             assert!(installed, "AppKit material was not installed");
                         }
@@ -121,24 +124,21 @@ fn main() -> iced::Result {
     iced::daemon(
         || {
             let (app, task) = App::boot();
-            (app, Task::batch([task, open_window()]))
+            (
+                app,
+                Task::batch([
+                    task,
+                    iced::system::theme().map(Message::SystemTheme),
+                    open_window(),
+                ]),
+            )
         },
         App::update,
         App::view_window,
     )
     .title("R-TrustTunnel · Native Preview")
     .subscription(App::subscription)
-    .theme(Theme::custom(
-        "R-TrustTunnel",
-        iced::theme::Palette {
-            background: Color::from_rgb8(48, 57, 72),
-            text: Color::from_rgb8(227, 231, 241),
-            primary: Color::from_rgb8(133, 184, 247),
-            success: Color::from_rgb8(114, 194, 166),
-            warning: Color::from_rgb8(230, 191, 114),
-            danger: Color::from_rgb8(226, 130, 143),
-        },
-    ))
+    .theme(|app: &App, _| ui::theme(&app.tokens()))
     .style(|_app: &App, theme: &Theme| {
         let background = theme.palette().background;
         #[cfg(target_os = "macos")]
@@ -157,6 +157,7 @@ fn main() -> iced::Result {
     .settings(iced::Settings {
         id: Some("org.rtrusttunnel.Native".into()),
         default_text_size: 14.0.into(),
+        default_font: ui::REGULAR,
         ..Default::default()
     })
     .run()
@@ -194,13 +195,31 @@ fn describe_decision(d: &rtrust_profile::routing::Decision) -> String {
         d.rules
     )
 }
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Page {
+    Home,
     Profiles,
+    /// Add profile.
     Import,
+    /// Checks.
     Diagnostics,
+    Network,
+    /// Sync and portal enrollment.
     Portal,
     Settings,
+    #[cfg(target_os = "windows")]
+    Updates,
+}
+impl Page {
+    /// Sections whose controls must stay usable during a long operation:
+    /// always-on disable/recovery, backups and updates live outside Settings.
+    fn reachable_while_busy(self) -> bool {
+        #[cfg(target_os = "windows")]
+        if self == Page::Updates {
+            return true;
+        }
+        matches!(self, Page::Settings | Page::Network)
+    }
 }
 struct App {
     #[cfg(target_os = "macos")]
@@ -275,9 +294,20 @@ struct App {
     confirm_delete: bool,
     confirm_replace: bool,
     dirty: bool,
+    theme_choice: ui::ThemeChoice,
+    system_dark: bool,
+    window_width: f32,
+    profile_query: String,
+    /// Last failed connect/disconnect, shown as the red state until the next attempt.
+    last_error: Option<String>,
 }
 #[derive(Clone)]
 enum Message {
+    SystemTheme(iced::theme::Mode),
+    Theme(ui::ThemeChoice),
+    Resized(f32),
+    ProfileQuery(String),
+    DiscardPreview,
     #[cfg(target_os = "macos")]
     Glass(bool),
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -400,7 +430,7 @@ impl App {
             autosave_due: None,
             profiles: vec![],
             selected: 0,
-            page: Page::Profiles,
+            page: Page::Home,
             input: text_editor::Content::new(),
             preview: None,
             status: "Загрузка защищённого хранилища…".into(),
@@ -442,7 +472,13 @@ impl App {
             confirm_delete: false,
             confirm_replace: false,
             dirty: false,
+            theme_choice: ui::load_theme(),
+            system_dark: true,
+            window_width: 1180.0,
+            profile_query: String::new(),
+            last_error: None,
         };
+        ui::remember_dark(app.dark());
         let args: Vec<_> = std::env::args_os().skip(1).collect();
         if args
             .first()
@@ -817,6 +853,14 @@ impl App {
                 }));
             }
             Message::Portal(action) => return self.portal_update(action),
+            Message::SystemTheme(mode) => return self.system_theme(mode),
+            Message::Theme(choice) => return self.set_theme(choice),
+            Message::Resized(width) => self.window_width = width,
+            Message::ProfileQuery(query) => self.profile_query = query,
+            Message::DiscardPreview if !self.busy => {
+                self.preview = None;
+                self.confirm_replace = false;
+            }
             Message::SmokeExit => return iced::exit(),
             Message::CloseRequested => return self.request_close(false),
             Message::ExitRequested => return self.request_close(true),
@@ -934,6 +978,7 @@ impl App {
             Message::Recovered(result) => {
                 if result.is_ok() {
                     self.pending_owner = None;
+                    self.last_error = None;
                 }
                 return self.update(Message::Done(result));
             }
@@ -952,6 +997,7 @@ impl App {
                     .map(|()| "Отключено; маршруты восстановлены.".into())
                     .unwrap_or_else(|e| e);
                 if failed {
+                    self.last_error = Some(self.status.clone());
                     self.reconnect_then_check = false;
                     self.follow_up = None;
                     return Self::show_window();
@@ -1040,6 +1086,7 @@ impl App {
                 if self.disconnecting {
                     return Task::none();
                 }
+                self.last_error = None;
                 if self.session.as_ref().is_some_and(Session::is_tun) {
                     self.connection_epoch += 1;
                     let epoch = self.connection_epoch;
@@ -1173,6 +1220,7 @@ impl App {
                         self.reconnect_then_check = false;
                         self.follow_up = None;
                         self.connection_name.clear();
+                        self.last_error = Some(error.clone());
                         self.status = error;
                         self.pending_close = None;
                         self.login_start = false;
@@ -1219,10 +1267,11 @@ impl App {
                         }
                         self.disconnect();
                         self.status = format!("Соединение потеряно: {error}");
+                        self.last_error = Some(self.status.clone());
                     }
                 }
             }
-            Message::Navigate(page) if !self.busy || page == Page::Settings => {
+            Message::Navigate(page) if !self.busy || page.reachable_while_busy() => {
                 self.page = page;
                 self.confirm_delete = false;
                 self.confirm_replace = false;
@@ -1295,6 +1344,10 @@ impl App {
                 if i < self.profiles.len() {
                     self.selected = i;
                     self.reset_editor();
+                    // The red state belongs to the previous attempt, not the new choice.
+                    if !self.connecting && self.session.is_none() {
+                        self.last_error = None;
+                    }
                 }
             }
             Message::Format(format) => {
@@ -1938,6 +1991,8 @@ impl App {
         iced::Subscription::batch([
             iced::window::open_events().map(Message::TrayInit),
             iced::window::close_requests().map(|_| Message::CloseRequested),
+            iced::window::resize_events().map(|(_, size)| Message::Resized(size.width)),
+            iced::system::theme_changes().map(Message::SystemTheme),
             iced::time::every(std::time::Duration::from_millis(250)).map(|_| Message::Tick),
         ])
     }
@@ -2114,444 +2169,18 @@ impl App {
         self.connection_task = Some(handle);
         task
     }
-    fn connection_bar(&self, window_width: f32) -> Element<'_, Message> {
-        let active = self.connecting || self.session.is_some();
-        let name = if active {
-            self.connection_name.as_str()
-        } else {
-            self.current()
-                .map(|p| p.name.as_str())
-                .unwrap_or("Добавьте профиль")
-        };
-        let state = if self.disconnecting {
-            "Отключение…".into()
-        } else if self.connecting {
-            "Подключение…".into()
-        } else if let Some(proxy) = &self.session {
-            if proxy.is_tun() {
-                proxy.address()
-            } else {
-                format!("SOCKS5 {}", proxy.address())
-            }
-        } else {
-            "Не подключено".into()
-        };
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        let (active, state) = if self.always_on.enabled {
-            (true, self.always_on.status.clone())
-        } else {
-            (active, state)
-        };
-        let enabled = !self.disconnecting
-            && (active
-                || (!self.busy
-                    && self
-                        .profiles
-                        .first()
-                        .is_some_and(|p| rtrust_engine::check_capabilities(p).is_ok())));
-        container(
-            row![
-                column![
-                    text("ПРОФИЛЬ ПО УМОЛЧАНИЮ").size(10),
-                    text(name).size(17),
-                    text(state).size(12)
-                ]
-                .spacing(3)
-                .width(Length::Fill),
-                button(
-                    text(if self.disconnecting {
-                        "Отключение…"
-                    } else if self.connecting {
-                        "Отменить"
-                    } else if active {
-                        "Отключить"
-                    } else {
-                        "Подключить"
-                    })
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_x(iced::Alignment::Center)
-                    .align_y(iced::Alignment::Center)
-                    .font(iced::Font {
-                        weight: iced::font::Weight::Semibold,
-                        ..iced::Font::DEFAULT
-                    })
-                )
-                .width(window_width * 0.4)
-                .height(39)
-                .style(move |theme, status| {
-                    let mut style = if active {
-                        buttons::danger(theme, status)
-                    } else {
-                        buttons::primary(theme, status)
-                    };
-                    style.border.radius = 7.0.into();
-                    style
-                })
-                .on_press_maybe(enabled.then_some(Message::ToggleConnection))
-            ]
-            .spacing(12)
-            .align_y(iced::Alignment::Center),
-        )
-        .padding(12)
-        .style(container::rounded_box)
-        .into()
-    }
     fn view(&self) -> Element<'_, Message> {
-        let mut nav = column![
-            text("R-TrustTunnel").size(19),
-            text("Ваше подключение").size(12)
-        ]
-        .spacing(8)
-        .width(160);
-        for (label, page) in [
-            ("Профили", Page::Profiles),
-            ("Добавить профиль", Page::Import),
-            ("Синхронизация", Page::Portal),
-            ("Настройки", Page::Settings),
-            ("Диагностика", Page::Diagnostics),
-        ] {
-            let selected = self.page == page;
-            nav = nav.push(
-                button(label)
-                    .width(Length::Fill)
-                    .padding([11, 12])
-                    .style(move |theme, status| {
-                        let mut style = if selected {
-                            buttons::primary(theme, status)
-                        } else {
-                            buttons::text(theme, status)
-                        };
-                        style.border.radius = 8.0.into();
-                        style
-                    })
-                    .on_press(Message::Navigate(page)),
-            );
-        }
-        let nav = nav
-            .push(iced::widget::Space::new().height(Length::Fill))
-            .push(
-                button("Свернуть в трей")
-                    .on_press(Message::CloseRequested)
-                    .width(Length::Fill),
-            )
-            .push(
-                button("Выход")
-                    .on_press(Message::ExitRequested)
-                    .width(Length::Fill),
-            );
-        let body: Element<'_, Message> = match self.page {
-            Page::Import => {
-                let mut content = column![
-                    text("Добавить профиль").size(22),
-                    text("TrustTunnel TOML/tt://, Hysteria 2 YAML/hy2://, AmneziaWG .conf, JSON. Импорт не подключает VPN."),
-                    button("Выбрать файл…")
-                        .on_press_maybe((!self.busy).then_some(Message::PickFile)),
-                    text_editor(&self.input)
-                        .placeholder("Вставьте tt://, hy2:// или конфигурацию")
-                        .height(120)
-                        .on_action(Message::Edit),
-                    button("Проверить").on_press_maybe((!self.busy).then_some(Message::Parse))
-                ]
-                .spacing(10);
-                if let Some(p) = &self.preview {
-                    content = content
-                        .push(summary(p))
-                        .push(button("Добавить в профили").on_press(Message::Accept));
-                    if let Some(current) = self.current() {
-                        content = content
-                            .push(
-                                text(format!("Заменить выбранный профиль: {}", current.name))
-                                    .size(12),
-                            )
-                            .push(
-                                button(if self.confirm_replace {
-                                    "Подтвердить замену"
-                                } else {
-                                    "Заменить выбранный…"
-                                })
-                                .on_press_maybe(
-                                    self.can_change_profiles().then_some(Message::Replace),
-                                ),
-                            );
-                    }
-                }
-                content.into()
-            }
-            Page::Portal => self.portal_view(),
-            Page::Settings => {
-                let mut toggle =
-                    checkbox(self.autostart).label("Запускать приложение при входе в систему");
-                if !self.busy && !self.startup_busy {
-                    toggle = toggle.on_toggle(Message::StartupSet);
-                }
-                let mut connect = checkbox(self.saved_connection.auto_connect)
-                    .label("Подключать профиль по умолчанию при запуске");
-                if self.can_change_profiles() {
-                    connect = connect.on_toggle(Message::AutoConnect);
-                }
-                let appearance = column![text("Настройки").size(22)].spacing(12);
-                #[cfg(target_os = "macos")]
-                let appearance = {
-                    let mut appearance = appearance.push(
-                        checkbox(self.glass_enabled)
-                            .label("Стекло — прозрачный фон окна")
-                            .on_toggle(Message::Glass),
-                    );
-                    if !glass::transparency_allowed() {
-                        appearance = appearance.push(text("Прозрачность отключена в системных настройках универсального доступа.").size(13));
-                    }
-                    appearance
-                };
-                let mut panel = column![
-                    appearance,
-                    self.proxy_settings(),
-                    toggle,
-                    text("Приложение откроется в трее. При отсутствии трея окно будет свёрнуто.")
-                        .size(13),
-                    button("Проверить настройку ОС")
-                        .on_press_maybe((!self.startup_busy).then_some(Message::StartupRefresh))
-                ]
-                .spacing(12);
-                panel = panel.push(connect).push(text("Одна попытка после загрузки хранилища. При открытии файла или tt-ссылки автоподключение не выполняется. До подключения трафик не защищён VPN.").size(13));
-                panel = panel.push(self.fallback_settings());
-                if self.startup_busy {
-                    panel = panel.push(text("Проверка настройки автозапуска…"));
-                }
-                if let Some(error) = &self.startup_error {
-                    panel = panel.push(text(error));
-                }
-                panel = panel.push(
-                    button("Восстановить предыдущую копию хранилища").on_press_maybe(
-                        (self.can_change_profiles() && !self.dirty).then_some(Message::ReadBackup),
-                    ),
-                );
-                #[cfg(target_os = "windows")]
-                {
-                    panel = panel.push(self.updates_view());
-                }
-                #[cfg(any(target_os = "linux", target_os = "windows"))]
-                {
-                    panel = panel.push(self.always_view());
-                }
-                panel.into()
-            }
-            Page::Profiles => {
-                let mut list = column![
-                    text("Профили").size(22),
-                    text("Выберите профиль для подключения или добавьте новый.").size(13),
-                    button("+ Добавить профиль").on_press(Message::Navigate(Page::Import)),
-                    row![
-                        button("Открыть хранилище").on_press_maybe(
-                            (!self.busy && !self.dirty && self.profiles.is_empty())
-                                .then_some(Message::Load)
-                        ),
-                        button("Сохранить шифрованно").on_press_maybe(
-                            (!self.busy
-                                && (!self.profiles.is_empty()
-                                    || self.revision.is_some()
-                                    || self.dirty))
-                                .then_some(Message::Save)
-                        )
-                    ]
-                    .spacing(10)
-                ]
-                .spacing(10);
-                if self.dirty {
-                    list = list.push(text("Есть несохранённые изменения").size(12));
-                }
-                if self.profiles.is_empty() {
-                    list=list.push(text("Пока нет профилей. Нажмите «Добавить профиль», чтобы открыть файл или вставить ссылку."));
-                }
-                for (i, p) in self.profiles.iter().enumerate() {
-                    list = list.push(
-                        button(text(format!(
-                            "{}  {}{}",
-                            if i == self.selected { "●" } else { "○" },
-                            p.name,
-                            if i == 0 {
-                                " · по умолчанию"
-                            } else {
-                                ""
-                            }
-                        )))
-                        .on_press(Message::Select(i))
-                        .width(Length::Fill),
-                    );
-                }
-                if let Some(p) = self.current() {
-                    list = list
-                        .push(
-                            row![
-                                text_input("Название профиля", &self.draft_name)
-                                    .on_input(Message::DraftName),
-                                button("Переименовать").on_press_maybe(
-                                    self.can_change_profiles().then_some(Message::Rename)
-                                ),
-                                button(if self.confirm_delete {
-                                    "Подтвердить удаление"
-                                } else {
-                                    "Удалить…"
-                                })
-                                .on_press_maybe(
-                                    self.can_change_profiles().then_some(Message::Delete)
-                                )
-                            ]
-                            .spacing(6),
-                        )
-                        .push(
-                            button(if self.selected == 0 {
-                                "Профиль по умолчанию"
-                            } else {
-                                "Использовать по умолчанию"
-                            })
-                            .on_press_maybe(
-                                (self.selected != 0
-                                    && !self.busy
-                                    && !self.connecting
-                                    && self.session.is_none())
-                                .then_some(Message::MakeDefault),
-                            ),
-                        )
-                        .push(summary(p))
-                        .push(text("Экспорт").size(18))
-                        .push(pick_list(
-                            p.formats(),
-                            p.formats().contains(&self.format).then_some(self.format),
-                            Message::Format,
-                        ));
-                    if let Ok(export) = p.export(self.format) {
-                        for loss in &export.losses {
-                            list = list.push(text(format!("⚠ {loss}")).size(14));
-                        }
-                    }
-                    list=list.push(checkbox(self.consent).label("Понимаю: экспорт содержит пароль; указанные настройки могут не войти в формат").on_toggle(Message::Consent)).push(button("Сохранить файл…").on_press_maybe((self.consent&&!self.busy).then_some(Message::Export)));
-                }
-                list.into()
-            }
-            Page::Diagnostics => {
-                let mut content=column![text("Диагностика и объяснение маршрута").size(22),text("Настоящий HTTP-запрос через TLS/HTTP2 или QUIC/HTTP3 CONNECT. Проверяет обмен данными, но не включает TUN, маршруты, DNS или kill switch."),
-                    text("Назначение внутри туннеля (HOST:PORT, обычный HTTP)"),text_input("example.com:80",&self.target).on_input(Message::Target)].spacing(10);
-                content = content.push(text("Проверка действующего системного VPN").size(18))
-                    .push(text("Запускается при подключении и повторяется каждые 30 секунд. Проверяется адрес ниже; управление VPN остаётся доступным."))
-                    .push(text("Ниже выполняется системное разрешение имени и один HEAD запрос HTTPS:443 / к указанному адресу. Без proxy среды, перенаправлений и прямого сравнения. HTTPS отправляется только при маршруте на интерфейс RTrustTunnel и привязан к нему. Windows пока не поддерживается."))
-                    .push(text_input("hostname или IP без URL и порта", &self.system_target).on_input(Message::SystemTarget))
-                    .push(button("Проверить системный путь / повторить")
-                        .on_press_maybe((!self.busy && self.diagnostic_start_allowed(std::time::Instant::now()) && self.session.as_ref().is_some_and(Session::is_tun)).then_some(Message::Diagnose)));
-                if let Some((epoch, report)) = &self.diagnostic_report {
-                    let stale = *epoch != self.connection_epoch
-                        || self.session.as_ref().is_none_or(|session| {
-                            session.observations().generation != report.lifecycle.generation
-                        })
-                        || rtrust_control::observations::now_ms()
-                            .saturating_sub(report.finished_at_ms)
-                            > 6000;
-                    content = content.push(text(if stale { "Исторический результат; повторите проверку для текущего состояния." } else { "Результат для одного адреса; защита и общий доступ в интернет не подтверждены." }))
-                        .push(text(report.verdict_text()))
-                        .push(text(report.summary()))
-                        .push(report.verdict().actions.into_iter().fold(row![].spacing(8), |actions, action| {
-                            use rtrust_desktop::diagnostics::Action;
-                            // Old results may still be repeated, never acted upon.
-                            let allowed = !self.busy && self.diagnostic_task.is_none() && (action == Action::Recheck || !stale) && (action != Action::Recheck || self.diagnostic_start_allowed(std::time::Instant::now()));
-                            actions.push(button(action.label()).on_press_maybe(allowed.then_some(Message::DiagnosticAction(action))))
-                        }));
-                }
-                if self.diagnostic_export_report.is_some() {
-                    content = content.push(text(if self.diagnostic_preview_dirty {
-                        "Редактируемая копия отчёта для экспорта. Ручные правки сохраняются; результаты автоматических проверок обновляются отдельно."
-                    } else {
-                        "Копия последнего отчёта для экспорта. Адреса, имя сайта, URL, credentials и сырые ошибки исключены."
-                    }))
-                        .push(text_editor(&self.diagnostic_preview).on_action(Message::DiagnosticEdit).height(160))
-                        .push(button("Заменить копию последним результатом")
-                            .on_press_maybe((!self.busy && self.diagnostic_report.is_some()).then_some(Message::ResetDiagnosticPreview)))
-                        .push(button("Сохранить показанный отчёт…").on_press_maybe((!self.busy).then_some(Message::ExportDiagnostic)));
-                }
-                content = content.push(
-                    button("Объяснить маршрут · без сетевого запроса")
-                        .on_press_maybe((!self.busy).then_some(Message::ExplainRoute)),
-                );
-                if let Some(p) = self.current() {
-                    content = content.push(summary(p));
-                    let supported = rtrust_engine::check_capabilities(p).is_ok();
-                    content = content.push(
-                        button("Проверить TCP-туннель")
-                            .on_press_maybe((supported && !self.busy).then_some(Message::Probe)),
-                    );
-                } else {
-                    content = content.push(text("Сначала выберите профиль."));
-                }
-                if self.probe.is_some() || self.diagnostic_task.is_some() {
-                    content = content.push(button("Отмена").on_press(Message::Cancel));
-                }
-                content.into()
-            }
-        };
-        container(
-            column![
-                iced::widget::responsive(|size| self.connection_bar(size.width + 24.0)).height(81),
-                row![
-                    nav,
-                    scrollable(
-                        container(if self.store_conflict.is_some() {
-                            self.store_conflict_view()
-                        } else {
-                            body
-                        })
-                        .padding(8)
-                    )
-                    .width(Length::Fill)
-                ]
-                .spacing(18)
-                .height(Length::Fill),
-                container(text(&self.status).size(14))
-                    .padding(10)
-                    .width(Length::Fill)
-                    .style(container::rounded_box)
-            ]
-            .spacing(12),
-        )
-        .padding(12)
-        .into()
+        self.shell()
     }
 }
-fn summary(p: &Profile) -> Element<'_, Message> {
-    let capability = match rtrust_engine::check_capabilities(p) {
-        Ok(()) => format!("Транспорт {} поддерживается", p.transport_name()),
-        Err(e) => e.to_string(),
-    };
-    container(
-        column![
-            text(&p.name).size(17),
-            text(format!("Сервер: {}", p.endpoint.addresses.join(", "))),
-            text(format!(
-                "TLS hostname: {} · {}",
-                p.endpoint.hostname,
-                p.transport_name()
-            )),
-            text(if p.endpoint.certificate.is_empty() {
-                "Системные CA · логин и пароль скрыты"
-            } else {
-                "Сертификат из профиля · логин и пароль скрыты"
-            }),
-            text(capability).size(12)
-        ]
-        .spacing(4),
-    )
-    .padding(12)
-    .width(Length::Fill)
-    .style(container::rounded_box)
-    .into()
-}
-
+/// Secondary action used by the section views; follows the current theme.
 fn button<'a>(content: impl Into<Element<'a, Message>>) -> buttons::Button<'a, Message> {
-    buttons::Button::new(content)
-        .padding([7, 11])
-        .style(|theme, status| {
-            let mut style = buttons::secondary(theme, status);
-            style.border.radius = 7.0.into();
-            style
-        })
+    let tokens = if ui::dark_now() {
+        ui::DARK_TOKENS
+    } else {
+        ui::LIGHT_TOKENS
+    };
+    ui::pill(tokens, ui::Kind::Chip, content).padding([8, 14])
 }
 
 // Flatpak file forwarding supplies file: URIs (including escaped spaces), while
