@@ -166,8 +166,8 @@
     <string name="v3_error_2">connected</string>
     <string name="v3_off_desc">Traffic goes directly, without the tunnel. Slide to connect “%1$s”.</string>
     <string name="v3_off_desc_none">Add a profile to connect.</string>
-    <string name="v3_connecting_desc">Connecting to %1$s. Apps routed through VPN stay blocked until the tunnel is up.</string>
-    <string name="v3_reconnecting_desc">The connection dropped; reconnecting. Traffic is blocked meanwhile.</string>
+    <string name="v3_connecting_desc">Connecting to %1$s.</string>
+    <string name="v3_reconnecting_desc">The connection dropped; reconnecting.</string>
     <string name="v3_running_desc">Transport is running. Route, DNS and protection are not verified yet — that does not mean they fail.</string>
     <string name="v3_verified_desc">All five checks passed in the last few seconds. Results expire; the colour returns to blue unless they are repeated.</string>
     <string name="v3_warning_desc">The tunnel is running, but a check failed. Open the checks to see which one.</string>

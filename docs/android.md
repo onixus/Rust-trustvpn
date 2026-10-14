@@ -17,7 +17,7 @@ This branding build has not been installed on a physical phone; the preceding
 
 ## Navigation
 
-One activity hosts five screens with its own back stack (predictive Back on API 33+):
+One activity hosts five screens with its own back stack (Back goes through `OnBackInvokedCallback` where the system uses it, Android 16 for this target SDK):
 
 - **Home**: a large two-line state headline, a plain-language description, the five
   checks, a horizontal strip of profiles (selected first, then its backups) and a

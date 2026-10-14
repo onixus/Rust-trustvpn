@@ -182,7 +182,6 @@ public class MainActivity extends Activity {
             default: return p.blue;
         }
     }
-    private String selectedName() { Info info = info(selectedId); return info == null ? null : info.name; }
     private Info info(String id) { for (Info info : profiles) if (info.id.equals(id)) return info; return null; }
 
     /** Five checks for the current state. Checks without a result say so plainly. */
@@ -216,8 +215,10 @@ public class MainActivity extends Activity {
     private void renderState() {
         int color = stateColor();
         backdrop.setAccent(color);
-        String name = selectedName();
-        Info selected = info(selectedId);
+        // While the service runs, name the profile it serves, not a newer selection in the strip.
+        String serving = TunnelService.active ? TunnelService.connectedProfileId() : null;
+        Info selected = info(serving != null ? serving : selectedId);
+        String name = selected == null ? null : selected.name;
         String key = uiState + "|" + name + "|" + backupIndex + "|" + problemText + "|" + TunnelService.active + TunnelService.alwaysOn;
         List<Row> rows = rows();
         for (Row row : rows) key += "|" + row.value + row.color;

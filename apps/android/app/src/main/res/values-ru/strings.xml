@@ -166,8 +166,8 @@
     <string name="v3_error_2">подключения</string>
     <string name="v3_off_desc">Трафик идёт напрямую, без туннеля. Сдвиньте кнопку, чтобы подключить «%1$s».</string>
     <string name="v3_off_desc_none">Добавьте профиль, чтобы подключиться.</string>
-    <string name="v3_connecting_desc">Подключаемся к %1$s. Трафик приложений из списка VPN заблокирован, пока туннель не поднят.</string>
-    <string name="v3_reconnecting_desc">Связь потеряна, переподключаемся. Трафик пока заблокирован.</string>
+    <string name="v3_connecting_desc">Подключаемся к %1$s.</string>
+    <string name="v3_reconnecting_desc">Связь потеряна, переподключаемся.</string>
     <string name="v3_running_desc">Транспорт запущен. Маршрут, DNS и защита пока не проверены — это не значит, что они не работают.</string>
     <string name="v3_verified_desc">Все пять проверок пройдены в последние секунды. Результаты устаревают — цвет вернётся к синему, если их не повторить.</string>
     <string name="v3_warning_desc">Туннель работает, но проверка не пройдена. Откройте проверки, чтобы увидеть какая.</string>

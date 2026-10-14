@@ -99,7 +99,9 @@ final class AppRoutingAcceptance {
                 ViewGroup content = activity.findViewById(android.R.id.content);
                 LinearLayout root = (LinearLayout) ((ViewGroup) content.getChildAt(0)).getChildAt(0);
                 View last = root.getChildAt(root.getChildCount() - 1);
-                check(last instanceof SlideButton && last.getContentDescription().toString().equals(activity.getString(R.string.connect_selected_profile)), "Connect control is fixed below the home content");
+                String label = last instanceof SlideButton ? last.getContentDescription().toString() : "";
+                // An earlier test may leave a service problem behind, which offers a retry instead.
+                check(label.equals(activity.getString(R.string.connect_selected_profile)) || label.equals(activity.getString(R.string.v3_slide_retry)), "Connect control is fixed below the home content");
             });
         } finally { test.runOnMainSync(activity::finish); }
     }
