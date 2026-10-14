@@ -162,7 +162,10 @@ body[data-state=connecting] .knob,body[data-state=disconnecting] .knob{backgroun
 body[data-state=connecting] .knob svg,body[data-state=disconnecting] .knob svg{stroke:var(--s-text)}
 body.is-busy .knob{animation:pulse 1.2s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.55}}
-.status-line{min-height:20px;font-size:13px;overflow-wrap:anywhere;padding:0 8px}
+.statusbar{position:sticky;top:calc(-1 * var(--pad-y));z-index:3;max-width:1120px;margin:calc(-1 * var(--pad-y)) auto 0;padding:var(--pad-y) 0 12px}
+.statusbar:has(.status-line:empty){padding-bottom:0}
+.status-line{font-size:13px;overflow-wrap:anywhere;padding:10px 16px;border-radius:16px;color:var(--text)}
+.status-line:empty{padding:0;border:0;background:none;box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none}
 
 /* Profiles */
 .toolbar{display:flex;gap:10px}

@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id),invoke=window.__TAURI__.core.invoke,M=window.RTModel;
 // The view model carries no credentials; Rust keeps vault, tokens and portal baselines.
-let state,notice='',busy=false,selected=0,phase=null,connectError=null,unavailable=false,armedDelete=null,lastListKey='';
+let state,notice='',noticeTimer=null,busy=false,selected=0,phase=null,connectError=null,unavailable=false,armedDelete=null,lastListKey='';
 
 /* ---------- Copy (RU/EN by system language) ---------- */
 const LANG=String(navigator.language||'en').toLowerCase().startsWith('ru')?'ru':'en';
@@ -51,7 +51,7 @@ const T={en:{
  'add.paste_note':'First we show what will be imported. A link never connects automatically.',
  'add.portal':'Connect to a server','add.portal_detail':'One-time code from the panel; profiles arrive by sync',
  'add.preview_title':'Import preview','add.preview_empty':'Choose a file or paste a link to see what will be imported.','add.import':'Import','add.name':'Name',
- 'add.pending':'Confirm pending import','add.pending_note':'For a link opened from another app: its name is shown in the status line on Home.',
+ 'add.pending':'Confirm pending import','add.pending_note':'For a link opened from another app: its name is shown in the status line.',
  'add.vault':'Credentials are kept in the encrypted vault on this computer.',
  'diag.title':'Why does a service not open?','diag.target':'Hostname or IP (no URL or port)',
  'diag.note':'Uses the system resolver and sends one HTTPS HEAD request through the active VPN interface. No direct comparison or automatic upload. The result applies to one destination.',
@@ -112,7 +112,7 @@ const T={en:{
  'add.paste_note':'Сначала покажем, что будет импортировано. Ссылка никогда не подключает автоматически.',
  'add.portal':'Подключить к серверу','add.portal_detail':'Одноразовый код из панели — профили приходят синхронизацией',
  'add.preview_title':'Предпросмотр импорта','add.preview_empty':'Выберите файл или вставьте ссылку, чтобы увидеть, что будет импортировано.','add.import':'Импортировать','add.name':'Имя',
- 'add.pending':'Подтвердить ожидающий импорт','add.pending_note':'Для ссылки, открытой из другого приложения: её имя показано в строке состояния на главной.',
+ 'add.pending':'Подтвердить ожидающий импорт','add.pending_note':'Для ссылки, открытой из другого приложения: её имя показано в строке состояния.',
  'add.vault':'Учётные данные хранятся в зашифрованном хранилище на этом компьютере.',
  'diag.title':'Почему не открывается сервис?','diag.target':'Имя хоста или IP (без URL и порта)',
  'diag.note':'Использует системный резолвер и отправляет один HTTPS-запрос HEAD через активный интерфейс VPN. Без прямого сравнения и автоматической отправки. Результат относится к одному адресу.',
@@ -162,7 +162,19 @@ function live(){
 }
 function backupNames(){return Array.isArray(state?.connection?.fallback_profiles)?state.connection.fallback_profiles:[];}
 function snapshotInput(){return {connected:!!state?.connected,verified:state?.verified===true,full:state?.connection?.mode==='Full',snapshot:state?.observations,phase,error:connectError,unavailable,now:Date.now()};}
+// The last action's error or notice stays visible on every page until the next
+// action or navigation; the background poll does not overwrite it.
+function setNotice(text,expire){
+ clearTimeout(noticeTimer);noticeTimer=null;notice=text;
+ if(text&&expire)noticeTimer=setTimeout(clearNotice,expire);
+}
+function clearNotice(){
+ clearTimeout(noticeTimer);noticeTimer=null;
+ if(notice&&$('status').textContent===notice)$('status').textContent='';
+ notice='';
+}
 function goto(page){
+ clearNotice();
  document.querySelectorAll('main>section').forEach(s=>{s.hidden=s.id!==page});
  const nav=page==='add-page'?'profiles-page':page;
  document.querySelectorAll('.nav-item').forEach(b=>{if(b.dataset.page===nav)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});
@@ -307,11 +319,23 @@ function preview(p){
 }
 
 /* ---------- Actions ---------- */
+// Fields the user edited keep their values across refreshes (including a
+// revision-conflict reload) until their own form is saved successfully.
+const NETWORK_FIELDS=['mode','port','networks','dns','auto'],SYNC_FIELDS=['address'];
+const dirty=new Set();
+for(const id of ['port','networks','dns','auto','address'])$(id).addEventListener('input',()=>dirty.add(id));
+$('auto').addEventListener('change',()=>dirty.add('auto'));
+function clean(ids){ids.forEach(id=>dirty.delete(id));}
 function fillForms(){
- const c=state.connection;
- $('auto').checked=c.auto_connect;$('syncauto').checked=c.sync.enabled;$('mode').value=c.mode;
- document.querySelectorAll('[name=mode-choice]').forEach(r=>r.checked=r.value===c.mode);
- $('port').value=c.socks_port;$('networks').value=c.networks.join(', ');$('dns').value=c.dns;$('address').value=c.sync.origin;$('networks-managed').hidden=!c.managed_routes;modeFields();
+ const c=state.connection,set=(id,fn)=>{if(!dirty.has(id))fn();};
+ set('auto',()=>{$('auto').checked=c.auto_connect});
+ $('syncauto').checked=c.sync.enabled;
+ set('mode',()=>{$('mode').value=c.mode;document.querySelectorAll('[name=mode-choice]').forEach(r=>r.checked=r.value===c.mode)});
+ set('port',()=>{$('port').value=c.socks_port});
+ set('networks',()=>{$('networks').value=c.networks.join(', ')});
+ set('dns',()=>{$('dns').value=c.dns});
+ set('address',()=>{$('address').value=c.sync.origin});
+ $('networks-managed').hidden=!c.managed_routes;modeFields();
 }
 async function refresh(){
  state=await invoke('view',{russian:LANG==='ru'});unavailable=false;
@@ -328,7 +352,7 @@ function applyDisabled(){
  renderDiagnostics();
 }
 async function run(action,opts={}){
- if(busy)return;busy=true;notice='';phase=opts.phase||null;document.body.classList.add('is-busy');setButtons(true);
+ if(busy)return;busy=true;clearNotice();phase=opts.phase||null;document.body.classList.add('is-busy');setButtons(true);
  $('status').textContent=t('working');renderStatus();
  try{
   await action();
@@ -340,10 +364,10 @@ async function run(action,opts={}){
   phase=null;
   if(/^Profiles changed/.test(String(e))){
    // Another frontend or background sync bumped the revision: reload, do not show a failure state.
-   try{await refresh();notice=t('notice.conflict');$('status').textContent=notice;}catch(r){$('status').textContent=String(r);}
+   try{await refresh();setNotice(t('notice.conflict'),15000);$('status').textContent=notice;}catch(r){setNotice(String(r));$('status').textContent=notice;}
   }else{
    if(opts.phase==='connecting'||opts.phase==='reconnecting')connectError=String(e);
-   $('status').textContent=String(e);
+   setNotice(String(e));$('status').textContent=notice;
   }
  }finally{
   phase=null;busy=false;document.body.classList.remove('is-busy');setButtons(false);
@@ -358,15 +382,15 @@ $('connect').onclick=()=>{
 $('paste').onclick=()=>run(async()=>{let input=$('input').value;$('input').value='';preview(await invoke('preview',{input}));input=''});
 $('file').onclick=()=>run(async()=>preview(await invoke('pick_import')));
 $('pending').onclick=()=>run(()=>invoke('commit_import',{revision:state.revision}));
-$('save').onclick=()=>run(()=>invoke('save_settings',{revision:state.revision,settings:{...state.connection,auto_connect:$('auto').checked,mode:$('mode').value,socks_port:Number($('port').value),networks:$('networks').value.split(',').map(s=>s.trim()).filter(Boolean),dns:$('dns').value}}));
-$('enroll').onclick=()=>run(async()=>{const code=$('code').value;$('code').value='';await invoke('portal_enroll',{revision:state.revision,address:$('address').value,code,name:$('name').value})});
+$('save').onclick=()=>run(async()=>{await invoke('save_settings',{revision:state.revision,settings:{...state.connection,auto_connect:$('auto').checked,mode:$('mode').value,socks_port:Number($('port').value),networks:$('networks').value.split(',').map(s=>s.trim()).filter(Boolean),dns:$('dns').value}});clean(NETWORK_FIELDS)});
+$('enroll').onclick=()=>run(async()=>{const code=$('code').value;$('code').value='';await invoke('portal_enroll',{revision:state.revision,address:$('address').value,code,name:$('name').value});clean(SYNC_FIELDS)});
 $('sync').onclick=()=>run(()=>invoke('portal_sync',{revision:state.revision}));
-$('forget').onclick=()=>run(()=>invoke('portal_forget',{revision:state.revision}));
+$('forget').onclick=()=>run(async()=>{await invoke('portal_forget',{revision:state.revision});clean(SYNC_FIELDS)});
 $('renew').onclick=()=>run(()=>invoke('portal_renew',{revision:state.revision}));
 $('syncauto').onchange=()=>run(()=>invoke('portal_auto',{revision:state.revision,enabled:$('syncauto').checked}));
 $('profile-search').oninput=()=>renderProfiles();
 function modeFields(){$('port-field').hidden=$('mode').value!=='Socks';$('networks-field').hidden=$('mode').value!=='Tun';}
-document.querySelectorAll('[name=mode-choice]').forEach(r=>r.onchange=()=>{$('mode').value=r.value;modeFields();});
+document.querySelectorAll('[name=mode-choice]').forEach(r=>r.onchange=()=>{dirty.add('mode');$('mode').value=r.value;modeFields();});
 
 applyCopy();applyTheme(readTheme());preview(null);
 run(async()=>{}).then(()=>{if(state)invoke('ui_ready').catch(e=>{$('status').textContent=String(e)})});
@@ -381,7 +405,7 @@ setInterval(async()=>{
   const next=await invoke('view',{russian:LANG==='ru'});
   state.connected=next.connected;state.verified=next.verified;state.observations=next.observations;state.status=next.status;state.diagnostics=next.diagnostics;state.connected_profile=next.connected_profile;state.active_profile=next.active_profile;state.on_fallback=next.on_fallback;
   unavailable=false;if(state.connected)connectError=null;
-  $('status').textContent=state.status||(!state.connected&&connectError)||notice||'';
+  $('status').textContent=notice||state.status||(!state.connected&&connectError)||'';
   const key=listKey();if(key!==lastListKey){lastListKey=key;renderHome();renderProfiles();}
  }catch{unavailable=true;}
  renderStatus();applyDisabled();

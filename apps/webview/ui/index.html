@@ -16,6 +16,7 @@
 </nav>
 
 <main>
+<div class="statusbar"><p id="status" class="status-line card" role="status" aria-live="polite"></p></div>
 <section id="home-page" class="page">
  <div class="home-top"><span class="chip state-chip"><span class="dot" aria-hidden="true"></span><span id="state-tag">—</span></span></div>
  <div class="home-grid">
@@ -39,7 +40,7 @@
   </div>
  </div>
  <div class="power-bar"><button type="button" id="connect" class="card power" disabled><span class="knob" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg></span><span id="connect-label">Connect</span></button>
- <p id="status" class="status-line" role="status" aria-live="polite"></p></div>
+ </div>
 </section>
 
 <section id="profiles-page" class="page" hidden>
@@ -83,7 +84,7 @@
     <span class="eyebrow" data-i18n="add.preview_title">Import preview</span>
     <div id="preview" role="status"></div>
     <div class="row"><button type="button" id="pending" class="btn quiet" data-i18n="add.pending">Confirm pending import</button></div>
-    <small data-i18n="add.pending_note">For a link opened from another app: its name is shown in the status line on Home.</small>
+    <small data-i18n="add.pending_note">For a link opened from another app: its name is shown in the status line.</small>
    </div>
    <p class="hint lock"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><span data-i18n="add.vault">Credentials are kept in the encrypted vault on this computer.</span></p>
   </div>
