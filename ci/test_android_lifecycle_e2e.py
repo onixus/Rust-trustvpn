@@ -7,12 +7,66 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import android_lifecycle_e2e as harness
+import android as pipeline
 
 PACKAGE = 'org.rtrusttunnel.android.run_synthetic.lifecycle_test'
 TEST_PACKAGE = PACKAGE + '.test'
+
+
+def connectivity_dump(transport='WIFI', nested='', later=''):
+    return ('Active default network: 100\n\nCurrent Networks:\n'
+            '  NetworkAgentInfo{network{100} ni{CONNECTED} nc{[ Transports: '
+            + transport + ' Capabilities: INTERNET ]}}\n' + nested
+            + '\nStatus for known UIDs:\n\nNetwork Requests:\n' + later)
+
+
+class ConnectivityParserTests(unittest.TestCase):
+    def test_passive_vpn_listen_request_is_not_active(self):
+        self.assertFalse(harness.has_current_vpn(connectivity_dump(later=
+            '  NetworkRequest [ LISTEN id=9, [ Transports: VPN ] ]\n')))
+
+    def test_historical_release_and_agent_logs_are_not_current(self):
+        self.assertFalse(harness.has_current_vpn(connectivity_dump(later=
+            'mNetworkRequestInfoLogs (most recent first):\n'
+            '  RELEASE NetworkRequest [ LISTEN id=9, [ Transports: VPN ] ]\n'
+            '  NetworkAgentInfo{nc{[ Transports: VPN ]}}\n')))
+
+    def test_nested_requests_in_current_networks_are_not_agents(self):
+        self.assertFalse(harness.has_current_vpn(connectivity_dump(nested=
+            '    Requests: REQUEST:1 LISTEN:1 BACKGROUND_REQUEST:0 total:2\n'
+            '      NetworkRequest [ LISTEN id=9, [ Transports: VPN ] ]\n'
+            '    Inactivity Timers:\n')))
+
+    def test_vpn_and_combined_transports_remain_blocked(self):
+        for value in ('VPN', 'WIFI|VPN', 'CELLULAR|VPN', 'VPN|WIFI'):
+            with self.subTest(value=value):
+                self.assertTrue(harness.has_current_vpn(connectivity_dump(value)))
+
+    def test_empty_current_network_section_is_observed_idle(self):
+        self.assertFalse(harness.has_current_vpn('Current Networks:\n\nNetwork Requests:\n'))
+
+    def test_unknown_truncated_or_malformed_output_fails_closed(self):
+        samples = (
+            '', 'Transports: WIFI', 'Permission denied',
+            'Current Networks:\n  NetworkAgentInfo{nc{[ Transports: WIFI ]}}',
+            'Current Networks:\nUnknown section:\n',
+            'Current Networks:\n  UnexpectedRow\nNetwork Requests:\n',
+            connectivity_dump('FUTURE_TRANSPORT'),
+            connectivity_dump().replace('nc{[ Transports:', 'unknown{[ Transports:'),
+            connectivity_dump().replace('INTERNET ]}}', 'INTERNET'),
+            connectivity_dump() + 'Current Networks:\n',
+        )
+        for value in samples:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    harness.has_current_vpn(value)
+
+    def test_dump_size_is_bounded(self):
+        with self.assertRaises(ValueError):
+            harness.has_current_vpn('x' * (4 * 1024 * 1024 + 1))
 
 
 class Device:
@@ -37,7 +91,7 @@ class Device:
         elif cmd[:4] == ['shell', 'settings', 'get', 'secure']:
             output = 'null'
         elif cmd[:3] == ['shell', 'dumpsys', 'connectivity']:
-            output = 'Transports: VPN' if self.active else 'Transports: WIFI'
+            output = connectivity_dump('VPN' if self.active else 'WIFI')
         elif cmd[:4] == ['shell', 'pm', 'list', 'packages']:
             output = '\n'.join('package:' + name for name in self.packages if cmd[-1] in name)
         elif cmd[0] == 'install':
@@ -148,6 +202,70 @@ class HarnessTests(unittest.TestCase):
                     self.assertEqual(len(list(Path(directory).rglob('*.lock'))), 1)
                 with harness.emulator_lock('emulator-5554', 0):
                     pass
+
+
+class PipelineBranchTests(unittest.TestCase):
+    def invoke(self, lifecycle_only, fail_network=False):
+        args = ['test', '--serial', 'emulator-5554', '--gradle', 'synthetic-gradle']
+        if lifecycle_only:
+            args.append('--lifecycle-only')
+        def execute(command, **kwargs):
+            if fail_network and 'ci/android_network_e2e.py' in command:
+                raise RuntimeError('Synthetic required network gate failure')
+        fixture = Mock()
+        fixture.poll.return_value = None
+        fixture.wait.return_value = 0
+        with patch.object(sys, 'argv', args), \
+             patch.object(pipeline.Path, 'is_dir', return_value=True), \
+             patch.object(pipeline.Path, 'mkdir'), \
+             patch.object(pipeline.Path, 'exists', return_value=True), \
+             patch.object(pipeline.signal, 'signal'), \
+             patch.object(pipeline.subprocess, 'run', return_value=SimpleNamespace(returncode=0)), \
+             patch.object(pipeline.subprocess, 'Popen', return_value=fixture) as popen, \
+             patch.object(pipeline, 'run', side_effect=execute) as run, \
+             patch.object(pipeline.shutil, 'copy2') as copy, \
+             patch.dict(sys.modules, {'hysteria_interop': SimpleNamespace(binary=lambda: None),
+                                      'amneziawg_server': SimpleNamespace(binary=lambda: None)}), \
+             redirect_stdout(io.StringIO()):
+            try:
+                pipeline.main()
+            finally:
+                self.last_commands = [call.args[0] for call in run.call_args_list]
+            return self.last_commands, popen.call_count, copy.call_count
+
+    def test_explicit_lifecycle_builds_then_runs_only_isolated_acceptance(self):
+        commands, fixtures, copies = self.invoke(True)
+        self.assertEqual(fixtures, 0)
+        self.assertEqual(copies, 0)
+        self.assertEqual(sum('ci/android_lifecycle_e2e.py' in cmd for cmd in commands), 1)
+        self.assertFalse(any(any(name in cmd for name in ('ci/android_smoke.py',
+            'ci/android_network_e2e.py', 'ci/android_always_on_e2e.py',
+            'ci/android_process_death_e2e.py', 'ci/android_upgrade_e2e.py')) for cmd in commands))
+        build = next(cmd for cmd in commands if cmd[0] == 'synthetic-gradle')
+        self.assertTrue(all(task in build for task in ('assembleDebug', 'assembleRelease',
+                                                     'assembleDebugAndroidTest', 'lintDebug')))
+        native = next(cmd for cmd in commands if 'rtrust-android-lifecycle-target:/work/target' in cmd)
+        self.assertIn('cargo test --locked -p rtrust-android -p rtrust-engine', native[-1])
+        self.assertLess(commands.index(build), next(i for i, cmd in enumerate(commands)
+                                                   if 'ci/android_lifecycle_e2e.py' in cmd))
+        self.assertFalse(any('rtrust-android-target:/work/target' in cmd for cmd in commands))
+
+    def test_default_network_failure_is_not_replaced_by_lifecycle_pass(self):
+        with self.assertRaises(RuntimeError):
+            self.invoke(False, fail_network=True)
+        self.assertFalse(any('ci/android_lifecycle_e2e.py' in cmd for cmd in self.last_commands))
+
+    def test_default_keeps_complete_network_and_product_pipeline(self):
+        commands, fixtures, copies = self.invoke(False)
+        self.assertEqual(fixtures, 4)
+        self.assertEqual(copies, 2)
+        self.assertEqual(sum('ci/android_network_e2e.py' in cmd for cmd in commands), 4)
+        for name in ('ci/android_smoke.py', 'ci/android_always_on_e2e.py',
+                     'ci/android_process_death_e2e.py', 'ci/android_upgrade_e2e.py',
+                     'ci/android_lifecycle_e2e.py'):
+            self.assertEqual(sum(name in cmd for cmd in commands), 1)
+        self.assertTrue(any('rtrust-android-target:/work/target' in cmd for cmd in commands))
+        self.assertFalse(any('rtrust-android-lifecycle-target:/work/target' in cmd for cmd in commands))
 
 
 if __name__ == '__main__':

@@ -18,6 +18,56 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def has_current_vpn(connectivity):
+    """AOSP Current Networks agent rows only; requests/history are not observations.
+
+    Unknown/truncated output fails closed instead of declaring the VPN slot idle.
+    No dump contents are included in errors (they can contain private identifiers).
+    """
+    if len(connectivity) > 4 * 1024 * 1024:
+        raise ValueError('Connectivity dump exceeds the supported bound')
+    lines = connectivity.splitlines()
+    starts = [index for index, line in enumerate(lines) if line.strip() == 'Current Networks:']
+    if len(starts) != 1:
+        raise ValueError('Connectivity current-network section is missing or ambiguous')
+    rows = []
+    terminated = False
+    for line in lines[starts[0] + 1:]:
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            if line.startswith(('Status for known UIDs:', 'Network Requests:', 'Restrict background:')):
+                terminated = True
+                break
+            raise ValueError('Connectivity current-network section has an unknown boundary')
+        rows.append(line)
+    if not terminated:
+        raise ValueError('Connectivity current-network section is truncated')
+    agent_indent = None
+    vpn = False
+    transports = {'CELLULAR', 'WIFI', 'BLUETOOTH', 'ETHERNET', 'VPN', 'WIFI_AWARE',
+                  'LOWPAN', 'TEST', 'USB', 'THREAD', 'SATELLITE'}
+    for line in rows:
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        if stripped.startswith('NetworkAgentInfo{'):
+            if agent_indent is None:
+                agent_indent = indent
+            if indent != agent_indent or not stripped.endswith('}') or ']}' not in stripped:
+                raise ValueError('Connectivity network-agent row is malformed')
+            match = re.search(r'\bnc\{\[\s*Transports:\s+([A-Z_|]+)(?=\s|\])', stripped)
+            if match is None:
+                raise ValueError('Connectivity network-agent capabilities are unsupported')
+            values = match.group(1).split('|')
+            if not values or any(value not in transports for value in values):
+                raise ValueError('Connectivity network-agent transports are unsupported')
+            vpn = vpn or 'VPN' in values
+        elif agent_indent is None or indent <= agent_indent:
+            raise ValueError('Connectivity current-network row is unsupported')
+        # More-indented rows are this agent's requests/inactivity timers, not agents.
+    return vpn
+
+
 def application_id():
     return 'org.rtrusttunnel.android.run_' + secrets.token_hex(16) + '.lifecycle_test'
 
@@ -85,7 +135,11 @@ def main():
             parser.error('Emulator has an Always-on VPN; refusing to change it')
         # Observe only: never stop another package or alter its VPN settings.
         connectivity = run('shell', 'dumpsys', 'connectivity')
-        if re.search(r'Transports: [A-Z_|]*\bVPN\b', connectivity):
+        try:
+            occupied = has_current_vpn(connectivity)
+        except ValueError:
+            parser.error('Emulator current VPN state could not be parsed; refusing to proceed')
+        if occupied:
             parser.error('Emulator has an active VPN; lifecycle test requires an idle VPN slot')
 
     def absent_packages():
