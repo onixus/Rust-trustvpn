@@ -24,9 +24,10 @@ class Pipe:
         if self.handle==W.HANDLE(-1).value:raise ctypes.WinError(ctypes.get_last_error())
     def close(self):
         if self.handle is not None:K.CloseHandle(self.handle);self.handle=None
-    def read(self,n):
-        result=b'';until=time.monotonic()+45
+    def read(self,n,deadline=None):
+        result=b'';until=min(time.monotonic()+45,deadline) if deadline is not None else time.monotonic()+45
         while len(result)<n:
+            if time.monotonic()>=until:raise TimeoutError('IPC response timeout')
             available=W.DWORD()
             if not K.PeekNamedPipe(self.handle,None,0,None,ctypes.byref(available),None):raise ctypes.WinError(ctypes.get_last_error())
             if not available.value:
@@ -36,12 +37,12 @@ class Pipe:
             if not K.ReadFile(self.handle,buffer,len(buffer),ctypes.byref(count),None):raise ctypes.WinError(ctypes.get_last_error())
             result+=buffer.raw[:count.value]
         return result
-    def request(self,command,version=6):
+    def request(self,command,version=6,deadline=None):
         data=json.dumps(dict(version=version,command=command)).encode();frame=struct.pack('>I',len(data))+data;count=W.DWORD()
         if not K.WriteFile(self.handle,frame,len(frame),ctypes.byref(count),None):raise ctypes.WinError(ctypes.get_last_error())
         assert count.value==len(frame)
-        length=struct.unpack('>I',self.read(4))[0];assert 0<length<=2*1024*1024
-        return json.loads(self.read(length))
+        length=struct.unpack('>I',self.read(4,deadline))[0];assert 0<length<=2*1024*1024
+        return json.loads(self.read(length,deadline))
 def start(pipe,networks=None,base=None):
     profile=dict(schema_version=1,name='Wintun E2E',endpoint=base or FIXTURE['base'])
     return pipe.request(dict(op='Start',profile=profile,networks=networks or [NETWORK]))
