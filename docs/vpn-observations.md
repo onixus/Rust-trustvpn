@@ -110,7 +110,7 @@ not durable across process restart. Observations are advisory and do not change 
 | Windows selected / full / Always-on | Service worker lifecycle; failure/reconnect/gap; polled adapter change, kernel-clock resume | Unknown; no live system probe | Unknown | Native and WebView share the Rust verdict |
 | macOS selected / full | Service worker lifecycle; failure/reconnect/gap; routing-socket network change, kernel-clock resume | Unknown; no live system probe | Unknown | Native and WebView share the Rust verdict |
 | Desktop SOCKS | Proxy lifecycle only | Unsupported for the system path | Unknown | Explicit proxy scope |
-| Android | Shared mobile worker lifecycle; failure/recovery/gap; selected underlying Network/link-property changes; kernel deep-sleep clock evidence | Unknown; VpnService setup is not a live audit of DNS or lockdown | Unknown | JNI JSON, localized five-part summary, no green lifecycle badge |
+| Android | Shared mobile worker lifecycle; failure/recovery/gap; selected underlying Network/link-property changes; kernel deep-sleep clock evidence | Unknown; VpnService setup is not a live audit of DNS or lockdown | Unknown | JNI JSON, localized summary of checks that have a result, no green lifecycle badge |
 | iOS | Shared mobile worker lifecycle; failure/recovery/gap; provider path updates and native wake callback | Unknown; NetworkExtension status is not a live audit | Unknown | Redacted provider message; generation/age checked; localized summary |
 
 Capabilities explicitly advertise `system_probes=false`. The desktop GUI may
@@ -119,8 +119,15 @@ displays, as `source: app_probe` for route and connectivity only; a service
 never sends that source, and it replaces only open or expired service results.
 The adapters retain
 existing platform differences; this change does not make unsupported checks
-available or constitute packet-level leak acceptance. iOS/Android widget labels
-say transport is running and availability is unchecked.
+available or constitute packet-level leak acceptance.
+
+Since 0.6.1 (#67) every client lists only checks that produced a result. Route,
+DNS, guard and connectivity have no runtime producer yet, so while they are
+Unknown they are omitted instead of shown as "unchecked": a running transport
+reads "Transport: running" (iOS/Android widgets: "Transport running"). The amber
+colour still means that nothing is verified. Failed, stale and unsupported
+results are always shown. Desktop system-path diagnostics are reported separately;
+see [system diagnostics](system-diagnostics.md).
 
 ## Validation and remaining acceptance
 

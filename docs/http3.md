@@ -45,17 +45,46 @@ loss) broke 2 of 100 downloads.
 A vendored h3 0.0.8 ([patch notes](../vendor/h3/RTRUST-PATCH.md)) fails only
 that request. A health check whose response is lost counts as healthy once the
 same connection's first check returned 200, which also proves the credentials.
+Lost checks are therefore no evidence of a dead session; the next section
+describes what is.
 
-## Data-plane liveness after v0.6.1 (#62 / #69)
+## Dead-session detection
 
-Main adds per-session bounded, in-memory liveness counters in
-`crates/engine/src/liveness.rs`. An idle session remains healthy. Unanswered
-outgoing demand for at least 20 seconds together with at least five failing TCP opens or at least five accepted-but-silent TCP
-opens across at least three destination hash bits in the 60-second evidence window yields `Degraded`. Lost `_check` responses alone
-remain compatible with endpoint 1.1.0. Degradation enters the existing guarded
-reconnect path without direct fallback; sessions with no delivered bytes do
-not reset backoff. Android refunds a degraded-session attempt only after
-proven delivery and at least 30 seconds of session life.
+Before #62 a session could stay "Connected" after a reconnect while no flow got a
+reply, because `_check` alone kept passing. Since main after 0.6.1 (PR #69),
+`Session::health` (`crates/engine/src/lib.rs`) also fails with `Degraded` when the
+session carries no traffic. The check is session-level, so it applies to every
+transport, not only HTTP/3. A session is degraded only when both hold:
+
+- outbound data has stayed unanswered for 20 s;
+- within the last 60 s and since the last inbound byte, at least 5 TCP opens
+  failed in transport, or at least 5 were accepted but stayed silent, across at
+  least 3 distinct destinations. The two kinds are counted separately
+  (`crates/engine/src/liveness.rs`).
+
+These do not count as evidence: an idle tunnel, lost `_check` responses, endpoint
+rejections and authentication or destination errors, shared UDP/ICMP relay
+streams, and one application retrying one or two dead hosts. A failed health
+check ends the data plane and the normal supervisor reconnects.
+
+The exit carries `proven`: whether the session ever delivered an inbound byte.
+
+- Desktop and iOS: an unproven degraded session never restores the reconnect
+  budget, however long it lasted, so an endpoint that hands out dead sessions
+  reaches the normal blocked cooldown instead of a fast loop
+  (`crates/control/src/recovery.rs`). A proven session connected for at least
+  30 s restores it as before.
+- Android: a proven, stable degraded exit refunds its attempt in the finite
+  per-session budget (`crates/mobile/src/reserves.rs`), so such exits over days
+  cannot block the VPN permanently. Unproven or short exits still count.
+- macOS records `transport_degraded proven=<bool>` in the service event log.
+
+Liveness keeps only in-memory counters and a per-session keyed 64-bit host-hash
+set. No destination or address is stored, logged or exposed.
+
+Degradation enters the existing guarded reconnect path without direct fallback.
+Verified by unit tests and `crates/engine/tests/h3_transport.rs`; no installed
+package or device acceptance has been run for it.
 
 This is a heuristic, not a VPN-bound HTTPS acceptance check. An endpoint that
 returns 200 for `_check` but rejects CONNECT with 5xx remains outside its
@@ -82,7 +111,8 @@ for Hysteria 2:
 
 `Profile::udp_transport()` selects UDP for Hysteria 2, AmneziaWG and TrustTunnel
 HTTP/3. QUIC keepalive is 10 s with a 30 s idle timeout; the dataplane health
-check (every 5 s, 10 s timeout) detects a dead endpoint.
+check (every 5 s, 10 s timeout) detects a dead endpoint and, since #62, a
+session that carries no traffic ([dead-session detection](#dead-session-detection)).
 
 ## Verification
 

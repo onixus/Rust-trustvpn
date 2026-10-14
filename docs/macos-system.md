@@ -16,6 +16,13 @@ Sleep invalidates previous observations, and late pre-wake transport completions
 cannot start a session. Transport liveness still does not prove DNS/routes/guard
 or end-to-end availability.
 
+Since main after 0.6.1 (#62) a session that carries no traffic fails its health
+check and is reconnected. If it never delivered an inbound byte, its exit does not
+restore the retry budget, however long it lasted, so an endpoint handing out dead
+sessions reaches the five-minute cooldown instead of a fast loop. The service event
+log records `transport_degraded proven=<bool>` without destinations or addresses.
+See [dead-session detection](http3.md#dead-session-detection).
+
 The desktop client keeps a partially read IPC response through sleep and never
 resends the command. Kernel clocks detect suspension without wall-clock assumptions.
 macOS status polls allow 30 seconds, with at most one further 30-second extension

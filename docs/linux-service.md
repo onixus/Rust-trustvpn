@@ -1,6 +1,16 @@
 # Linux-служба и TUN из native UI
 
-## Опубликованный UI refresh: v0.3.2-ui.2
+## Актуальный Linux-набор: v0.6.0
+
+Самые новые Linux-пакеты — в [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0)
+(13 октября 2026): x86_64 Flatpak **Native / WebView / Both** и host-пакет
+`rtrust-host-0.6.0-7-x86_64.pkg.tar.gz`. В v0.6.1 Linux-пакетов нет. Среди файлов
+v0.6.0 нет отдельных `.sig` и `rtrusttunnel.gpg`, поэтому сверяйте загрузки по
+`SHA256SUMS` и source manifest релиза; шаги с GPG ниже относятся к v0.3.2-ui.2.
+Приёмка установленного Linux-пакета 0.6.0 (ARM64, reboot, sleep) не проводилась —
+см. [v0.6.0](releases/v0.6.0.md#acceptance-status).
+
+## Предыдущий UI refresh: v0.3.2-ui.2
 
 [Релиз и загрузки](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.3.2-ui.2)
 содержат подписанные x86_64 Flatpak **Native / WebView / Both** и отдельный Arch

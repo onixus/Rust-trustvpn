@@ -10,8 +10,8 @@ Workspace 0.6.1, desktop sequence 11, Android 60101 / 0.6.1-preview.1,
 iOS 0.6.1 / 60101. [v0.6.1](releases/v0.6.1.md) опубликован 13 октября
 из `db8796a89e4bef11c524b514557e0db60d4057ec` (annotated tag).
 GitHub assets содержат Android APK, Windows installer, macOS DMG/PKG,
-SHA256SUMS и native source identity/manifest. Linux assets остаются в
-v0.5.0-rebuild.9, iOS — в v0.5.0. Подписи, содержимое артефактов, binding
+SHA256SUMS и native source identity/manifest. Самые новые Linux assets
+(Flatpak и `rtrust-host-0.6.0-7`) — в [v0.6.0](releases/v0.6.0.md), iOS — в v0.5.0. Подписи, содержимое артефактов, binding
 source manifest и update-channel latest в этой сверке — **NOT RUN**.
 
 После тега в main вошли:

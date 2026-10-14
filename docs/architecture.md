@@ -2,6 +2,11 @@
 
 Дата актуализации: 2026-10-14. Workspace 0.6.1, desktop sequence 11. Опубликованный тег v0.6.1 и более новый main имеют разный состав; [точные границы и открытые issue](project-status.md).
 
+Главные архитектурные добавления 0.6.x: типизированные [наблюдения VPN](vpn-observations.md)
+с generations, [системная диагностика](system-diagnostics.md), защищённое
+[восстановление](recovery.md) через резервные профили, desktop control IPC v6 и
+проверка живости сессии ([dead-session detection](http3.md#dead-session-detection)).
+
 ## 1. Граница репозитория
 
 Этот репозиторий содержит **клиентскую часть** R-TrustTunnel:
@@ -123,8 +128,10 @@ platform target, hashes, size and expiry to a compiled client identity.
 
 Sequence 9 exists specifically to repair the old 0.5.0 sequence-7 identity problem.
 A current client must not offer itself as a new version or select the wrong rollback
-package. Windows latest is sequence 9; macOS automatic-update promotion remains
-withheld until its acceptance gate is satisfied.
+package. Releases 0.6.0 and 0.6.1 compile as sequences 10 and 11. Promotion of
+`latest` beyond sequence 9 requires production-signed metadata and the acceptance
+matrix (see [secure updates](secure-updates.md)); macOS automatic-update promotion
+remains withheld until its acceptance gate is satisfied.
 
 ## 8. Security invariants
 
