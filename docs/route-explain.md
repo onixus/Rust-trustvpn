@@ -8,9 +8,10 @@ implements an independent block rule; unsupported features are not advertised.
 
 ## One evaluator per actual routing backend
 
-`Router::tunneled` and `Router::decide` call the same evaluator. The dataplane
-continues to call `tunneled`; explanation serialization and revision string
-cloning are kept off that hot path. Rules retain their existing semantics:
+`Router::tunneled`, `Router::decide` and `Router::route_flow` use the same
+evaluator. The dataplane calls `route_flow`, which returns the action and can
+publish a redacted observed decision; the full explanation remains a separate
+request. Rules retain their existing semantics:
 
 - Port 53 is always tunneled.
 - General-mode exclusions choose direct; selective-mode exclusions choose VPN.

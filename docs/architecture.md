@@ -1,10 +1,9 @@
 # Архитектура R-TrustTunnel
 
-Дата: 2026-10-07, дополнено 2026-10-14. Основа описания — main на 7 октября
-(workspace 0.5.0). Текущий workspace — **0.6.1**. Изменения 0.6.0 и 0.6.1 описаны в
-[v0.6.0](releases/v0.6.0.md) и [v0.6.1](releases/v0.6.1.md). Главные архитектурные
-добавления: типизированные [наблюдения VPN](vpn-observations.md) с generations,
-[системная диагностика](system-diagnostics.md), защищённое
+Дата актуализации: 2026-10-14. Workspace 0.6.1, desktop sequence 11. Опубликованный тег v0.6.1 и более новый main имеют разный состав; [точные границы и открытые issue](project-status.md).
+
+Главные архитектурные добавления 0.6.x: типизированные [наблюдения VPN](vpn-observations.md)
+с generations, [системная диагностика](system-diagnostics.md), защищённое
 [восстановление](recovery.md) через резервные профили, desktop control IPC v6 и
 проверка живости сессии ([dead-session detection](http3.md#dead-session-detection)).
 
@@ -54,6 +53,7 @@ flowchart LR
 - `crates/update` — signed desktop update metadata/lifecycle;
 - `apps/native` — iced desktop UI;
 - `apps/webview` — Tauri WebView UI;
+- `apps/tui` — Linux terminal UI поверх общего desktop Controller; [возможности и ограничения](tui.md);
 - `apps/tun` — desktop privileged tunnel/service path;
 - `apps/android/core` — Rust часть Android;
 - `apps/ios/core` — Rust часть iOS;

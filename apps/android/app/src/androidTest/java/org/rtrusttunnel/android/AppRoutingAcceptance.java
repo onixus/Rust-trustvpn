@@ -78,13 +78,36 @@ final class AppRoutingAcceptance {
         check(MainActivity.connectionColor(true, 2, false) != MainActivity.connectionColor(false, 0, false), "Connected color differs from disconnected");
         check(MainActivity.connectionColor(true, 1, false) == MainActivity.connectionColor(true, 3, false), "Connect/reconnect color");
         check(MainActivity.connectionColor(false, 0, true) == MainActivity.connectionColor(true, 4, false), "Service and core errors use error color");
+        check(MainActivity.connectionColor(true, 2, false) != MainActivity.WARNING, "A running tunnel is not shown as a warning");
+        check(VpnWidget.button(R.string.connected) == R.drawable.widget_button_on && VpnWidget.button(R.string.connecting) == R.drawable.widget_button_busy
+            && VpnWidget.button(R.string.disconnected) == R.drawable.widget_button_off, "Widget separates off, connecting and running");
+        check("p".equals(MainActivity.badgeProfile(true, 0, "p")) && MainActivity.badgeProfile(false, 0, "p") == null
+            && MainActivity.badgeProfile(true, 1, "p") == null, "Connected badge only on a connected primary");
+        JSONObject saved = new JSONObject("{\"name\":\"Office\",\"endpoint\":{\"hostname\":\"vpn.example\",\"addresses\":[\"192.0.2.1:443\"]}}");
+        JSONObject stored = new JSONObject().put("profiles", new JSONArray().put(new JSONObject().put("id", "a").put("profile", saved)));
+        check("Office".equals(MainActivity.duplicateOf(stored, new JSONObject("{\"endpoint\":{\"addresses\":[\"192.0.2.1:443\"],\"hostname\":\"vpn.example\"},\"name\":\"Office\"}"))), "Identical profile in another key order is a duplicate");
+        check(MainActivity.duplicateOf(stored, new JSONObject("{\"name\":\"Office\",\"endpoint\":{\"hostname\":\"vpn.example\",\"addresses\":[\"192.0.2.2:443\"]}}")) == null, "A different endpoint is not a duplicate");
+        long now = System.currentTimeMillis();
+        JSONObject passed = new JSONObject().put("outcome", "passed").put("observed_at_ms", now).put("valid_for_ms", 5000);
+        JSONObject checks = new JSONObject().put("schema", 2);
+        for (String key : ObservationStatus.KEYS) checks.put(key, passed);
+        check(ObservationStatus.level(checks) == ObservationStatus.VERIFIED, "Fresh passed checks are verified");
+        checks.put("dns", new JSONObject().put("outcome", "failed"));
+        check(ObservationStatus.level(checks) == ObservationStatus.WARNING, "A failed check is a warning");
+        checks.put("dns", new JSONObject().put("outcome", "passed").put("observed_at_ms", now - 60000).put("valid_for_ms", 5000));
+        check(ObservationStatus.level(checks) == ObservationStatus.RUNNING, "A stale pass is not verified");
+        check(ObservationStatus.level(new JSONObject().put("schema", 2).put("transport", new JSONObject().put("outcome", "configured").put("observed_at_ms", now).put("valid_for_ms", 5000))) == ObservationStatus.RUNNING, "Transport alone is running, not verified");
         Activity activity = test.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         try {
             test.runOnMainSync(() -> {
                 ViewGroup content = activity.findViewById(android.R.id.content);
-                LinearLayout root = (LinearLayout) content.getChildAt(0);
+                // Phone: the slider is the home column's last child; unfolded, the lower half's.
+                ViewGroup root = (ViewGroup) ((ViewGroup) content.getChildAt(0)).getChildAt(0);
                 View last = root.getChildAt(root.getChildCount() - 1);
-                check(last instanceof Button && ((Button) last).getText().toString().equals(activity.getString(R.string.connect_selected_profile)), "Connect button is fixed below profile list");
+                if (!(last instanceof SlideButton) && last instanceof ViewGroup) { ViewGroup half = (ViewGroup) last; last = half.getChildAt(half.getChildCount() - 1); }
+                String label = last instanceof SlideButton ? last.getContentDescription().toString() : "";
+                // An earlier test may leave a service problem behind, which offers a retry instead.
+                check(label.equals(activity.getString(R.string.connect_selected_profile)) || label.equals(activity.getString(R.string.v3_slide_retry)), "Connect control is fixed below the home content");
             });
         } finally { test.runOnMainSync(activity::finish); }
     }

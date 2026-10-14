@@ -114,6 +114,10 @@ impl Controller {
         self.pending = Some(p);
         Ok(summary)
     }
+    /// Drops a declined import preview so its credentials leave memory.
+    pub fn discard_preview(&mut self) {
+        self.pending = None;
+    }
     pub fn import(&mut self, revision: u64) -> Result<(), String> {
         self.check(revision)?;
         let p = self.pending.take().ok_or("Import preview expired")?;

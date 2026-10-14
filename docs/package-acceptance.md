@@ -106,7 +106,20 @@ stack: `ci/linux_system_e2e.py`, `ci/linux_host_package_e2e.py`,
 parts of this matrix. Read their authorization/environment requirements first.
 Do not launch them against a personal installation as an incidental self-test.
 
-## Candidate 0.6.0 inventory — 2026-10-12
+## Current publication snapshot — 2026-10-14
+
+v0.6.0 and v0.6.1 are published on GitHub. Publication does not complete this
+matrix. For tag/source/assets and remaining issue gates, see
+[project-status.md](project-status.md). v0.6.1 artifact signatures, publisher
+identity, latest-channel state and full installed-package acceptance were not
+reverified. Partial Android preview.2 and Windows lab-signed sequence-10 results
+in [v0.6.0](releases/v0.6.0.md) do not transfer to v0.6.1/current main.
+
+## Historical candidate 0.6.0 inventory — 2026-10-12
+
+The following table records the earlier inventory, with its dated Windows
+follow-up. Empty hashes/build-pending and NOT RUN cells describe that snapshot;
+they are not the current publication state or a fresh device inventory.
 
 Pre-release candidate **0.6.0** (desktop sequence 10, Android
 `0.6.0-preview.1`/60001, iOS 0.6.0/60001) on branch `codex/release-0.6.0`, based

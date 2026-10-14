@@ -9,7 +9,7 @@ import org.json.*;
 /** Runs only in the separately installed test APK. No test endpoints in the product. */
 public final class SmokeInstrumentation extends Instrumentation {
     private Bundle arguments;
-    @Override public void onCreate(Bundle args) { super.onCreate(args); arguments = args; start(); }
+    @Override public void onCreate(Bundle args) { super.onCreate(args); arguments = args; MainActivity.autoPathChecks = false; start(); }
     private void check(boolean result, String message) { if (!result) throw new AssertionError(message); }
     @Override public void onStart() {
         Bundle result = new Bundle();

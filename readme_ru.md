@@ -8,23 +8,25 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 
 > **Статус проекта: development preview, 14 октября 2026 года.**
 >
-> Последний опубликованный релиз — **[v0.6.1](docs/releases/v0.6.1.md)** (13 октября; workspace 0.6.1, desktop update sequence 11, Android/iOS 60101). Он не production-ready: приёмка установленных пакетов и устройств для артефактов 0.6.1 не проводилась. **[v0.6.0](docs/releases/v0.6.0.md)**, опубликованный в тот же день, — самый новый релиз с Linux-пакетами. Архивы iOS по-прежнему есть только в [v0.5.0](docs/releases/v0.5.0.md).
+> Workspace — **0.6.1**, update sequence 11. [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) опубликован 13 октября из `db8796a`. H3 health, Linux TUI и UI вариант 3 вошли в main после тега и отсутствуют в опубликованных пакетах 0.6.1. Публикация не доказывает приёмку установленного пакета или production-ready статус. См. [текущее состояние и открытые gates](docs/project-status.md). [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0), опубликованный в тот же день, — самый новый релиз с Linux-пакетами.
 
 ## Скачать
 
-- **[v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1)**: Windows, macOS, Android.
-- **[v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0)**: Linux Flatpak и Linux host package.
-- **[v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0)**: iOS device и Simulator archives.
-
-| Платформа | Актуальный артефакт | Примечание |
+| Платформа | Последний опубликованный набор | Ограничения |
 | --- | --- | --- |
-| Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` из v0.6.1 | Без Authenticode-подписи. Для 0.6.0 прошёл lab-signed update 9 → 10 с принудительным rollback на 9. Метаданные с production-ключом и перевод `latest` в release record отмечены как NOT RUN. |
+| Windows x64 | Installer из [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) | Наличие артефакта проверено; Authenticode и update/rollback точного пакета в этой актуализации не проверялись. |
+| macOS Apple Silicon | UI Choices, preview, bundled/system candidate DMG/PKG из v0.6.1 | Пакеты остаются кандидатами; публикация не подтверждает Developer ID/notarization или system-VPN acceptance. |
+| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` из v0.6.1 | Версия исходников 0.6.1-preview.1 / 60101; ключ релиза введён в 0.6.0. Для старых 0.5.x нужен reinstall. Сертификат артефакта здесь повторно не проверялся. |
 | Linux x86_64, Wayland | Native / WebView / Both Flatpak и `rtrust-host-0.6.0-7` из v0.6.0 | В v0.6.1 Linux-пакетов нет. Системному VPN нужен отдельный host package. |
-| macOS Apple Silicon | UI Choices, preview и system-candidate DMG/PKG из v0.6.1 | Ad-hoc sealed, без Developer ID и notarization. Автоматическое обновление не промотировано. |
-| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` из v0.6.1 | versionCode 60101, versionName 0.6.1-preview.1. Подписан ключом, введённым в 0.6.0: 0.6.0 обновляется поверх, а 0.5.x и старше нужно переустановить, локальные профили при этом удаляются. |
-| iOS arm64 / Simulator | Device и Simulator archives из v0.5.0 | Preview. Device archive требует Apple signing и не является готовым IPA. |
+| iOS arm64 / Simulator | Архивы из [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0) | В v0.6.1 нет iOS assets. Device archive требует Apple signing и не является готовым IPA. |
 
-В релизах опубликованы SHA256SUMS и source manifests.
+В v0.6.1 есть SHA256SUMS и native source identity/manifest. Наличие файлов не заменяет проверку подписи, provenance или канала обновлений. [Объём релиза](docs/releases/v0.6.1.md).
+
+## Изменения main после v0.6.1
+
+- H3 data-plane liveness и ограниченное восстановление degraded-сессии ([#69](https://github.com/onixus/Rust-trustvpn/pull/69)); macOS sleep/roam acceptance остаётся в #62.
+- [Консольный клиент Linux](docs/tui.md) поверх общего desktop controller (#72).
+- Android UI вариант 3 с route/DNS/HTTPS checks через собственную VPN network (#73); Native/WebView/iOS UI вариант 3 (#74). Desktop/iOS ещё не имеют непрерывных producers route/DNS/guard/connectivity; работающий транспорт остаётся синим.
 
 ## Что нового в 0.6.0 и 0.6.1
 
@@ -37,8 +39,6 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 - **macOS.** Восстановление VPN после сна; служба продолжает вести VPN после отключения GUI.
 - **Android.** Компактный виджет и плитка быстрых настроек. После смены Wi-Fi/мобильной сети VPN идёт через сеть, которую предпочитает Android. Необязательная настройка учёта трафика VPN. Новый ключ подписи релизов.
 - **Управляемые профили.** Сохраняют происхождение, назначенную маршрутизацию и офлайн-квитанции. Ответы панели о лимите профилей объясняются на desktop, Android и iOS. См. [managed devices](docs/managed-devices.md).
-
-Main после 0.6.1 также проваливает health check сессии, которая не пропускает трафик, и переподключает её (#62). См. [HTTP/3](docs/http3.md#dead-session-detection).
 
 Route groups относятся только к desktop. Android/iOS используют routing policy внутри профиля.
 ## Возможности
@@ -93,7 +93,7 @@ Route groups относятся только к desktop. Android/iOS испол�
 
 ## Скриншоты
 
-Desktop-интерфейс версии 0.6.1 с синтетическими профилями:
+Desktop-интерфейс опубликованной 0.6.1 с синтетическими профилями. Main уже перешёл на UI вариант 3 (#74); он ещё не снят:
 
 | Native | WebView |
 | --- | --- |
@@ -113,7 +113,7 @@ Workspace требует **Rust 1.89+**. Текущий CI использует 
 
 Основные desktop/service бинарники:
 
-    cargo build --release -p rtrust-native -p rtrust-tun -p rtrust-inspect --locked
+    cargo build --release -p rtrust-native -p rtrust-tun -p rtrust-inspect -p rtrust-tui --locked
 
 Стандартные проверки:
 
@@ -132,6 +132,7 @@ Workspace требует **Rust 1.89+**. Текущий CI использует 
 
 - [Windows service](docs/windows-service.md)
 - [Linux service](docs/linux-service.md)
+- [Terminal client (TUI)](docs/tui.md)
 - [macOS system VPN](docs/macos-system.md)
 - [Android](docs/android.md)
 - [Jenkins / CI](docs/jenkins.md)

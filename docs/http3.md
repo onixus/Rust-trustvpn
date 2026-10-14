@@ -58,8 +58,9 @@ transport, not only HTTP/3. A session is degraded only when both hold:
 
 - outbound data has stayed unanswered for 20 s;
 - within the last 60 s and since the last inbound byte, at least 5 TCP opens
-  failed in transport or were accepted but stayed silent, across at least 3
-  distinct destinations (`crates/engine/src/liveness.rs`).
+  failed in transport, or at least 5 were accepted but stayed silent, across at
+  least 3 distinct destinations. The two kinds are counted separately
+  (`crates/engine/src/liveness.rs`).
 
 These do not count as evidence: an idle tunnel, lost `_check` responses, endpoint
 rejections and authentication or destination errors, shared UDP/ICMP relay
@@ -81,8 +82,18 @@ The exit carries `proven`: whether the session ever delivered an inbound byte.
 Liveness keeps only in-memory counters and a per-session keyed 64-bit host-hash
 set. No destination or address is stored, logged or exposed.
 
+Degradation enters the existing guarded reconnect path without direct fallback.
 Verified by unit tests and `crates/engine/tests/h3_transport.rs`; no installed
 package or device acceptance has been run for it.
+
+This is a heuristic, not a VPN-bound HTTPS acceptance check. An endpoint that
+returns 200 for `_check` but rejects CONNECT with 5xx remains outside its
+coverage; independent remote failures can also trigger reconnect. Installed
+macOS sleep/wake and roam reproduction remains open in
+[#62](https://github.com/onixus/Rust-trustvpn/issues/62), slow Stop in
+[#70](https://github.com/onixus/Rust-trustvpn/issues/70), and the server cause in
+[onixus/tunnel#30](https://github.com/onixus/tunnel/issues/30).
+These changes were merged after the published v0.6.1 tag.
 
 ## Transport bypass
 

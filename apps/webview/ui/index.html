@@ -1,79 +1,171 @@
 <!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>R-TrustTunnel</title><link rel="stylesheet" href="style.css"></head>
-<body>
-<header class="topbar">
- <div class="brand"><svg class="mark" viewBox="0 0 512 512" aria-hidden="true"><path d="M124 151h108c49 0 88 39 88 88v122" class="mark-a"/><path d="M388 361H280c-49 0-88-39-88-88V151" class="mark-b"/><path d="m288 333 32 40 32-40M160 179l32-40 32 40" class="mark-c"/></svg><strong>R-TrustTunnel</strong></div>
- <nav class="tabs" aria-label="Main navigation"><button data-page="profiles-page" aria-current="page">Profiles</button><button data-page="settings-page">Settings</button><button data-page="sync-page">Sync</button><button data-page="diagnostics-page">Diagnostics</button></nav>
-</header>
-
-<section class="connection-card" aria-label="Connection">
- <div class="orb" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 5 6v5.5c0 4.3 2.9 8.2 7 9.5 4.1-1.3 7-5.2 7-9.5V6z"/><path class="tick" d="m8.8 12.2 2.2 2.2 4.2-4.6"/></svg></div>
- <div class="connection-text">
-  <span class="state-label" id="state-label">Not protected</span>
-  <h1 id="default-name">Loading profiles…</h1>
-  <p id="status" role="status" aria-live="polite"></p>
- </div>
- <button id="connect" class="primary" disabled>Connect</button>
-</section>
+<body data-state="off" data-tone="grey">
+<div class="blobs" aria-hidden="true"><span class="blob b1"></span><span class="blob b2"></span><span class="blob b3"></span></div>
+<div class="shell">
+<nav class="sidebar" data-i18n-aria="nav.sections" aria-label="Sections">
+ <div class="brand"><svg class="mark" viewBox="0 0 512 512" aria-hidden="true"><path d="M124 151h108c49 0 88 39 88 88v122" class="mark-a"/><path d="M388 361H280c-49 0-88-39-88-88V151" class="mark-b"/><path d="m288 333 32 40 32-40M160 179l32-40 32 40" class="mark-c"/></svg><strong class="nav-label">R-TrustTunnel</strong></div>
+ <button type="button" class="nav-item" data-page="home-page" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11l8-7 8 7v9h-5v-6h-6v6H4z"/></svg><span class="nav-label" data-i18n="nav.home">Home</span></button>
+ <button type="button" class="nav-item" data-page="profiles-page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span class="nav-label" data-i18n="nav.profiles">Profiles</span></button>
+ <button type="button" class="nav-item" data-page="checks-page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg><span class="nav-label" data-i18n="nav.checks">Checks</span></button>
+ <button type="button" class="nav-item" data-page="settings-page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0"/></svg><span class="nav-label" data-i18n="nav.network">Network</span></button>
+ <button type="button" class="nav-item" data-page="sync-page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h11a4 4 0 0 0 .5-8 6 6 0 0 0-11.6-1.6A4.8 4.8 0 0 0 7 18z"/></svg><span class="nav-label" data-i18n="nav.sync">Sync</span></button>
+ <button type="button" class="nav-item" data-page="prefs-page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8M14 5v4M8 15v4"/></svg><span class="nav-label" data-i18n="nav.settings">Settings</span></button>
+ <div class="side-status card"><span class="dot" aria-hidden="true"></span><span id="side-state" class="nav-label">—</span></div>
+</nav>
 
 <main>
-<section id="profiles-page" class="page">
- <div class="page-head"><div><h2>Profiles</h2><p>Connect uses the selected profile. Widgets and automatic connection use the default.</p></div></div>
- <div id="profiles" class="profile-list"></div>
- <details id="import-panel" class="panel">
-  <summary><span class="plus" aria-hidden="true">+</span>Add a profile</summary>
-  <div class="panel-body">
-   <p>Open a file or paste a TrustTunnel, Hysteria 2 or AmneziaWG configuration.</p>
-   <button id="file" class="secondary">Choose file…</button>
-   <label for="input">Configuration or link</label>
-   <textarea id="input" placeholder="tt://, hy2://, TOML, YAML or JSON" spellcheck="false"></textarea>
-   <div class="row"><button id="paste" class="secondary">Preview import</button><button id="pending" class="ghost">Confirm pending import</button></div>
-   <div id="preview" role="status"></div>
+<div class="statusbar"><p id="status" class="status-line card" role="status" aria-live="polite"></p></div>
+<section id="home-page" class="page">
+ <div class="home-top"><span class="chip state-chip"><span class="dot" aria-hidden="true"></span><span id="state-tag">—</span></span></div>
+ <div class="home-grid">
+  <div class="stack">
+   <h1 class="headline"><span id="line1">VPN</span> <span id="line2" class="accent">…</span></h1>
+   <p id="state-desc" class="desc"></p>
+   <div class="card checks-card">
+    <div class="card-head"><span class="eyebrow" data-i18n="checks.eyebrow">Checks</span><button type="button" class="chip-btn" data-goto="checks-page" data-i18n="checks.open">Open checks</button></div>
+    <div id="home-checks" class="check-rows"></div>
+   </div>
   </div>
- </details>
+  <div class="stack">
+   <button type="button" class="card pcard" id="profile-card" data-goto="profiles-page"><span class="avatar" id="profile-code">—</span><span class="pcard-text"><span class="eyebrow" id="profile-eyebrow">Profile</span><b id="default-name">…</b><small id="profile-sub"></small></span></button>
+   <button type="button" class="card pcard" id="backup-card" data-goto="profiles-page" hidden><span class="avatar" id="backup-code">—</span><span class="pcard-text"><span class="eyebrow" data-i18n="home.backup">Backup</span><b id="backup-name"></b><small id="backup-sub"></small></span></button>
+   <div class="tiles">
+    <button type="button" class="card tile" data-goto="settings-page"><span class="eyebrow" data-i18n="tile.mode">Mode</span><b id="tile-mode"></b><small id="tile-mode-sub"></small></button>
+    <button type="button" class="card tile" data-goto="settings-page"><span class="eyebrow">DNS</span><b id="tile-dns"></b><small data-i18n="tile.dns_sub">DNS server</small></button>
+    <button type="button" class="card tile" data-goto="sync-page"><span class="eyebrow" data-i18n="tile.sync">Sync</span><b id="tile-sync"></b><small id="tile-sync-sub"></small></button>
+    <button type="button" class="card tile" data-goto="settings-page"><span class="eyebrow" data-i18n="tile.auto">Autoconnect</span><b id="tile-auto"></b><small data-i18n="tile.auto_sub">when the app starts</small></button>
+   </div>
+  </div>
+ </div>
+ <div class="power-bar"><button type="button" id="connect" class="card power" disabled><span class="knob" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg></span><span id="connect-label">Connect</span></button>
+ </div>
 </section>
 
-<section id="settings-page" class="page" hidden>
- <div class="page-head"><div><h2>Connection</h2><p>Choose which traffic goes through the tunnel.</p></div></div>
- <fieldset class="modes"><legend>Connection mode</legend>
-  <label class="mode"><input type="radio" name="mode-choice" value="Full"><span><b>Whole device</b><small>All IPv4, IPv6 and DNS through the tunnel</small></span></label>
-  <label class="mode"><input type="radio" name="mode-choice" value="Tun"><span><b>Selected networks</b><small>Only the IPv4 networks you list</small></span></label>
-  <label class="mode"><input type="radio" name="mode-choice" value="Socks"><span><b>Local proxy</b><small>SOCKS5 for apps you configure</small></span></label>
+<section id="profiles-page" class="page" hidden>
+ <h1 class="page-title" data-i18n="nav.profiles">Profiles</h1>
+ <div class="split">
+  <div class="stack">
+   <div class="toolbar">
+    <label class="card search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></svg><input id="profile-search" type="search" autocomplete="off" spellcheck="false" data-i18n-ph="profiles.search" placeholder="Name, server or protocol" data-i18n-aria="profiles.search" aria-label="Name, server or protocol"></label>
+    <button type="button" class="btn primary" data-goto="add-page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span data-i18n="profiles.add">Add profile</span></button>
+   </div>
+   <div class="card list-card">
+    <div class="list-head" aria-hidden="true"><span></span><span data-i18n="profiles.col_profile">Profile</span><span data-i18n="profiles.col_protocol">Protocol</span><span data-i18n="profiles.col_state">State</span></div>
+    <div id="profiles" class="profile-list"></div>
+   </div>
+   <p class="hint" data-i18n="profiles.hint">Select a profile to see its actions. Connect uses the selected profile; automatic connection uses the default.</p>
+  </div>
+  <div class="card detail" id="profile-detail"></div>
+ </div>
+</section>
+
+<section id="add-page" class="page" hidden>
+ <div class="title-row"><button type="button" class="btn quiet back" data-goto="profiles-page" data-i18n-aria="common.back" aria-label="Back"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button><h1 class="page-title" data-i18n="add.title">New profile</h1></div>
+ <div class="split even">
+  <div class="stack">
+   <div class="card drop">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4M7 9l5-5 5 5"/><path d="M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></svg>
+    <b data-i18n="add.file_title">Open a profile file</b>
+    <small data-i18n="add.file_detail">TrustTunnel, Hysteria 2 or AmneziaWG: TOML, YAML, JSON or .conf</small>
+    <button type="button" id="file" class="btn primary" data-i18n="add.file">Choose file…</button>
+   </div>
+   <div class="card form-card">
+    <label for="input" data-i18n="add.paste_title">Link or configuration text</label>
+    <textarea id="input" data-i18n-ph="add.paste_hint" placeholder="tt://, hy2:// or TOML / YAML / JSON" spellcheck="false" autocomplete="off"></textarea>
+    <div class="row"><button type="button" id="paste" class="btn" data-i18n="add.preview">Preview import</button></div>
+    <small data-i18n="add.paste_note">First we show what will be imported. A link never connects automatically.</small>
+   </div>
+   <button type="button" class="card portal-card" data-goto="sync-page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h11a4 4 0 0 0 .5-8 6 6 0 0 0-11.6-1.6A4.8 4.8 0 0 0 7 18z"/></svg><span><b data-i18n="add.portal">Connect to a server</b><small data-i18n="add.portal_detail">One-time code from the panel; profiles arrive by sync</small></span></button>
+  </div>
+  <div class="stack">
+   <div class="card preview-card">
+    <span class="eyebrow" data-i18n="add.preview_title">Import preview</span>
+    <div id="preview" role="status"></div>
+    <div class="row"><button type="button" id="pending" class="btn quiet" data-i18n="add.pending">Confirm pending import</button></div>
+    <small data-i18n="add.pending_note">For a link opened from another app: its name is shown in the status line.</small>
+   </div>
+   <p class="hint lock"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><span data-i18n="add.vault">Credentials are kept in the encrypted vault on this computer.</span></p>
+  </div>
+ </div>
+</section>
+
+<section id="checks-page" class="page" hidden>
+ <h1 class="page-title" data-i18n="nav.checks">Checks</h1>
+ <div class="split wide">
+  <div class="stack">
+   <div class="checks-top"><span class="chip soft state-chip"><span class="dot" aria-hidden="true"></span><span id="checks-short">—</span></span><span id="checks-sub" class="muted"></span></div>
+   <div class="card"><div id="checks-detail" class="check-rows detailed"></div></div>
+   <p class="hint" data-i18n="checks.hint">Checks come from the connection service. A check without a result shows “no data”, never “passed”. Results expire after a few seconds.</p>
+  </div>
+  <div class="stack">
+   <div class="card form-card">
+    <b data-i18n="diag.title">Why does a service not open?</b>
+    <label for="diagnostic-target" data-i18n="diag.target">Hostname or IP (no URL or port)</label>
+    <input id="diagnostic-target" value="example.com" autocomplete="off" spellcheck="false">
+    <small data-i18n="diag.note">Uses the system resolver and sends one HTTPS HEAD request through the active VPN interface. No direct comparison or automatic upload. The result applies to one destination.</small>
+    <div class="row"><button type="button" id="diagnostic-run" class="btn primary" data-i18n="diag.run">Check current VPN path</button><button type="button" id="diagnostic-cancel" class="btn quiet" data-i18n="diag.cancel">Cancel</button></div>
+    <div class="row"><button type="button" id="diagnostic-endpoint" class="btn" data-i18n="diag.endpoint">Check VPN endpoint</button><button type="button" id="diagnostic-reconnect" class="btn" data-i18n="diag.reconnect">Reconnect and check again</button></div>
+    <p id="diagnostic-result" role="status" aria-live="polite">No check yet.</p>
+   </div>
+   <div class="card form-card">
+    <b data-i18n="diag.rules_title">Why the route is like this</b>
+    <small data-i18n="diag.rules_detail">The routing policy used by the last check: profile rules, exclusions or administrator routes.</small>
+    <div class="row"><button type="button" id="diagnostic-rules" class="btn quiet" data-i18n="diag.rules">Review rules</button></div>
+    <pre id="diagnostic-policy"></pre>
+   </div>
+   <details class="card panel"><summary data-i18n="diag.report">Preview and redact report</summary><div class="panel-body">
+    <textarea id="diagnostic-preview" spellcheck="false"></textarea>
+    <small data-i18n="diag.report_note">User additions are saved as entered. Remove sensitive details before export.</small>
+    <div class="row"><button type="button" id="diagnostic-replace" class="btn quiet" data-i18n="diag.replace">Replace edits with latest report</button><button type="button" id="diagnostic-export" class="btn" data-i18n="diag.export">Save locally…</button></div>
+   </div></details>
+  </div>
+ </div>
+</section>
+
+<section id="settings-page" class="page narrow" hidden>
+ <h1 class="page-title" data-i18n="nav.network">Network</h1>
+ <p class="muted" data-i18n="net.lead">Choose which traffic goes through the tunnel. Disconnect before changing settings.</p>
+ <fieldset class="modes"><legend data-i18n="net.mode">Connection mode</legend>
+  <label class="mode"><input type="radio" name="mode-choice" value="Full"><span class="card"><b data-i18n="mode.full">Whole device</b><small data-i18n="mode.full_sub">All IPv4, IPv6 and DNS through the tunnel</small></span></label>
+  <label class="mode"><input type="radio" name="mode-choice" value="Tun"><span class="card"><b data-i18n="mode.tun">Selected networks</b><small data-i18n="mode.tun_sub">Only the IPv4 networks you list</small></span></label>
+  <label class="mode"><input type="radio" name="mode-choice" value="Socks"><span class="card"><b data-i18n="mode.socks">Local proxy</b><small data-i18n="mode.socks_sub">SOCKS5 for apps you configure</small></span></label>
  </fieldset>
- <select id="mode" hidden><option value="Socks">Local proxy (SOCKS5)</option><option value="Tun">Selected IPv4 networks</option><option value="Full">Whole device VPN</option></select>
- <div class="fields">
-  <label id="port-field">SOCKS port<input id="port" type="number" min="1" max="65535"></label>
-  <label id="networks-field">IPv4 networks<input id="networks" placeholder="192.0.2.0/24, 10.0.0.0/8"></label>
-  <label>DNS server<input id="dns" placeholder="1.1.1.1"></label>
+ <select id="mode" hidden><option value="Socks">Socks</option><option value="Tun">Tun</option><option value="Full">Full</option></select>
+ <div class="card form-card">
+  <label id="port-field"><span data-i18n="net.port">SOCKS port</span><input id="port" type="number" min="1" max="65535"></label>
+  <label id="networks-field"><span data-i18n="net.networks">IPv4 networks</span><input id="networks" placeholder="192.0.2.0/24, 10.0.0.0/8"><small id="networks-managed" data-i18n="net.managed" hidden>The server assigns the routes for this device.</small></label>
+  <label><span data-i18n="net.dns">DNS server</span><input id="dns" placeholder="1.1.1.1"></label>
  </div>
- <label class="switch"><input id="auto" type="checkbox"><span>Connect on launch</span></label>
- <div class="row end"><button id="save" class="secondary">Save settings</button></div>
+ <label class="card switch"><span data-i18n="net.auto">Connect on launch</span><input id="auto" type="checkbox"></label>
+ <div class="row end"><button type="button" id="save" class="btn primary" data-i18n="net.save">Save settings</button></div>
 </section>
 
-<section id="sync-page" class="page" hidden>
- <div class="page-head"><div><h2>Sync</h2><p>Register this device with your server to download and upload profiles.</p></div></div>
- <div class="fields">
-  <label>Portal HTTPS address<input id="address" type="url" placeholder="https://vpn.example.com"></label>
-  <label>Enrollment code or invitation JSON<input id="code" type="password" autocomplete="off"></label>
-  <label>Device name<input id="name" value="Desktop"></label>
+<section id="sync-page" class="page narrow" hidden>
+ <h1 class="page-title" data-i18n="nav.sync">Sync</h1>
+ <p class="muted" data-i18n="sync.lead">Register this device with your server to download and upload profiles.</p>
+ <div class="card form-card">
+  <label><span data-i18n="sync.address">Portal HTTPS address</span><input id="address" type="url" placeholder="https://vpn.example.com" autocomplete="off" spellcheck="false"></label>
+  <label><span data-i18n="sync.code">Enrollment code or invitation JSON</span><input id="code" type="password" autocomplete="off"></label>
+  <label><span data-i18n="sync.name">Device name</span><input id="name" value="Desktop" autocomplete="off"></label>
+  <div class="row"><button type="button" id="enroll" class="btn primary" data-i18n="sync.enroll">Register device</button><button type="button" id="sync" class="btn" data-i18n="sync.now">Sync profiles now</button><button type="button" id="renew" class="btn quiet" data-i18n="sync.renew">Renew portal access</button></div>
  </div>
- <div class="row"><button id="enroll" class="secondary">Register device</button><button id="sync" class="ghost">Sync profiles now</button><button id="renew" class="ghost">Renew portal access</button></div>
- <label class="switch"><input id="syncauto" type="checkbox"><span>Background synchronization</span></label>
- <details class="panel quiet"><summary>Registration</summary><div class="panel-body"><p>Forget this local registration. Downloaded VPN credentials have independent access; this does not revoke them on the server.</p><button id="forget" class="danger">Forget registration</button></div></details>
+ <label class="card switch"><span data-i18n="sync.auto">Background synchronization</span><input id="syncauto" type="checkbox"></label>
+ <details class="card panel"><summary data-i18n="sync.registration">Registration</summary><div class="panel-body"><small data-i18n="sync.forget_note">Forget this local registration. Downloaded VPN credentials have independent access; this does not revoke them on the server.</small><div class="row"><button type="button" id="forget" class="btn danger" data-i18n="sync.forget">Forget registration</button></div></div></details>
 </section>
-<section id="diagnostics-page" class="page" hidden>
- <div class="page-head"><div><h2>Why does the service not open?</h2><p>Checks system DNS, the route and one verified HTTPS response through the active VPN interface. Results apply to one destination.</p></div></div>
- <label>Hostname or IP (no URL or port)<input id="diagnostic-target" value="example.com" autocomplete="off" spellcheck="false"></label>
- <p>Uses the system resolver and sends one HTTPS HEAD request to this destination. No direct comparison or automatic upload.</p>
- <div class="row"><button id="diagnostic-run">Check current VPN path</button><button id="diagnostic-cancel">Cancel</button><button id="diagnostic-endpoint">Check VPN endpoint</button><button id="diagnostic-reconnect">Reconnect and check again</button><button id="diagnostic-rules">Review rules</button></div>
- <p id="diagnostic-result" role="status" aria-live="polite">No check yet.</p>
- <pre id="diagnostic-policy"></pre>
- <details class="panel"><summary>Preview and redact report</summary><div class="panel-body">
- <textarea id="diagnostic-preview" spellcheck="false"></textarea>
- <p>User additions are saved as entered. Remove sensitive details before export.</p>
- <div class="row"><button id="diagnostic-replace">Replace edits with latest report</button><button id="diagnostic-export">Save locally…</button></div>
- </div></details>
+
+<section id="prefs-page" class="page narrow" hidden>
+ <h1 class="page-title" data-i18n="nav.settings">Settings</h1>
+ <fieldset class="modes"><legend data-i18n="prefs.theme">Theme</legend>
+  <label class="mode"><input type="radio" name="theme-choice" value="system"><span class="card"><b data-i18n="prefs.system">System</b><small data-i18n="prefs.system_sub">Follows the system appearance</small></span></label>
+  <label class="mode"><input type="radio" name="theme-choice" value="dark"><span class="card"><b data-i18n="prefs.dark">Dark</b><small data-i18n="prefs.dark_sub">Black background</small></span></label>
+  <label class="mode"><input type="radio" name="theme-choice" value="light"><span class="card"><b data-i18n="prefs.light">Light</b><small data-i18n="prefs.light_sub">Frosted glass</small></span></label>
+ </fieldset>
+ <p class="hint" data-i18n="prefs.language">Language follows the system: Russian or English. Messages from the connection service may be in English.</p>
+ <p class="hint" data-i18n="prefs.native">Boot policy, updates, backup profiles and recovery controls are in the Native app.</p>
 </section>
 </main>
+</div>
+<script src="model.js"></script>
 <script src="app.js"></script></body></html>

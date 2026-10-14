@@ -8,23 +8,25 @@ The client implements its own transport and does **not** wrap the official Trust
 
 > **Project status: development preview, October 14, 2026.**
 >
-> The latest published release is **[v0.6.1](docs/releases/v0.6.1.md)** (October 13; workspace 0.6.1, desktop update sequence 11, Android/iOS 60101). It is not production-ready. Installed-package and device acceptance of the 0.6.1 artifacts has not been run. **[v0.6.0](docs/releases/v0.6.0.md)**, published the same day, is the newest release with Linux packages. iOS archives are still only in [v0.5.0](docs/releases/v0.5.0.md).
+> The source workspace is **0.6.1**, update sequence 11. [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) was published on October 13 from `db8796a`. Current main also includes H3 data-plane health, Linux TUI and UI variant 3, merged after that tag; those changes are not in the published 0.6.1 packages. Publication does not establish installed-package acceptance or production readiness. See [current implementation and open gates](docs/project-status.md). [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0), published the same day, is the newest release with Linux packages.
 
 ## Download
 
-- **[v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1)**: Windows, macOS, Android.
-- **[v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0)**: Linux Flatpaks and the Linux host package.
-- **[v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0)**: iOS device and Simulator archives.
-
-| Platform | Current artifact | Notes |
+| Platform | Latest published artifact set | Notes |
 | --- | --- | --- |
-| Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` from v0.6.1 | Not Authenticode signed. A lab-signed 9 → 10 update with forced rollback to 9 passed for 0.6.0. Production-key metadata and promotion of `latest` are listed as NOT RUN in the release record. |
+| Windows x64 | Installer from [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) | Artifact presence verified; Authenticode and exact-package update/rollback acceptance were not verified in this refresh. |
+| macOS Apple Silicon | UI Choices, preview, bundled/system candidate DMG/PKG from v0.6.1 | Candidate naming remains; Developer ID/notarization and system-VPN acceptance are not established by publication. |
+| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` from v0.6.1 | Source version 0.6.1-preview.1 / 60101; release key introduced in 0.6.0. Older 0.5.x installations require reinstall. Artifact certificate was not rechecked here. |
 | Linux x86_64, Wayland | Native / WebView / Both Flatpaks and `rtrust-host-0.6.0-7` from v0.6.0 | v0.6.1 has no Linux packages. System VPN needs the separate host package. |
-| macOS Apple Silicon | UI Choices, preview and system-candidate DMG/PKG from v0.6.1 | Ad-hoc sealed, not Developer ID signed or notarized. Automatic-update promotion is withheld. |
-| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` from v0.6.1 | versionCode 60101, versionName 0.6.1-preview.1. Signed with the release key introduced in 0.6.0: it updates 0.6.0 in place, but 0.5.x and older must be reinstalled, which removes local profiles. |
-| iOS arm64 / Simulator | Device and Simulator archives from v0.5.0 | Preview only. The device archive requires Apple signing and is not an installable IPA. |
+| iOS arm64 / Simulator | Archives from [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0) | No iOS assets in v0.6.1. Device archive requires Apple signing and is not an installable IPA. |
 
-SHA256SUMS and source manifests are published with the releases.
+v0.6.1 includes SHA256SUMS and native source identity/manifest files. Their presence is not independent signature, provenance or update-channel verification. [Release scope](docs/releases/v0.6.1.md).
+
+## Changes in main after v0.6.1
+
+- H3 data-plane liveness and bounded degraded-session recovery ([#69](https://github.com/onixus/Rust-trustvpn/pull/69)); macOS sleep/roam acceptance remains open in #62.
+- [Linux terminal client](docs/tui.md) over the shared desktop controller (#72).
+- Android UI variant 3 with VPN-bound route/DNS/HTTPS checks (#73), and Native/WebView/iOS UI variant 3 (#74). Desktop/iOS still lack continuous route/DNS/guard/connectivity producers; running transport alone remains blue.
 
 ## What is new in 0.6.0 and 0.6.1
 
@@ -37,8 +39,6 @@ Compared with v0.5.0-rebuild.9:
 - **macOS.** VPN restore after sleep, and the service keeps supervising the VPN when the GUI disconnects.
 - **Android.** Compact widget and Quick Settings tile. The VPN follows the network Android prefers after a Wi-Fi/mobile handoff. Optional "VPN data usage" metering setting. New release signing key.
 - **Managed profiles.** They keep provenance, assigned routing and offline receipts. Portal profile-limit replies are explained on desktop, Android and iOS. See [managed devices](docs/managed-devices.md).
-
-Main after 0.6.1 also fails the health check of a session that carries no traffic and reconnects it (#62). See [HTTP/3](docs/http3.md#dead-session-detection).
 
 Route groups are desktop-only. Android/iOS use the routing policy embedded in the profile.
 ## Features
@@ -93,7 +93,7 @@ Desktop Native/WebView/Both details are in [UI choices](docs/ui-choices.md). Lin
 
 ## Screenshots
 
-Desktop UI of version 0.6.1 with synthetic profiles:
+Desktop UI of the published 0.6.1 with synthetic profiles. Main has since moved to UI variant 3 (#74), which is not captured yet:
 
 | Native | WebView |
 | --- | --- |
@@ -113,7 +113,7 @@ Clone and run the native UI:
 
 Build the main desktop/service binaries:
 
-    cargo build --release -p rtrust-native -p rtrust-tun -p rtrust-inspect --locked
+    cargo build --release -p rtrust-native -p rtrust-tun -p rtrust-inspect -p rtrust-tui --locked
 
 Run the standard Rust checks:
 
@@ -132,6 +132,7 @@ Platform-specific prerequisites and acceptance limits are documented in:
 
 - [Windows service](docs/windows-service.md)
 - [Linux service](docs/linux-service.md)
+- [Terminal client (TUI)](docs/tui.md)
 - [macOS system VPN](docs/macos-system.md)
 - [Android](docs/android.md)
 - [Jenkins / CI](docs/jenkins.md)

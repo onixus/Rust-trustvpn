@@ -16,29 +16,42 @@ final class VPNModel: ObservableObject {
     private var observationEpoch: UInt64 = 0
     @Published private var observations: [String: Any]?
     private var observationReceived = Date.distantPast
-    /// nil when the check never produced a result: such checks are omitted, not listed as unchecked.
-    private func observationLabel(_ key: String) -> String? {
-        guard Date().timeIntervalSince(observationReceived) <= 6,
-              let o = observations?[key] as? [String: Any], let outcome = o["outcome"] as? String else { return nil }
-        if outcome == "passed" || outcome == "configured" {
-            let time = (o["observed_at_ms"] as? NSNumber)?.doubleValue ?? 0
-            let age = Date().timeIntervalSince1970 * 1000 - time
-            if age < 0 || age > 6000 { return tr("stale", "устарело") }
-        }
-        switch outcome {
-        case "passed": return tr("verified", "проверено")
-        case "configured": return tr("running", "запущен")
-        case "failed": return tr("failed", "сбой")
-        case "stale": return tr("stale", "устарело")
-        case "unsupported": return tr("check unsupported", "проверка не поддерживается")
-        default: return nil
-        }
+    private var observationTick = 0
+    /// True after a connection attempt ended before the tunnel came up (or the start call
+    /// threw). Cleared by the next toggle or a connected state. Drives the red state only.
+    @Published private(set) var attemptFailed = false
+    private var attempting = false
+    /// Set when startTunnel returned. Until the system reports a transition (or the
+    /// deadline passes) a `.disconnected` reading is the pre-start status, not a failure.
+    @Published private var startPendingUntil: Date?
+    /// Profile this app passed to startTunnel in this session. nil when the tunnel was
+    /// started elsewhere (widget, On Demand, an earlier app session): the provider then
+    /// loads the default profile itself, so the UI names no profile.
+    @Published private(set) var runningProfileID: String? { didSet { if runningProfileID == nil { runningConnectedDate = nil } } }
+    /// connection.connectedDate of the session started with runningProfileID. A different
+    /// (or missing) date later means the tunnel restarted outside the app while it was
+    /// suspended, e.g. On Demand with the default profile.
+    private var runningConnectedDate: Date?
+    var runningProfile: SavedProfile? {
+        guard active, let id = runningProfileID else { return nil }
+        return vault.profiles.first { $0.id == id }
+    }
+    /// The provider snapshot if it was received in the last 6 seconds while connected.
+    var snapshot: [String: Any]? {
+        guard state == .connected, Date().timeIntervalSince(observationReceived) <= 6 else { return nil }
+        return observations
+    }
+    var snapshotReceived: Date? { snapshot == nil ? nil : observationReceived }
+    var level: TunnelLevel {
+        if state == .connected { return ObservationStatus.level(snapshot) }
+        return startPendingUntil != nil ? .connecting : TunnelLevel.transport(state, attemptFailed: attemptFailed)
     }
     private func refreshObservations() {
         observationEpoch &+= 1
         let epoch = observationEpoch
-        observations = nil
-        guard active, let session = manager?.connection as? NETunnelProviderSession else { return }
+        // Old results are not cleared on every poll (that would flicker); freshness is
+        // enforced by the receive time above and each check's own TTL.
+        guard active, let session = manager?.connection as? NETunnelProviderSession else { observations = nil; return }
         try? session.sendProviderMessage(Data("observations-v1".utf8)) { [weak self] data in
             Task { @MainActor in
                 guard let self, epoch == self.observationEpoch, self.active,
@@ -141,26 +154,20 @@ final class VPNModel: ObservableObject {
     }
     var active: Bool { VPNController.isActive(state) }
     var canEdit: Bool { !busy && !active && !onDemand }
-    var status: String {
-        switch state {
-        case .connected:
-            let checks = [(tr("Transport", "Транспорт"), "transport"), (tr("route", "маршрут"), "route"), ("DNS", "dns"),
-                          (tr("guard", "защита"), "guard"), (tr("connectivity", "доступность"), "connectivity")]
-                .compactMap { name, key in observationLabel(key).map { name + ": " + $0 } }
-            return checks.isEmpty ? tr("Transport running", "Транспорт запущен") : checks.joined(separator: " · ")
-        case .connecting: return tr("Connecting", "Подключение")
-        case .reasserting: return tr("Reconnecting", "Восстановление")
-        case .disconnecting: return tr("Disconnecting", "Отключение")
-        default: return tr("Disconnected", "Отключено")
-        }
-    }
-    var color: Color { error != nil ? .red : active ? .orange : .gray }
     init() {
         observer = NotificationCenter.default.addObserver(forName: .NEVPNStatusDidChange, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in await self?.refresh() }
         }
-        observationTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshObservations(); self?.refreshFlowCapture() }
+        // Ask the provider every third second. Views that show freshness re-render on
+        // their own clock (TimelineView), so the whole model is not invalidated here.
+        observationTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.observationTick &+= 1
+                if self.observationTick % 3 == 0 { self.refreshObservations(); self.refreshFlowCapture() }
+                // A start that never reported a transition is re-read once its deadline passes.
+                if let until = self.startPendingUntil, Date() >= until { await self.refresh() }
+            }
         }
         Task { await refresh(); busy = false }
     }
@@ -174,11 +181,63 @@ final class VPNModel: ObservableObject {
         guard VPNController.supportsVPN else { WidgetState.update(.disconnected); return }
         do {
             manager = try await VPNController.manager()
-            state = manager?.connection.status ?? .disconnected
+            track(manager?.connection.status ?? .disconnected, connectedDate: manager?.connection.connectedDate)
             onDemand = manager?.isOnDemandEnabled ?? false
             refreshObservations()
             WidgetState.update(state)
         } catch { self.error = tr("Cannot load VPN configuration", "Не удалось загрузить конфигурацию VPN") }
+    }
+    /// Records whether a connection attempt ended before the tunnel came up.
+    /// Only status transitions are used; nothing is probed.
+    func track(_ next: NEVPNStatus, connectedDate: Date? = nil) {
+        if let until = startPendingUntil {
+            if next != .disconnected && next != .invalid { startPendingUntil = nil }
+            else if Date() < until { return }
+            else { startPendingUntil = nil }
+        }
+        let wasUp = state == .connected || state == .reasserting
+        if next == .connected, runningProfileID != nil {
+            if let connectedDate, runningConnectedDate == nil { runningConnectedDate = connectedDate }
+            else if connectedDate == nil || connectedDate != runningConnectedDate { runningProfileID = nil }
+        }
+        switch next {
+        // Only a fresh attempt counts; reasserting after a connected session does not.
+        case .connecting: if !wasUp && !VPNController.userStopped { attempting = true }
+        case .connected: attempting = false; attemptFailed = false
+        case .disconnected, .invalid:
+            if attempting && !VPNController.userStopped { attemptFailed = true }
+            if attempting || VPNController.isActive(state) { runningProfileID = nil }
+            attempting = false; VPNController.userStopped = false
+        default: break
+        }
+        // Results from before a reconnect or stop must not reappear afterwards.
+        if state == .connected && next != .connected { observations = nil }
+        state = next
+    }
+    /// Records the profile passed by this app to startTunnel (also used by tests).
+    func recordStart(_ profileID: String?) { runningProfileID = profileID; runningConnectedDate = nil }
+    /// startTunnel returned: the attempt counts even if it fails before `.connecting` is
+    /// observed, but a stale `.disconnected` read right after the call is not that failure.
+    func startReturned(deadline: Date = Date().addingTimeInterval(10)) { attempting = true; startPendingUntil = deadline }
+    /// Status chip text; names a profile only if this app started it.
+    func homeTag(_ level: TunnelLevel) -> String {
+        if level == .off { return loc("v3.tag.off") }
+        let state = loc("v3.tag." + level.rawValue)
+        guard let profile = runningProfile else { return state }
+        return profile.name.uppercased() + " · " + state
+    }
+    func homeDescription(_ level: TunnelLevel) -> String {
+        switch level {
+        case .off: return vault.active == nil ? loc("v3.desc.off.none") : loc("v3.desc.off")
+        case .connecting:
+            if state == .reasserting { return loc("v3.desc.reconnecting") }
+            return runningProfile.map { loc("v3.desc.connecting", shownHost($0)) } ?? loc("v3.desc.connecting.unnamed")
+        case .disconnecting: return loc("v3.desc.disconnecting")
+        case .running: return loc("v3.desc.running")
+        case .verified: return loc("v3.desc.verified")
+        case .warning: return loc("v3.desc.warning", loc("v3.check." + (ObservationStatus.firstFailed(snapshot) ?? "transport")))
+        case .error: return loc("v3.desc.error")
+        }
     }
     func previewImport(_ data: Data) {
         guard canEdit else { error = tr("Disconnect and disable On Demand before editing profiles", "Перед изменением профилей отключите VPN и On Demand"); return }
@@ -218,13 +277,17 @@ final class VPNModel: ObservableObject {
     func toggle() async {
         guard !busy, VPNController.supportsVPN else { return }
         busy = true; defer { busy = false }
+        attemptFailed = false
+        var starting = false
         do {
             let current = try await VPNController.manager()
             if let current, VPNController.isActive(current.connection.status) {
                 current.isOnDemandEnabled = false
                 try await current.saveToPreferences()
+                VPNController.userStopped = true
                 current.connection.stopVPNTunnel()
             } else {
+                starting = true
                 guard let profileID = vault.selected else { throw AppError.message("Select a profile first") }
                 _ = try ProfilePlan.parse(ProfileVault.load(profileID: profileID))
                 let current = current ?? NETunnelProviderManager()
@@ -236,11 +299,16 @@ final class VPNModel: ObservableObject {
                 current.localizedDescription = "R-TrustTunnel"
                 let rule = NEOnDemandRuleConnect(); rule.interfaceTypeMatch = .any
                 current.onDemandRules = [rule]; current.isOnDemandEnabled = onDemand
+                recordStart(profileID)
                 try await VPNController.start(current, profileID: profileID)
+                startReturned()
                 manager = current
             }
             error = nil; await refresh()
-        } catch { report(error) }
+        } catch {
+            if starting { attemptFailed = true; attempting = false; startPendingUntil = nil; recordStart(nil) }
+            report(error)
+        }
     }
     func setOnDemand(_ enabled: Bool) async {
         guard !busy, VPNController.supportsVPN else { return }
@@ -258,5 +326,101 @@ final class VPNModel: ObservableObject {
         guard !busy else { return }
         busy = true; defer { busy = false; reloadVault(); PortalSync.schedule() }
         do { try await operation(); error = nil } catch { report(error) }
+    }
+}
+
+/// Localized UI string from Resources/<lang>.lproj/Localizable.strings. The language is
+/// chosen by the same rule as `tr`, so new and existing strings never mix languages.
+func loc(_ key: String, _ arguments: CVarArg...) -> String {
+    let format = Localization.bundle.localizedString(forKey: key, value: key, table: nil)
+    return arguments.isEmpty ? format : String(format: format, locale: Localization.locale, arguments: arguments)
+}
+/// Resolved once per process: the preferred language does not change while the app runs.
+private enum Localization {
+    static let language = Locale.preferredLanguages.first?.hasPrefix("ru") == true ? "ru" : "en"
+    static let bundle = Bundle.main.path(forResource: language, ofType: "lproj").flatMap(Bundle.init(path:)) ?? .main
+    static let locale = Locale(identifier: language)
+}
+
+/// Rendering of the Rust core observation snapshot (schema 2), same rules as Android
+/// ObservationStatus: only every check passed and fresh is verified.
+enum ObservationStatus {
+    static let keys = ["transport", "route", "dns", "guard", "connectivity"]
+    /// Normalised outcome. Passed/configured results become stale after
+    /// min(6 s, valid_for_ms); a missing check is "unknown" (never passed).
+    static func outcome(_ observation: Any?, nowMs: Double = Date().timeIntervalSince1970 * 1000) -> String {
+        guard let observation = observation as? [String: Any], let outcome = observation["outcome"] as? String else { return "unknown" }
+        if outcome == "passed" || outcome == "configured" {
+            guard let time = (observation["observed_at_ms"] as? NSNumber)?.doubleValue else { return "stale" }
+            let ttl = min(6000, (observation["valid_for_ms"] as? NSNumber)?.doubleValue ?? 0)
+            if nowMs < time || nowMs - time > ttl { return "stale" }
+        }
+        return ["passed", "failed", "configured", "stale", "unsupported"].contains(outcome) ? outcome : "unknown"
+    }
+    static func valid(_ snapshot: [String: Any]?) -> [String: Any] {
+        guard let snapshot, snapshot["schema"] as? Int == 2 else { return [:] }
+        return snapshot
+    }
+    /// Level of a connected tunnel: warning if any check failed, verified only if all
+    /// five passed and are fresh, otherwise running.
+    static func level(_ snapshot: [String: Any]?, nowMs: Double = Date().timeIntervalSince1970 * 1000) -> TunnelLevel {
+        let snapshot = valid(snapshot)
+        var verified = true
+        for key in keys {
+            let value = outcome(snapshot[key], nowMs: nowMs)
+            if value == "failed" { return .warning }
+            if value != "passed" { verified = false }
+        }
+        return verified ? .verified : .running
+    }
+    static func firstFailed(_ snapshot: [String: Any]?, nowMs: Double = Date().timeIntervalSince1970 * 1000) -> String? {
+        let snapshot = valid(snapshot)
+        return keys.first { outcome(snapshot[$0], nowMs: nowMs) == "failed" }
+    }
+    static func reason(_ snapshot: [String: Any]?, _ key: String) -> String? {
+        (valid(snapshot)[key] as? [String: Any])?["reason"] as? String
+    }
+}
+
+enum CheckDot: Equatable { case filled(StateTone), ring(StateTone), empty }
+struct CheckRow: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let value: String
+    let dot: CheckDot
+    var tone: StateTone? {
+        switch dot {
+        case .filled(let tone), .ring(let tone): return tone
+        case .empty: return nil
+        }
+    }
+}
+extension ObservationStatus {
+    /// One row per check. Only a connected tunnel shows snapshot results; otherwise the
+    /// transport row follows the system VPN status and every other check is "no data".
+    static func rows(status: NEVPNStatus, level: TunnelLevel, snapshot: [String: Any]?,
+                     nowMs: Double = Date().timeIntervalSince1970 * 1000) -> [CheckRow] {
+        let noData = (loc("v3.value.nodata"), CheckDot.empty)
+        return keys.map { key in
+            let (value, dot): (String, CheckDot)
+            if status == .connected {
+                switch outcome(valid(snapshot)[key], nowMs: nowMs) {
+                case "passed": (value, dot) = (loc("v3.value.passed"), .filled(.green))
+                case "failed": (value, dot) = (loc("v3.value.failed"), .filled(.yellow))
+                case "configured": (value, dot) = (loc("v3.value.running"), .filled(.blue))
+                case "stale": (value, dot) = (loc("v3.value.stale"), .ring(.grey))
+                case "unsupported": (value, dot) = (loc("v3.value.unsupported"), .ring(.grey))
+                default: (value, dot) = noData
+                }
+            } else if key == "transport" {
+                switch level {
+                case .connecting: (value, dot) = (loc("v3.value.connecting"), .ring(.blue))
+                case .disconnecting: (value, dot) = (loc("v3.value.disconnecting"), .ring(.blue))
+                case .error: (value, dot) = (loc("v3.value.error"), .filled(.red))
+                default: (value, dot) = (loc("v3.value.off"), .empty)
+                }
+            } else { (value, dot) = noData }
+            return CheckRow(id: key, name: loc("v3.check." + key), value: value, dot: dot)
+        }
     }
 }

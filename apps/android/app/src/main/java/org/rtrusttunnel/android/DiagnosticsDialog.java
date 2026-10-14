@@ -17,12 +17,12 @@ import org.json.*;
 final class DiagnosticsDialog {
     // A cancelled system DNS call may finish late. No second DNS worker or
     // unbounded queue can be created while it remains blocked.
-    private static final ThreadPoolExecutor WORKER = new ThreadPoolExecutor(1, 1, 30,
+    static final ThreadPoolExecutor WORKER = new ThreadPoolExecutor(1, 1, 30,
         TimeUnit.SECONDS, new SynchronousQueue<>(), task -> { Thread t = new Thread(task, "vpn-diagnostic"); t.setDaemon(true); return t; });
     private static String text(String en, String ru) {
         return java.util.Locale.getDefault().getLanguage().equals("ru") ? ru : en;
     }
-    private static long generation() throws Exception {
+    static long generation() throws Exception {
         JSONObject status = new JSONObject(NativeCore.INSTANCE.status());
         if (!TunnelService.active || status.optInt("state") != 2) throw new IOException();
         return status.getJSONObject("observations").getLong("generation");
@@ -85,7 +85,7 @@ final class DiagnosticsDialog {
         }
     }
     private static final class Changed extends IOException { }
-    private static JSONObject check(Activity activity, String host, Job job) {
+    static JSONObject check(Activity activity, String host, Job job) {
         String dns = "not_checked", route = "not_checked", https = "not_checked", cause = "undetermined";
         Integer status = null;
         long started = System.currentTimeMillis(), epoch = -1;
