@@ -56,6 +56,11 @@ public final class SmokeInstrumentation extends Instrumentation {
                 }
                 result.putString("stream", "PASS: recovery " + recovery + "\n"); finish(-1, result); return;
             }
+            if (arguments.getString("lifecycle") != null) {
+                TunnelLifecycleAcceptance.run(this);
+                result.putString("stream", "PASS: immediate STOP/START replaces TUN/callback, preserves newer request, cleans native core\n");
+                finish(-1, result); return;
+            }
             String alwaysOn = arguments.getString("always_on");
             if (alwaysOn != null) {
                 AlwaysOnAcceptance.run(this, alwaysOn);

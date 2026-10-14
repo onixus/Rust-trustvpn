@@ -17,7 +17,10 @@ public final class TunnelService extends VpnService {
     static volatile String problem = "";
     static volatile boolean active;
     static volatile boolean alwaysOn, lockdown;
-    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    // One process-wide native adapter: old onDestroy cleanup must finish before a
+    // new service instance can start it. Tasks are bounded by lifecycle/refresh gates.
+    private static final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final TunnelLifecycle lifecycle = new TunnelLifecycle();
     private volatile Network underlying;
     private ParcelFileDescriptor tun;
     private ConnectivityManager connectivity;
@@ -26,6 +29,7 @@ public final class TunnelService extends VpnService {
     private volatile ConnectivityManager.NetworkCallback callback;
     private volatile boolean stopping, recovering;
     private boolean cleaned;
+    private volatile long lifecycleEpoch;
     private final Handler widgetHandler = new Handler(Looper.getMainLooper());
     private final Runnable widgetPoll = new Runnable() {
         // Always-on is switched in system Settings while the app UI is usually closed: record it
@@ -94,24 +98,43 @@ public final class TunnelService extends VpnService {
     static final String PROFILE_ID = "org.rtrusttunnel.android.PROFILE_ID";
     @Override public int onStartCommand(Intent intent, int flags, int id) {
         alwaysOn = isAlwaysOn(); lockdown = isLockdownEnabled();
-        if (intent != null && STOP.equals(intent.getAction()) && !alwaysOn) { rememberAlwaysOn(this, false); disconnect(); return START_NOT_STICKY; }
-        if (active || stopping) return START_STICKY;
-        if (VpnService.prepare(this) != null) { rememberAlwaysOn(this, false); problem = getString(R.string.vpn_permission_is_required); stopSelf(); return START_NOT_STICKY; }
-        recovering = intent != null && RECOVER.equals(intent.getAction());
+        if (intent != null && STOP.equals(intent.getAction()) && !alwaysOn) {
+            rememberAlwaysOn(this, false);
+            if (lifecycle.stop(id)) scheduleDisconnect();
+            return START_NOT_STICKY;
+        }
+        TunnelLifecycle.Start request = new TunnelLifecycle.Start(id,
+            intent == null ? null : intent.getStringExtra(PROFILE_ID),
+            intent != null && RECOVER.equals(intent.getAction()));
+        if (lifecycle.start(request)) return beginConnection(request) ? START_STICKY : START_NOT_STICKY;
+        return START_STICKY;
+    }
+    /** Runs on the main looper, including restart after the previous worker joins. */
+    private boolean beginConnection(TunnelLifecycle.Start request) {
+        stopping = false; cleaned = false; recovering = request.recover;
+        final long session = ++lifecycleEpoch;
+        transitioning = true; accessHeld = false; localPolicy = false; localSource = false;
+        requestedId = request.profileId; receiptKey = ""; policyKey = ""; adapterKey = "";
+        logicalSession = System.nanoTime() & Long.MAX_VALUE;
+        networkEpoch++; lastWall = 0; clockInvalid = false;
+        if (VpnService.prepare(this) != null) {
+            rememberAlwaysOn(this, false); problem = getString(R.string.vpn_permission_is_required);
+            disconnect(); return false;
+        }
         if (Build.VERSION.SDK_INT >= 34) startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED);
         else startForeground(1, notification());
         active = true; problem = "";
-        String profileId = intent == null ? null : intent.getStringExtra(PROFILE_ID);
         worker.execute(() -> {
-            try { connect(profileId); }
+            try { if (!stopping && session == lifecycleEpoch) connect(request.profileId); }
             catch (Exception error) {
+                if (stopping || session != lifecycleEpoch) return;
                 // Never include config, addresses or exception payloads in UI/logs.
                 problem = getString(R.string.cannot_start_vpn_check_the_profile);
-                if(tun!=null){transitioning=true;return;}
-                cleanup(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf();
+                if (tun != null) { transitioning = true; return; }
+                finishFailure();
             }
         });
-        return START_STICKY;
+        return true;
     }
     private Network availableNetwork() { return availableNetwork(null); }
     /** {@code lost} is skipped: getAllNetworks can still list a network while its onLost runs. */
@@ -191,11 +214,12 @@ public final class TunnelService extends VpnService {
         }catch(Exception invalid){transitioning=true;requestRefresh();}
     }
     private void requestRefresh(){
-        if(stopping || !refreshQueued.compareAndSet(false,true))return;
+        if(stopping || lifecycle.destroyed() || !refreshQueued.compareAndSet(false,true))return;
+        final long session = lifecycleEpoch;
         worker.execute(()->{
             long epoch=networkEpoch;
-            try{rebuild(epoch);}catch(Exception error){problem=getString(R.string.cannot_start_vpn_check_the_profile);transitioning=true;}
-            finally{refreshQueued.set(false);if(!stopping && epoch!=networkEpoch)requestRefresh();}
+            try{if(!stopping && session==lifecycleEpoch)rebuild(epoch);}catch(Exception error){if(!stopping && session==lifecycleEpoch){problem=getString(R.string.cannot_start_vpn_check_the_profile);transitioning=true;}}
+            finally{refreshQueued.set(false);if(!stopping && session==lifecycleEpoch && epoch!=networkEpoch)requestRefresh();}
         });
     }
     private void connect(String profileId)throws Exception {
@@ -266,8 +290,7 @@ public final class TunnelService extends VpnService {
             // Android reports these flags after establish. This is a final refusal,
             // not a transient network error that should retain the blocking TUN.
             problem = getString(R.string.cannot_start_vpn_check_the_profile);
-            stopping = true;
-            cleanup(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf();
+            finishFailure();
             return;
         }
         ProfileVault.Selection primary=set.profiles.get(0);localSource=primary.localPolicy;localPolicy=primary.localPolicy && set.profiles.size()==1;
@@ -299,13 +322,36 @@ public final class TunnelService extends VpnService {
         } catch (IllegalArgumentException ignored) { /* Registration failed or was already removed; token is revoked. */ }
         NativeCore.INSTANCE.stop();
         if (tun != null) { try { tun.close(); } catch (Exception ignored) {} tun = null; }
-        candidates=java.util.Collections.emptyList(); underlying = null; active = false; VpnWidget.refresh(this, true);
+        candidates=java.util.Collections.emptyList(); underlying = null;
+        if (running == this) { active = false; VpnWidget.refresh(this, true); }
+    }
+    private void finishFailure() {
+        if (!lifecycle.beginStop()) return;
+        stopping = true; lifecycleEpoch++;
+        cleanup();
+        widgetHandler.post(this::completeDisconnect);
+    }
+    private void scheduleDisconnect() {
+        stopping = true; lifecycleEpoch++;
+        worker.execute(() -> { cleanup(); widgetHandler.post(this::completeDisconnect); });
     }
     private void disconnect() {
-        if (stopping) return;
-        stopping = true;
-        worker.execute(() -> { cleanup(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); });
+        if (lifecycle.beginStop()) scheduleDisconnect();
     }
-    @Override public void onRevoke() { disconnect(); }
-    @Override public void onDestroy() { widgetHandler.removeCallbacks(widgetPoll); running = null; stopping = true; worker.execute(this::cleanup); worker.shutdown(); super.onDestroy(); }
+    private void completeDisconnect() {
+        if (lifecycle.destroyed()) return;
+        TunnelLifecycle.Start next = lifecycle.completeStop();
+        if (next != null) { beginConnection(next); return; }
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelfResult(lifecycle.latestId());
+    }
+    @Override public void onRevoke() {
+        // Permission revocation is final: queued START cannot restart a revoked session.
+        if (lifecycle.stop(lifecycle.latestId())) scheduleDisconnect();
+    }
+    @Override public void onDestroy() {
+        lifecycle.destroy(); widgetHandler.removeCallbacksAndMessages(null);
+        if (running == this) { running = null; active = false; }
+        stopping = true; lifecycleEpoch++; worker.execute(this::cleanup); super.onDestroy();
+    }
 }
