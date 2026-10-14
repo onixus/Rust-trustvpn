@@ -28,6 +28,9 @@ pub enum Source {
     MobileLifecycle,
     ProxyLifecycle,
     SystemProbe,
+    /// The desktop GUI's own path check of one user-chosen destination,
+    /// folded into its displayed snapshot; never sent by a service.
+    AppProbe,
     NotObserved,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

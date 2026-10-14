@@ -1863,7 +1863,7 @@ impl App {
             && (self.system_target_edited_at.is_some()
                 || self
                     .last_diagnostic
-                    .is_none_or(|t| t.elapsed().as_secs() >= 30)
+                    .is_none_or(|t| t.elapsed() >= ui::PROBE_INTERVAL)
                 || self.diagnostic_report.as_ref().is_some_and(|(_, report)| {
                     self.session.as_ref().unwrap().observations().generation
                         != report.lifecycle.generation

@@ -140,12 +140,6 @@ const fn rgb(hex: u32) -> Color {
 const fn rgba(hex: u32, alpha: f32) -> Color {
     Color::from_rgba8((hex >> 16) as u8, (hex >> 8) as u8, hex as u8, alpha)
 }
-/// `fg` at `alpha` over an opaque `base`, as one opaque colour.
-fn over(fg: Color, alpha: f32, base: Color) -> Color {
-    let mix = |f: f32, b: f32| f * alpha + b * (1.0 - alpha);
-    Color::from_rgb(mix(fg.r, base.r), mix(fg.g, base.g), mix(fg.b, base.b))
-}
-const LIGHT_BG: u32 = 0xE8EDF5;
 /// Colours of Android variant 3 (Palette.java); light is the "frosted" look.
 #[derive(Clone, Copy)]
 pub(super) struct Tokens {
@@ -202,7 +196,7 @@ pub(super) const DARK_TOKENS: Tokens = Tokens {
 };
 pub(super) const LIGHT_TOKENS: Tokens = Tokens {
     dark: false,
-    bg: rgb(LIGHT_BG),
+    bg: rgb(0xE8EDF5),
     text: rgb(0x0E1726),
     muted: rgb(0x4A566B),
     // Translucent everywhere so the colour fields show through, as in the
@@ -434,14 +428,22 @@ impl Check {
         }
     }
 }
-/// The app's own system path check repeats every 30 s; its result stays fresh
-/// until shortly after the next run is due.
-pub(super) const PROBE_FRESH_MS: u64 = 40_000;
+/// How often the app repeats its own system path check while TUN is up.
+pub(super) const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// A probe result stays fresh until the next run is overdue: runs start
+/// PROBE_INTERVAL apart and each may take up to TOTAL, plus a few seconds of
+/// scheduling slack. Measured from `finished_at_ms`.
+pub(super) const PROBE_FRESH_MS: u64 =
+    (PROBE_INTERVAL.as_millis() + rtrust_desktop::diagnostics::TOTAL.as_millis()) as u64 + 5_000;
 /// Fold the app's own path check (one destination: route to the VPN interface,
 /// then HTTPS through it) into the service snapshot it was taken against.
 /// DNS and the guard are not inferred: a system lookup does not prove the DNS
 /// path and the check never tests the firewall.
-pub(super) fn apply_probe(snapshot: &mut Snapshot, report: &rtrust_desktop::diagnostics::Report) {
+pub(super) fn apply_probe(
+    snapshot: &mut Snapshot,
+    report: &rtrust_desktop::diagnostics::Report,
+    now: u64,
+) {
     use rtrust_desktop::diagnostics::Fact;
     use rtrust_profile::routing::Action;
     if report.finished_at_ms == 0 || report.lifecycle.generation != snapshot.generation {
@@ -449,19 +451,19 @@ pub(super) fn apply_probe(snapshot: &mut Snapshot, report: &rtrust_desktop::diag
     }
     let probe = |outcome| Observation {
         outcome,
-        source: Source::SystemProbe,
+        source: Source::AppProbe,
         observed_at_ms: Some(report.finished_at_ms),
         valid_for_ms: PROBE_FRESH_MS,
         mode: snapshot.transport.mode,
         reason: ObservationReason::NotChecked,
     };
-    // Service evidence wins; the probe only fills checks the service left open.
+    // Fresh service evidence wins; the probe only fills checks the service
+    // left open, including results that have since expired.
     let open = |o: &Observation| {
-        o.source != Source::SystemProbe
-            && matches!(
-                o.outcome,
-                Outcome::Unknown | Outcome::Stale | Outcome::Configured
-            )
+        matches!(
+            normalized(o, now),
+            Outcome::Unknown | Outcome::Stale | Outcome::Configured
+        )
     };
     // The destination is user-chosen: a route outside the VPN is a tunnel
     // failure only when the policy sends it into the tunnel (or, in full
@@ -496,7 +498,7 @@ pub(super) fn apply_probe(snapshot: &mut Snapshot, report: &rtrust_desktop::diag
 pub(super) fn normalized(observation: &Observation, now: u64) -> Outcome {
     match observation.outcome {
         Outcome::Passed | Outcome::Configured => {
-            let cap = if observation.source == Source::SystemProbe {
+            let cap = if observation.source == Source::AppProbe {
                 PROBE_FRESH_MS
             } else {
                 FRESH_MS
@@ -509,7 +511,7 @@ pub(super) fn normalized(observation: &Observation, now: u64) -> Outcome {
         }
         // The app's own check is repeated; its failure must not outlive the
         // runs that stopped confirming it.
-        Outcome::Failed if observation.source == Source::SystemProbe => {
+        Outcome::Failed if observation.source == Source::AppProbe => {
             match observation.observed_at_ms {
                 Some(time) if now >= time && now - time <= PROBE_FRESH_MS => Outcome::Failed,
                 _ => Outcome::Stale,
@@ -754,68 +756,95 @@ type Field = (f32, f32, f32, Color, f32);
 /// first takes `state`, the other two are fixed violet and sky. Placed as in
 /// the 1280×800 mockups, anchored to the same window edges.
 ///
-/// The fields are rasterised once per window size and state colour, and drawn
+/// The fields are rasterised once per texel grid and state colour, and drawn
 /// as one image. Layered translucent shapes would be re-blended on every
 /// scroll frame by tiny-skia (Windows, Linux), which renders on the CPU; a
 /// shadow blur would also leave stale pixels outside its quad's damage.
 fn backdrop<'a>(state: Color) -> Element<'a, Message> {
     iced::widget::responsive(move |size| {
-        // (left, top, diameter) as in the mockups, converted to centre and radius.
-        let field = |diameter: f32, color: Color, opacity: f32, x: f32, y: f32| -> Field {
-            let r = diameter / 2.0;
-            (x + r, y + r, r, color, opacity)
-        };
-        let fields = [
-            field(520.0, state, 0.35, 180.0, -120.0),
-            field(440.0, rgb(0xB9AEFF), 0.4, size.width + 60.0 - 440.0, 260.0),
-            field(
-                420.0,
-                rgb(0x9FDCFF),
-                0.4,
-                520.0,
-                size.height + 200.0 - 420.0,
-            ),
-        ];
-        iced::widget::image(backdrop_image(size, &fields))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .content_fit(iced::ContentFit::Fill)
-            .filter_method(iced::widget::image::FilterMethod::Nearest)
-            .into()
+        let (handle, snapped) = backdrop_image(size, state);
+        // One texel per BLOB_TEXEL exactly: the image may overhang the window
+        // by less than a texel, which the container clips.
+        container(
+            iced::widget::image(handle)
+                .width(snapped.width)
+                .height(snapped.height)
+                .content_fit(iced::ContentFit::Fill)
+                .filter_method(iced::widget::image::FilterMethod::Nearest),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .clip(true)
+        .into()
     })
     .into()
 }
-/// The cached raster for `size` and `fields`; a new handle (and upload) only
-/// when either changes, so redraws reuse the renderer's copy.
-fn backdrop_image(size: iced::Size, fields: &[Field; 3]) -> iced::widget::image::Handle {
+/// The fields for a window of `size`, anchored as in the mockups.
+fn backdrop_fields(size: iced::Size, state: Color) -> [Field; 3] {
+    // (left, top, diameter) as in the mockups, converted to centre and radius.
+    let field = |diameter: f32, color: Color, opacity: f32, x: f32, y: f32| -> Field {
+        let r = diameter / 2.0;
+        (x + r, y + r, r, color, opacity)
+    };
+    [
+        field(520.0, state, 0.35, 180.0, -120.0),
+        field(440.0, rgb(0xB9AEFF), 0.4, size.width + 60.0 - 440.0, 260.0),
+        field(
+            420.0,
+            rgb(0x9FDCFF),
+            0.4,
+            520.0,
+            size.height + 200.0 - 420.0,
+        ),
+    ]
+}
+/// The raster for `size` snapped up to whole texels, and that snapped size.
+/// The fields are placed for the snapped size, so the cache key (texel counts
+/// and state colour) determines the image completely; a new handle (and
+/// upload) only when the key changes, so redraws reuse the renderer's copy.
+fn backdrop_image(size: iced::Size, state: Color) -> (iced::widget::image::Handle, iced::Size) {
     use std::cell::RefCell;
     type Key = (u32, u32, [u32; 4]);
     thread_local! {
         static CACHE: RefCell<Option<(Key, iced::widget::image::Handle)>> =
             const { RefCell::new(None) };
     }
-    let width = (size.width / BLOB_TEXEL).ceil().clamp(1.0, 1024.0) as u32;
-    let height = (size.height / BLOB_TEXEL).ceil().clamp(1.0, 1024.0) as u32;
-    let state = fields[0].3;
+    let texels = |v: f32| (v / BLOB_TEXEL).ceil().clamp(1.0, 2048.0) as u32;
+    let (width, height) = (texels(size.width), texels(size.height));
+    let snapped = iced::Size::new(width as f32 * BLOB_TEXEL, height as f32 * BLOB_TEXEL);
     let key = (
         width,
         height,
         [state.r, state.g, state.b, state.a].map(f32::to_bits),
     );
-    CACHE.with_borrow_mut(|cache| match cache {
+    let handle = CACHE.with_borrow_mut(|cache| match cache {
         Some((cached, handle)) if *cached == key => handle.clone(),
         _ => {
-            let pixels = backdrop_pixels(width, height, size, fields);
+            let fields = backdrop_fields(snapped, state);
+            let pixels = backdrop_pixels(width, height, snapped, &fields);
             let handle = iced::widget::image::Handle::from_rgba(width, height, pixels);
             *cache = Some((key, handle.clone()));
             handle
         }
-    })
+    });
+    (handle, snapped)
 }
 /// Straight-alpha RGBA texels of `fields` composed in order over transparency.
 /// Each field is `opacity` × a disk blurred with BLOB_SIGMA, sampled at the
 /// texel centres of a `width`×`height` grid stretched over `size`.
 fn backdrop_pixels(width: u32, height: u32, size: iced::Size, fields: &[Field]) -> Vec<u8> {
+    // Φ((radius - d) / σ) tabulated per logical pixel of (radius - d): one
+    // lookup per texel and field instead of an exp, so a resize of a large
+    // window stays cheap. A pixel of offset changes the alpha by under 0.002.
+    const REACH: i32 = (4.0 * BLOB_SIGMA) as i32;
+    let profile: Vec<f32> = (-REACH..=REACH)
+        .map(|offset| normal_cdf(offset as f32 / BLOB_SIGMA))
+        .collect();
+    let cdf = |offset: f32| match offset.round() as i32 {
+        o if o < -REACH => 0.0,
+        o if o > REACH => 1.0,
+        o => profile[(o + REACH) as usize],
+    };
     let (sx, sy) = (size.width / width as f32, size.height / height as f32);
     let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
     for j in 0..height {
@@ -824,8 +853,8 @@ fn backdrop_pixels(width: u32, height: u32, size: iced::Size, fields: &[Field]) 
             let x = (i as f32 + 0.5) * sx;
             let (mut a, mut rgb) = (0.0_f32, [0.0_f32; 3]);
             for &(cx, cy, radius, color, opacity) in fields {
-                let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
-                let fa = opacity * normal_cdf((radius - d) / BLOB_SIGMA);
+                let d = (x - cx).hypot(y - cy);
+                let fa = opacity * cdf(radius - d);
                 let out = fa + a * (1.0 - fa);
                 if out > 0.0 {
                     for (c, f) in rgb.iter_mut().zip([color.r, color.g, color.b]) {
@@ -941,7 +970,12 @@ pub(super) fn pill_style(tk: Tokens, kind: Kind, status: buttons::Status) -> but
     };
     let disabled = matches!(status, buttons::Status::Disabled);
     let hovered = matches!(status, buttons::Status::Hovered | buttons::Status::Pressed);
-    let background = background.map(|c| if disabled { over(c, 0.5, tk.bg) } else { c });
+    let background = background.map(|mut c| {
+        if disabled {
+            c.a *= 0.5;
+        }
+        c
+    });
     let background = match (background, hovered) {
         (None, true) => Some(tk.chip),
         (b, _) => b,
@@ -962,7 +996,7 @@ pub(super) fn pill_style(tk: Tokens, kind: Kind, status: buttons::Status) -> but
             } else if tk.dark {
                 tk.stroke
             } else {
-                over(tk.text, 0.14, tk.bg)
+                rgba(0x0E1726, 0.14)
             },
             width: if matches!(kind, Kind::Chip) { 1.0 } else { 0.0 },
             radius: 22.0.into(),
@@ -1085,7 +1119,7 @@ impl App {
             if let Some((epoch, report)) = &self.diagnostic_report
                 && *epoch == self.connection_epoch
             {
-                apply_probe(&mut snapshot, report);
+                apply_probe(&mut snapshot, report, now);
             }
             return (tunnel_level(&snapshot, now), Some(snapshot));
         }
@@ -1212,14 +1246,14 @@ impl App {
                         );
                         match normalized(o, now) {
                             Outcome::Unknown => reason_text(o.reason).to_owned(),
-                            Outcome::Failed if o.source == Source::SystemProbe => format!(
+                            Outcome::Failed if o.source == Source::AppProbe => format!(
                                 "{}{age}",
                                 t(
                                     "Системная проверка одного адреса не прошла; подробности — в последней проверке пути.",
                                     "The system check of one address failed; see the last path check.",
                                 )
                             ),
-                            _ if o.source == Source::SystemProbe => format!(
+                            _ if o.source == Source::AppProbe => format!(
                                 "{} {probe}{age}",
                                 check.meaning(s.transport.mode)
                             ),
@@ -2464,7 +2498,10 @@ impl App {
             .unwrap_or_default();
         let header = row![
             soft(
-                over(hue.fill(tk.dark), 0.15, tk.bg),
+                Color {
+                    a: 0.15,
+                    ..hue.fill(tk.dark)
+                },
                 14.0,
                 row![
                     dot(
@@ -2857,10 +2894,10 @@ mod tests {
         report.dns = Fact::Passed;
         // Not finished yet: nothing to show.
         let mut shown = service.clone();
-        apply_probe(&mut shown, &report);
+        apply_probe(&mut shown, &report, now_ms());
         assert_eq!(shown, service);
         report.finished_at_ms = now_ms();
-        apply_probe(&mut shown, &report);
+        apply_probe(&mut shown, &report, now_ms());
         let now = now_ms();
         assert_eq!(normalized(&shown.route, now), Outcome::Passed);
         assert_eq!(normalized(&shown.connectivity, now), Outcome::Passed);
@@ -2877,21 +2914,21 @@ mod tests {
         let mut later = service.clone();
         later.generation += 1;
         let before = later.clone();
-        apply_probe(&mut later, &report);
+        apply_probe(&mut later, &report, now_ms());
         assert_eq!(later, before);
         // One site failing over the tunnel says nothing about the tunnel.
         report.https = Fact::Timeout;
         let mut shown = service.clone();
-        apply_probe(&mut shown, &report);
+        apply_probe(&mut shown, &report, now_ms());
         assert_eq!(shown.connectivity, service.connectivity);
         // In split mode an unexplained bypass may be a rule doing its job.
         report.route = Fact::RouteMismatch;
         report.https = Fact::NotChecked;
         let mut shown = service.clone();
-        apply_probe(&mut shown, &report);
+        apply_probe(&mut shown, &report, now_ms());
         assert_eq!(shown, service);
         report.policy = Some(policy(Action::Direct));
-        apply_probe(&mut shown, &report);
+        apply_probe(&mut shown, &report, now_ms());
         assert_eq!(shown, service);
         // A bypass of a destination the policy tunnels is a failure; service
         // evidence is never overwritten.
@@ -2901,7 +2938,7 @@ mod tests {
             source: Source::ServiceLifecycle,
             ..shown.connectivity
         };
-        apply_probe(&mut shown, &report);
+        apply_probe(&mut shown, &report, now_ms());
         assert_eq!(shown.route.outcome, Outcome::Failed);
         assert_eq!(shown.connectivity.source, Source::ServiceLifecycle);
         assert_eq!(tunnel_level(&shown, now), Level::Warning);
@@ -2920,12 +2957,12 @@ mod tests {
         report.route = Fact::RouteMismatch;
         report.finished_at_ms = now_ms();
         let mut shown = service.clone();
-        apply_probe(&mut shown, &report);
+        apply_probe(&mut shown, &report, now_ms());
         assert_eq!(shown.route.outcome, Outcome::Failed);
         // Endpoint and local-network bypasses are direct by design.
         report.policy = Some(policy(Action::Direct));
         let mut shown = service.clone();
-        apply_probe(&mut shown, &report);
+        apply_probe(&mut shown, &report, now_ms());
         assert_eq!(shown, service);
     }
     #[test]
@@ -2958,6 +2995,58 @@ mod tests {
         assert!(both[1] > 60 && both[1] < 120, "{both:?}");
         assert!((both[3] as f32 / 255.0 - 0.64).abs() < 0.01, "{both:?}");
         assert!((normal_cdf(0.0) - 0.5).abs() < 1e-6 && normal_cdf(3.0) > 0.998);
+    }
+    #[test]
+    fn backdrop_raster_is_reused_until_its_grid_or_state_changes() {
+        let blue = Hue::Blue.fill(false);
+        let (first, snapped) = backdrop_image(iced::Size::new(1001.0, 701.0), blue);
+        // Whole texels, covering the window by less than one texel.
+        assert_eq!(snapped, iced::Size::new(1004.0, 704.0));
+        let (same, _) = backdrop_image(iced::Size::new(1003.0, 703.5), blue);
+        assert_eq!(first.id(), same.id());
+        let (wider, _) = backdrop_image(iced::Size::new(1005.0, 701.0), blue);
+        assert_ne!(first.id(), wider.id());
+        let (recoloured, _) = backdrop_image(iced::Size::new(1005.0, 701.0), Hue::Red.fill(false));
+        assert_ne!(wider.id(), recoloured.id());
+    }
+    #[test]
+    fn disabled_pills_halve_their_own_alpha() {
+        for tk in [LIGHT_TOKENS, DARK_TOKENS] {
+            let enabled = pill_style(tk, Kind::Danger, buttons::Status::Active);
+            let disabled = pill_style(tk, Kind::Danger, buttons::Status::Disabled);
+            let alpha = |s: &buttons::Style| match s.background {
+                Some(iced::Background::Color(c)) => c.a,
+                _ => panic!("pill without a colour"),
+            };
+            assert!((alpha(&disabled) - alpha(&enabled) / 2.0).abs() < 1e-6);
+        }
+    }
+    #[test]
+    fn probe_stays_fresh_until_the_next_run_is_overdue() {
+        let slowest_gap = PROBE_INTERVAL + rtrust_desktop::diagnostics::TOTAL;
+        assert!(u128::from(PROBE_FRESH_MS) > slowest_gap.as_millis());
+    }
+    #[test]
+    fn path_check_replaces_expired_service_evidence() {
+        use rtrust_desktop::diagnostics::{Fact, Report};
+        let now = now_ms();
+        let mut service = Snapshot::unknown(ObsMode::Full);
+        service.transport = passed(now);
+        // The service proved the route once; that proof has since expired.
+        service.route = passed(now - FRESH_MS - 1_000);
+        let mut report = Report::new(service.clone());
+        report.route = Fact::Passed;
+        report.finished_at_ms = now;
+        let mut shown = service.clone();
+        apply_probe(&mut shown, &report, now);
+        assert_eq!(shown.route.source, Source::AppProbe);
+        assert_eq!(normalized(&shown.route, now), Outcome::Passed);
+        // Fresh service evidence is kept.
+        let mut fresh = service.clone();
+        fresh.route = passed(now);
+        let before = fresh.clone();
+        apply_probe(&mut fresh, &report, now);
+        assert_eq!(fresh, before);
     }
     fn policy(action: Action) -> rtrust_profile::routing::Decision {
         use rtrust_profile::routing::{Context, Decision, Reason};

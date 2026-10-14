@@ -113,7 +113,11 @@ not durable across process restart. Observations are advisory and do not change 
 | Android | Shared mobile worker lifecycle; failure/recovery/gap; selected underlying Network/link-property changes; kernel deep-sleep clock evidence | Unknown; VpnService setup is not a live audit of DNS or lockdown | Unknown | JNI JSON, localized five-part summary, no green lifecycle badge |
 | iOS | Shared mobile worker lifecycle; failure/recovery/gap; provider path updates and native wake callback | Unknown; NetworkExtension status is not a live audit | Unknown | Redacted provider message; generation/age checked; localized summary |
 
-Capabilities explicitly advertise `system_probes=false`. The adapters retain
+Capabilities explicitly advertise `system_probes=false`. The desktop GUI may
+fold its own path check of one user-chosen destination into the snapshot it
+displays, as `source: app_probe` for route and connectivity only; a service
+never sends that source, and it replaces only open or expired service results.
+The adapters retain
 existing platform differences; this change does not make unsupported checks
 available or constitute packet-level leak acceptance. iOS/Android widget labels
 say transport is running and availability is unchecked.

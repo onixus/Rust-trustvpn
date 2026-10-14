@@ -16,7 +16,8 @@ use tokio::io::AsyncReadExt;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 const OUTPUT_LIMIT: u64 = 8192;
 const ADDRESS_LIMIT: usize = 8;
-const TOTAL: Duration = Duration::from_secs(15);
+/// Upper bound of one path check, including every step's timeout.
+pub const TOTAL: Duration = Duration::from_secs(15);
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 const STEP: Duration = Duration::from_secs(3);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
