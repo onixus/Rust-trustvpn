@@ -148,11 +148,17 @@ impl Liveness {
     /// Keeps the oldest pending demand; later demand does not move it forward.
     fn demand_at(&self, at: Duration) {
         let at = stamp(at);
-        let current = self.demand.load(Relaxed);
-        if current == 0 || current > at {
-            let _ = self.demand.fetch_update(Relaxed, Relaxed, |current| {
-                (current == 0 || current > at).then_some(at)
-            });
+        // Explicit CAS loop: `fetch_update` is deprecated on new toolchains
+        // and its replacement is newer than the MSRV.
+        let mut current = self.demand.load(Relaxed);
+        while current == 0 || current > at {
+            match self
+                .demand
+                .compare_exchange_weak(current, at, Relaxed, Relaxed)
+            {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
         }
     }
     /// Any byte from the endpoint answers all pending demand. Loads first:
