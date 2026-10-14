@@ -4,8 +4,8 @@
 use super::*;
 use iced::widget::{Space, column};
 use rtrust_control::observations::{
-    FRESH_MS, Mode as ObservationMode, Observation, Outcome, Reason as ObservationReason, Snapshot,
-    Source,
+    FRESH_MS, Mode as ObservationMode, Observation, Outcome, PROBE_TTL_MS,
+    Reason as ObservationReason, Snapshot, Source, ttl_cap,
 };
 
 // ---------------------------------------------------------------- language
@@ -460,10 +460,15 @@ pub(super) fn apply_probe(
     // Fresh service evidence wins; the probe only fills checks the service
     // left open, including results that have since expired.
     let open = |o: &Observation| {
-        matches!(
-            normalized(o, now),
-            Outcome::Unknown | Outcome::Stale | Outcome::Configured
-        )
+        // A service probe's own row is never replaced while it is current.
+        let current = o.source == Source::SystemProbe
+            && o.observed_at_ms
+                .is_some_and(|time| now >= time && now - time <= PROBE_TTL_MS);
+        !current
+            && matches!(
+                normalized(o, now),
+                Outcome::Unknown | Outcome::Stale | Outcome::Configured
+            )
     };
     // The destination is user-chosen: a route outside the VPN is a tunnel
     // failure only when the policy sends it into the tunnel (or, in full
@@ -493,15 +498,15 @@ pub(super) fn apply_probe(
         snapshot.apply_connectivity(generation, observation);
     }
 }
-/// Passed and configured results expire after their TTL (at most FRESH_MS),
-/// exactly as Android ObservationStatus normalises them.
+/// Passed and configured results expire after their TTL (at most FRESH_MS,
+/// or the probe TTL for repeated probes), as Android ObservationStatus does.
 pub(super) fn normalized(observation: &Observation, now: u64) -> Outcome {
     match observation.outcome {
         Outcome::Passed | Outcome::Configured => {
             let cap = if observation.source == Source::AppProbe {
                 PROBE_FRESH_MS
             } else {
-                FRESH_MS
+                ttl_cap(observation.source)
             };
             let ttl = observation.valid_for_ms.min(cap);
             match observation.observed_at_ms {
@@ -514,6 +519,12 @@ pub(super) fn normalized(observation: &Observation, now: u64) -> Outcome {
         Outcome::Failed if observation.source == Source::AppProbe => {
             match observation.observed_at_ms {
                 Some(time) if now >= time && now - time <= PROBE_FRESH_MS => Outcome::Failed,
+                _ => Outcome::Stale,
+            }
+        }
+        Outcome::Failed if observation.source == Source::SystemProbe => {
+            match observation.observed_at_ms {
+                Some(time) if now >= time && now - time <= PROBE_TTL_MS => Outcome::Failed,
                 _ => Outcome::Stale,
             }
         }
@@ -610,6 +621,23 @@ pub(super) fn running_text(snapshot: &Snapshot, now: u64, proxy_port: &str) -> S
         }
     }
     parts.join(" ")
+}
+/// Split DNS bypasses the tunnel by design and split TUN has no kill switch:
+/// neither is a missing feature nor a result.
+pub(super) fn check_value(
+    check: Check,
+    mode: ObservationMode,
+    outcome: Outcome,
+) -> (&'static str, Option<Hue>) {
+    match (mode, check, outcome) {
+        (ObservationMode::Split, Check::Dns, Outcome::Unsupported) => {
+            (t("не применимо", "not applicable"), None)
+        }
+        (ObservationMode::Split, Check::Guard, Outcome::Unsupported) => {
+            (t("не включена", "off"), None)
+        }
+        _ => row_value(outcome),
+    }
 }
 /// Display of one check row: label, hue (None = empty ring) and muted flag.
 pub(super) fn row_value(outcome: Outcome) -> (&'static str, Option<Hue>) {
@@ -1214,7 +1242,9 @@ impl App {
             .map(|&check| {
                 let none = (t("нет данных", "no data"), None);
                 let (value, hue) = match (snapshot, check, level) {
-                    (Some(s), _, _) => row_value(normalized(check.of(s), now)),
+                    (Some(s), _, _) => {
+                        check_value(check, s.transport.mode, normalized(check.of(s), now))
+                    }
                     (None, Check::Transport, Level::Off) => (t("выключен", "off"), None),
                     (None, Check::Transport, Level::Connecting) => {
                         (t("подключение…", "connecting…"), Some(Hue::Blue))
@@ -1244,8 +1274,40 @@ impl App {
                             "Системная проверка одного адреса.",
                             "System check of one address.",
                         );
+                        let service = t("Проверка службы.", "Service check.");
                         match normalized(o, now) {
+                            Outcome::Unsupported
+                                if s.transport.mode == ObservationMode::Split
+                                    && matches!(check, Check::Dns | Check::Guard) =>
+                            {
+                                check.meaning(s.transport.mode).to_owned()
+                            }
+                            Outcome::Unknown if o.source == Source::SystemProbe => format!(
+                                "{}{age}",
+                                t(
+                                    "Проверка службы не дала результата.",
+                                    "The service check was inconclusive.",
+                                )
+                            ),
                             Outcome::Unknown => reason_text(o.reason).to_owned(),
+                            Outcome::Failed if o.source == Source::SystemProbe => format!(
+                                "{}{age}",
+                                match check {
+                                    Check::Dns => t(
+                                        "Проверка службы: DNS может идти мимо VPN.",
+                                        "Service check: DNS may bypass the VPN.",
+                                    ),
+                                    Check::Guard => t(
+                                        "Проверка службы: блокировка без VPN не подтверждена или нарушена.",
+                                        "Service check: blocking without the VPN is missing or broken.",
+                                    ),
+                                    _ => t("Проверка службы не прошла.", "The service check failed."),
+                                }
+                            ),
+                            _ if o.source == Source::SystemProbe => format!(
+                                "{} {service}{age}",
+                                check.meaning(s.transport.mode)
+                            ),
                             Outcome::Failed if o.source == Source::AppProbe => format!(
                                 "{}{age}",
                                 t(
@@ -3119,6 +3181,63 @@ mod tests {
         app.disconnecting = true;
         assert_eq!(app.level().0, Level::Disconnecting);
         drop((task, retry));
+    }
+    fn system(outcome: Outcome, at: u64) -> Observation {
+        Observation::system(outcome, ObsMode::Full, at)
+    }
+    #[test]
+    fn service_probes_turn_green_and_return_to_blue_after_their_ttl() {
+        use rtrust_desktop::diagnostics::{Fact, Report};
+        let now = 1_000_000;
+        let mut s = all_passed(now);
+        for o in [&mut s.transport, &mut s.dns, &mut s.guard] {
+            *o = system(Outcome::Passed, now);
+        }
+        s.route.source = Source::AppProbe;
+        s.route.valid_for_ms = PROBE_FRESH_MS;
+        s.connectivity = s.route.clone();
+        // Service probe TTL outlives the 6 s lifecycle cap, not more.
+        assert_eq!(tunnel_level(&s, now + FRESH_MS + 1), Level::Verified);
+        assert_eq!(tunnel_level(&s, now + PROBE_TTL_MS + 1), Level::Running);
+        let mut long = s.clone();
+        long.guard.valid_for_ms = PROBE_TTL_MS * 10;
+        assert_eq!(
+            normalized(&long.guard, now + PROBE_TTL_MS + 1),
+            Outcome::Stale
+        );
+        // A failed service check is yellow, named, and does not outlive its TTL.
+        let mut failed = s.clone();
+        failed.guard = system(Outcome::Failed, now);
+        assert_eq!(tunnel_level(&failed, now), Level::Warning);
+        assert_eq!(
+            normalized(&failed.guard, now + PROBE_TTL_MS + 1),
+            Outcome::Stale
+        );
+        // The app's path check never replaces a current service probe row.
+        let mut shown = Snapshot::unknown(ObsMode::Full);
+        shown.route = system(Outcome::Unknown, now);
+        let mut report = Report::new(shown.clone());
+        report.route = Fact::Passed;
+        report.finished_at_ms = now;
+        let before = shown.clone();
+        apply_probe(&mut shown, &report, now);
+        assert_eq!(shown.route, before.route);
+        apply_probe(&mut shown, &report, now + PROBE_TTL_MS + 1);
+        assert_eq!(shown.route.source, Source::AppProbe);
+    }
+    #[test]
+    fn split_dns_and_guard_read_not_applicable_and_off_and_stay_blue() {
+        let now = rtrust_control::observations::now_ms();
+        let split = Monitor::new(ObsMode::Split, Source::ServiceLifecycle, now).sample(now);
+        assert_eq!(tunnel_level(&split, now), Level::Running);
+        let dns = check_value(Check::Dns, ObsMode::Split, normalized(&split.dns, now));
+        let guard = check_value(Check::Guard, ObsMode::Split, normalized(&split.guard, now));
+        assert_eq!(dns, (t("не применимо", "not applicable"), None));
+        assert_eq!(guard, (t("не включена", "off"), None));
+        assert_eq!(
+            check_value(Check::Guard, ObsMode::Full, Outcome::Unsupported),
+            row_value(Outcome::Unsupported)
+        );
     }
     #[test]
     fn split_tunnel_and_proxy_never_turn_green() {

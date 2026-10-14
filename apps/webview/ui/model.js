@@ -6,6 +6,9 @@
  const OUTCOMES = ['passed', 'failed', 'configured', 'stale', 'unsupported'];
  // Same cap as the Rust core FRESH_MS and Android ObservationStatus.
  const MAX_TTL_MS = 6000;
+ // The service's own repeated probes: Rust observations::PROBE_TTL_MS.
+ const PROBE_TTL_MS = 25000;
+ function ttlCap(o) { return o && o.source === 'system_probe' ? PROBE_TTL_MS : MAX_TTL_MS; }
 
  function snapshot(s) { return s && s.schema === 2 ? s : null; }
 
@@ -13,9 +16,10 @@
  function outcome(o, now) {
   let out = o && typeof o.outcome === 'string' ? o.outcome : 'unknown';
   if (!OUTCOMES.includes(out)) return 'unknown';
-  if (out === 'passed' || out === 'configured') {
+  // A service probe failure must not outlive the runs that stopped confirming it.
+  if (out === 'passed' || out === 'configured' || (out === 'failed' && o.source === 'system_probe')) {
    const time = typeof o.observed_at_ms === 'number' ? o.observed_at_ms : -1;
-   const ttl = Math.min(MAX_TTL_MS, Number(o.valid_for_ms) || 0);
+   const ttl = Math.min(ttlCap(o), Number(o.valid_for_ms) || 0);
    if (time < 0 || now < time || now - time > ttl) out = 'stale';
   }
   return out;
@@ -74,8 +78,13 @@
  function rows(input, key) {
   const live = input.connected && !input.unavailable && key !== 'connecting';
   const o = live ? outcomes(input.snapshot, input.now) : {};
+  const s = live ? snapshot(input.snapshot) : null;
+  const split = s && s.transport && s.transport.mode === 'split';
   return KEYS.map(name => {
    let value = live ? o[name] : 'unknown';
+   // Split DNS bypasses the tunnel by design; split TUN has no kill switch.
+   if (split && value === 'unsupported' && name === 'dns') value = 'na';
+   if (split && value === 'unsupported' && name === 'guard') value = 'guard_off';
    if (!live && name === 'transport') {
     if (key === 'connecting') value = 'connecting';
     else if (key === 'error' && !input.unavailable) value = 'error';
@@ -86,7 +95,7 @@
  }
 
  // dot style per row value: fill colour or an empty ring
- const ROW_TONE = { passed: 'green', failed: 'yellow', configured: 'blue', stale: 'ring-grey', unsupported: 'grey', unknown: 'ring', off: 'ring', connecting: 'ring-blue', error: 'red' };
+ const ROW_TONE = { passed: 'green', failed: 'yellow', configured: 'blue', stale: 'ring-grey', unsupported: 'grey', na: 'grey', guard_off: 'grey', unknown: 'ring', off: 'ring', connecting: 'ring-blue', error: 'red' };
 
  /**
   * Status line for one poll. An action's error/notice stays until the service
@@ -105,7 +114,7 @@
   return { text: fallback, keepNotice: false, noticeBase: undefined };
  }
 
- const api = { KEYS, MAX_TTL_MS, snapshot, outcome, outcomes, level, failed, pending, derive, statusLine, rows, TONE, ROW_TONE };
+ const api = { KEYS, MAX_TTL_MS, PROBE_TTL_MS, snapshot, outcome, outcomes, level, failed, pending, derive, statusLine, rows, TONE, ROW_TONE };
  if (typeof module !== 'undefined' && module.exports) module.exports = api;
  else root.RTModel = Object.freeze(api);
 })(typeof window !== 'undefined' ? window : globalThis);

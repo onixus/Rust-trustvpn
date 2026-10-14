@@ -53,6 +53,25 @@ assert.deepEqual(M.rows({ ...base, connected: false, snapshot: null }, 'off').ma
 assert.deepEqual(M.rows({ ...base, connected: false, phase: 'connecting', snapshot: null }, 'connecting').map(r => r.value), ['connecting', 'unknown', 'unknown', 'unknown', 'unknown']);
 assert.deepEqual(M.rows({ ...base, connected: false, error: 'x', snapshot: null }, 'error').map(r => r.value), ['error', 'unknown', 'unknown', 'unknown', 'unknown']);
 assert.deepEqual(M.rows({ ...base, unavailable: true, snapshot: allPassed() }, 'error').map(r => r.value), ['unknown', 'unknown', 'unknown', 'unknown', 'unknown']);
+// Service probes (issue #81): their own TTL cap, failure expiry and split labels.
+const sys = (outcome, age = 1000, ttl = 25000) => ({ ...obs(outcome, age, ttl), source: 'system_probe', reason: 'configuration_applied' });
+const probed = allPassed(); probed.transport = sys('passed'); probed.dns = sys('passed'); probed.guard = sys('passed');
+probed.route = obs('passed', 1000, 6000); probed.connectivity = obs('passed', 1000, 6000);
+assert.equal(M.outcome(probed.dns, now + 10000), 'passed');
+assert.equal(M.outcome(probed.dns, now + M.PROBE_TTL_MS), 'stale');
+assert.equal(M.outcome(sys('passed', 1000, 600000), now + M.PROBE_TTL_MS), 'stale');
+assert.equal(M.outcome(obs('passed', 1000, 25000), now + 10000), 'stale', 'lifecycle rows keep the 6 s cap');
+assert.equal(M.outcome(sys('failed'), now), 'failed');
+assert.equal(M.outcome(sys('failed'), now + M.PROBE_TTL_MS), 'stale');
+assert.equal(M.outcome(obs('failed'), now + 60000), 'failed', 'other failures persist until replaced');
+assert.equal(M.derive({ ...base, snapshot: { ...probed, guard: sys('failed') } }), 'warning');
+assert.deepEqual(M.failed({ ...probed, guard: sys('failed') }, now), ['guard']);
+const unsup = { outcome: 'unsupported', source: 'service_lifecycle', observed_at_ms: null, valid_for_ms: 6000, mode: 'split', reason: 'check_unavailable' };
+const split = snap({ transport: { ...obs('configured'), mode: 'split' }, dns: unsup, guard: unsup });
+assert.deepEqual(M.rows({ ...base, full: false, snapshot: split }, 'running').map(r => r.value), ['configured', 'unknown', 'na', 'guard_off', 'unknown']);
+assert.equal(M.ROW_TONE.na, 'grey');
+assert.equal(M.derive({ ...base, full: false, snapshot: split }), 'running');
+assert.deepEqual(M.rows({ ...base, snapshot: snap({ transport: obs('configured'), guard: { ...unsup, mode: 'full' } }) }, 'running').map(r => r.value)[3], 'unsupported');
 // Status line: an action error stays across polls until the service status changes.
 let line = M.statusLine({ notice: 'Unsupported profile format', noticeBase: undefined, status: '', connected: false, connectError: null });
 assert.deepEqual(line, { text: 'Unsupported profile format', keepNotice: true, noticeBase: '' });
