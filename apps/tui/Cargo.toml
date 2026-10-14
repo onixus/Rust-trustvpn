@@ -1,0 +1,20 @@
+[package]
+name = "rtrust-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terminal client for R-TrustTunnel profiles and connections"
+
+[[bin]]
+name = "rtrust-tui"
+path = "src/main.rs"
+
+[dependencies]
+rtrust-desktop.workspace = true
+rtrust-store.workspace = true
+rtrust-profile.workspace = true
+rtrust-control.workspace = true
+rtrust-engine.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+zeroize.workspace = true
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

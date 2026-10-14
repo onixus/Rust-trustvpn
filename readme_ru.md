@@ -116,7 +116,7 @@ Workspace требует **Rust 1.89+**. Текущий CI использует 
 
 Основные desktop/service бинарники:
 
-    cargo build --release -p rtrust-native -p rtrust-tun -p rtrust-inspect --locked
+    cargo build --release -p rtrust-native -p rtrust-tun -p rtrust-inspect -p rtrust-tui --locked
 
 Стандартные проверки:
 
@@ -135,6 +135,7 @@ Workspace требует **Rust 1.89+**. Текущий CI использует 
 
 - [Windows service](docs/windows-service.md)
 - [Linux service](docs/linux-service.md)
+- [Terminal client (TUI)](docs/tui.md)
 - [macOS system VPN](docs/macos-system.md)
 - [Android](docs/android.md)
 - [Jenkins / CI](docs/jenkins.md)

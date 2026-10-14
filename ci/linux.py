@@ -66,7 +66,9 @@ cargo test --workspace --locked --quiet
 cargo test -p rtrust-native --locked desktop_entry_exec_roundtrip -- --ignored
 dbus-run-session -- sh -c 'printf "%s" "rtrust-isolated-ci" | gnome-keyring-daemon --unlock --components=secrets >/tmp/rtrust-keyring-env; cargo test -p rtrust-store --locked os_keyring_restart_roundtrip -- --ignored --exact tests::os_keyring_restart_roundtrip'
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo build --release -p rtrust-webview -p rtrust-native -p rtrust-tun -p rtrust-inspect --locked
+cargo build --release -p rtrust-webview -p rtrust-native -p rtrust-tun -p rtrust-inspect -p rtrust-tui --locked
+target/release/rtrust-tui --version
+target/release/rtrust-tui --help >/dev/null
 # The existing packet harness uses debug paths.
 mkdir -p target/debug
 cp target/release/rtrust-service target/release/rtrust-inspect target/release/rtrust-tun target/debug/
@@ -90,6 +92,8 @@ done
 cp target/release/rtrust-webview dist/native-preview-linux/
 mkdir -p dist/service-preview-linux
 cp target/release/rtrust-service scripts/install-linux-service.sh deploy/rtrust-service@.service deploy/rtrust-boot-guard@.service docs/linux-service.md dist/service-preview-linux/
+mkdir -p dist/tui-preview-linux
+cp target/release/rtrust-tui docs/tui.md dist/tui-preview-linux/
 '''.replace('CLIPPY_ARCHIVE', CLIPPY_SHA).replace('HYSTERIA_ARCH', DOCKER_ARCH)
     # ":z" relabels bind mounts for SELinux hosts (Fedora agent); a no-op elsewhere.
     # The disposable test container also needs SELinux confinement lifted:
