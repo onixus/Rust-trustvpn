@@ -115,7 +115,7 @@ Clone and run the native UI:
 
 Build the main desktop/service binaries:
 
-    cargo build --release -p rtrust-native -p rtrust-tun -p rtrust-inspect --locked
+    cargo build --release -p rtrust-native -p rtrust-tun -p rtrust-inspect -p rtrust-tui --locked
 
 Run the standard Rust checks:
 
@@ -134,6 +134,7 @@ Platform-specific prerequisites and acceptance limits are documented in:
 
 - [Windows service](docs/windows-service.md)
 - [Linux service](docs/linux-service.md)
+- [Terminal client (TUI)](docs/tui.md)
 - [macOS system VPN](docs/macos-system.md)
 - [Android](docs/android.md)
 - [Jenkins / CI](docs/jenkins.md)
