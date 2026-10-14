@@ -6,40 +6,41 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 
 Клиент реализует транспорт самостоятельно и **не является оболочкой** над официальными CLI TrustTunnel или Hysteria.
 
-> **Статус проекта: development preview, 7 октября 2026 года.**
+> **Статус проекта: development preview, 14 октября 2026 года.**
 >
-> Исходники workspace — **0.6.1** (update sequence 11, не production-ready; см. [v0.6.1](docs/releases/v0.6.1.md) и [кандидат v0.6.0](docs/releases/v0.6.0.md)). Последняя опубликованная desktop-пересборка — **v0.5.0-rebuild.9** от 6 октября; Android и iOS артефакты остаются в исходном релизе **v0.5.0**. Rebuild исправляет идентичность desktop update/rollback sequence и собран уже после разделения клиентского и серверного репозиториев. См. [описание v0.5.0](docs/releases/v0.5.0.md).
+> Последний опубликованный релиз — **[v0.6.1](docs/releases/v0.6.1.md)** (13 октября; workspace 0.6.1, desktop update sequence 11, Android/iOS 60101). Он не production-ready: приёмка установленных пакетов и устройств для артефактов 0.6.1 не проводилась. **[v0.6.0](docs/releases/v0.6.0.md)**, опубликованный в тот же день, — самый новый релиз с Linux-пакетами. Архивы iOS по-прежнему есть только в [v0.5.0](docs/releases/v0.5.0.md).
 
 ## Скачать
 
-Актуальные preview-релизы:
-
-- **Desktop rebuild:** [v0.5.0-rebuild.9](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9)
-- **Mobile-артефакты и исходный набор 0.5.0:** [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0)
+- **[v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1)**: Windows, macOS, Android.
+- **[v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0)**: Linux Flatpak и Linux host package.
+- **[v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0)**: iOS device и Simulator archives.
 
 | Платформа | Актуальный артефакт | Примечание |
 | --- | --- | --- |
-| Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` из v0.5.0-rebuild.9 | Signed update metadata sequence 9; Authenticode-подписи у пакета нет. Реальный signed update 7→9, принудительный unhealthy install, rollback на 7 и повторный update на 9 прошли. |
-| Linux x86_64, Wayland | Native / WebView / Both Flatpak из v0.5.0-rebuild.9 | Проверены подписанные install/update/rollback и отказ от unsigned update; системному VPN по-прежнему нужен отдельный host package. |
-| macOS Apple Silicon | UI Choices / system candidate из v0.5.0-rebuild.9 | Ad-hoc sealed, без Developer ID/notarization. Автоматическое обновление не промотировано; приёмка system VPN ещё не закрыта полностью. |
-| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` из v0.5.0 | versionCode 50001, versionName 0.5.0-preview.1. |
+| Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` из v0.6.1 | Без Authenticode-подписи. Для 0.6.0 прошёл lab-signed update 9 → 10 с принудительным rollback на 9. Метаданные с production-ключом и перевод `latest` в release record отмечены как NOT RUN. |
+| Linux x86_64, Wayland | Native / WebView / Both Flatpak и `rtrust-host-0.6.0-7` из v0.6.0 | В v0.6.1 Linux-пакетов нет. Системному VPN нужен отдельный host package. |
+| macOS Apple Silicon | UI Choices, preview и system-candidate DMG/PKG из v0.6.1 | Ad-hoc sealed, без Developer ID и notarization. Автоматическое обновление не промотировано. |
+| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` из v0.6.1 | versionCode 60101, versionName 0.6.1-preview.1. Подписан ключом, введённым в 0.6.0: 0.6.0 обновляется поверх, а 0.5.x и старше нужно переустановить, локальные профили при этом удаляются. |
 | iOS arm64 / Simulator | Device и Simulator archives из v0.5.0 | Preview. Device archive требует Apple signing и не является готовым IPA. |
 
-В релизах опубликованы SHA256SUMS, подписи и evidence-файлы.
+В релизах опубликованы SHA256SUMS и source manifests.
 
-## Что нового в v0.5.0 / rebuild.9
+## Что нового в 0.6.0 и 0.6.1
 
-По сравнению с v0.4.0:
+По сравнению с v0.5.0-rebuild.9:
 
-- preview iOS с import/export профилей, QR, portal sync, On Demand и VPN widget;
-- Android VPN widget и обновлённая общая mobile routing-policy логика;
-- macOS glass appearance с persistent toggle в Settings и accessibility fallback;
-- desktop IPv4 TUN include/exclude, LAN bypass и серверные route groups;
-- HTTP-запросы на смешанном desktop proxy port;
-- update sequence **9** для desktop rebuild, исправляющий старую ошибку sequence-7 identity/rollback;
-- серверная реализация и deployment удалены из этого репозитория и перенесены в [onixus/tunnel](https://github.com/onixus/tunnel).
+- **Честный статус подключения.** Типизированные наблюдения (passed, failed, configured, unknown, stale, unsupported) вместо «подключено — значит работает». С 0.6.1 в статусе только проверки, давшие результат, например «Транспорт: запущен». См. [наблюдения VPN](docs/vpn-observations.md).
+- **Диагностика на desktop.** Проверка системного пути через активный туннель при подключении и каждые 30 секунд, с типизированным вердиктом, проверкой endpoint и следующими действиями. Офлайн-объяснение маршрута тем же вычислителем, что и dataplane. См. [системную диагностику](docs/system-diagnostics.md) и [объяснение маршрута](docs/route-explain.md).
+- **Защищённое восстановление.** По желанию — переключение на до трёх одобренных резервных профилей; защита при этом не снимается. Always-on восстановление через резервные профили — только Linux и Windows. См. [failover](docs/failover.md) и [recovery](docs/recovery.md).
+- **Desktop control IPC v6.** GUI и служба должны быть из одного пакета.
+- **macOS.** Восстановление VPN после сна; служба продолжает вести VPN после отключения GUI.
+- **Android.** Компактный виджет и плитка быстрых настроек. После смены Wi-Fi/мобильной сети VPN идёт через сеть, которую предпочитает Android. Необязательная настройка учёта трафика VPN. Новый ключ подписи релизов.
+- **Управляемые профили.** Сохраняют происхождение, назначенную маршрутизацию и офлайн-квитанции. Ответы панели о лимите профилей объясняются на desktop, Android и iOS. См. [managed devices](docs/managed-devices.md).
 
-Route groups относятся только к desktop. Android/iOS продолжают использовать routing policy внутри профиля и отдельный group API не читают.
+Main после 0.6.1 также проваливает health check сессии, которая не пропускает трафик, и переподключает её (#62). См. [HTTP/3](docs/http3.md#dead-session-detection).
+
+Route groups относятся только к desktop. Android/iOS используют routing policy внутри профиля.
 ## Возможности
 
 ### Клиент и профили
@@ -54,10 +55,8 @@ Route groups относятся только к desktop. Android/iOS продо�
 
 ### TrustTunnel
 
-- Собственный Rust HTTP/2 transport для системного VPN.
 - Нативные Rust-транспорты HTTP/2 и HTTP/3 для системного VPN и SOCKS5; транспорт задаёт профиль, без скрытой смены, см. [HTTP/3](docs/http3.md).
 - IPv4/IPv6 TCP и UDP, DNS, ICMP там, где это реализовано платформенным dataplane, ограниченная обработка фрагментации, reconnect и fail-closed защита.
-- HTTP/3 для системного VPN есть в текущем main, но не в пакетах v0.4.0: там системный туннель всё ещё идёт по HTTP/2.
 
 ### Hysteria 2
 
@@ -94,15 +93,13 @@ Route groups относятся только к desktop. Android/iOS продо�
 
 ## Скриншоты
 
-В галерее лежат реальные desktop-скриншоты Native и WebView из UI refresh:
+Desktop-интерфейс версии 0.6.1 с синтетическими профилями:
 
 | Native | WebView |
 | --- | --- |
-| ![Главный экран Native](docs/screenshots/native-home-0.3.2-ui.1.jpg) | ![Главный экран WebView](docs/screenshots/webview-home-0.3.2-ui.1.jpg) |
+| ![Профили Native](docs/screenshots/native-profiles-0.6.1.jpg) | ![Профили WebView](docs/screenshots/webview-profiles-0.6.1.jpg) |
 
-См. [галерею и настройки подключения](docs/screenshots/README.md).
-
-Обновлённый главный экран Android входит в APK v0.4.0.
+Остальные экраны (импорт, настройки, синхронизация, диагностика) и способ съёмки — в [галерее](docs/screenshots/README.md). Android блокирует скриншоты через `FLAG_SECURE`.
 
 ## Сборка
 
@@ -211,15 +208,23 @@ SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS
 
 ## Документация
 
-- [Состояние реализации](docs/implementation.md)
-- [Архитектура](docs/architecture.md)
-- [Delivery и критерии приёмки](docs/delivery.md)
-- [Hysteria 2](docs/hysteria2.md)
-- [Android](docs/android.md)
-- [Desktop lifecycle](docs/desktop-lifecycle.md)
-- [Secure updates](docs/secure-updates.md)
-- [Profile exchange API](docs/profile-api.md)
-- [Technical debt](docs/technical-debt.md)
+Обзор:
+
+- [Состояние реализации](docs/implementation.md) · [Архитектура](docs/architecture.md) · [Delivery и критерии приёмки](docs/delivery.md) · [Technical debt](docs/technical-debt.md)
+- [Записи релизов](docs/releases/) · [Приёмка пакетов](docs/package-acceptance.md) · [Secure updates](docs/secure-updates.md) · [Evidence](docs/evidence.md)
+
+Протоколы: [HTTP/3](docs/http3.md) · [Hysteria 2](docs/hysteria2.md) · [AmneziaWG](docs/amneziawg.md)
+
+Поведение подключения: [Наблюдения VPN](docs/vpn-observations.md) · [Системная диагностика](docs/system-diagnostics.md) · [Объяснение маршрута](docs/route-explain.md) · [Routing policy](docs/routing-policy.md) · [Failover](docs/failover.md) · [Recovery](docs/recovery.md) · [Always-on](docs/always-on.md) · [Desktop lifecycle](docs/desktop-lifecycle.md)
+
+Платформы:
+
+- Desktop: [Desktop-приложения](docs/desktop-apps.md) · [Выбор UI](docs/ui-choices.md) · [Служба Windows](docs/windows-service.md) · [Системный VPN macOS](docs/macos-system.md) · [Служба Linux](docs/linux-service.md) · [Linux full tunnel](docs/linux-full-tunnel.md)
+- Mobile: [Android](docs/android.md) · [iOS](docs/ios.md) · [Mobile flow observations](docs/mobile-flow-observations.md)
+
+Панель и управляемые профили: [Обмен профилями](docs/portal.md) · [Profile API](docs/profile-api.md) · [Managed devices](docs/managed-devices.md) · [Access scope validation](docs/access-scope-validation.md)
+
+CI и лаборатории: [Jenkins](docs/jenkins.md) · [Linux lab](docs/linux-lab.md) · [Linux acceptance](docs/linux-acceptance.md) · [Android на macOS](docs/android-macos.md) · [Восстановление macOS после сна](docs/macos-sleep-recovery-validation.md)
 
 Часть исторических документов описывает старые этапы. При расхождении следует ориентироваться на актуальный платформенный документ и наиболее свежие release evidence.
 

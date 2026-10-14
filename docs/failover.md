@@ -54,6 +54,10 @@ backups to a service that does not advertise the capability.
    2 s after a switch. The service does not move back to the requested profile
    while a backup works; it returns on the backup's failure or on the user's
    reconnect.
+   Separately, the reconnect retry budget is restored only by a session that
+   stayed connected for at least 30 s *and*, if it ended degraded, had delivered
+   traffic: since #62 a dead session that never received a byte keeps the budget
+   spent ([dead-session detection](http3.md#dead-session-detection)).
 4. **Confirmation.** A candidate counts as connected only after its transport
    session is established and the guard refresh succeeds, as for any
    reconnect. Until then the host stays in the blocked state.

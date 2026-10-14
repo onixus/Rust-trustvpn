@@ -6,40 +6,41 @@ R-TrustTunnel is a native VPN client written in Rust for **TrustTunnel**, **Hyst
 
 The client implements its own transport and does **not** wrap the official TrustTunnel or Hysteria CLI.
 
-> **Project status: development preview, October 7, 2026.**
+> **Project status: development preview, October 14, 2026.**
 >
-> The source workspace is **0.6.1** (update sequence 11, not production-ready; see [v0.6.1](docs/releases/v0.6.1.md) and the [v0.6.0 candidate](docs/releases/v0.6.0.md)). The latest published desktop rebuild is **v0.5.0-rebuild.9** from October 6; Android and iOS artifacts remain in the original **v0.5.0** release. The rebuild fixes desktop update identity/rollback sequencing and is built after the client/server repository split. See [v0.5.0 release scope](docs/releases/v0.5.0.md).
+> The latest published release is **[v0.6.1](docs/releases/v0.6.1.md)** (October 13; workspace 0.6.1, desktop update sequence 11, Android/iOS 60101). It is not production-ready. Installed-package and device acceptance of the 0.6.1 artifacts has not been run. **[v0.6.0](docs/releases/v0.6.0.md)**, published the same day, is the newest release with Linux packages. iOS archives are still only in [v0.5.0](docs/releases/v0.5.0.md).
 
 ## Download
 
-Current preview releases:
-
-- **Desktop rebuild:** [v0.5.0-rebuild.9](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9)
-- **Mobile artifacts and original 0.5.0 package set:** [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0)
+- **[v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1)**: Windows, macOS, Android.
+- **[v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0)**: Linux Flatpaks and the Linux host package.
+- **[v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0)**: iOS device and Simulator archives.
 
 | Platform | Current artifact | Notes |
 | --- | --- | --- |
-| Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` from v0.5.0-rebuild.9 | Signed update metadata sequence 9; package is not Authenticode signed. Real signed 7→9 update, forced unhealthy install, rollback to 7 and retry to 9 passed. |
-| Linux x86_64, Wayland | Native / WebView / Both Flatpaks from v0.5.0-rebuild.9 | Signed Flatpak install/update/rollback and unsigned-update rejection passed; system VPN still uses the separate host package. |
-| macOS Apple Silicon | UI Choices / system candidate packages from v0.5.0-rebuild.9 | Ad-hoc sealed, not Developer-ID notarized. Automatic-update promotion remains withheld; system-VPN acceptance is still incomplete. |
-| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` from v0.5.0 | versionCode 50001, versionName 0.5.0-preview.1. |
-| iOS arm64 / Simulator | Device and Simulator archives from v0.5.0 | Preview only. Device archive requires Apple signing and is not an installable IPA. |
+| Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` from v0.6.1 | Not Authenticode signed. A lab-signed 9 → 10 update with forced rollback to 9 passed for 0.6.0. Production-key metadata and promotion of `latest` are listed as NOT RUN in the release record. |
+| Linux x86_64, Wayland | Native / WebView / Both Flatpaks and `rtrust-host-0.6.0-7` from v0.6.0 | v0.6.1 has no Linux packages. System VPN needs the separate host package. |
+| macOS Apple Silicon | UI Choices, preview and system-candidate DMG/PKG from v0.6.1 | Ad-hoc sealed, not Developer ID signed or notarized. Automatic-update promotion is withheld. |
+| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` from v0.6.1 | versionCode 60101, versionName 0.6.1-preview.1. Signed with the release key introduced in 0.6.0: it updates 0.6.0 in place, but 0.5.x and older must be reinstalled, which removes local profiles. |
+| iOS arm64 / Simulator | Device and Simulator archives from v0.5.0 | Preview only. The device archive requires Apple signing and is not an installable IPA. |
 
-SHA256SUMS, signatures and evidence files are published with the releases.
+SHA256SUMS and source manifests are published with the releases.
 
-## What is new in v0.5.0 / rebuild.9
+## What is new in 0.6.0 and 0.6.1
 
-Compared with v0.4.0:
+Compared with v0.5.0-rebuild.9:
 
-- iOS preview with profile import/export, QR import, portal sync, On Demand and a small VPN widget;
-- Android VPN widget and shared mobile routing-policy updates;
-- macOS glass appearance with a persistent Settings toggle and accessibility fallback;
-- desktop IPv4 TUN include/exclude rules, LAN bypass and server-assigned route groups;
-- HTTP requests on the mixed desktop proxy port;
-- update sequence **9** for rebuilt desktop clients, fixing the old sequence-7 identity/rollback mismatch;
-- repository boundary cleanup: the server implementation/deployment was removed from this repository and belongs to [onixus/tunnel](https://github.com/onixus/tunnel).
+- **Honest connection status.** Typed observations (passed, failed, configured, unknown, stale, unsupported) replace "Connected means working". Since 0.6.1 the status lists only checks that produced a result, for example "Transport: running". See [VPN observations](docs/vpn-observations.md).
+- **Desktop diagnostics.** System-path checks through the active tunnel run on connect and every 30 seconds, with typed verdicts, an endpoint probe and follow-up actions. Offline route explanations use the dataplane's own evaluator. See [system diagnostics](docs/system-diagnostics.md) and [route explain](docs/route-explain.md).
+- **Guarded recovery.** Opt-in switching to up to three user-approved backup profiles; the guard stays up during recovery. Always-on recovery through backup candidates is Linux and Windows only. See [failover](docs/failover.md) and [recovery](docs/recovery.md).
+- **Desktop control IPC v6.** GUI and service must come from the same package.
+- **macOS.** VPN restore after sleep, and the service keeps supervising the VPN when the GUI disconnects.
+- **Android.** Compact widget and Quick Settings tile. The VPN follows the network Android prefers after a Wi-Fi/mobile handoff. Optional "VPN data usage" metering setting. New release signing key.
+- **Managed profiles.** They keep provenance, assigned routing and offline receipts. Portal profile-limit replies are explained on desktop, Android and iOS. See [managed devices](docs/managed-devices.md).
 
-Route groups are desktop-only. Android/iOS continue to use profile-embedded routing policy and do not consume the separate group API.
+Main after 0.6.1 also fails the health check of a session that carries no traffic and reconnects it (#62). See [HTTP/3](docs/http3.md#dead-session-detection).
+
+Route groups are desktop-only. Android/iOS use the routing policy embedded in the profile.
 ## Features
 
 ### Client and profile management
@@ -56,7 +57,6 @@ Route groups are desktop-only. Android/iOS continue to use profile-embedded rout
 
 - Native Rust HTTP/2 and HTTP/3 transports for system VPN and SOCKS5; the profile selects the transport, with no silent fallback, see [HTTP/3](docs/http3.md).
 - IPv4/IPv6 TCP and UDP handling, DNS, ICMP where supported by the platform dataplane, bounded fragmentation handling, reconnect and fail-closed protection.
-- HTTP/3 system VPN is in the current main, not in the v0.4.0 packages: those still run system tunnels over HTTP/2.
 
 ### Hysteria 2
 
@@ -93,15 +93,13 @@ Desktop Native/WebView/Both details are in [UI choices](docs/ui-choices.md). Lin
 
 ## Screenshots
 
-The current gallery contains real Native and WebView desktop captures from the v0.3.2 UI refresh:
+Desktop UI of version 0.6.1 with synthetic profiles:
 
 | Native | WebView |
 | --- | --- |
-| ![Native home](docs/screenshots/native-home-0.3.2-ui.1.jpg) | ![WebView home](docs/screenshots/webview-home-0.3.2-ui.1.jpg) |
+| ![Native profiles](docs/screenshots/native-profiles-0.6.1.jpg) | ![WebView profiles](docs/screenshots/webview-profiles-0.6.1.jpg) |
 
-See [screenshots and connection settings](docs/screenshots/README.md).
-
-The refreshed Android home screen is included in the v0.4.0 APK.
+More screens (import, settings, sync, diagnostics) and how they were made are in the [screenshot gallery](docs/screenshots/README.md). Android blocks screenshots with `FLAG_SECURE`.
 
 ## Build
 
@@ -210,15 +208,23 @@ The server implementation, administration UI and server deployment belong to [on
 
 ## Documentation
 
-- [Implementation status](docs/implementation.md)
-- [Architecture](docs/architecture.md)
-- [Delivery and acceptance](docs/delivery.md)
-- [Hysteria 2](docs/hysteria2.md)
-- [Android](docs/android.md)
-- [Desktop lifecycle](docs/desktop-lifecycle.md)
-- [Secure updates](docs/secure-updates.md)
-- [Profile exchange API](docs/profile-api.md)
-- [Technical debt](docs/technical-debt.md)
+Overview:
+
+- [Implementation status](docs/implementation.md) · [Architecture](docs/architecture.md) · [Delivery and acceptance](docs/delivery.md) · [Technical debt](docs/technical-debt.md)
+- [Release records](docs/releases/) · [Package acceptance](docs/package-acceptance.md) · [Secure updates](docs/secure-updates.md) · [Evidence](docs/evidence.md)
+
+Protocols: [HTTP/3](docs/http3.md) · [Hysteria 2](docs/hysteria2.md) · [AmneziaWG](docs/amneziawg.md)
+
+Connection behaviour: [VPN observations](docs/vpn-observations.md) · [System diagnostics](docs/system-diagnostics.md) · [Route explain](docs/route-explain.md) · [Routing policy](docs/routing-policy.md) · [Failover](docs/failover.md) · [Recovery](docs/recovery.md) · [Always-on](docs/always-on.md) · [Desktop lifecycle](docs/desktop-lifecycle.md)
+
+Platforms:
+
+- Desktop: [Desktop apps](docs/desktop-apps.md) · [UI choices](docs/ui-choices.md) · [Windows service](docs/windows-service.md) · [macOS system VPN](docs/macos-system.md) · [Linux service](docs/linux-service.md) · [Linux full tunnel](docs/linux-full-tunnel.md)
+- Mobile: [Android](docs/android.md) · [iOS](docs/ios.md) · [Mobile flow observations](docs/mobile-flow-observations.md)
+
+Portal and managed profiles: [Profile exchange](docs/portal.md) · [Profile API](docs/profile-api.md) · [Managed devices](docs/managed-devices.md) · [Access scope validation](docs/access-scope-validation.md)
+
+CI and labs: [Jenkins](docs/jenkins.md) · [Linux lab](docs/linux-lab.md) · [Linux acceptance](docs/linux-acceptance.md) · [Android on macOS](docs/android-macos.md) · [macOS sleep recovery](docs/macos-sleep-recovery-validation.md)
 
 Some historical documents describe older milestones. When they conflict, prefer the current platform-specific document and the newest release evidence.
 

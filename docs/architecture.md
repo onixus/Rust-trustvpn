@@ -1,6 +1,12 @@
 # Архитектура R-TrustTunnel
 
-Дата: 2026-10-07. Статус: **фактическая архитектура main на эту дату (workspace 0.5.0)**. Текущий workspace — неопубликованный кандидат 0.6.0, см. [v0.6.0](releases/v0.6.0.md).
+Дата: 2026-10-07, дополнено 2026-10-14. Основа описания — main на 7 октября
+(workspace 0.5.0). Текущий workspace — **0.6.1**. Изменения 0.6.0 и 0.6.1 описаны в
+[v0.6.0](releases/v0.6.0.md) и [v0.6.1](releases/v0.6.1.md). Главные архитектурные
+добавления: типизированные [наблюдения VPN](vpn-observations.md) с generations,
+[системная диагностика](system-diagnostics.md), защищённое
+[восстановление](recovery.md) через резервные профили, desktop control IPC v6 и
+проверка живости сессии ([dead-session detection](http3.md#dead-session-detection)).
 
 ## 1. Граница репозитория
 
@@ -122,8 +128,10 @@ platform target, hashes, size and expiry to a compiled client identity.
 
 Sequence 9 exists specifically to repair the old 0.5.0 sequence-7 identity problem.
 A current client must not offer itself as a new version or select the wrong rollback
-package. Windows latest is sequence 9; macOS automatic-update promotion remains
-withheld until its acceptance gate is satisfied.
+package. Releases 0.6.0 and 0.6.1 compile as sequences 10 and 11. Promotion of
+`latest` beyond sequence 9 requires production-signed metadata and the acceptance
+matrix (see [secure updates](secure-updates.md)); macOS automatic-update promotion
+remains withheld until its acceptance gate is satisfied.
 
 ## 8. Security invariants
 

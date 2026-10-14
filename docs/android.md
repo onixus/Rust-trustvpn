@@ -1,19 +1,23 @@
 # Android native preview
 
 The Android client uses native Android widgets (Java), a foreground `VpnService`
-and the same Rust profile codec, TrustTunnel HTTP/2, Hysteria 2 and AmneziaWG transports and IPv4/IPv6 packet engine as
+and the same Rust profile codec, TrustTunnel HTTP/2 and HTTP/3, Hysteria 2 and AmneziaWG transports and IPv4/IPv6 packet engine as
 the desktop client. There is no WebView, CLI subprocess or privileged host service.
 Baseline: Android 10/API 29+, arm64-v8a; x86_64 is also built for emulator testing.
 Acceptance uses Android 16/API 36 x86_64 and physical POCO X3 NFC and Huawei DEL-LX9 phones running Android 12/API 31.
 
-Current published package: [v0.4.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.4.0),
-versionCode **40001**, versionName **0.4.0-preview.1**, signed with the existing release identity.
-The selected Flow icon uses adaptive launcher artwork, Android 13 themed monochrome
-artwork and a separate notification icon. Android Jenkins **#30 completed SUCCESS**:
-Gitleaks/Trivy, shared Rust unit tests, both ABIs, build/lint, emulator smoke,
-TrustTunnel and Hysteria 2 network E2E, restart, reinstall and version upgrade.
-This branding build has not been installed on a physical phone; the preceding
-30208 UI release was installed on Huawei with its profile and Always-on/lockdown retained.
+Current published package: [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1),
+versionCode **60101**, versionName **0.6.1-preview.1** ([release record](releases/v0.6.1.md)).
+It is signed with the release key introduced in 0.6.0 (certificate SHA-256
+`4aa431cd…77306af`, checked by `scripts/sign-android.py`): it updates 0.6.0 in
+place, while 0.5.x and older must be reinstalled, which removes their local profiles.
+The previous package, `0.6.0-preview.2` / 60002, passed on a physical Huawei
+DEL-LX9 (Android 12) on 2026-10-13: Wi-Fi ↔ LTE handoff, Always-on with lockdown
+and the metering setting. IPv6 egress and reboot were not run. Installed-device
+acceptance of 0.6.1 itself has not been run.
+
+The older package history (v0.4.0 / 40001 and earlier) is in the release records
+and [Jenkins](jenkins.md).
 
 ## Navigation
 
@@ -61,6 +65,18 @@ do not disable that protection or publish real profiles to create documentation.
   An IPv6 DNS server is rejected for an IPv4-only endpoint. Every endpoint socket is protected
   and bound to the underlying non-VPN network before connect; protection failure
   rejects the attempt. A blocking TUN is established before endpoint DNS resolution. Startup waits for an underlying network and retries unavailable DNS, including offline startup.
+- The underlying network follows Android's own choice: candidates are ranked
+  validated, then unmetered, then not cellular, so the tunnel does not run over
+  mobile data that stays up next to Wi-Fi. After a handoff the lost network is
+  skipped and every network change redeclares the underlying network at once, so
+  the VPN reports the current network's transports (0.6.0-preview.2, #63).
+- A session switched to Always-on in system Settings while the app is in the
+  background is recorded, so the app can reconnect it if it dies.
+- A session that carries no traffic fails its health check and reconnects. A
+  degraded exit after a stable session (≥30 s) that delivered traffic refunds its
+  attempt in the finite per-session budget, so such exits over days cannot block
+  the VPN permanently; see [dead-session detection](http3.md#dead-session-detection)
+  (main after 0.6.1).
 - Rust duplicates the TUN FD, cancels/joins its worker before closing the duplicate,
   and retains TUN while reconnecting. The Java service owns the original FD.
   Stop/revoke closes both. Temporary handshake EOF/reset remains retryable;

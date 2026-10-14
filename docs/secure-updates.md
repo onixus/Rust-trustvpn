@@ -124,13 +124,15 @@ Windows latest is sequence 9. macOS automatic-update promotion remains withheld.
 The rebuild release is:
 https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9
 
-## Candidate sequence 10 — v0.6.0 (not published)
+## Sequences 10 and 11 — v0.6.0 and v0.6.1
 
-The source tree compiles as version **0.6.0**, `CURRENT_SEQUENCE = 10`;
-`CURRENT_IPC` stays 1. `prepare-signed-release.py` refuses any other sequence for
-this source and runs the signing tool with `--offline --locked`. No sequence-10
-artifact, signed manifest or rollback envelope has been built or published, and
-no target's `latest` points at sequence 10. See [v0.6.0](releases/v0.6.0.md).
+v0.6.0 compiles as `CURRENT_SEQUENCE = 10` and v0.6.1, like current main, as
+`CURRENT_SEQUENCE = 11`; `CURRENT_IPC` stays 1. `prepare-signed-release.py`
+refuses any other sequence for the source and runs the signing tool with
+`--offline --locked`. Both releases were published on GitHub on 2026-10-13. Their
+release records list production-key update metadata and promotion of `latest` as
+NOT RUN, so this document does not treat any target's `latest` as moved past
+sequence 9. See [v0.6.0](releases/v0.6.0.md) and [v0.6.1](releases/v0.6.1.md).
 
 Rollback 10 → 9: the installed sequence-9 helper from v0.5.0-rebuild.9 speaks
 control IPC **v1**, two or more steps behind the 0.6.0 service (v6), so the
@@ -149,7 +151,7 @@ injected health failure made the v1 updater reserve the v6 service and roll
 back to 9, and the retry to 10 succeeded with the encrypted vault unchanged.
 The manifests used a throwaway lab key, so the production-key sequence-10
 metadata is still NOT RUN and is required, with the acceptance matrix, before
-Windows `latest` may move to sequence 10. macOS remains withheld.
+Windows `latest` may move to sequence 10 or 11. macOS remains withheld.
 
 ## Версия IPC и gate приёмки (issues #31/#36)
 
