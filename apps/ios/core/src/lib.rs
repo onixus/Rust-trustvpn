@@ -308,15 +308,16 @@ async fn run(
                     .transport_ready(runner_session);
                 set_state(2);
                 let started = std::time::Instant::now();
-                tokio::select! {
+                let ended = tokio::select! {
                     _ = cancel.changed() => return,
-                    _ = rtrust_tun::run_packet_flow(session,tunnel,device.clone(),"169.254.254.2".parse().unwrap(),dns.clone(),routing.clone()) => {}
-                }
+                    ended = rtrust_tun::run_packet_flow(session,tunnel,device.clone(),"169.254.254.2".parse().unwrap(),dns.clone(),routing.clone()) => ended,
+                };
                 FLOWS
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .transport_lost(runner_session);
-                if started.elapsed() > Duration::from_secs(30) {
+                // A degraded session that never delivered data is not a stable connection.
+                if started.elapsed() > Duration::from_secs(30) && !rtrust_tun::unproven(&ended) {
                     delay = 1;
                 }
             }

@@ -37,4 +37,6 @@ pub mod windows;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
-pub use dataplane::{PacketDevice, run_with_dns as run_packet_flow, run_with_policy};
+pub use dataplane::{
+    PacketDevice, degraded, run_with_dns as run_packet_flow, run_with_policy, unproven,
+};

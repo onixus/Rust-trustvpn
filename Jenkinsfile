@@ -27,6 +27,7 @@ pipeline {
         sh 'python3 ci/run.py source-provenance python3 -m unittest discover -s ci -p test_source_provenance.py'
         sh 'python3 ci/run.py release-acceptance python3 -m unittest discover -s ci -p test_release_acceptance.py'
         sh 'python3 ci/run.py release-publisher python3 -m unittest discover -s ci -p test_publish_signed_release.py'
+        sh 'python3 ci/run.py android-signing python3 -m unittest discover -s ci -p test_sign_android.py'
         stash name: 'source', includes: '**', useDefaultExcludes: false
         archiveArtifacts artifacts: 'source-manifest.json,source-identity.json,Jenkinsfile', fingerprint: true
       }

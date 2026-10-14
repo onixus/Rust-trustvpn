@@ -134,15 +134,14 @@ async fn reply(
 ) -> Result<(), String> {
     reply_as(pipe, VERSION, state, message).await
 }
-/// Replies on the wire version admitted for this request.
+/// Replies on the wire version and shape admitted for this request.
 async fn reply_as(
     pipe: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
     version: u32,
     state: State,
     message: &str,
 ) -> Result<(), String> {
-    let mut response = Response::new(state, message);
-    response.version = version;
+    let response = rtrust_control::Reply::new(version, state, message);
     tokio::time::timeout(Duration::from_secs(5), write(pipe, &response))
         .await
         .map_err(|_| "IPC write timed out")?
@@ -183,11 +182,14 @@ impl Worker {
     fn new(task: tokio::task::JoinHandle<RunResult>) -> Self {
         Self(Some(task))
     }
-    async fn finished(&mut self) {
+    /// True when the session ended degraded without ever delivering data.
+    async fn finished(&mut self) -> bool {
+        let mut unproven = false;
         if let Some(task) = self.0.as_mut() {
-            let _ = task.await;
+            unproven = task.await.as_ref().is_ok_and(crate::dataplane::unproven);
         }
         self.0 = None;
+        unproven
     }
     async fn stop(&mut self) {
         if let Some(task) = self.0.take() {
@@ -227,7 +229,8 @@ async fn serve(
         .await
         .map_err(|_| "IPC read timed out")??;
     // A previous-version updater may only negotiate and reserve the service,
-    // so a failed upgrade can still be rolled back by the old installer.
+    // and a released older updater (RELEASED_UPDATER_VERSIONS) only reserve
+    // it, so a failed upgrade can still be rolled back by the old installer.
     let Some(version) = rtrust_control::admitted_version(&request) else {
         return reply(pipe, State::Error, "IPC version mismatch").await;
     };
@@ -554,9 +557,9 @@ async fn lease_loop(
                     crate::netwatch::Change::Resumed => monitor.resumed(rtrust_control::observations::now_ms()),
                 },
                 _ = stop.changed() => return Ok(None),
-                _ = worker.finished(), if state == State::Connected => {
+                unproven = worker.finished(), if state == State::Connected => {
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
-                    budget.disconnected(connected_since.elapsed());
+                    budget.disconnected(connected_since.elapsed(), unproven);
                     if failover.ended(connected_since.elapsed(), std::time::Instant::now()) {
                         monitor.failed_over(rtrust_control::observations::now_ms());
                     }
@@ -690,6 +693,24 @@ mod tests {
         }
         let response = exchange(VERSION - 2, Command::Capabilities).await;
         assert_eq!(response.message, "IPC version mismatch");
+    }
+    #[tokio::test]
+    async fn released_v1_updater_cannot_negotiate_or_control_a_session() {
+        for &version in rtrust_control::RELEASED_UPDATER_VERSIONS {
+            for command in [
+                Command::Capabilities,
+                Command::Stop,
+                Command::Status,
+                Command::Recover { owner: None },
+                Command::DisableAlwaysOn,
+                Command::AlwaysOnStatus,
+            ] {
+                let response = exchange(version, command).await;
+                assert_eq!(response.version, VERSION);
+                assert_eq!(response.state, State::Error);
+                assert_eq!(response.message, "IPC version mismatch");
+            }
+        }
     }
     #[tokio::test]
     async fn stop_after_transport_failure_does_not_poll_completed_task() {

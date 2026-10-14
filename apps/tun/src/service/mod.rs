@@ -413,13 +413,13 @@ async fn serve(
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     },
                 },
-                _ = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() => {
+                result = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() => {
                     endpoint_lease.suspend();
                     workers.tunnel = None;
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
                     endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     // A flapping endpoint must not reset the backoff indefinitely.
-                    retry_delay.disconnected(connected_since.elapsed());
+                    retry_delay.disconnected(connected_since.elapsed(), result.as_ref().is_ok_and(crate::dataplane::unproven));
                     if failover.ended(connected_since.elapsed(), Instant::now()) {
                         monitor.failed_over(rtrust_control::observations::now_ms());
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());

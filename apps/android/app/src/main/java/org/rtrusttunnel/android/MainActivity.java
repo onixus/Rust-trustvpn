@@ -34,18 +34,19 @@ public class MainActivity extends Activity {
                 JSONObject state = new JSONObject(NativeCore.INSTANCE.status());
                 TunnelService.refreshPolicy();
                 int nativeState = state.optInt("state", 0);
-                String message = !TunnelService.problem.isEmpty() ? TunnelService.problem : nativeState == 2 ? getString(R.string.connected) : nativeState == 1 ? getString(R.string.connecting) : nativeState == 3 ? getString(R.string.reconnecting) : nativeState == 4 ? getString(R.string.connection_failed) : "";
-                if (nativeState == 2 && TunnelService.problem.isEmpty()) message = ObservationStatus.summary(MainActivity.this, state.optJSONObject("observations"));
-                JSONObject recovery=state.optJSONObject("recovery");if(nativeState==2 && recovery!=null && recovery.optInt("selected_index")>0)message+=" · "+getString(R.string.recovery_backup_active,recovery.optInt("selected_index"));
-                if (message.isEmpty()) message = TunnelService.active ? getString(R.string.starting_vpn) : getString(R.string.disconnected);
-                if (!status.getText().toString().equals(message)) status.setText(message);
+                CharSequence message = !TunnelService.problem.isEmpty() ? TunnelService.problem : nativeState == 2 ? getString(R.string.connected) : nativeState == 1 ? getString(R.string.connecting) : nativeState == 3 ? getString(R.string.reconnecting) : nativeState == 4 ? getString(R.string.connection_failed) : "";
+                boolean detailed = nativeState == 2 && TunnelService.problem.isEmpty();
+                if (detailed) { CharSequence checks = ObservationStatus.summary(MainActivity.this, state.optJSONObject("observations")); if (checks.length() > 0) message = checks; }
+                JSONObject recovery=state.optJSONObject("recovery");if(nativeState==2 && recovery!=null && recovery.optInt("selected_index")>0)message=android.text.TextUtils.concat(message,detailed?"\n":" · ",getString(R.string.recovery_backup_active,recovery.optInt("selected_index")));
+                if (message.length() == 0) message = TunnelService.active ? getString(R.string.starting_vpn) : getString(R.string.disconnected);
+                showStatus(message, detailed);
                 String action = TunnelService.active ? getString(R.string.disconnect) : getString(R.string.connect_selected_profile);
                 connect.setEnabled(!TunnelService.active || !TunnelService.alwaysOn);
                 if (!connect.getText().toString().equals(action)) connect.setText(action);
                 paintConnection(connectionColor(TunnelService.active, state.optInt("state", -1), !TunnelService.problem.isEmpty()), TunnelService.active || !TunnelService.problem.isEmpty());
             } catch (Exception ignored) {
                 paintConnection(connectionColor(false, 0, true), true);
-                if (!status.getText().toString().equals(getString(R.string.vpn_status_unavailable))) status.setText(getString(R.string.vpn_status_unavailable));
+                showStatus(getString(R.string.vpn_status_unavailable), false);
             }
             handler.postDelayed(this, 500);
         }
@@ -73,7 +74,10 @@ public class MainActivity extends Activity {
         LinearLayout stateRow = new LinearLayout(this); stateRow.setGravity(Gravity.CENTER_VERTICAL);
         statusDot = new View(this); GradientDrawable dot = new GradientDrawable(); dot.setShape(GradientDrawable.OVAL); dot.setColor(color(R.color.text_muted)); statusDot.setBackground(dot);
         LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(12), dp(12)); dotParams.setMarginEnd(dp(10)); stateRow.addView(statusDot, dotParams);
-        status = new TextView(this); status.setTextSize(20); status.setTypeface(null, Typeface.BOLD); status.setTextColor(color(R.color.text)); stateRow.addView(status);
+        status = new TextView(this); status.setTextSize(20); status.setTypeface(null, Typeface.BOLD); status.setTextColor(color(R.color.text));
+        // The full row width: the per-check summary is sized to it, one check per line.
+        stateRow.addView(status, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        status.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> { if (r - l != or - ol) v.post(this::fitStatus); });
         hero.addView(stateRow);
         TextView label = new TextView(this); label.setText(R.string.selected_profile_label); label.setTextSize(11); label.setLetterSpacing(0.08f); label.setTextColor(color(R.color.text_muted)); label.setPadding(0, dp(14), 0, dp(2)); hero.addView(label);
         selectedProfile = new TextView(this); selectedProfile.setTextSize(16); selectedProfile.setTextColor(color(R.color.text)); selectedProfile.setMaxLines(1); selectedProfile.setEllipsize(android.text.TextUtils.TruncateAt.END); hero.addView(selectedProfile);
@@ -117,10 +121,49 @@ public class MainActivity extends Activity {
         if (pendingConnectId == null || pendingConnectId.isEmpty()) { error(getString(R.string.import_and_select_a_profile)); return; }
         startForegroundService(new Intent(this, TunnelService.class).putExtra(TunnelService.PROFILE_ID, pendingConnectId));
     }
+    /** A short state is a large bold headline; the per-check summary styles itself and is
+     *  sized so that every check and its outcome stay on one line. */
+    private void showStatus(CharSequence message, boolean detailed) {
+        if (detailed != statusDetailed) {
+            statusDetailed = detailed;
+            status.setTypeface(null, detailed ? Typeface.NORMAL : Typeface.BOLD);
+            if (!detailed) status.setTextSize(20);
+            status.setText(message);
+        } else if (!status.getText().toString().equals(message.toString())) status.setText(message);
+        else return;
+        if (detailed) fitStatus();
+    }
+    /** The largest size up to 14sp at which the widest line fits the status width. */
+    private void fitStatus() {
+        if (!statusDetailed) return;
+        int width = status.getWidth() - status.getTotalPaddingLeft() - status.getTotalPaddingRight();
+        if (width <= 0) return; // the layout listener fits it once the width is known
+        CharSequence text = status.getText();
+        android.text.TextPaint paint = new android.text.TextPaint(status.getPaint());
+        android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
+        float size = 14;
+        for (; size > 6; size -= 0.5f) {
+            paint.setTextSize(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, size, metrics));
+            if (widestLine(text, paint) <= width) break;
+        }
+        status.setTextSize(size);
+    }
+    private static float widestLine(CharSequence text, android.text.TextPaint paint) {
+        float widest = 0;
+        for (int start = 0; start <= text.length(); ) {
+            int end = android.text.TextUtils.indexOf(text, '\n', start);
+            if (end < 0) end = text.length();
+            widest = Math.max(widest, android.text.Layout.getDesiredWidth(text, start, end, paint));
+            start = end + 1;
+        }
+        return widest;
+    }
+    private boolean statusDetailed;
     private void settingsMenu() {
-        new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on), java.util.Locale.getDefault().getLanguage().equals("ru") ? "Наблюдать решения маршрутизации" : "Observe local flow decisions", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Проверить путь VPN" : "Check VPN path", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Правила текущего подключения" : "Current connection rules",getString(R.string.recovery_title)}, (dialog, which) -> {
+        new AlertDialog.Builder(this).setTitle(R.string.home_settings).setItems(new String[]{getString(R.string.portal_title), getString(R.string.always_on), java.util.Locale.getDefault().getLanguage().equals("ru") ? "Наблюдать решения маршрутизации" : "Observe local flow decisions", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Проверить путь VPN" : "Check VPN path", java.util.Locale.getDefault().getLanguage().equals("ru") ? "Правила текущего подключения" : "Current connection rules",getString(R.string.recovery_title),getString(R.string.metering_title)}, (dialog, which) -> {
             if (which == 0) new PortalDialog(this, vault, this::reload).show();
             else if (which == 1) vpnSettings();
+            else if(which==6)meteringSettings();
             else if(which==5){try{RecoveryDialog.show(this,vault,selectedId);}catch(Exception e){error(getString(R.string.recovery_invalid));}}
             else { if (flowCapture != null) flowCapture.dismiss(); flowCapture = which == 2 ? FlowCaptureDialog.show(this) : which == 3 ? DiagnosticsDialog.show(this) : FlowPolicyDialog.show(this); }
         }).show();
@@ -321,6 +364,18 @@ public class MainActivity extends Activity {
             }
         } catch (JSONException ignored) { }
         preview(raw);
+    }
+    private void meteringSettings() {
+        int[] choice = {TunnelService.inheritMetering(this) ? 1 : 0};
+        new AlertDialog.Builder(this).setTitle(R.string.metering_title)
+            .setSingleChoiceItems(new String[]{getString(R.string.metering_always), getString(R.string.metering_inherit)}, choice[0], (d, w) -> choice[0] = w)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(android.R.string.ok, (d, w) -> {
+                boolean inherit = choice[0] == 1;
+                if (inherit == TunnelService.inheritMetering(this)) return;
+                TunnelService.setInheritMetering(this, inherit);
+                if (TunnelService.active) Toast.makeText(this, R.string.metering_next_connection, Toast.LENGTH_LONG).show();
+            }).show();
     }
     private void vpnSettings() {
         String state = TunnelService.active ? getString(R.string.always_status, TunnelService.alwaysOn, TunnelService.lockdown) : getString(R.string.always_status_unknown);

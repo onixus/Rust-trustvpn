@@ -5,6 +5,7 @@ Run from repository root, then stop by creating .ci-android/stop. Never changes
 host routes or existing VPNs. Secrets and all Docker resources expire in 15 min.
 """
 import argparse
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -26,6 +27,19 @@ SHA = '91c2ea3db7416a01b5258a4c047ec22890490bc55e1b194206031aa75144f0e7'
 def run(*args, **kwargs):
     return subprocess.check_output(args, timeout=90, **kwargs).decode().strip()
 
+def certificate(root, issued=None):
+    """Write the fixture's self-signed endpoint certificate into root.
+
+    The emulator clock is not synchronised with this host and has been seen
+    almost a minute behind it. A certificate valid from "now" is then not yet
+    valid on the device, and the client rightly treats that TLS failure as fatal
+    (no retry, no downgrade). Backdate validity like the other fixtures do
+    instead of weakening the client.
+    """
+    issued = issued or datetime.now(timezone.utc)
+    stamp = lambda moment: moment.strftime('%Y%m%d%H%M%SZ')
+    subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-not_before', stamp(issued - timedelta(days=1)), '-not_after', stamp(issued + timedelta(days=1)), '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost', '-addext', 'basicConstraints=critical,CA:FALSE', '-keyout', 'key.pem', '-out', 'cert.pem'], cwd=root, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 def main():
     # "trusttunnel" is TrustTunnel over HTTP/2; "http3" the same endpoint over QUIC.
     parser=argparse.ArgumentParser();parser.add_argument('--protocol',choices=['trusttunnel','http3','hysteria2','amneziawg'],default='trusttunnel');args=parser.parse_args()
@@ -46,7 +60,7 @@ def main():
     with tarfile.open(archive) as tar:
         member = next(m for m in tar if m.name.endswith('/trusttunnel_endpoint'))
         binary = ROOT / 'trusttunnel_endpoint'; binary.write_bytes(tar.extractfile(member).read()); binary.chmod(0o755)
-    subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost', '-addext', 'basicConstraints=critical,CA:FALSE', '-keyout', 'key.pem', '-out', 'cert.pem'], cwd=ROOT, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    certificate(ROOT)
     token, password = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
     (ROOT / 'control-token').write_text(token)
     (ROOT / 'vpn.toml').write_text('listen_address="0.0.0.0:4433"\nallow_private_network_connections=true\ncredentials_file="credentials.toml"\n[listen_protocols.http2]\n'+('[listen_protocols.quic]\n' if http3 else ''))

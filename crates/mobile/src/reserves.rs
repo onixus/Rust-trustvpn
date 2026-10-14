@@ -35,6 +35,14 @@ impl Planner {
     pub fn selected(&self) -> usize {
         self.selected
     }
+    /// A degraded exit after a stable session that delivered traffic is not a
+    /// failed attempt: refund it, so such exits over days cannot exhaust the
+    /// finite budget. Unproven or short sessions still count.
+    pub fn degraded(&mut self, proven: bool, connected: Duration) {
+        if proven && connected >= rtrust_control::recovery::STABLE_CONNECTION {
+            self.attempts = self.attempts.saturating_sub(1);
+        }
+    }
     pub fn failed(&mut self, fatal: bool, connected: Duration, jitter: u64) -> Duration {
         if fatal {
             self.denied[self.selected] = true;
@@ -72,5 +80,28 @@ mod tests {
         fixed.begin();
         fixed.failed(true, Duration::ZERO, 0);
         assert!(fixed.begin().is_none());
+    }
+    #[test]
+    fn only_proven_stable_degraded_exits_are_refunded() {
+        use rtrust_control::recovery::STABLE_CONNECTION;
+        let mut p = Planner::new(1).unwrap();
+        for _ in 0..10 * LIMIT {
+            assert!(p.begin().is_some());
+            p.degraded(true, STABLE_CONNECTION);
+            p.failed(false, STABLE_CONNECTION, 0);
+        }
+        assert_eq!(p.attempts(), 0);
+        for (proven, connected) in [
+            (false, Duration::from_secs(3600)),
+            (true, STABLE_CONNECTION - Duration::from_secs(1)),
+        ] {
+            let mut p = Planner::new(1).unwrap();
+            for _ in 0..LIMIT {
+                assert!(p.begin().is_some());
+                p.degraded(proven, connected);
+                p.failed(false, connected, 0);
+            }
+            assert!(p.begin().is_none());
+        }
     }
 }

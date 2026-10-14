@@ -99,6 +99,7 @@ final class AppRoutingAcceptance {
                 long end = SystemClock.elapsedRealtime() + 45000;
                 while (SystemClock.elapsedRealtime() < end && new JSONObject(NativeCore.INSTANCE.status()).getInt("state") != 2) Thread.sleep(100);
                 check(new JSONObject(NativeCore.INSTANCE.status()).getInt("state") == 2, "Selected-app VPN connects");
+                NetworkAcceptance.settle(context);
                 boolean expected = false;
                 for (int i = 0; i < 50; i++) {
                     NetworkCapabilities caps = cm.getNetworkCapabilities(cm.getActiveNetwork());

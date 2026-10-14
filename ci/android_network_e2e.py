@@ -18,8 +18,8 @@ def main():
     if not args.serial.startswith('emulator-'):
         p.error('Network acceptance is restricted to an isolated emulator')
     adb = [args.adb, '-s', args.serial]
-    def run(*cmd, **kwargs):
-        return subprocess.run([*adb, *cmd], check=True, timeout=180, **kwargs)
+    def run(*cmd, timeout=180, **kwargs):
+        return subprocess.run([*adb, *cmd], check=True, timeout=timeout, **kwargs)
     package = 'org.rtrusttunnel.android'
     source = ROOT / '.ci-android/client.json'
     if not source.is_file():
@@ -27,7 +27,9 @@ def main():
     run('shell', 'pm', 'grant', package, 'android.permission.POST_NOTIFICATIONS')
     run('shell', 'appops', 'set', package, 'ACTIVATE_VPN', 'allow')
     run('shell', "run-as org.rtrusttunnel.android sh -c 'cat > cache/vpn-fixture.json'", input=source.read_bytes(), stdout=subprocess.DEVNULL)
-    result = run('shell', 'am', 'instrument', '-w', '-r', '-e', 'network', 'true', package + '.test/' + package + '.SmokeInstrumentation', capture_output=True, text=True)
+    result = run('shell', 'am', 'instrument', '-w', '-r', '-e', 'network', 'true', package + '.test/' + package + '.SmokeInstrumentation', capture_output=True, text=True,
+                 # Outage recovery, metering reconnects and a Wi-Fi rejoin (up to 2 min on the emulator).
+                 timeout=600)
     print(result.stdout)
     if 'PASS: VPN IPv4/IPv6' not in result.stdout or 'INSTRUMENTATION_CODE: -1' not in result.stdout or 'FAIL:' in result.stdout:
         raise SystemExit('Android network acceptance failed')

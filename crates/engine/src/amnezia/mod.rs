@@ -313,7 +313,11 @@ impl AmneziaSession {
             };
             tokio::join!(upload, download);
         });
-        Ok(Tunnel { io, pump })
+        Ok(Tunnel {
+            io,
+            pump,
+            liveness: None,
+        })
     }
     pub async fn open_udp(&self) -> Result<Tunnel> {
         let (up, up_receiver) = mpsc::channel(64);
@@ -356,7 +360,11 @@ impl AmneziaSession {
                 _ = download => {}
             }
         });
-        Ok(Tunnel { io, pump })
+        Ok(Tunnel {
+            io,
+            pump,
+            liveness: None,
+        })
     }
 }
 

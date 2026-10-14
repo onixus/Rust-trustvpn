@@ -21,8 +21,10 @@ After Setup, the helper launches the installed GUI smoke mode. A failed health
 check installs and checks the previous signed package. If the replacement service
 is unavailable, active, or retains a guard, automatic rollback stops safely;
 the replacement service admits the previous IPC version only for capability
-negotiation and the maintenance reservation, so an IPC bump alone does not stop
-the old helper's rollback;
+negotiation and the maintenance reservation, and the IPC versions of published
+older helpers listed in `RELEASED_UPDATER_VERSIONS` only for the reservation,
+answered in that version's wire shape, so an IPC bump alone does not stop the
+old helper's rollback;
 packages, encrypted backup and logs remain in the transaction directory. The
 helper does not clear a network guard or overwrite the user's vault. A successful
 update restarts the GUI; after rollback the user can restart the previous version.
@@ -115,9 +117,39 @@ profile vault remained unchanged and decryptable, installed GUI/service hashes
 matched the rebuilt artifacts, and the installed updater rejects sequence 9 as
 already current.
 
+The published Windows sequence-9 Setup is 14610519 bytes, SHA-256
+`dcb5ee4eb2eac4a3ef7d3c0cebb8209f7a600a0664d0724a57e308e7919b50e8`.
+
 Windows latest is sequence 9. macOS automatic-update promotion remains withheld.
 The rebuild release is:
 https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9
+
+## Candidate sequence 10 — v0.6.0 (not published)
+
+The source tree compiles as version **0.6.0**, `CURRENT_SEQUENCE = 10`;
+`CURRENT_IPC` stays 1. `prepare-signed-release.py` refuses any other sequence for
+this source and runs the signing tool with `--offline --locked`. No sequence-10
+artifact, signed manifest or rollback envelope has been built or published, and
+no target's `latest` points at sequence 10. See [v0.6.0](releases/v0.6.0.md).
+
+Rollback 10 → 9: the installed sequence-9 helper from v0.5.0-rebuild.9 speaks
+control IPC **v1**, two or more steps behind the 0.6.0 service (v6), so the
+one-step `VERSION - 1` exception alone would refuse its `PrepareUpdate` after a
+failed health check. `rtrust_control::RELEASED_UPDATER_VERSIONS = [1]` admits
+exactly `PrepareUpdate` from that published helper (v1 has no `Capabilities`),
+and the Windows service answers it in the v1 `Response` shape
+(`version`/`state`/`message`), which the v1 helper parses with
+`deny_unknown_fields`. Every other v1 command still gets an IPC version
+mismatch; pipe authentication is unchanged, and a retained guard or active
+session still refuses the reservation. Linux and macOS keep strict equality.
+Unit tests pin the v1 request JSON and the v1-readable reply. On 2026-10-13 a
+lab-signed rehearsal on the Windows lab passed: the published sequence-9 package
+and updater installed the 0.6.0 candidate Setup (exact source `974debf`), an
+injected health failure made the v1 updater reserve the v6 service and roll
+back to 9, and the retry to 10 succeeded with the encrypted vault unchanged.
+The manifests used a throwaway lab key, so the production-key sequence-10
+metadata is still NOT RUN and is required, with the acceptance matrix, before
+Windows `latest` may move to sequence 10. macOS remains withheld.
 
 ## Версия IPC и gate приёмки (issues #31/#36)
 

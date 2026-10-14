@@ -8,4 +8,4 @@
 "VPN control" = "Управление VPN";
 "Open R-TrustTunnel to securely toggle VPN. Authorize VPN in the app first." = "Откройте R-TrustTunnel для переключения VPN. Сначала разрешите VPN в приложении.";
 
-"Transport running · availability unchecked" = "Транспорт запущен · доступность не проверена";
+"Transport running" = "Транспорт запущен";

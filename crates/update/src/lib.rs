@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 pub const ORIGIN: &str = "https://onixus-rf.duckdns.org";
-pub const CURRENT_SEQUENCE: u64 = 9;
+pub const CURRENT_SEQUENCE: u64 = 11;
 /// Signed package transaction compatibility. This legacy wire field is independent
 /// of the GUI/service IPC: both components are replaced together by the installer.
 pub const CURRENT_IPC: u32 = 1;
