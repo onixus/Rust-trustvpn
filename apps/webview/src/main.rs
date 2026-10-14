@@ -6,7 +6,7 @@ type Shared = std::sync::Arc<Mutex<Controller>>;
 fn note_pending(c: &mut Controller, result: Result<Summary, String>) {
     c.status = match result {
         Ok(p) => format!(
-            "Pending import: {}. Confirm in the Profiles section.",
+            "Pending import: {}. Confirm it under Profiles, Add profile.",
             p.name
         ),
         Err(e) => e,
@@ -35,16 +35,30 @@ async fn ui_ready(app: tauri::AppHandle) -> Result<(), String> {
     app.exit(0);
     Ok(())
 }
+/// The shared credential-free view plus which saved profile the live session
+/// was started from, so the profile list can mark it without guessing.
+#[derive(serde::Serialize)]
+struct WebView {
+    #[serde(flatten)]
+    view: View,
+    connected_profile: Option<usize>,
+}
+fn web_view(c: &Controller) -> WebView {
+    WebView {
+        connected_profile: c.session.as_ref().and(c.connected_profile),
+        view: c.view(),
+    }
+}
 #[tauri::command]
-async fn view(state: State<'_, Shared>) -> Result<View, String> {
+async fn view(russian: Option<bool>, state: State<'_, Shared>) -> Result<WebView, String> {
     let mut c = state.lock().await;
     if let Some(session) = &c.session {
         let health = session.lifecycle_health().await;
         c.status = health
             .err()
-            .unwrap_or_else(|| session.status_summary(false));
+            .unwrap_or_else(|| session.status_summary(russian.unwrap_or(false)));
     }
-    Ok(c.view())
+    Ok(web_view(&c))
 }
 #[tauri::command]
 async fn diagnostic_cancel(state: State<'_, Shared>) -> Result<(), String> {
@@ -578,4 +592,18 @@ fn main() {
                 });
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn view_model_has_no_session_profile_or_portal_baselines_when_idle() {
+        let c = rtrust_desktop::Controller::smoke();
+        let v = serde_json::to_value(super::web_view(&c)).expect("serializable view");
+        assert!(v["connected_profile"].is_null());
+        assert_eq!(v["connected"], false);
+        assert!(v["observations"].is_null());
+        let tracked = &v["connection"]["sync"]["tracked"];
+        assert!(tracked.as_array().is_some_and(Vec::is_empty));
+    }
 }

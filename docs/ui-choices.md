@@ -16,11 +16,27 @@ frontend-owned session is not claimed.
 
 ## Everyday navigation
 
-The default profile and connect/disconnect action stay at the top of desktop
-windows. Native highlights the active sidebar section; network mode, DNS and
-proxy settings live in Settings. WebView separates Profiles, Settings and Sync,
-shows only mode-relevant network fields, and asks for a second click before
-removing a profile. Its import options are grouped under Add a profile.
+Native keeps the default profile and connect/disconnect action at the top of
+the window and highlights the active sidebar section; network mode, DNS and
+proxy settings live in Settings.
+
+WebView uses UI variant 3: a sidebar with Home, Profiles (with Add profile),
+Checks, Network, Sync and Settings, a black dark theme and a frosted-glass light
+theme that follow the system unless Settings overrides them (stored only in the
+WebView's local storage). Home shows a state chip, a two-line headline, one row
+per check, the profile Connect will use, the first backup named by the
+connection settings, mode/DNS/sync/autoconnect tiles and a large connect pill.
+The state is grey off, blue connecting or running, green only when all five
+checks of the existing observation snapshot passed within their TTL (capped at
+6 s) and Rust reports verified, yellow when any check failed (named in the
+text), and red after a failed connect or when the state cannot be read. Checks
+without a result show "no data". The view model gained only the index of the
+profile the live session was started from; it still carries no credentials or
+portal baselines. Network shows only mode-relevant fields, profile deletion
+needs a second click, and import keeps the preview and explicit confirmation.
+Copy follows the system language (Russian or English); messages from the Rust
+core stay English except the observation summary. Not in WebView: QR import,
+drag and drop, rename, editing backup profiles, an action search and hotkeys.
 
 Android keeps the status-colored connection button at the bottom. The home
 screen uses a dark Material theme: a status card with a state dot and the

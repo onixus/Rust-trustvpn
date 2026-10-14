@@ -1,0 +1,86 @@
+'use strict';
+// Presentation-only state model. Rust supplies the observation snapshot and the
+// verified verdict; this file never upgrades a result, it only decays it.
+(function (root) {
+ const KEYS = ['transport', 'route', 'dns', 'guard', 'connectivity'];
+ const OUTCOMES = ['passed', 'failed', 'configured', 'stale', 'unsupported'];
+ // Same cap as the Rust core FRESH_MS and Android ObservationStatus.
+ const MAX_TTL_MS = 6000;
+
+ function snapshot(s) { return s && s.schema === 2 ? s : null; }
+
+ /** Normalised outcome: passed/configured become stale after their TTL. */
+ function outcome(o, now) {
+  let out = o && typeof o.outcome === 'string' ? o.outcome : 'unknown';
+  if (!OUTCOMES.includes(out)) return 'unknown';
+  if (out === 'passed' || out === 'configured') {
+   const time = typeof o.observed_at_ms === 'number' ? o.observed_at_ms : -1;
+   const ttl = Math.min(MAX_TTL_MS, Number(o.valid_for_ms) || 0);
+   if (time < 0 || now < time || now - time > ttl) out = 'stale';
+  }
+  return out;
+ }
+
+ function outcomes(s, now) {
+  s = snapshot(s);
+  const result = {};
+  for (const key of KEYS) result[key] = s ? outcome(s[key], now) : 'unknown';
+  return result;
+ }
+
+ /** running | verified | warning, exactly as Android ObservationStatus.level. */
+ function level(s, now) {
+  const o = outcomes(s, now);
+  let verified = true;
+  for (const key of KEYS) {
+   if (o[key] === 'failed') return 'warning';
+   if (o[key] !== 'passed') verified = false;
+  }
+  return verified ? 'verified' : 'running';
+ }
+
+ function failed(s, now) {
+  const o = outcomes(s, now);
+  return KEYS.filter(key => o[key] === 'failed');
+ }
+
+ /**
+  * input: {connected, verified, snapshot, phase, error, unavailable, now}
+  * phase is the frontend's own pending action ('connecting'|'disconnecting'|null).
+  */
+ function derive(input) {
+  if (input.unavailable) return 'error';
+  if (input.phase === 'connecting') return 'connecting';
+  if (input.phase === 'disconnecting') return 'disconnecting';
+  if (!input.connected) return input.error ? 'error' : 'off';
+  const l = level(input.snapshot, input.now);
+  if (l === 'warning') return 'warning';
+  // Green needs both the Rust verdict and a fresh client-side reading.
+  if (l === 'verified' && input.verified === true) return 'verified';
+  return 'running';
+ }
+
+ const TONE = { off: 'grey', connecting: 'blue', disconnecting: 'blue', running: 'blue', verified: 'green', warning: 'yellow', error: 'red' };
+
+ /** One row per check. Pseudo-values describe the transport when no session exists. */
+ function rows(input, key) {
+  const live = input.connected && !input.unavailable && key !== 'connecting';
+  const o = live ? outcomes(input.snapshot, input.now) : {};
+  return KEYS.map(name => {
+   let value = live ? o[name] : 'unknown';
+   if (!live && name === 'transport') {
+    if (key === 'connecting') value = 'connecting';
+    else if (key === 'error' && !input.unavailable) value = 'error';
+    else if (key === 'off') value = 'off';
+   }
+   return { key: name, value };
+  });
+ }
+
+ // dot style per row value: fill colour or an empty ring
+ const ROW_TONE = { passed: 'green', failed: 'yellow', configured: 'blue', stale: 'ring-grey', unsupported: 'grey', unknown: 'ring', off: 'ring', connecting: 'ring-blue', error: 'red' };
+
+ const api = { KEYS, MAX_TTL_MS, snapshot, outcome, outcomes, level, failed, derive, rows, TONE, ROW_TONE };
+ if (typeof module !== 'undefined' && module.exports) module.exports = api;
+ else root.RTModel = Object.freeze(api);
+})(typeof window !== 'undefined' ? window : globalThis);
