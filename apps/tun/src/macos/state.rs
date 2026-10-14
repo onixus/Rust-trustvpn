@@ -208,9 +208,7 @@ impl Guard {
                 direct: true,
             });
         }
-        for route in &planned {
-            route.vacant()?;
-        }
+        routes::vacant(&planned)?;
         let mut j = Journal {
             version: 1,
             uid,
@@ -225,18 +223,14 @@ impl Guard {
         let script = firewall::policy(uid, full, &j.networks, permits);
         j.pf_token = Some(firewall::install(Path::new(DIRECTORY), &script)?);
         save(&j, false)?;
-        for route in &j.routes {
-            route.add()?;
-        }
+        routes::ensure(&j.routes)?;
         if let Some(resolver) = tunnel_dns {
             dns::install(uid, resolver)?;
         }
         Ok(Self(j))
     }
     pub fn refresh(&self) -> Result<(), String> {
-        for route in &self.0.routes {
-            route.ensure()?;
-        }
+        routes::ensure(&self.0.routes)?;
         if let Some(resolver) = self.0.dns {
             dns::ensure(self.0.uid, resolver)?;
         }
@@ -254,9 +248,7 @@ pub(super) fn recover(uid: u32) -> Result<(), String> {
     if let Some(resolver) = j.dns {
         dns::remove(uid, resolver)?;
     }
-    for route in j.routes.iter().rev() {
-        route.remove()?;
-    }
+    routes::remove(&j.routes)?;
     if j.boot == boot()? {
         firewall::remove(uid, j.pf_token.as_deref())?;
     } else if !command::run("/sbin/pfctl", &["-a", "com.apple/zz-rtrust", "-sr"])?

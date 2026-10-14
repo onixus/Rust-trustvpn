@@ -19,7 +19,9 @@ pub(super) fn prefix(value: &str, v6: bool) -> Option<String> {
         if bits > 128 {
             return None;
         }
-        return Some(format!("{address}/{bits}"));
+        let mask = u128::MAX.checked_shl(128 - u32::from(bits)).unwrap_or(0);
+        let network = Ipv6Addr::from(u128::from(address) & mask);
+        return Some(format!("{network}/{bits}"));
     }
     let octets: Vec<_> = address.split('.').collect();
     if octets.is_empty() || octets.len() > 4 {
@@ -37,7 +39,11 @@ pub(super) fn prefix(value: &str, v6: bool) -> Option<String> {
     if bits > 32 {
         return None;
     }
-    Some(format!("{}/{bits}", Ipv4Addr::from(bytes)))
+    let mask = u32::MAX.checked_shl(32 - u32::from(bits)).unwrap_or(0);
+    Some(format!(
+        "{}/{bits}",
+        Ipv4Addr::from(u32::from_be_bytes(bytes) & mask)
+    ))
 }
 pub(super) fn parse(text: &str) -> Result<Vec<Entry>, String> {
     let mut started = false;
@@ -105,6 +111,19 @@ mod tests {
         );
         assert!(prefix("0/129", true).is_none());
         assert!(prefix("256.1/16", false).is_none());
+    }
+    #[test]
+    fn prefixes_are_normalized_for_snapshot_ownership_comparison() {
+        assert_eq!(
+            prefix("192.0.2.129/24", false).as_deref(),
+            Some("192.0.2.0/24")
+        );
+        assert_eq!(prefix("192.0.2.129/0", false).as_deref(), Some("0.0.0.0/0"));
+        assert_eq!(
+            prefix("2001:db8::1234/32", true).as_deref(),
+            Some("2001:db8::/32")
+        );
+        assert_eq!(prefix("2001:db8::1/0", true).as_deref(), Some("::/0"));
     }
     #[test]
     fn refuse_changed_columns_instead_of_guessing_interface() {
