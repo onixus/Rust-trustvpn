@@ -414,6 +414,13 @@ impl Monitor {
             self.gap = true;
         }
         self.last_poll = now;
+        // A tunnel DNS round trip started in this generation, i.e. after any
+        // gap or resume that bumped it, proves the worker still carries
+        // traffic. Lifecycle-only configuration still needs a transition.
+        let generation = self.snapshot.generation;
+        let proof = self
+            .proof
+            .filter(|&(tag, time)| tag == generation && now >= time && now - time <= PROBE_TTL_MS);
         let transport = &mut self.snapshot.transport;
         if !self.running {
             transport.outcome = Outcome::Failed;
@@ -421,25 +428,18 @@ impl Monitor {
             transport.reason = Reason::WorkerStopped;
             transport.observed_at_ms = Some(now);
             transport.valid_for_ms = FRESH_MS;
+        } else if let Some((_, time)) = proof {
+            transport.outcome = Outcome::Passed;
+            transport.source = Source::SystemProbe;
+            transport.reason = Reason::ConfigurationApplied;
+            transport.observed_at_ms = Some(time);
+            transport.valid_for_ms = PROBE_TTL_MS;
         } else if !self.gap {
-            match self.proof.filter(|&(generation, time)| {
-                generation == self.snapshot.generation && now >= time && now - time <= PROBE_TTL_MS
-            }) {
-                Some((_, time)) => {
-                    transport.outcome = Outcome::Passed;
-                    transport.source = Source::SystemProbe;
-                    transport.reason = Reason::ConfigurationApplied;
-                    transport.observed_at_ms = Some(time);
-                    transport.valid_for_ms = PROBE_TTL_MS;
-                }
-                None => {
-                    transport.outcome = Outcome::Configured;
-                    transport.source = self.source;
-                    transport.reason = Reason::SessionRunning;
-                    transport.observed_at_ms = Some(now);
-                    transport.valid_for_ms = FRESH_MS;
-                }
-            }
+            transport.outcome = Outcome::Configured;
+            transport.source = self.source;
+            transport.reason = Reason::SessionRunning;
+            transport.observed_at_ms = Some(now);
+            transport.valid_for_ms = FRESH_MS;
         }
         self.snapshot.expire(now);
         self.snapshot.clone()
@@ -660,9 +660,10 @@ mod tests {
             (Outcome::Stale, Reason::SystemResumed)
         );
         assert_eq!(s.guard.outcome, Outcome::Stale);
-        // Gap after resume: no transport proof until a real transition.
+        // After resume only a proof from the new generation restores transport.
+        assert_eq!(s.transport.outcome, Outcome::Stale);
         assert!(m.apply_system(m.generation(), probe(Outcome::Passed, 105), 105));
-        assert_eq!(m.sample(106).transport.outcome, Outcome::Stale);
+        assert_eq!(m.sample(106).transport.outcome, Outcome::Passed);
         m.transition(false, 107);
         m.transition(true, 108);
         assert!(m.apply_system(m.generation(), failed, 109));
@@ -672,6 +673,39 @@ mod tests {
             m.sample(now);
         }
         assert_eq!(m.sample(now).guard.outcome, Outcome::Stale);
+    }
+    #[test]
+    fn only_a_proof_started_after_a_gap_restores_transport() {
+        let mut m = Monitor::new(Mode::Full, Source::ServiceLifecycle, 100);
+        let before = m.generation();
+        // A probe that started before the polling gap was detected.
+        let s = m.sample(100 + FRESH_MS + 1);
+        assert_eq!(s.transport.outcome, Outcome::Stale);
+        assert_eq!(s.transport.reason, Reason::LifecycleGap);
+        let at = 100 + FRESH_MS + 2;
+        assert!(!m.apply_system(before, probe(Outcome::Passed, at), at));
+        assert_eq!(m.sample(at).transport.outcome, Outcome::Stale);
+        // A run tagged with the post-gap generation is a real round trip.
+        assert!(m.apply_system(m.generation(), probe(Outcome::Passed, at), at));
+        let s = m.sample(at + 1);
+        assert_eq!(
+            (s.transport.outcome, s.transport.source),
+            (Outcome::Passed, Source::SystemProbe)
+        );
+        // Without a repeat it expires; lifecycle configuration stays withheld.
+        let mut now = at;
+        while now <= at + PROBE_TTL_MS {
+            now += FRESH_MS - 1;
+            m.sample(now);
+        }
+        let s = m.sample(now);
+        assert_eq!(s.transport.outcome, Outcome::Stale);
+        assert!(!s.verified());
+        // A failure-only probe (no round trip) proves nothing either.
+        let mut silent = probe(Outcome::Passed, now);
+        silent.transport_proven_at = None;
+        assert!(m.apply_system(m.generation(), silent, now));
+        assert_eq!(m.sample(now + 1).transport.outcome, Outcome::Stale);
     }
     #[test]
     fn probe_rows_never_carry_free_text_or_addresses() {
