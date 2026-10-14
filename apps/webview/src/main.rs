@@ -6,7 +6,7 @@ type Shared = std::sync::Arc<Mutex<Controller>>;
 fn note_pending(c: &mut Controller, result: Result<Summary, String>) {
     c.status = match result {
         Ok(p) => format!(
-            "Pending import: {}. Confirm in the Profiles section.",
+            "Pending import: {}. Confirm it under Profiles, Add profile.",
             p.name
         ),
         Err(e) => e,
@@ -35,16 +35,62 @@ async fn ui_ready(app: tauri::AppHandle) -> Result<(), String> {
     app.exit(0);
     Ok(())
 }
+/// The shared credential-free view plus which saved profiles the live session
+/// was requested with and actually runs on (a backup after failover).
+#[derive(serde::Serialize)]
+struct WebView {
+    #[serde(flatten)]
+    view: View,
+    /// Index of the profile the session was started with.
+    connected_profile: Option<usize>,
+    /// Index of the profile the service reports as active, when it resolves.
+    active_profile: Option<usize>,
+    /// The service moved to a backup profile (active candidate > 0).
+    on_fallback: bool,
+}
+/// Map the service's candidate index (0 = requested, 1.. = backups in the
+/// order sent) back to a saved profile, as the session was started with
+/// `fallbacks_for`. Edits are refused while connected, so the list is stable.
+fn active_index(
+    vault: &rtrust_store::Vault,
+    requested: usize,
+    active: Option<u8>,
+) -> Option<usize> {
+    let primary = vault.profiles.get(requested)?;
+    match active {
+        None | Some(0) => Some(requested),
+        Some(candidate) => {
+            let backups = vault
+                .connection
+                .fallbacks_for(&vault.profiles, Some(primary));
+            let name = &backups.get(usize::from(candidate) - 1)?.name;
+            vault.profiles.iter().position(|p| &p.name == name)
+        }
+    }
+}
+fn web_view(c: &Controller) -> WebView {
+    let connected_profile = c.session.as_ref().and(c.connected_profile);
+    let reported = c
+        .session
+        .as_ref()
+        .and_then(rtrust_desktop::connection::Session::active_profile);
+    WebView {
+        connected_profile,
+        active_profile: connected_profile.and_then(|i| active_index(&c.vault, i, reported)),
+        on_fallback: connected_profile.is_some() && reported.is_some_and(|i| i > 0),
+        view: c.view(),
+    }
+}
 #[tauri::command]
-async fn view(state: State<'_, Shared>) -> Result<View, String> {
+async fn view(russian: Option<bool>, state: State<'_, Shared>) -> Result<WebView, String> {
     let mut c = state.lock().await;
     if let Some(session) = &c.session {
         let health = session.lifecycle_health().await;
         c.status = health
             .err()
-            .unwrap_or_else(|| session.status_summary(false));
+            .unwrap_or_else(|| session.status_summary(russian.unwrap_or(false)));
     }
-    Ok(c.view())
+    Ok(web_view(&c))
 }
 #[tauri::command]
 async fn diagnostic_cancel(state: State<'_, Shared>) -> Result<(), String> {
@@ -578,4 +624,45 @@ fn main() {
                 });
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn view_model_has_no_session_profile_or_portal_baselines_when_idle() {
+        let c = rtrust_desktop::Controller::smoke();
+        let v = serde_json::to_value(super::web_view(&c)).expect("serializable view");
+        assert!(v["connected_profile"].is_null());
+        assert_eq!(v["connected"], false);
+        assert!(v["observations"].is_null());
+        let tracked = &v["connection"]["sync"]["tracked"];
+        assert!(tracked.as_array().is_some_and(Vec::is_empty));
+        assert!(v["active_profile"].is_null());
+        assert_eq!(v["on_fallback"], false);
+    }
+    fn synthetic(name: &str) -> rtrust_profile::Profile {
+        let mut p =
+            rtrust_profile::Profile::import(include_str!("../../../examples/demo.endpoint.toml"))
+                .expect("demo profile");
+        p.name = name.into();
+        p
+    }
+    #[test]
+    fn failover_maps_service_candidate_to_the_backup_profile() {
+        let mut vault = rtrust_store::Vault {
+            profiles: vec![synthetic("Office"), synthetic("Home"), synthetic("Backup")],
+            ..Default::default()
+        };
+        vault.connection.fallback_profiles = vec!["Office".into(), "Backup".into()];
+        // Requested Office (0): candidate 1 is Backup, as Office is skipped.
+        assert_eq!(super::active_index(&vault, 0, Some(1)), Some(2));
+        assert_eq!(super::active_index(&vault, 0, Some(0)), Some(0));
+        assert_eq!(super::active_index(&vault, 0, None), Some(0));
+        // Requested Home (1): candidates are Office then Backup.
+        assert_eq!(super::active_index(&vault, 1, Some(1)), Some(0));
+        assert_eq!(super::active_index(&vault, 1, Some(2)), Some(2));
+        // A candidate the saved list cannot explain stays unknown.
+        assert_eq!(super::active_index(&vault, 1, Some(3)), None);
+        assert_eq!(super::active_index(&vault, 9, Some(0)), None);
+    }
 }
