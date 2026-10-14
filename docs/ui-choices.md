@@ -51,14 +51,12 @@ Copy follows the system language (Russian or English); messages from the Rust
 core stay English except the observation summary. Not in WebView: QR import,
 drag and drop, rename, editing backup profiles, an action search and hotkeys.
 
-Android keeps the status-colored connection button at the bottom. The home
-screen uses a dark Material theme: a status card with a state dot and the
-default profile, three icon tiles (Add profile, VPN apps with the current
-selection, Settings) and a card list of saved profiles with host and protocol.
-Tapping a profile makes it the default; its trailing menu exports or deletes it.
-Add a profile opens file, paste and QR import; Settings opens server
-synchronization and system Always-on VPN controls. Android labels are localized
-in English and Russian. Profile storage and tunnel behavior are unchanged.
+Android follows UI variant 3 with a slide-to-connect/disconnect control,
+Home/Profiles/Add/Checks/Actions/VPN apps, dark and frosted light themes, and
+foldable split layout. The app checks route/DNS/HTTPS through its own VPN
+network on Android 12+; it has no direct fallback. Green reflects these fresh
+checks, not packet-level proof or enforced lockdown. See
+[Android UI and limitations](android.md).
 
 ## Packaging
 

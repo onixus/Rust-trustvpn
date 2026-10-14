@@ -1,5 +1,12 @@
 # macOS sleep recovery investigation (2026-10-07)
 
+
+Current follow-up (2026-10-14): these are historical observations, not acceptance
+of the latest package. [#62](https://github.com/onixus/Rust-trustvpn/issues/62)
+still needs installed sleep/roam verification after #69's data-plane liveness
+change; [#70](https://github.com/onixus/Rust-trustvpn/issues/70) tracks slow Stop
+and route operations. [Current status](project-status.md).
+
 ## Evidence and limits
 
 The installed helper and GUI both started after the previous package installation.

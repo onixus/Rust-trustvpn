@@ -7,7 +7,7 @@ substituted.
 
 ## Enabling it
 
-Native → Settings → **Automatic recovery** lists every profile except the
+Native → Network → **Automatic recovery** lists every profile except the
 default one. Up to three can be allowed. The order you tick them in is the
 preference order, shown as "backup 1..3". The vault stores profile names
 (`connection.fallback_profiles`); renaming keeps the selection, and a deleted

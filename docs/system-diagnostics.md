@@ -33,7 +33,7 @@ localizes it; machine consumers use the enums.
 A timeout is never reported as blocking. **Check endpoint** asks the authenticated
 service to check only its current pinned profile through a fresh IPC channel.
 The request contains an opaque lease token and generation, never a caller-selected
-profile, hostname or URL. Linux IPC v4 currently supports this for verified
+profile, hostname or URL. The capability was introduced in IPC v4; current control IPC is v6. Linux supports this for verified
 TrustTunnel HTTP/2 numeric endpoints. Up to eight distinct configured endpoint
 addresses share the same total budget: any independently verified successful
 health exchange is sufficient, but a failure is attributable only after every

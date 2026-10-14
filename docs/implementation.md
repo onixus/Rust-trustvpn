@@ -1,18 +1,17 @@
-# Состояние реализации — 12 октября 2026
+# Состояние реализации — 14 октября 2026
 
-Текущая версия workspace: **0.6.1** (desktop update sequence 11, Android
-0.6.1-preview.1 / 60101, iOS 0.6.1 / 60101); изменения — [v0.6.1](releases/v0.6.1.md).
-Ниже описан предыдущий кандидат 0.6.0
-(desktop update sequence 10, Android 0.6.0-preview.2 / 60002, iOS 0.6.0 / 60002).
-Кандидат не собран как exact-source пакет, не подписан, не опубликован и не
-объявлен production-ready; `latest` не продвигается. Состав и статус приёмки:
-[v0.6.0](releases/v0.6.0.md).
+Workspace: **0.6.1** (desktop update sequence 11, Android
+0.6.1-preview.1 / 60101, iOS 0.6.1 / 60101).
+[v0.6.1](releases/v0.6.1.md) опубликован 13 октября из `db8796a`:
+Android APK, Windows installer и macOS packages. Linux assets остаются в
+v0.5.0-rebuild.9, iOS — в v0.5.0. Более новый main `e10cb99` включает #69,
+#72, #73 и #74; эти изменения не входят в опубликованный тег v0.6.1.
+[Сводка issue и доказательств](project-status.md) отделяет реализацию,
+публикацию и приёмку точного установленного пакета.
 
-Публичные preview-наборы:
-- desktop rebuild: [v0.5.0-rebuild.9](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9), опубликован 6 октября 2026;
-- Android/iOS и исходный 0.5.0 package set: [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0).
-
-`main` уже разделён по ответственности: серверная реализация и её deployment удалены из этого репозитория и живут в [onixus/tunnel](https://github.com/onixus/tunnel). Здесь остаются клиенты, shared Rust core, desktop system services, client-side portal integration и контракт API.
+Серверная реализация и deployment принадлежат
+[onixus/tunnel](https://github.com/onixus/tunnel); здесь остаются клиенты,
+shared Rust core, desktop services и client-side portal integration.
 
 ## Реализовано
 
@@ -26,13 +25,14 @@
 | Windows | Native desktop, Wintun/SCM service, WFP fail-closed, full-tunnel acceptance, sleep/wake recovery и signed metadata updater. |
 | Linux | Wayland desktop, TUN host service, nftables/systemd-resolved, Native/WebView/Both Flatpak, signed install/update/rollback flow. |
 | macOS | Native/WebView/Both packaging, LaunchDaemon/utun system path, glass UI toggle, live TrustTunnel acceptance; часть system-VPN/update acceptance ещё открыта. |
-| Android | VpnService, encrypted vault, file/text/QR import, app routing, portal sync, Always-on/lockdown, resizable widget и Quick Settings tile, managed recovery; minSdk 29, targetSdk 36, versionCode 60002, versionName 0.6.0-preview.2 (опубликован в pre-release v0.6.0 с новым ключом подписи). |
+| Android | VpnService, encrypted vault, file/text/QR import, app routing, portal sync, Always-on/lockdown, resizable widget и Quick Settings tile, managed recovery; minSdk 29, targetSdk 36, versionCode 60101, versionName 0.6.1-preview.1; APK опубликован в v0.6.1. В main после тега добавлены UI вариант 3 и VPN-bound checks (#73). |
 | iOS | Preview на Swift/Network Extension: import/export, QR, portal sync, On Demand, widget; device archive требует Apple signing. |
 | Routing | Desktop IPv4 TUN include/exclude, LAN bypass, profile routing и server-assigned route groups. Route groups не используются Android/iOS. |
+| Linux TUI | `apps/tui` поверх общего desktop Controller: профили, connect/disconnect, SOCKS/TUN/Full настройки; portal/export/system diagnostics остаются в GUI. Installed TUN/full acceptance через TUI — NOT RUN. |
 | Proxy | SOCKS5 и HTTP-запросы на mixed desktop proxy port. |
-| Обновления | Опубликованный desktop sequence 9 исправляет ошибку идентичности старой 0.5.0 сборки; на Windows пройден реальный 7→9 update, forced unhealthy install, rollback на 7 и повторный update на 9. Исходники компилируются как sequence 10 (кандидат 0.6.0, не опубликован). Для автоотката 10→9 служба Windows допускает от апдейтера sequence 9 (control IPC v1) только `PrepareUpdate` и отвечает в форме v1; покрыто unit-тестами; 2026-10-13 на Windows-стенде пройден 9→10 с принудительным откатом и повтором на манифестах с лабораторной подписью (продакшен-подпись sequence 10 и Authenticode не проверялись) (см. [v0.6.0](releases/v0.6.0.md#compatibility)). |
+| Обновления | Опубликованный desktop sequence 9 исправляет ошибку идентичности старой 0.5.0 сборки; на Windows пройден реальный 7→9 update, forced unhealthy install, rollback на 7 и повторный update на 9. Текущие исходники — sequence 11; v0.6.0 и v0.6.1 опубликованы. Наличие release assets не подтверждает продвижение update-channel latest или подписи точного пакета. Для автоотката 10→9 служба Windows допускает от апдейтера sequence 9 (control IPC v1) только `PrepareUpdate` и отвечает в форме v1; покрыто unit-тестами; 2026-10-13 на Windows-стенде пройден 9→10 с принудительным откатом и повтором на манифестах с лабораторной подписью (продакшен-подпись sequence 10 и Authenticode не проверялись) (см. [v0.6.0](releases/v0.6.0.md#compatibility)). |
 | Наблюдения и диагностика | Типизированные observations с generations, события сети/пробуждения, route explain, system-path diagnostics с verdict/actions и автоматическими проверками; control IPC v6. |
-| Recovery | Opt-in восстановление через разрешённые резервные профили (обычная сессия на desktop; Always-on — только Linux/Windows), guard не снимается; macOS/mobile Always-on recovery не поддерживается. |
+| Recovery | Opt-in восстановление через разрешённые резервные профили (обычная сессия на desktop; Always-on — только Linux/Windows), guard не снимается; macOS/iOS Always-on fallback recovery не поддерживается. Android Always-on reconnect на текущей сети добавлен в #63; переключение на резервный профиль этим не подтверждается. |
 
 ## Проверки, относящиеся к 0.5.0 rebuild.9
 
@@ -46,8 +46,9 @@
 
 ## Ограничения кандидата 0.6.0
 
-- Ни одна installed-package/device проверка для 0.6.0 не выполнялась; статусы
-  NOT RUN/BLOCKED с владельцами перечислены в [v0.6.0](releases/v0.6.0.md#acceptance-status).
+- Исходная матрица кандидата и последующие точечные результаты перечислены в
+  [v0.6.0](releases/v0.6.0.md#acceptance-status); полного закрытого gate для
+  точных пакетов v0.6.1 или текущего main эта актуализация не устанавливает.
 - Ни один runner не делает независимый packet capture физического интерфейса:
   отсутствие утечек подтверждено только активными пробами и атрибуцией в
   контейнере/эмуляторе.
