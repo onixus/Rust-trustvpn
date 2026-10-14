@@ -46,6 +46,8 @@ class Device:
             self.packages.add(name)
             if self.failure == 'install-' + str(self.install_count):
                 raise subprocess.CalledProcessError(1, command)
+            if self.failure == 'install-timeout-' + str(self.install_count):
+                raise subprocess.TimeoutExpired(command, 180)
             output = 'Success'
         elif cmd[:3] == ['shell', 'appops', 'set'] and self.failure == 'late-vpn':
             self.active = True
@@ -93,6 +95,13 @@ class HarnessTests(unittest.TestCase):
             self.invoke(device)
         self.assertEqual(device.packages, {PACKAGE})
         self.assertEqual(len(device.mutations()), 1)  # failed install only
+
+    def test_timed_out_first_install_does_not_grant_cleanup_ownership(self):
+        device = Device(failure='install-timeout-1')
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.invoke(device)
+        self.assertEqual(device.packages, {PACKAGE})
+        self.assertEqual(len(device.mutations()), 1)
 
     def test_failed_second_install_cleans_only_confirmed_first(self):
         device = Device(failure='install-2')

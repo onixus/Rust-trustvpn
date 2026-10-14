@@ -26,6 +26,7 @@ pipeline {
         '''
         sh 'python3 ci/run.py tool-extraction python3 -m unittest discover -s ci -p test_tools.py'
         sh 'python3 ci/run.py windows-recovery python3 -m unittest discover -s ci -p test_windows_recovery.py'
+        sh 'python3 ci/run.py android-lifecycle-harness python3 -m unittest discover -s ci -p test_android_lifecycle_e2e.py'
         sh 'python3 ci/run.py source-provenance python3 -m unittest discover -s ci -p test_source_provenance.py'
         sh 'python3 ci/run.py release-acceptance python3 -m unittest discover -s ci -p test_release_acceptance.py'
         sh 'python3 ci/run.py release-publisher python3 -m unittest discover -s ci -p test_publish_signed_release.py'
