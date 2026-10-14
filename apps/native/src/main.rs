@@ -210,6 +210,17 @@ enum Page {
     #[cfg(target_os = "windows")]
     Updates,
 }
+impl Page {
+    /// Sections whose controls must stay usable during a long operation:
+    /// always-on disable/recovery, backups and updates live outside Settings.
+    fn reachable_while_busy(self) -> bool {
+        #[cfg(target_os = "windows")]
+        if self == Page::Updates {
+            return true;
+        }
+        matches!(self, Page::Settings | Page::Network)
+    }
+}
 struct App {
     #[cfg(target_os = "macos")]
     glass_enabled: bool,
@@ -967,6 +978,7 @@ impl App {
             Message::Recovered(result) => {
                 if result.is_ok() {
                     self.pending_owner = None;
+                    self.last_error = None;
                 }
                 return self.update(Message::Done(result));
             }
@@ -1259,7 +1271,7 @@ impl App {
                     }
                 }
             }
-            Message::Navigate(page) if !self.busy || page == Page::Settings => {
+            Message::Navigate(page) if !self.busy || page.reachable_while_busy() => {
                 self.page = page;
                 self.confirm_delete = false;
                 self.confirm_replace = false;
@@ -1332,6 +1344,10 @@ impl App {
                 if i < self.profiles.len() {
                     self.selected = i;
                     self.reset_editor();
+                    // The red state belongs to the previous attempt, not the new choice.
+                    if !self.connecting && self.session.is_none() {
+                        self.last_error = None;
+                    }
                 }
             }
             Message::Format(format) => {

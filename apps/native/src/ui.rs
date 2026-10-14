@@ -4,7 +4,7 @@
 use super::*;
 use iced::widget::{Space, column};
 use rtrust_control::observations::{
-    FRESH_MS, Observation, Outcome, Reason as ObservationReason, Snapshot,
+    FRESH_MS, Mode as ObservationMode, Observation, Outcome, Reason as ObservationReason, Snapshot,
 };
 
 // ---------------------------------------------------------------- language
@@ -104,7 +104,7 @@ fn theme_path() -> Option<std::path::PathBuf> {
         .map(|dirs| dirs.config_dir().join("appearance"))
 }
 pub(super) fn load_theme() -> ThemeChoice {
-    if std::env::args().any(|arg| arg.starts_with("--ci-")) {
+    if cfg!(test) || std::env::args().any(|arg| arg.starts_with("--ci-")) {
         return ThemeChoice::System;
     }
     theme_path()
@@ -282,11 +282,17 @@ pub(super) enum Level {
     Verified,
     Warning,
     Error,
+    /// Always-on is enabled but the service could not be reached: nothing is known.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "windows")),
+        expect(dead_code, reason = "always-on runs only on Linux and Windows")
+    )]
+    Unknown,
 }
 impl Level {
     pub(super) fn hue(self) -> Hue {
         match self {
-            Self::Off => Hue::Grey,
+            Self::Off | Self::Unknown => Hue::Grey,
             Self::Connecting | Self::Disconnecting | Self::Running => Hue::Blue,
             Self::Verified => Hue::Green,
             Self::Warning => Hue::Yellow,
@@ -305,6 +311,7 @@ impl Level {
             Self::Verified => t("Туннель проверен", "Tunnel verified"),
             Self::Warning => t("Нужно внимание", "Needs attention"),
             Self::Error => t("Нет подключения", "Not connected"),
+            Self::Unknown => t("Нет связи со службой", "No contact with the service"),
         }
     }
     fn headline(self) -> (&'static str, &'static str) {
@@ -316,6 +323,7 @@ impl Level {
             Self::Verified => (t("Туннель", "Tunnel"), t("проверен", "verified")),
             Self::Warning => (t("Нужно", "Needs"), t("внимание", "attention")),
             Self::Error => (t("Нет", "Not"), t("подключения", "connected")),
+            Self::Unknown => (t("Состояние", "State"), t("неизвестно", "unknown")),
         }
     }
 }
@@ -366,8 +374,32 @@ impl Check {
             Self::Connectivity => t("один адрес через VPN-сеть", "one address via the VPN"),
         }
     }
-    /// What a passed result of this check means.
-    fn meaning(self) -> &'static str {
+    /// What a passed result of this check means; split TUN covers only the
+    /// selected networks, so it never reads as whole-computer protection.
+    fn meaning(self, mode: ObservationMode) -> &'static str {
+        if mode == ObservationMode::Split {
+            match self {
+                Self::Route => {
+                    return t(
+                        "Выбранные сети направлены в VPN; остальной трафик идёт вне VPN.",
+                        "Selected networks are routed into the VPN; other traffic bypasses it.",
+                    );
+                }
+                Self::Dns => {
+                    return t(
+                        "Результат относится только к выбранным сетям; системный DNS не меняется.",
+                        "Applies only to the selected networks; the system DNS is unchanged.",
+                    );
+                }
+                Self::Guard => {
+                    return t(
+                        "Защита относится только к выбранным сетям, не ко всему компьютеру.",
+                        "Protection covers only the selected networks, not the whole computer.",
+                    );
+                }
+                _ => {}
+            }
+        }
         match self {
             Self::Transport => t(
                 "Соединение с сервером профиля установлено.",
@@ -407,16 +439,95 @@ pub(super) fn normalized(observation: &Observation, now: u64) -> Outcome {
     }
 }
 /// Level of a live tunnel from its snapshot: any failure is a warning, only
-/// every check passed and fresh is verified, everything else is running.
+/// every check passed and fresh in whole-computer mode is verified, everything
+/// else is running. Split TUN and proxy never turn green.
 pub(super) fn tunnel_level(snapshot: &Snapshot, now: u64) -> Level {
     let outcomes = CHECKS.map(|check| normalized(check.of(snapshot), now));
     if outcomes.contains(&Outcome::Failed) {
         Level::Warning
-    } else if outcomes.iter().all(|o| *o == Outcome::Passed) {
+    } else if snapshot.transport.mode == ObservationMode::Full
+        && outcomes.iter().all(|o| *o == Outcome::Passed)
+    {
         Level::Verified
     } else {
         Level::Running
     }
+}
+/// Name of the profile actually carrying traffic: after an opt-in failover the
+/// service reports the backup's index among the candidates sent with Start.
+pub(super) fn live_name(
+    active: Option<u8>,
+    candidates: &[String],
+    requested: &str,
+) -> (String, bool) {
+    match active.and_then(|i| candidates.get(i as usize).map(|name| (i, name))) {
+        Some((index, name)) => (name.clone(), index > 0),
+        None => (requested.to_owned(), false),
+    }
+}
+/// Description of a running tunnel built from the actual outcomes.
+pub(super) fn running_text(snapshot: &Snapshot, now: u64, proxy_port: &str) -> String {
+    let ru = ru();
+    if snapshot.transport.mode == ObservationMode::Proxy {
+        return if ru {
+            format!(
+                "SOCKS5-прокси запущен на 127.0.0.1:{proxy_port}. Через туннель идут только приложения, настроенные на этот прокси; остальной трафик и DNS системы идут как обычно."
+            )
+        } else {
+            format!(
+                "The SOCKS5 proxy runs on 127.0.0.1:{proxy_port}. Only apps configured to use it go through the tunnel; other traffic and system DNS are unchanged."
+            )
+        };
+    }
+    let mut parts = vec![
+        match normalized(&snapshot.transport, now) {
+            Outcome::Passed | Outcome::Configured => {
+                t("Транспорт запущен.", "The transport is up.")
+            }
+            Outcome::Stale => t(
+                "Результат транспорта устарел.",
+                "The transport result is stale.",
+            ),
+            _ => t(
+                "Транспорт не подтверждён.",
+                "The transport is not confirmed.",
+            ),
+        }
+        .to_owned(),
+    ];
+    if snapshot.transport.mode == ObservationMode::Split {
+        parts.push(
+            t(
+                "Через VPN идут только выбранные сети; остальной трафик и системный DNS — вне VPN.",
+                "Only the selected networks use the VPN; other traffic and system DNS bypass it.",
+            )
+            .to_owned(),
+        );
+    }
+    let names = |want: &dyn Fn(Outcome) -> bool| {
+        CHECKS[1..]
+            .iter()
+            .filter(|c| want(normalized(c.of(snapshot), now)))
+            .map(|c| c.name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    for (label, list) in [
+        (t("Пройдено", "Passed"), names(&|o| o == Outcome::Passed)),
+        (
+            t("Не проверяется в этом режиме", "Not checked in this mode"),
+            names(&|o| o == Outcome::Unsupported),
+        ),
+        (
+            t("Пока без результата", "No result yet"),
+            names(&|o| matches!(o, Outcome::Unknown | Outcome::Stale | Outcome::Configured)),
+        ),
+    ] {
+        if !list.is_empty() {
+            parts.push(format!("{label}: {list}."));
+        }
+    }
+    parts.join(" ")
 }
 /// Display of one check row: label, hue (None = empty ring) and muted flag.
 pub(super) fn row_value(outcome: Outcome) -> (&'static str, Option<Hue>) {
@@ -776,6 +887,9 @@ impl App {
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if self.always_on.enabled {
+            if self.always_on.contact_lost {
+                return (Level::Unknown, None);
+            }
             return match &self.always_on.service {
                 Some((rtrust_control::State::Connected, snapshot)) => {
                     (tunnel_level(snapshot, now), Some(snapshot.clone()))
@@ -802,16 +916,41 @@ impl App {
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         false
     }
+    /// The profile carrying (or attempting) the connection, and whether it is a backup.
+    pub(super) fn live_profile(&self) -> Option<(String, bool)> {
+        if self.connecting && self.session.is_none() {
+            return Some((self.connection_name.clone(), false));
+        }
+        let session = self.session.as_ref()?;
+        Some(live_name(
+            session.active_profile(),
+            &self.connection_candidates,
+            &self.connection_name,
+        ))
+    }
+    /// Whether the endpoint relays IPv6 (otherwise full mode blocks IPv6 locally).
+    fn full_ipv6(&self) -> bool {
+        if self.connecting || self.session.is_some() {
+            self.connection_ipv6
+        } else {
+            self.current().is_some_and(|p| p.endpoint.has_ipv6)
+        }
+    }
+    /// Whether the connect/disconnect pill is shown: always on Home, and during a
+    /// store conflict so a live session can still be stopped.
+    pub(super) fn shows_connect_control(&self) -> bool {
+        self.page == Page::Home || self.store_conflict.is_some()
+    }
     /// The profile the big control acts on: the live one, else the selected one.
     fn subject(&self) -> Option<(String, String)> {
-        if self.connecting || self.session.is_some() {
+        if let Some((name, _)) = self.live_profile() {
             let host = self
                 .profiles
                 .iter()
-                .find(|p| p.name == self.connection_name)
+                .find(|p| p.name == name)
                 .map(|p| p.endpoint.hostname.clone())
                 .unwrap_or_default();
-            return Some((self.connection_name.clone(), host));
+            return Some((name, host));
         }
         if self.always_on_active() {
             return self
@@ -862,10 +1001,14 @@ impl App {
                             .unwrap_or_default();
                         match normalized(o, now) {
                             Outcome::Unknown => reason_text(o.reason).to_owned(),
-                            _ => format!("{} {}{age}", check.meaning(), reason_text(o.reason)),
+                            _ => format!(
+                                "{} {}{age}",
+                                check.meaning(s.transport.mode),
+                                reason_text(o.reason)
+                            ),
                         }
                     }
-                    None => check.meaning().to_owned(),
+                    None => check.meaning(ObservationMode::Full).to_owned(),
                 };
                 (check, value, hue, detail)
             })
@@ -1071,7 +1214,7 @@ impl App {
         ]
         .spacing(20)
         .padding([24, 36]);
-        if self.page == Page::Home && self.store_conflict.is_none() {
+        if self.shows_connect_control() {
             main = main.push(self.connect_pill(tk, level));
         }
         main = main.push(
@@ -1104,19 +1247,27 @@ impl App {
             Level::Connecting => format!("{name} · {}", t("ПОДКЛЮЧЕНИЕ", "CONNECTING")),
             Level::Disconnecting => format!("{name} · {}", t("ОТКЛЮЧЕНИЕ", "DISCONNECTING")),
             Level::Error => format!("{name} · {}", t("ОШИБКА", "ERROR")),
+            Level::Unknown => level.short().to_uppercase(),
             _ => {
-                let transport = self
-                    .profiles
-                    .iter()
-                    .find(|p| self.always_on_active() || p.name == self.connection_name)
-                    .map(|p| protocol_label(p).to_uppercase())
-                    .unwrap_or_default();
+                let live = self.live_profile();
+                let transport = match &live {
+                    Some((live, _)) => self.profiles.iter().find(|p| &p.name == live),
+                    None if self.always_on_active() => self.profiles.first(),
+                    None => None,
+                }
+                .map(|p| protocol_label(p).to_uppercase())
+                .unwrap_or_default();
+                let backup = if live.is_some_and(|(_, backup)| backup) {
+                    format!(" · {}", t("РЕЗЕРВ", "BACKUP"))
+                } else {
+                    String::new()
+                };
                 if self.session.as_ref().is_some_and(|s| !s.is_tun()) {
                     format!("{name} · SOCKS5")
                 } else if transport.is_empty() {
-                    name
+                    format!("{name}{backup}")
                 } else {
-                    format!("{name} · {transport}")
+                    format!("{name} · {transport}{backup}")
                 }
             }
         };
@@ -1141,15 +1292,30 @@ impl App {
     // ------------------------------------------------------------ home
 
     fn description(&self, level: Level, snapshot: Option<&Snapshot>) -> String {
+        let text = self.state_description(level, snapshot);
+        match self.live_profile() {
+            Some((name, true))
+                if matches!(level, Level::Running | Level::Verified | Level::Warning) =>
+            {
+                if ru() {
+                    format!("{text} Сейчас используется резервный профиль «{name}».")
+                } else {
+                    format!("{text} The backup profile “{name}” is in use.")
+                }
+            }
+            _ => text,
+        }
+    }
+    fn state_description(&self, level: Level, snapshot: Option<&Snapshot>) -> String {
         let ru = ru();
         let subject = self.subject();
         match level {
             Level::Off => match &subject {
                 Some((name, _)) if ru => format!(
-                    "Трафик идёт напрямую, без туннеля. Подключите профиль «{name}»."
+                    "Туннель не подключён — трафик не защищён VPN. Подключите профиль «{name}»."
                 ),
                 Some((name, _)) => format!(
-                    "Traffic goes directly, without the tunnel. Connect profile “{name}”."
+                    "The tunnel is not connected — traffic is not protected by the VPN. Connect profile “{name}”."
                 ),
                 None => t(
                     "Добавьте профиль, чтобы подключиться.",
@@ -1175,9 +1341,17 @@ impl App {
                 "Stopping the tunnel and restoring routes.",
             )
             .into(),
-            Level::Running => t(
-                "Транспорт запущен. Маршрут, DNS и защита пока не проверены — это не значит, что они не работают.",
-                "The transport is up. Route, DNS and guard are not verified yet — that does not mean they are broken.",
+            Level::Running => match snapshot {
+                Some(snapshot) => running_text(
+                    snapshot,
+                    rtrust_control::observations::now_ms(),
+                    &self.proxy_port,
+                ),
+                None => t("Транспорт запущен.", "The transport is up.").into(),
+            },
+            Level::Unknown => t(
+                "Постоянный VPN включён, но связь со службой потеряна; состояние туннеля и защиты не подтверждено.",
+                "Always-on is enabled, but contact with the service was lost; tunnel and protection state are not confirmed.",
             )
             .into(),
             Level::Verified => t(
@@ -1285,6 +1459,7 @@ impl App {
                 tk,
                 label,
                 profile,
+                true,
                 Message::Navigate(Page::Profiles),
             ));
         }
@@ -1297,6 +1472,7 @@ impl App {
                 tk,
                 t("Резерв", "Backup"),
                 backup,
+                false,
                 Message::Navigate(Page::Network),
             ));
         }
@@ -1318,7 +1494,12 @@ impl App {
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             Mode::Full => (
                 t("Весь компьютер", "Whole computer").to_owned(),
-                t("IPv4/IPv6 + DNS", "IPv4/IPv6 + DNS").to_owned(),
+                if self.full_ipv6() {
+                    "IPv4/IPv6 + DNS"
+                } else {
+                    t("IPv4 + DNS, IPv6 заблокирован", "IPv4 + DNS, IPv6 blocked")
+                }
+                .to_owned(),
             ),
         };
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -1443,7 +1624,7 @@ impl App {
                 Some(Message::ToggleConnection),
             ),
             Level::Disconnecting => (t("Отключение…", "Disconnecting…").into(), None),
-            Level::Running | Level::Verified | Level::Warning => (
+            Level::Running | Level::Verified | Level::Warning | Level::Unknown => (
                 t("Отключить", "Disconnect").into(),
                 Some(Message::ToggleConnection),
             ),
@@ -1523,6 +1704,7 @@ impl App {
         let query = self.profile_query.trim().to_lowercase();
         let (level, _) = self.level();
         let fallbacks = &self.saved_connection.fallback_profiles;
+        let live_name = self.live_profile().map(|(name, _)| name);
         let mut list = column![].spacing(2);
         let mut shown = 0;
         for (i, p) in self.profiles.iter().enumerate() {
@@ -1536,8 +1718,7 @@ impl App {
             }
             shown += 1;
             let (code, fg, bg) = badge(p, tk);
-            let live =
-                (self.connecting || self.session.is_some()) && self.connection_name == p.name;
+            let live = live_name.as_deref() == Some(p.name.as_str());
             let (status, status_color, status_dot) = if live {
                 (
                     level.short().to_lowercase(),
@@ -1581,14 +1762,9 @@ impl App {
                             .height(44)
                             .align_x(iced::Alignment::Center)
                             .align_y(iced::Alignment::Center),
-                        column![
-                            name_line,
-                            text(format!("{protocol} · {}", p.endpoint.hostname))
-                                .size(12)
-                                .color(tk.muted)
-                        ]
-                        .spacing(2)
-                        .width(Length::Fill),
+                        column![name_line, text(protocol.clone()).size(12).color(tk.muted)]
+                            .spacing(2)
+                            .width(Length::Fill),
                         row![
                             dot(Some(status_dot), status_dot, 7.0),
                             text(status).size(12).font(BOLD).color(status_color)
@@ -2338,8 +2514,14 @@ fn profile_card<'a>(
     tk: Tokens,
     label: &'static str,
     p: &Profile,
+    show_host: bool,
     message: Message,
 ) -> Element<'a, Message> {
+    let detail = if show_host {
+        format!("{} · {}", protocol_label(p), p.endpoint.hostname)
+    } else {
+        protocol_label(p)
+    };
     let (code, fg, bg) = badge(p, tk);
     buttons::Button::new(
         row![
@@ -2351,9 +2533,7 @@ fn profile_card<'a>(
             column![
                 caps(tk, label),
                 text(p.name.clone()).size(16).font(BOLD),
-                text(format!("{} · {}", protocol_label(p), p.endpoint.hostname))
-                    .size(12)
-                    .color(tk.muted)
+                text(detail).size(12).color(tk.muted)
             ]
             .spacing(2)
             .width(Length::Fill)
@@ -2491,6 +2671,114 @@ mod tests {
         app.disconnecting = true;
         assert_eq!(app.level().0, Level::Disconnecting);
         drop((task, retry));
+    }
+    #[test]
+    fn split_tunnel_and_proxy_never_turn_green() {
+        let now = 1_000_000;
+        let mut split = all_passed(now);
+        split.transport.mode = ObsMode::Split;
+        assert_eq!(tunnel_level(&split, now), Level::Running);
+        assert_ne!(
+            Check::Guard.meaning(ObsMode::Split),
+            Check::Guard.meaning(ObsMode::Full)
+        );
+        assert_ne!(
+            Check::Dns.meaning(ObsMode::Split),
+            Check::Dns.meaning(ObsMode::Full)
+        );
+        let mut proxy = all_passed(now);
+        proxy.transport.mode = ObsMode::Proxy;
+        assert_eq!(tunnel_level(&proxy, now), Level::Running);
+    }
+    #[test]
+    fn running_text_follows_outcomes_and_explains_socks_scope() {
+        let now = rtrust_control::observations::now_ms();
+        let proxy = Monitor::new(ObsMode::Proxy, Source::ProxyLifecycle, now).sample(now);
+        let socks = running_text(&proxy, now, "1080");
+        assert!(socks.contains("SOCKS5") && socks.contains("127.0.0.1:1080"));
+        // Proxy mode lists no route/guard results and claims nothing about them.
+        assert!(!socks.contains(t("Пока без результата", "No result yet")));
+        for check in [Check::Route, Check::Guard, Check::Connectivity] {
+            assert!(!socks.contains(check.name()), "{check:?} in {socks}");
+        }
+        let full = Monitor::new(ObsMode::Full, Source::ServiceLifecycle, now).sample(now);
+        let text = running_text(&full, now, "1080");
+        assert!(!text.contains("SOCKS5"));
+        for check in [Check::Route, Check::Dns, Check::Guard, Check::Connectivity] {
+            assert!(text.contains(check.name()), "{check:?} missing in {text}");
+        }
+        let mut partial = full.clone();
+        partial.dns = passed(now);
+        partial.guard.outcome = Outcome::Unsupported;
+        let text = running_text(&partial, now, "1080");
+        let pending = text
+            .split(&format!("{}:", t("Пока без результата", "No result yet")))
+            .nth(1)
+            .unwrap();
+        assert!(!pending.contains(Check::Dns.name()) && !pending.contains(Check::Guard.name()));
+    }
+    #[test]
+    fn failover_shows_the_backup_that_carries_traffic() {
+        let candidates = vec!["office".to_owned(), "reserve".to_owned()];
+        assert_eq!(
+            live_name(Some(1), &candidates, "office"),
+            ("reserve".to_owned(), true)
+        );
+        assert_eq!(
+            live_name(Some(0), &candidates, "office"),
+            ("office".to_owned(), false)
+        );
+        // Unknown or out-of-range indices keep the requested profile.
+        assert_eq!(
+            live_name(None, &candidates, "office"),
+            ("office".to_owned(), false)
+        );
+        assert_eq!(
+            live_name(Some(7), &candidates, "office"),
+            ("office".to_owned(), false)
+        );
+    }
+    #[test]
+    fn connect_control_stays_available_during_a_store_conflict() {
+        let mut app = crate::tests::app();
+        app.page = Page::Profiles;
+        assert!(!app.shows_connect_control());
+        app.store_conflict = Some((
+            rtrust_store::Vault {
+                profiles: app.profiles.clone(),
+                connection: Default::default(),
+            },
+            None,
+        ));
+        assert!(app.shows_connect_control());
+        // A live attempt can still be cancelled from the conflict view.
+        let task = app.update(Message::ToggleConnection);
+        assert!(app.connecting);
+        let _ = app.view();
+        let _ = app.update(Message::ToggleConnection);
+        assert!(!app.connecting);
+        drop(task);
+    }
+    #[test]
+    fn recovery_or_a_new_selection_clears_the_red_state() {
+        let mut app = crate::tests::app();
+        app.last_error = Some("cleanup failed".into());
+        let _ = app.update(Message::Recovered(Ok("done".into())));
+        assert!(app.last_error.is_none());
+        app.last_error = Some("offline".into());
+        let _ = app.update(Message::Recovered(Err("refused".into())));
+        assert!(app.last_error.is_some());
+        let _ = app.update(Message::Select(1));
+        assert_eq!(app.level().0, Level::Off);
+    }
+    #[test]
+    fn network_and_settings_stay_reachable_while_busy() {
+        let mut app = crate::tests::app();
+        app.busy = true;
+        let _ = app.update(Message::Navigate(Page::Network));
+        assert!(app.page == Page::Network);
+        let _ = app.update(Message::Navigate(Page::Profiles));
+        assert!(app.page == Page::Network);
     }
     #[test]
     fn language_detection_defaults_to_russian() {

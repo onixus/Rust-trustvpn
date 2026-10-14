@@ -22,8 +22,10 @@ follow the system unless chosen in Settings (stored outside the vault). Home
 shows the state chip, a two-line headline, the five service observations
 (transport, route, DNS, guard, connectivity), the selected and backup profiles,
 mode/DNS/sync/auto-connect tiles and a large connect pill. Green means every
-observation passed and is fresh; any failure is yellow; otherwise a live tunnel
-is blue, and a check without a result reads "no data". Network holds mode,
+observation passed and is fresh in whole-computer mode (split TUN and SOCKS stay
+blue); any failure is yellow; otherwise a live tunnel is blue, and a check
+without a result reads "no data". After failover the backup carrying traffic
+is named. Lost contact with an Always-on service shows an unknown state. Network holds mode,
 routes, backups and Always-on; Settings holds appearance, startup and storage
 recovery. Real blur exists only with the macOS glass material. The shell,
 Home, Profiles, Add profile and Checks follow the system language (Russian or

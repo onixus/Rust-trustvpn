@@ -14,6 +14,8 @@ pub(super) struct State {
     enable_task: Option<iced::task::Handle>,
     /// Last reported service state and observations; presentation only.
     pub(super) service: crate::ui::ServiceState,
+    /// The last status request failed: the previous state is no longer evidence.
+    pub(super) contact_lost: bool,
 }
 #[derive(Clone)]
 pub(super) enum Action {
@@ -82,6 +84,8 @@ impl App {
                     match result {
                         Ok(r) => self.always_observed(r),
                         Err(_) => {
+                            self.always_on.service = None;
+                            self.always_on.contact_lost = true;
                             self.always_on.status =
                                 "Связь со службой потеряна; состояние защиты не подтверждено".into()
                         }
@@ -100,7 +104,11 @@ impl App {
                 self.always_on.recovery_confirm = false;
                 match result {
                     Ok(r) => self.always_observed(r),
-                    Err(e) => self.always_on.status = e,
+                    Err(e) => {
+                        self.always_on.service = None;
+                        self.always_on.contact_lost = true;
+                        self.always_on.status = e;
+                    }
                 }
                 self.always_on.next_poll = None;
                 return Task::none();
@@ -173,6 +181,7 @@ impl App {
         }
     }
     fn always_observed(&mut self, response: rtrust_control::Response) {
+        self.always_on.contact_lost = false;
         if let Some(enabled) = response.always_on {
             self.always_on.enabled = enabled;
         } else {
@@ -300,6 +309,25 @@ mod tests {
         assert!(app.busy);
         assert!(!app.connecting);
         assert!(app.session.is_none());
+    }
+    #[test]
+    fn lost_service_contact_drops_the_last_connected_state() {
+        let mut app = crate::tests::app();
+        let mut connected =
+            rtrust_control::Response::new(rtrust_control::State::Connected, "connected");
+        connected.always_on = Some(true);
+        let generation = app.always_on.generation;
+        let _ = app.always_update(Action::Observed(generation, Ok(connected.clone())));
+        assert!(app.always_on.enabled && app.always_on.service.is_some());
+        assert_ne!(app.level().0, crate::ui::Level::Unknown);
+        let _ = app.always_update(Action::Observed(generation, Err("IPC lost".into())));
+        assert!(app.always_on.service.is_none());
+        assert_eq!(app.level(), (crate::ui::Level::Unknown, None));
+        // A failed command reply is also no longer evidence of the old state.
+        let _ = app.always_update(Action::Observed(generation, Ok(connected)));
+        assert_ne!(app.level().0, crate::ui::Level::Unknown);
+        let _ = app.always_update(Action::Done(generation, Err("refused".into())));
+        assert_eq!(app.level().0, crate::ui::Level::Unknown);
     }
     fn profile(name: &str, address: &str) -> Profile {
         Profile::import(&format!("name='{name}'\nhostname='vpn.example'\naddresses=['{address}:443']\nusername='u'\npassword='p'\n")).unwrap()
