@@ -136,7 +136,7 @@ fn main() -> iced::Result {
         App::update,
         App::view_window,
     )
-    .title("R-TrustTunnel · Native Preview")
+    .title("R-TrustTunnel")
     .subscription(App::subscription)
     .theme(|app: &App, _| ui::theme(&app.tokens()))
     .style(|_app: &App, theme: &Theme| {
@@ -145,7 +145,12 @@ fn main() -> iced::Result {
         let background = {
             let mut background = background;
             if _app.glass_enabled && glass::transparency_allowed() {
-                background.a = 0.68;
+                // iced blends quads premultiplied but clears with this colour
+                // as given; a straight colour here washes every translucent
+                // card and colour field above it out to white.
+                let a = 0.68;
+                background =
+                    iced::Color::from_rgba(background.r * a, background.g * a, background.b * a, a);
             }
             background
         };

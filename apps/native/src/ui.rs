@@ -140,32 +140,12 @@ const fn rgb(hex: u32) -> Color {
 const fn rgba(hex: u32, alpha: f32) -> Color {
     Color::from_rgba8((hex >> 16) as u8, (hex >> 8) as u8, hex as u8, alpha)
 }
-/// `fg` at `alpha` over an opaque `base`, as one opaque colour (see `frost`).
+/// `fg` at `alpha` over an opaque `base`, as one opaque colour.
 fn over(fg: Color, alpha: f32, base: Color) -> Color {
     let mix = |f: f32, b: f32| f * alpha + b * (1.0 - alpha);
     Color::from_rgb(mix(fg.r, base.r), mix(fg.g, base.g), mix(fg.b, base.b))
 }
 const LIGHT_BG: u32 = 0xE8EDF5;
-/// Frosted fill of the light theme. Only macOS (wgpu, real glass) keeps the
-/// alpha: tiny-skia's partial redraws re-blend translucent quads over the
-/// previous frame, so elsewhere the colour is pre-composited over the background.
-#[cfg(target_os = "macos")]
-const fn frost(hex: u32, alpha: f32) -> Color {
-    rgba(hex, alpha)
-}
-#[cfg(not(target_os = "macos"))]
-const fn frost(hex: u32, alpha: f32) -> Color {
-    const fn mix(fg: u32, bg: u32, shift: u32, alpha: f32) -> u8 {
-        let fg = ((fg >> shift) & 0xFF) as f32;
-        let bg = ((bg >> shift) & 0xFF) as f32;
-        (fg * alpha + bg * (1.0 - alpha) + 0.5) as u8
-    }
-    Color::from_rgb8(
-        mix(hex, LIGHT_BG, 16, alpha),
-        mix(hex, LIGHT_BG, 8, alpha),
-        mix(hex, LIGHT_BG, 0, alpha),
-    )
-}
 /// Colours of Android variant 3 (Palette.java); light is the "frosted" look.
 #[derive(Clone, Copy)]
 pub(super) struct Tokens {
@@ -225,18 +205,16 @@ pub(super) const LIGHT_TOKENS: Tokens = Tokens {
     bg: rgb(LIGHT_BG),
     text: rgb(0x0E1726),
     muted: rgb(0x4A566B),
-    card: frost(0xFFFFFF, 0.55),
-    #[cfg(target_os = "macos")]
+    // Translucent everywhere so the colour fields show through, as in the
+    // mockups; without macOS glass the fields are simply not blurred again.
+    card: rgba(0xFFFFFF, 0.55),
     stroke: rgba(0xFFFFFF, 0.85),
-    // Without glass and shadows the card edge itself has to carry the outline.
-    #[cfg(not(target_os = "macos"))]
-    stroke: rgb(0xD3DAE5),
-    chip: frost(0xFFFFFF, 0.6),
-    field: frost(0xFFFFFF, 0.8),
-    rule: frost(0x0E1726, 0.08),
+    chip: rgba(0xFFFFFF, 0.6),
+    field: rgba(0xFFFFFF, 0.8),
+    rule: rgba(0x0E1726, 0.08),
     empty: rgb(0x8C97A8),
-    side: frost(0xFFFFFF, 0.4),
-    nav_active: frost(0xFFFFFF, 0.85),
+    side: rgba(0xFFFFFF, 0.4),
+    nav_active: rgba(0xFFFFFF, 0.85),
     link: rgb(0x1F6FE0),
     blue: rgb(0x1F6FE0),
     on_blue: rgb(0xFFFFFF),
@@ -246,9 +224,9 @@ pub(super) const LIGHT_TOKENS: Tokens = Tokens {
     orange: rgb(0x9A4A0C),
     orange_soft: rgb(0xFFE6D3),
     warn: rgb(0x8F6200),
-    warn_soft: frost(0xE0A526, 0.18),
+    warn_soft: rgba(0xE0A526, 0.18),
     danger: rgb(0xC2272D),
-    danger_soft: frost(0xE5484D, 0.14),
+    danger_soft: rgba(0xE5484D, 0.14),
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Hue {
@@ -761,6 +739,99 @@ fn lift(tk: Tokens) -> iced::Shadow {
             offset: iced::Vector::new(0.0, 4.0),
             blur_radius: 18.0,
         }
+    }
+}
+// ---------------------------------------------------------------- backdrop
+/// Standard deviation of the mockups' `filter: blur(90px)`.
+const BLOB_SIGMA: f32 = 90.0;
+/// How far a blurred field reaches past its disk.
+const BLOB_REACH: f32 = 2.5 * BLOB_SIGMA;
+/// Rings per field: fewer show bands, more cost fill time on tiny-skia.
+const BLOB_RINGS: usize = 28;
+/// Light theme colour fields behind the frosted cards (mockup variant 3): the
+/// first takes `state`, the other two are fixed violet and sky. Placed as in
+/// the 1280×800 mockups, anchored to the same window edges.
+fn backdrop<'a>(state: Color) -> Element<'a, Message> {
+    iced::widget::responsive(move |size| {
+        let field = |diameter: f32, color: Color, opacity: f32, x: f32, y: f32| {
+            iced::widget::pin(blob(diameter, color, opacity))
+                .x(x - BLOB_REACH)
+                .y(y - BLOB_REACH)
+        };
+        iced::widget::stack![
+            field(520.0, state, 0.35, 180.0, -120.0),
+            field(440.0, rgb(0xB9AEFF), 0.4, size.width + 60.0 - 440.0, 260.0),
+            field(
+                420.0,
+                rgb(0x9FDCFF),
+                0.4,
+                520.0,
+                size.height + 200.0 - 420.0
+            ),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    })
+    .into()
+}
+/// One blurred disk as concentric translucent circles. A real blur (shadow)
+/// would leave stale pixels on tiny-skia, whose damage covers only the quad;
+/// every circle here lies inside its own quad, so partial redraws repeat it exactly.
+fn blob<'a>(diameter: f32, color: Color, opacity: f32) -> Element<'a, Message> {
+    let side = diameter + 2.0 * BLOB_REACH;
+    let mut layers = iced::widget::Stack::new().width(side).height(side);
+    for (radius, alpha) in blob_rings(diameter / 2.0, opacity) {
+        let fill = Color { a: alpha, ..color };
+        layers = layers.push(
+            container(
+                container(Space::new())
+                    .width(2.0 * radius)
+                    .height(2.0 * radius)
+                    .style(move |_| container::Style {
+                        background: Some(fill.into()),
+                        border: iced::Border {
+                            radius: radius.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+            )
+            .center(side),
+        );
+    }
+    layers.into()
+}
+/// Outer-to-inner (radius, alpha) so that the stacked circles compose to
+/// `opacity` × a disk of `radius` blurred with BLOB_SIGMA.
+fn blob_rings(radius: f32, opacity: f32) -> Vec<(f32, f32)> {
+    let outer = radius + BLOB_REACH;
+    let inner = (radius - BLOB_REACH).max(BLOB_SIGMA / 2.0);
+    let step = (outer - inner) / (BLOB_RINGS - 1) as f32;
+    let mut covered = 0.0;
+    (0..BLOB_RINGS)
+        .map(|k| {
+            let edge = outer - step * k as f32;
+            let inside = (edge - step / 2.0).max(0.0);
+            let target = opacity * normal_cdf((radius - inside) / BLOB_SIGMA);
+            let alpha = (1.0 - (1.0 - target) / (1.0 - covered)).max(0.0);
+            covered = target.max(covered);
+            (edge, alpha)
+        })
+        .collect()
+}
+/// Standard normal CDF (Abramowitz–Stegun 7.1.26, error below 1.5e-7).
+fn normal_cdf(x: f32) -> f32 {
+    let z = x.abs() / std::f32::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.327_591_1 * z);
+    let poly = t
+        * (0.254_829_6
+            + t * (-0.284_496_74 + t * (1.421_413_7 + t * (-1.453_152_1 + t * 1.061_405_4))));
+    let erf = 1.0 - poly * (-z * z).exp();
+    if x >= 0.0 {
+        0.5 * (1.0 + erf)
+    } else {
+        0.5 * (1.0 - erf)
     }
 }
 fn soft<'a>(
@@ -1362,7 +1433,18 @@ impl App {
                     ..Default::default()
                 }),
         );
-        container(row![sidebar, edge, main.width(Length::Fill)])
+        let window = container(row![sidebar, edge, main.width(Length::Fill)])
+            .width(Length::Fill)
+            .height(Length::Fill);
+        if tk.dark {
+            return window.into();
+        }
+        // As in the mockups, the main field shows the state only where the state is the subject.
+        let field = match self.page {
+            Page::Home | Page::Diagnostics => hue.fill(false),
+            _ => Hue::Blue.fill(false),
+        };
+        iced::widget::stack![backdrop(field), window]
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -2825,6 +2907,22 @@ mod tests {
         let mut shown = service.clone();
         apply_probe(&mut shown, &report);
         assert_eq!(shown, service);
+    }
+    #[test]
+    fn blob_rings_compose_a_blurred_disk() {
+        let rings = blob_rings(260.0, 0.35);
+        assert_eq!(rings.len(), BLOB_RINGS);
+        let mut covered = 0.0_f32;
+        let mut previous = f32::MAX;
+        for &(radius, alpha) in &rings {
+            assert!(radius < previous && (0.0..=1.0).contains(&alpha));
+            previous = radius;
+            covered = 1.0 - (1.0 - covered) * (1.0 - alpha);
+        }
+        // Faint at the reach, the full opacity at the centre.
+        assert!(rings[0].1 < 0.01);
+        assert!((covered - 0.35).abs() < 0.01, "{covered}");
+        assert!((normal_cdf(0.0) - 0.5).abs() < 1e-6 && normal_cdf(3.0) > 0.998);
     }
     fn policy(action: Action) -> rtrust_profile::routing::Decision {
         use rtrust_profile::routing::{Context, Decision, Reason};

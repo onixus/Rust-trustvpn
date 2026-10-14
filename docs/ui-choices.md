@@ -27,7 +27,9 @@ blue); any failure is yellow; otherwise a live tunnel is blue, and a check
 without a result reads "no data". After failover the backup carrying traffic
 is named. Lost contact with an Always-on service shows an unknown state. Network holds mode,
 routes, backups and Always-on; Settings holds appearance, startup and storage
-recovery. Real blur exists only with the macOS glass material. The shell,
+recovery. Real blur exists only with the macOS glass material. As in the
+mockups, the light theme puts three soft colour fields behind translucent cards;
+the first takes the state colour on Home and Checks (blue elsewhere). The shell,
 Home, Profiles, Add profile and Checks follow the system language (Russian or
 English); deeper section and status messages remain Russian.
 
