@@ -28,29 +28,31 @@ import android.widget.TextView;
  */
 final class Sheet {
     private final Activity activity;
+    private final Palette p;
     private final Dialog dialog;
     private final LinearLayout body;
 
     Sheet(Activity activity, CharSequence title, CharSequence subtitle) {
         this.activity = activity;
+        p = Palette.of(activity);
         dialog = new Dialog(activity);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
         body = new LinearLayout(activity); body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(dp(12), dp(10), dp(12), dp(12));
-        View handle = new View(activity); handle.setBackground(round(color(R.color.outline), dp(2)));
+        View handle = new View(activity); handle.setBackground(round(p.empty, dp(2)));
         LinearLayout.LayoutParams handleParams = new LinearLayout.LayoutParams(dp(36), dp(4)); handleParams.gravity = Gravity.CENTER_HORIZONTAL; handleParams.bottomMargin = dp(10);
         body.addView(handle, handleParams);
         if (title != null) {
-            TextView head = text(title, 18, R.color.text, true); head.setPadding(dp(8), dp(4), dp(8), 0); head.setMaxLines(2); head.setEllipsize(TextUtils.TruncateAt.END); body.addView(head);
+            TextView head = text(title, 18, p.text, true); head.setPadding(dp(8), dp(4), dp(8), 0); head.setMaxLines(2); head.setEllipsize(TextUtils.TruncateAt.END); body.addView(head);
         }
         if (subtitle != null && subtitle.length() > 0) {
-            TextView sub = text(subtitle, 13, R.color.text_muted, false); sub.setPadding(dp(8), dp(2), dp(8), 0); sub.setMaxLines(3); sub.setEllipsize(TextUtils.TruncateAt.END); body.addView(sub);
+            TextView sub = text(subtitle, 13, p.muted, false); sub.setPadding(dp(8), dp(2), dp(8), 0); sub.setMaxLines(3); sub.setEllipsize(TextUtils.TruncateAt.END); body.addView(sub);
         }
         if (title != null || subtitle != null) body.addView(new View(activity), new LinearLayout.LayoutParams(1, dp(8)));
     }
 
     Sheet section(int title) {
-        TextView label = text(activity.getString(title).toUpperCase(java.util.Locale.getDefault()), 11, R.color.text_muted, true);
+        TextView label = text(activity.getString(title).toUpperCase(java.util.Locale.getDefault()), 11, p.muted, true);
         label.setLetterSpacing(0.08f); label.setPadding(dp(8), dp(14), dp(8), dp(6)); body.addView(label);
         return this;
     }
@@ -58,22 +60,14 @@ final class Sheet {
     /** A row without an action is informational and is not focusable; icon 0 leaves the tile empty. */
     Sheet item(int icon, CharSequence title, CharSequence detail, Runnable action) { return add(icon, title, detail, action, false); }
     Sheet danger(int icon, CharSequence title, CharSequence detail, Runnable action) { return add(icon, title, detail, action, true); }
-    /** Status row: a coloured dot instead of an icon tile. */
-    Sheet status(int dotColor, CharSequence title, CharSequence detail) {
-        LinearLayout row = row();
-        View dot = new View(activity); dot.setBackground(round(dotColor, dp(5)));
-        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(10), dp(10)); dotParams.setMarginStart(dp(13)); dotParams.setMarginEnd(dp(13));
-        row.addView(dot, dotParams); row.addView(texts(title, detail, false), new LinearLayout.LayoutParams(0, -2, 1));
-        body.addView(row); return this;
-    }
     Sheet footer(CharSequence note) {
-        TextView text = text(note, 12, R.color.text_muted, false); text.setPadding(dp(8), dp(12), dp(8), 0); body.addView(text);
+        TextView text = text(note, 12, p.muted, false); text.setPadding(dp(8), dp(12), dp(8), 0); body.addView(text);
         return this;
     }
 
     Dialog show() {
         ScrollView scroll = new ScrollView(activity); scroll.setVerticalScrollBarEnabled(false); scroll.addView(body);
-        float r = dp(24); GradientDrawable bg = new GradientDrawable(); bg.setColor(color(R.color.surface_raised)); bg.setCornerRadii(new float[]{r, r, r, r, 0, 0, 0, 0});
+        float r = dp(24); GradientDrawable bg = new GradientDrawable(); bg.setColor(p.sheet); bg.setCornerRadii(new float[]{r, r, r, r, 0, 0, 0, 0});
         scroll.setBackground(bg);
         scroll.setOnApplyWindowInsetsListener((view, insets) -> {
             int bottom = Build.VERSION.SDK_INT >= 30 ? insets.getInsets(WindowInsets.Type.systemBars()).bottom : insets.getSystemWindowInsetBottom();
@@ -96,15 +90,15 @@ final class Sheet {
 
     private Sheet add(int icon, CharSequence title, CharSequence detail, Runnable action, boolean danger) {
         LinearLayout row = row();
-        int tint = color(danger ? R.color.danger : R.color.accent);
+        int tint = danger ? p.danger : p.blueText;
         ImageView image = new ImageView(activity); if (icon != 0) image.setImageDrawable(tinted(icon, tint)); image.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        image.setPadding(dp(8), dp(8), dp(8), dp(8)); image.setBackground(round(danger ? Color.argb(40, 229, 72, 77) : color(R.color.accent_soft), dp(12)));
+        image.setPadding(dp(8), dp(8), dp(8), dp(8)); image.setBackground(round(danger ? Color.argb(40, 229, 72, 77) : p.blueSoft, dp(12)));
         LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(40), dp(40)); iconParams.setMarginEnd(dp(14)); row.addView(image, iconParams);
         row.addView(texts(title, detail, danger), new LinearLayout.LayoutParams(0, -2, 1));
         if (action != null) {
-            ImageView chevron = new ImageView(activity); chevron.setImageDrawable(tinted(R.drawable.ic_chevron, color(R.color.text_muted))); chevron.setAlpha(danger ? 0f : 0.6f);
+            ImageView chevron = new ImageView(activity); chevron.setImageDrawable(tinted(R.drawable.ic_chevron, p.muted)); chevron.setAlpha(danger ? 0f : 0.6f);
             row.addView(chevron, new LinearLayout.LayoutParams(dp(20), dp(20)));
-            row.setBackground(new RippleDrawable(ColorStateList.valueOf(color(R.color.ripple)), null, round(Color.WHITE, dp(14))));
+            row.setBackground(new RippleDrawable(ColorStateList.valueOf(p.ripple), null, round(Color.WHITE, dp(14))));
             row.setClickable(true); row.setFocusable(true);
             row.setOnClickListener(v -> { dialog.dismiss(); action.run(); });
         }
@@ -116,18 +110,17 @@ final class Sheet {
     }
     private LinearLayout texts(CharSequence title, CharSequence detail, boolean danger) {
         LinearLayout column = new LinearLayout(activity); column.setOrientation(LinearLayout.VERTICAL);
-        TextView head = text(title, 15, danger ? R.color.danger : R.color.text, true); head.setMaxLines(2); head.setEllipsize(TextUtils.TruncateAt.END); column.addView(head);
+        TextView head = text(title, 15, danger ? p.danger : p.text, true); head.setMaxLines(2); head.setEllipsize(TextUtils.TruncateAt.END); column.addView(head);
         if (detail != null && detail.length() > 0) {
-            TextView sub = text(detail, 12, R.color.text_muted, false); sub.setPadding(0, dp(2), 0, 0); sub.setMaxLines(3); sub.setEllipsize(TextUtils.TruncateAt.END); column.addView(sub);
+            TextView sub = text(detail, 12, p.muted, false); sub.setPadding(0, dp(2), 0, 0); sub.setMaxLines(3); sub.setEllipsize(TextUtils.TruncateAt.END); column.addView(sub);
         }
         return column;
     }
     private TextView text(CharSequence value, int size, int colorId, boolean bold) {
-        TextView view = new TextView(activity); view.setText(value); view.setTextSize(size); view.setTextColor(color(colorId));
+        TextView view = new TextView(activity); view.setText(value); view.setTextSize(size); view.setTextColor(colorId);
         if (bold) view.setTypeface(null, Typeface.BOLD); return view;
     }
     private Drawable tinted(int id, int tint) { Drawable icon = activity.getDrawable(id).mutate(); icon.setTint(tint); return icon; }
     private GradientDrawable round(int fill, int radius) { GradientDrawable bg = new GradientDrawable(); bg.setColor(fill); bg.setCornerRadius(radius); return bg; }
-    private int color(int id) { return activity.getColor(id); }
     private int dp(int n) { return Math.round(n * activity.getResources().getDisplayMetrics().density); }
 }

@@ -8,33 +8,65 @@ import android.graphics.drawable.*;
 import android.content.res.ColorStateList;
 import android.net.*;
 import android.os.*;
+import android.text.Editable;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.TextUtils;
+import android.text.TextWatcher;
+import android.text.style.ForegroundColorSpan;
 import android.view.*;
 import android.widget.*;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
-import java.util.UUID;
+import java.util.*;
 import org.json.*;
 
-/** Native Android widgets; no WebView and no remote UI code. */
+/**
+ * Native Android widgets; no WebView and no remote UI code. One activity hosts the
+ * screens (home, profiles, add, checks, actions) with its own back stack.
+ */
 public class MainActivity extends Activity {
     private static final int PICK = 10, SAVE = 11, CONSENT = 12, QR_IMAGE = 13, DIAGNOSTIC_SAVE = 14;
+    static final int HOME = 0, PROFILES = 1, ADD = 2, CHECKS = 3, ACTIONS = 4;
+    /** Connection state shown to the user. */
+    static final int S_OFF = 0, S_CONNECTING = 1, S_RECONNECTING = 2, S_RUNNING = 3, S_VERIFIED = 4, S_WARNING = 5, S_ERROR = 6;
+    /** Connection state colours: grey off, blue connecting or running, green verified, yellow warning, red error. */
+    static final int IDLE = Color.rgb(107, 122, 140), BUSY = Color.rgb(77, 163, 255), ON = BUSY,
+        VERIFIED = Color.rgb(61, 214, 140), WARNING = Color.rgb(224, 165, 38), ERROR = Color.rgb(229, 72, 77);
+
+    /** Display data only: names, hosts and protocols; never credentials. */
+    static final class Info {
+        String id, name, protocol, host, managed; boolean server, isDefault;
+        boolean matches(String query) {
+            String q = query.toLowerCase(Locale.ROOT);
+            return name.toLowerCase(Locale.ROOT).contains(q) || host.toLowerCase(Locale.ROOT).contains(q) || protocol.toLowerCase(Locale.ROOT).contains(q);
+        }
+    }
+    private static final class Row { String name, value; int color, valueColor; boolean ring; String note; }
+
     private String diagnosticExport;
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private LinearLayout rows;
-    private String selectedId, pendingConnectId;
-    private TextView status, statusDetail, selectedProfile, selectedProfileLabel, routingLabel, profilesHeader;
-    private View statusDot;
-    private LinearLayout hero;
-    private Wrap checks;
-    private Button connect;
-    private int connectionColor;
-    private String checksKey = "", liveProfileId;
-    private JSONObject observations;
-    /** Connection state palette. Amber is reserved for real warnings. */
-    static final int IDLE = Color.rgb(107, 122, 140), BUSY = Color.rgb(77, 163, 255), ON = Color.rgb(43, 184, 154),
-        VERIFIED = Color.rgb(61, 214, 140), WARNING = Color.rgb(224, 165, 38), ERROR = Color.rgb(229, 72, 77);
+    private String selectedId, pendingConnectId, liveProfileId, problemText = "";
     private ProfileVault vault;
     private AlertDialog flowCapture;
+    private Palette p;
+    private Backdrop backdrop;
+    private FrameLayout host;
+    private int screen = HOME, uiState = S_OFF, backupIndex;
+    private final ArrayDeque<Integer> back = new ArrayDeque<>();
+    private Object backCallback; // android.window.OnBackInvokedCallback, API 33+
+    private JSONObject observations;
+    private final List<Info> profiles = new ArrayList<>();
+    private final Set<String> backups = new HashSet<>();
+    private String routingSummary = "", portalHost;
+    private String renderKey = "";
+    // Views of the visible screen; null on other screens.
+    private TextView tagText, headline, description, stateChip;
+    private View tagDot;
+    private LinearLayout checksBox, strip, list, results;
+    private SlideButton slider;
+    private EditText search;
+
     private final Runnable poll = new Runnable() {
         public void run() {
             try {
@@ -45,179 +77,668 @@ public class MainActivity extends Activity {
                 observations = running ? ObservationStatus.snapshot(state.optJSONObject("observations")) : null;
                 int level = running ? ObservationStatus.level(observations) : ObservationStatus.RUNNING;
                 JSONObject recovery = state.optJSONObject("recovery");
-                int backup = recovery == null ? 0 : recovery.optInt("selected_index");
-                String headline, detail = "";
-                if (problem) { headline = getString(R.string.state_problem); detail = TunnelService.problem; }
-                else if (nativeState == 4) { headline = getString(R.string.state_problem); detail = getString(R.string.connection_failed); }
-                else if (running) {
-                    headline = getString(level == ObservationStatus.VERIFIED ? R.string.state_verified : level == ObservationStatus.WARNING ? R.string.state_warning : R.string.connected);
-                    detail = getString(R.string.state_details_hint);
-                    if (backup > 0) detail = getString(R.string.recovery_backup_active, backup);
+                backupIndex = recovery == null ? 0 : recovery.optInt("selected_index");
+                if (problem || nativeState == 4 || nativeState < 0 || nativeState > 4) {
+                    uiState = S_ERROR; problemText = problem ? TunnelService.problem : getString(R.string.connection_failed);
                 }
-                else if (nativeState == 1) headline = getString(R.string.connecting);
-                else if (nativeState == 3) headline = getString(R.string.reconnecting);
-                else headline = getString(TunnelService.active ? R.string.starting_vpn : R.string.state_off);
-                setText(status, headline); setText(statusDetail, detail);
-                statusDetail.setVisibility(detail.isEmpty() ? View.GONE : View.VISIBLE);
-                showChecks(observations);
-                String action = TunnelService.active ? getString(R.string.disconnect) : getString(R.string.connect_selected_profile);
-                connect.setEnabled(!TunnelService.active || !TunnelService.alwaysOn); connect.setAlpha(connect.isEnabled() ? 1f : 0.5f);
-                setText(connect, action);
-                int color = connectionColor(TunnelService.active, state.optInt("state", -1), problem);
-                if (running && level == ObservationStatus.VERIFIED) color = VERIFIED;
-                if (running && level == ObservationStatus.WARNING) color = WARNING;
-                paintConnection(color, TunnelService.active);
-                // Only a connected primary earns the badge: not while connecting, failing or on a backup.
-                String live = badgeProfile(running, backup, TunnelService.connectedProfileId());
-                if (!java.util.Objects.equals(live, liveProfileId)) { liveProfileId = live; reload(); }
+                else if (running) uiState = level == ObservationStatus.VERIFIED ? S_VERIFIED : level == ObservationStatus.WARNING ? S_WARNING : S_RUNNING;
+                else if (nativeState == 3) uiState = S_RECONNECTING;
+                else if (nativeState == 1 || TunnelService.active) uiState = S_CONNECTING;
+                else uiState = S_OFF;
+                // Only a connected primary is marked running: not while connecting, failing or on a backup.
+                String live = badgeProfile(running, backupIndex, TunnelService.connectedProfileId());
+                if (!Objects.equals(live, liveProfileId)) { liveProfileId = live; reload(); }
             } catch (Exception ignored) {
-                paintConnection(connectionColor(false, 0, true), TunnelService.active);
-                observations = null; showChecks(null);
+                uiState = S_ERROR; problemText = getString(R.string.vpn_status_unavailable); observations = null;
                 if (liveProfileId != null) { liveProfileId = null; reload(); }
-                setText(status, getString(R.string.vpn_status_unavailable)); statusDetail.setVisibility(View.GONE);
             }
+            renderState();
             handler.postDelayed(this, 500);
         }
     };
+
     @Override public void onCreate(Bundle state) {
+        setTheme(Palette.light(this) ? R.style.Theme_RTrust_Light : R.style.Theme_RTrust);
         super.onCreate(state);
-        if (state != null) { selectedId = state.getString("selectedProfile"); pendingConnectId = state.getString("pendingConnectProfile"); }
+        if (state != null) {
+            selectedId = state.getString("selectedProfile"); pendingConnectId = state.getString("pendingConnectProfile");
+            screen = state.getInt("screen", HOME); if (screen != HOME) back.push(HOME);
+        }
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         vault = new ProfileVault(this);
         try { PortalSyncWorker.schedule(this); } catch (Exception ignored) { /* Reconcile again on next launch. */ }
-        LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(20), dp(16), dp(20), dp(16));
-        root.setOnApplyWindowInsetsListener((view, insets) -> {
+        p = Palette.of(this);
+        backdrop = new Backdrop(p);
+        host = new FrameLayout(this); host.setBackground(backdrop);
+        host.setOnApplyWindowInsetsListener((view, insets) -> {
             android.graphics.Insets bars = Build.VERSION.SDK_INT >= 30 ? insets.getInsets(WindowInsets.Type.systemBars()) : insets.getSystemWindowInsets();
-            view.setPadding(dp(20) + bars.left, dp(16) + bars.top, dp(20) + bars.right, dp(16) + bars.bottom); return insets;
+            int bottom = bars.bottom;
+            if (Build.VERSION.SDK_INT >= 30) bottom = Math.max(bottom, insets.getInsets(WindowInsets.Type.ime()).bottom);
+            view.setPadding(bars.left, bars.top, bars.right, bottom); return insets;
         });
-
-        // Header
-        TextView title = new TextView(this); title.setText("R-TrustTunnel"); title.setTextSize(26); title.setTypeface(null, Typeface.BOLD); title.setTextColor(color(R.color.text)); root.addView(title);
-        TextView subtitle = new TextView(this); subtitle.setText(R.string.home_subtitle); subtitle.setTextSize(14); subtitle.setTextColor(color(R.color.text_muted)); subtitle.setPadding(0, dp(2), 0, dp(16)); root.addView(subtitle);
-
-        // Status card: coloured dot + short state, detail line, check chips, profile in use.
-        // Tapping it lists every check with its full outcome.
-        hero = new LinearLayout(this); hero.setOrientation(LinearLayout.VERTICAL);
-        hero.setPadding(dp(20), dp(18), dp(20), dp(18)); hero.setClickable(true); hero.setFocusable(true); hero.setOnClickListener(v -> checksSheet());
-        LinearLayout stateRow = new LinearLayout(this); stateRow.setGravity(Gravity.CENTER_VERTICAL);
-        statusDot = new View(this); GradientDrawable dot = new GradientDrawable(); dot.setShape(GradientDrawable.OVAL); dot.setColor(IDLE); statusDot.setBackground(dot);
-        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(12), dp(12)); dotParams.setMarginEnd(dp(10)); stateRow.addView(statusDot, dotParams);
-        status = new TextView(this); status.setTextSize(20); status.setTypeface(null, Typeface.BOLD); status.setTextColor(color(R.color.text));
-        stateRow.addView(status, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        hero.addView(stateRow);
-        statusDetail = new TextView(this); statusDetail.setTextSize(13); statusDetail.setTextColor(color(R.color.text_muted)); statusDetail.setPadding(dp(22), dp(4), 0, 0); statusDetail.setVisibility(View.GONE); hero.addView(statusDetail);
-        checks = new Wrap(this, dp(6)); checks.setPadding(0, dp(12), 0, 0); checks.setVisibility(View.GONE); hero.addView(checks);
-        selectedProfileLabel = new TextView(this); selectedProfileLabel.setText(R.string.selected_profile_label); selectedProfileLabel.setTextSize(11); selectedProfileLabel.setLetterSpacing(0.08f); selectedProfileLabel.setTextColor(color(R.color.text_muted)); selectedProfileLabel.setPadding(0, dp(14), 0, dp(2)); hero.addView(selectedProfileLabel);
-        selectedProfile = new TextView(this); selectedProfile.setTextSize(16); selectedProfile.setTextColor(color(R.color.text)); selectedProfile.setMaxLines(1); selectedProfile.setEllipsize(android.text.TextUtils.TruncateAt.END); hero.addView(selectedProfile);
-        root.addView(hero);
-
-        // Quick actions: Add · VPN apps · Settings
-        LinearLayout actions = new LinearLayout(this);
-        actions.addView(action(R.drawable.ic_add, getString(R.string.add_profile), null, this::importMenu), actionParams(true));
-        LinearLayout routing = action(R.drawable.ic_apps, getString(R.string.vpn_apps), "", () -> {
-            try { AppRoutingDialog.show(this, vault, this::reload); }
-            catch (Exception error) { error(getString(R.string.app_selection_could_not_be_opened)); }
-        }); routingLabel = (TextView) routing.getChildAt(2); actions.addView(routing, actionParams(true));
-        actions.addView(action(R.drawable.ic_settings, getString(R.string.home_settings), null, this::settingsMenu), actionParams(false));
-        LinearLayout.LayoutParams actionsRow = new LinearLayout.LayoutParams(-1, -2); actionsRow.setMargins(0, dp(14), 0, dp(20)); root.addView(actions, actionsRow);
-
-        // Profiles
-        profilesHeader = new TextView(this); profilesHeader.setTextSize(13); profilesHeader.setTypeface(null, Typeface.BOLD); profilesHeader.setLetterSpacing(0.06f); profilesHeader.setTextColor(color(R.color.text_muted)); profilesHeader.setPadding(dp(4), 0, 0, dp(8)); root.addView(profilesHeader);
-        ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false); rows = new LinearLayout(this); rows.setOrientation(LinearLayout.VERTICAL); scroll.addView(rows); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-
-        // Connect: fixed at the bottom; its style shows the next action, not the state
-        connect = button(getString(R.string.connect_selected_profile), () -> toggle());
-        connect.setTextSize(16); connect.setCompoundDrawablesRelativeWithIntrinsicBounds(tinted(R.drawable.ic_power, Color.WHITE), null, null, null); connect.setCompoundDrawablePadding(dp(10)); connect.setPadding(dp(20), 0, dp(20), 0);
-        LinearLayout.LayoutParams connectParams = new LinearLayout.LayoutParams(-1, dp(58)); connectParams.setMargins(0, dp(12), 0, 0); root.addView(connect, connectParams);
-        connectionColor = 1; paintConnection(connectionColor(false, 0, false), false);
-        setContentView(root); reload(); incoming(getIntent());
+        setContentView(host);
+        reload(); build(); incoming(getIntent());
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 20);
-    }
-    private void importMenu() {
-        new Sheet(this, getString(R.string.add_profile), null)
-            .item(R.drawable.ic_file, getString(R.string.import_file), getString(R.string.import_file_detail), () -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE), PICK))
-            .item(R.drawable.ic_paste, getString(R.string.paste_config_or_tt_link), getString(R.string.paste_detail), this::paste)
-            .item(R.drawable.ic_qr, getString(R.string.qr_camera), getString(R.string.qr_camera_detail), this::qrCamera)
-            .item(R.drawable.ic_image, getString(R.string.qr_image), getString(R.string.qr_image_detail), () -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE), QR_IMAGE))
-            .show();
     }
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
         state.putString("selectedProfile", selectedId);
         state.putString("pendingConnectProfile", pendingConnectId);
+        state.putInt("screen", screen);
     }
-    private void startSelectedConnection() {
-        if (pendingConnectId == null || pendingConnectId.isEmpty()) { error(getString(R.string.import_and_select_a_profile)); return; }
-        startForegroundService(new Intent(this, TunnelService.class).putExtra(TunnelService.PROFILE_ID, pendingConnectId));
+
+    // ---- Navigation -------------------------------------------------------------------
+
+    private void show(int next) {
+        if (next == screen) return;
+        back.push(screen); screen = next; build();
     }
-    private void settingsMenu() {
-        String portal = getString(R.string.portal_not_enrolled);
-        try { JSONObject session = vault.read().optJSONObject("portal"); if (session != null) portal = getString(R.string.portal_enrolled_detail, Uri.parse(session.optString("origin")).getHost()); }
-        catch (Exception ignored) { /* The portal entry reports its own errors. */ }
+    private void goBack() {
+        if (back.isEmpty()) return;
+        screen = back.pop(); build();
+    }
+    /** Below API 33 only; syncBack() registers the API 33+ callback. */
+    @SuppressWarnings("deprecation") @android.annotation.SuppressLint("GestureBackNavigation")
+    @Override public void onBackPressed() { if (back.isEmpty()) super.onBackPressed(); else goBack(); }
+    private void home() { back.clear(); screen = HOME; build(); }
+    /** API 33+ (and always when targeting 36) routes Back here instead of onBackPressed. */
+    private void syncBack() {
+        if (Build.VERSION.SDK_INT < 33) return;
+        android.window.OnBackInvokedDispatcher dispatcher = getOnBackInvokedDispatcher();
+        if (!back.isEmpty() && backCallback == null) {
+            backCallback = (android.window.OnBackInvokedCallback) this::goBack;
+            dispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, (android.window.OnBackInvokedCallback) backCallback);
+        } else if (back.isEmpty() && backCallback != null) {
+            dispatcher.unregisterOnBackInvokedCallback((android.window.OnBackInvokedCallback) backCallback);
+            backCallback = null;
+        }
+    }
+    private void build() {
+        host.removeAllViews();
+        tagText = headline = description = stateChip = null; tagDot = null;
+        checksBox = strip = list = results = null; slider = null; search = null; renderKey = "";
+        View view;
+        switch (screen) {
+            case PROFILES: view = profilesScreen(); break;
+            case ADD: view = addScreen(); break;
+            case CHECKS: view = checksScreen(); break;
+            case ACTIONS: view = actionsScreen(); break;
+            default: view = homeScreen();
+        }
+        host.addView(view, new FrameLayout.LayoutParams(-1, -1));
+        syncBack();
+        renderState();
+    }
+
+    // ---- State ------------------------------------------------------------------------
+
+    private int stateColor() {
+        switch (uiState) {
+            case S_OFF: return p.grey;
+            case S_VERIFIED: return p.green;
+            case S_WARNING: return p.yellow;
+            case S_ERROR: return p.red;
+            default: return p.blue;
+        }
+    }
+    private String selectedName() { Info info = info(selectedId); return info == null ? null : info.name; }
+    private Info info(String id) { for (Info info : profiles) if (info.id.equals(id)) return info; return null; }
+
+    /** Five checks for the current state. Checks without a result say so plainly. */
+    private List<Row> rows() {
+        int[] notes = {R.string.v3_note_transport, R.string.v3_note_route, R.string.v3_note_dns, R.string.v3_note_guard, R.string.v3_note_connectivity};
+        List<Row> rows = new ArrayList<>();
+        for (int i = 0; i < ObservationStatus.KEYS.length; i++) {
+            Row row = new Row(); row.name = getString(ObservationStatus.NAMES[i]); row.note = getString(notes[i]);
+            row.ring = true; row.color = p.empty; row.value = getString(R.string.v3_no_data);
+            if (i == 0 && uiState == S_OFF) row.value = getString(R.string.v3_check_off);
+            else if (i == 0 && (uiState == S_CONNECTING || uiState == S_RECONNECTING)) { row.value = getString(R.string.v3_check_connecting); row.color = p.blue; }
+            else if (i == 0 && uiState == S_ERROR) { row.value = getString(R.string.observation_failed); row.color = p.red; row.ring = false; }
+            else if (observations != null) {
+                String outcome = ObservationStatus.outcome(observations.optJSONObject(ObservationStatus.KEYS[i]));
+                String label = ObservationStatus.label(this, outcome);
+                if (label != null) row.value = label;
+                switch (outcome) {
+                    case "passed": row.color = p.green; row.ring = false; break;
+                    case "failed": row.color = p.yellow; row.ring = false; break;
+                    case "configured": row.color = p.blue; row.ring = false; break;
+                    default: row.color = p.empty;
+                }
+            }
+            row.valueColor = row.ring ? (row.color == p.blue ? p.blueText : p.muted) : p.textFor(row.color);
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    /** Repaints the visible screen's state parts; cheap when nothing changed. */
+    private void renderState() {
+        int color = stateColor();
+        backdrop.setAccent(color);
+        String name = selectedName();
+        Info selected = info(selectedId);
+        String key = uiState + "|" + name + "|" + backupIndex + "|" + problemText + "|" + TunnelService.active + TunnelService.alwaysOn;
+        List<Row> rows = rows();
+        for (Row row : rows) key += "|" + row.value + row.color;
+        if (key.equals(renderKey)) return;
+        renderKey = key;
+        if (tagDot != null) ((GradientDrawable) tagDot.getBackground()).setColor(color);
+        if (tagText != null) tagText.setText(selected == null ? "R-TRUSTTUNNEL" : (selected.name + " · " + selected.protocol).toUpperCase(Locale.getDefault()));
+        if (headline != null) {
+            int[] lines;
+            switch (uiState) {
+                case S_CONNECTING: lines = new int[]{R.string.v3_tunnel, R.string.v3_connecting_2}; break;
+                case S_RECONNECTING: lines = new int[]{R.string.v3_tunnel, R.string.v3_reconnecting_2}; break;
+                case S_RUNNING: lines = new int[]{R.string.v3_tunnel, R.string.v3_running_2}; break;
+                case S_VERIFIED: lines = new int[]{R.string.v3_tunnel, R.string.v3_verified_2}; break;
+                case S_WARNING: lines = new int[]{R.string.v3_warning_1, R.string.v3_warning_2}; break;
+                case S_ERROR: lines = new int[]{R.string.v3_error_1, R.string.v3_error_2}; break;
+                default: lines = new int[]{R.string.v3_off_1, R.string.v3_off_2};
+            }
+            SpannableStringBuilder text = new SpannableStringBuilder(getString(lines[0])).append('\n');
+            int start = text.length(); text.append(getString(lines[1]));
+            text.setSpan(new ForegroundColorSpan(p.textFor(color)), start, text.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            headline.setText(text); fitHeadline();
+        }
+        if (description != null) {
+            String host = selected == null ? "" : selected.host.isEmpty() ? selected.name : selected.host;
+            String text;
+            switch (uiState) {
+                case S_CONNECTING: text = getString(R.string.v3_connecting_desc, host); break;
+                case S_RECONNECTING: text = getString(R.string.v3_reconnecting_desc); break;
+                case S_RUNNING: text = getString(R.string.v3_running_desc); break;
+                case S_VERIFIED: text = getString(R.string.v3_verified_desc); break;
+                case S_WARNING: text = getString(R.string.v3_warning_desc); break;
+                case S_ERROR: text = problemText; break;
+                default: text = name == null ? getString(R.string.v3_off_desc_none) : getString(R.string.v3_off_desc, name);
+            }
+            if (backupIndex > 0 && (uiState == S_RUNNING || uiState == S_VERIFIED || uiState == S_WARNING))
+                text = getString(R.string.recovery_backup_active, backupIndex) + ". " + text;
+            description.setText(text);
+        }
+        if (checksBox != null) fillChecks(checksBox, rows, screen == CHECKS);
+        if (stateChip != null) {
+            stateChip.setText(headlineWord());
+            stateChip.setTextColor(p.textFor(color));
+            stateChip.setBackground(round(Color.argb(p.light ? 46 : 38, Color.red(color), Color.green(color), Color.blue(color)), dp(12)));
+        }
+        if (slider != null) paintSlider(color);
+    }
+    private String headlineWord() {
+        switch (uiState) {
+            case S_CONNECTING: return getString(R.string.v3_connecting_2);
+            case S_RECONNECTING: return getString(R.string.v3_reconnecting_2);
+            case S_RUNNING: return getString(R.string.v3_running_2);
+            case S_VERIFIED: return getString(R.string.v3_verified_2);
+            case S_WARNING: return getString(R.string.v3_warning_2);
+            case S_ERROR: return getString(R.string.v3_error_2);
+            default: return getString(R.string.v3_off_2);
+        }
+    }
+    private void paintSlider(int color) {
+        boolean ring = uiState == S_CONNECTING || uiState == S_RECONNECTING;
+        int knob = p.light ? p.textFor(color) : color;
+        int icon = ring ? knob : p.light ? Color.WHITE : 0xFF08090B;
+        int label;
+        if (TunnelService.active && TunnelService.alwaysOn) label = R.string.v3_always_on_locked;
+        else if (ring) label = R.string.v3_slide_cancel;
+        else if (TunnelService.active) label = R.string.v3_slide_disconnect;
+        else if (uiState == S_ERROR) label = R.string.v3_slide_retry;
+        else label = R.string.connect_selected_profile;
+        // The idle label keeps the long wording for screen readers and tests; show the short one.
+        String text = getString(label == R.string.connect_selected_profile ? R.string.v3_slide_connect : label);
+        slider.set(text, knob, icon, ring, p.card, p.cardStroke, p.muted);
+        slider.setContentDescription(getString(label));
+    }
+    /** The two-line headline shrinks until its longer line fits, from 44 sp down to 26 sp. */
+    private void fitHeadline() {
+        TextView view = headline;
+        if (view == null) return;
+        int width = view.getWidth() - view.getPaddingLeft() - view.getPaddingRight();
+        if (width <= 0) { view.post(this::fitHeadline); return; }
+        android.text.TextPaint paint = new android.text.TextPaint(view.getPaint());
+        float size = 44;
+        for (; size > 26; size -= 2) {
+            paint.setTextSize(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, size, getResources().getDisplayMetrics()));
+            float widest = 0;
+            for (String line : view.getText().toString().split("\n")) widest = Math.max(widest, paint.measureText(line));
+            if (widest <= width) break;
+        }
+        if (view.getTextSize() != android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, size, getResources().getDisplayMetrics())) view.setTextSize(size);
+    }
+    private void fillChecks(LinearLayout box, List<Row> rows, boolean notes) {
+        box.removeAllViews();
+        for (int i = 0; i < rows.size(); i++) {
+            Row row = rows.get(i);
+            LinearLayout line = new LinearLayout(this); line.setGravity(notes ? Gravity.TOP : Gravity.CENTER_VERTICAL); line.setPadding(0, dp(11), 0, dp(11));
+            View dot = new View(this); GradientDrawable shape = new GradientDrawable(); shape.setShape(GradientDrawable.OVAL);
+            if (row.ring) shape.setStroke(dp(2), row.color); else shape.setColor(row.color);
+            dot.setBackground(shape);
+            LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(10), dp(10)); dotParams.setMarginEnd(dp(12)); if (notes) dotParams.topMargin = dp(5);
+            line.addView(dot, dotParams);
+            LinearLayout column = new LinearLayout(this); column.setOrientation(LinearLayout.VERTICAL);
+            LinearLayout head = new LinearLayout(this); head.setGravity(Gravity.CENTER_VERTICAL);
+            head.addView(text(row.name, 15, p.text, true), new LinearLayout.LayoutParams(0, -2, 1));
+            TextView value = text(row.value, 13, row.valueColor, true); head.addView(value);
+            column.addView(head);
+            if (notes) { TextView note = text(row.note, 12, p.muted, false); note.setPadding(0, dp(2), 0, 0); column.addView(note); }
+            line.addView(column, new LinearLayout.LayoutParams(0, -2, 1));
+            line.setContentDescription(row.name + ": " + row.value);
+            box.addView(line);
+            if (i < rows.size() - 1) { View rule = new View(this); rule.setBackgroundColor(p.rule); box.addView(rule, new LinearLayout.LayoutParams(-1, Math.max(1, dp(1) / 2))); }
+        }
+    }
+
+    // ---- Home -------------------------------------------------------------------------
+
+    private View homeScreen() {
+        LinearLayout root = column(); root.setPadding(dp(20), dp(16), dp(20), dp(16));
+        LinearLayout top = new LinearLayout(this); top.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout tag = new LinearLayout(this); tag.setGravity(Gravity.CENTER_VERTICAL); tag.setPadding(dp(12), dp(8), dp(12), dp(8)); tag.setBackground(glass(dp(16), p.chip));
+        tagDot = new View(this); GradientDrawable dot = new GradientDrawable(); dot.setShape(GradientDrawable.OVAL); dot.setColor(stateColor()); tagDot.setBackground(dot);
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(8), dp(8)); dotParams.setMarginEnd(dp(8)); tag.addView(tagDot, dotParams);
+        tagText = text("", 12, p.muted, true); tagText.setLetterSpacing(0.08f); tagText.setMaxLines(1); tagText.setEllipsize(TextUtils.TruncateAt.END); tag.addView(tagText);
+        LinearLayout.LayoutParams tagParams = new LinearLayout.LayoutParams(0, -2, 1); tagParams.setMarginEnd(dp(12));
+        LinearLayout tagWrap = new LinearLayout(this); tagWrap.addView(tag); top.addView(tagWrap, tagParams);
+        top.addView(circle(R.drawable.ic_search, R.string.v3_search_actions, () -> show(ACTIONS)), new LinearLayout.LayoutParams(dp(44), dp(44)));
+        root.addView(top);
+
+        ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false); scroll.setFillViewport(true);
+        LinearLayout body = column(); body.setPadding(0, dp(18), 0, dp(8));
+        headline = new TextView(this); headline.setTypeface(display()); headline.setTextSize(44); headline.setTextColor(p.text); headline.setLineSpacing(0, 0.95f); headline.setLetterSpacing(-0.02f);
+        headline.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> { if (r - l != or - ol) v.post(this::fitHeadline); });
+        body.addView(headline);
+        description = text("", 14, p.muted, false); description.setLineSpacing(0, 1.2f); description.setPadding(0, dp(12), 0, dp(18)); body.addView(description);
+        checksBox = column(); checksBox.setPadding(dp(16), dp(2), dp(16), dp(2)); checksBox.setBackground(rippled(glass(dp(24), p.card)));
+        checksBox.setClickable(true); checksBox.setFocusable(true); checksBox.setOnClickListener(v -> show(CHECKS));
+        body.addView(checksBox);
+        LinearLayout header = new LinearLayout(this); header.setGravity(Gravity.CENTER_VERTICAL); header.setPadding(dp(4), dp(20), 0, dp(10));
+        TextView label = text(getString(R.string.v3_section_profiles).toUpperCase(Locale.getDefault()), 11, p.muted, true); label.setLetterSpacing(0.1f);
+        header.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView all = text(getString(R.string.v3_all_profiles) + "  →", 13, p.blueText, true); all.setPadding(dp(8), dp(6), 0, dp(6));
+        all.setOnClickListener(v -> show(PROFILES)); header.addView(all);
+        body.addView(header);
+        HorizontalScrollView stripScroll = new HorizontalScrollView(this); stripScroll.setHorizontalScrollBarEnabled(false); stripScroll.setClipToPadding(false);
+        strip = new LinearLayout(this); stripScroll.addView(strip); body.addView(stripScroll);
+        scroll.addView(body); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        slider = new SlideButton(this); slider.setAction(this::toggle);
+        LinearLayout.LayoutParams sliderParams = new LinearLayout.LayoutParams(-1, dp(64)); sliderParams.topMargin = dp(12);
+        root.addView(slider, sliderParams);
+        fillStrip();
+        return root;
+    }
+    /** Selected profile first, then its backups, then the rest; tap selects, long press opens actions. */
+    private void fillStrip() {
+        if (strip == null) return;
+        strip.removeAllViews();
+        if (profiles.isEmpty()) {
+            LinearLayout empty = column(); empty.setPadding(dp(16), dp(14), dp(16), dp(14)); empty.setBackground(rippled(glass(dp(22), p.card)));
+            empty.addView(text(getString(R.string.import_a_profile_to_get_started), 15, p.text, true));
+            TextView hint = text(getString(R.string.empty_hint), 12, p.muted, false); hint.setPadding(0, dp(4), 0, 0); empty.addView(hint);
+            empty.setClickable(true); empty.setOnClickListener(v -> show(ADD));
+            strip.addView(empty, new LinearLayout.LayoutParams(dp(260), -2));
+        }
+        List<Info> ordered = new ArrayList<>();
+        Info selected = info(selectedId); if (selected != null) ordered.add(selected);
+        for (Info info : profiles) if (info != selected && backups.contains(info.id)) ordered.add(info);
+        for (Info info : profiles) if (info != selected && !backups.contains(info.id)) ordered.add(info);
+        for (Info info : ordered) {
+            boolean isSelected = info == selected, live = info.id.equals(liveProfileId);
+            LinearLayout card = new LinearLayout(this); card.setPadding(dp(14), dp(14), dp(14), dp(14));
+            GradientDrawable bg = glass(dp(22), isSelected ? (p.light ? 0xB3FFFFFF : p.blueSoft) : p.card);
+            if (isSelected) bg.setStroke(dp(1), Color.argb(140, Color.red(p.blueText), Color.green(p.blueText), Color.blue(p.blueText)));
+            card.setBackground(rippled(bg)); card.setClickable(true); card.setFocusable(true);
+            LinearLayout texts = column();
+            String label = isSelected ? getString(R.string.v3_label_profile) : backups.contains(info.id) ? getString(R.string.v3_label_backup) : info.protocol.toUpperCase(Locale.getDefault());
+            if (live) label += " · " + getString(R.string.v3_state_running).toUpperCase(Locale.getDefault());
+            TextView caption = text(label, 11, isSelected || live ? p.blueText : p.muted, true); caption.setLetterSpacing(0.08f); caption.setMaxLines(1); caption.setEllipsize(TextUtils.TruncateAt.END); texts.addView(caption);
+            TextView title = text(info.name, 16, p.text, true); title.setMaxLines(1); title.setEllipsize(TextUtils.TruncateAt.END); title.setPadding(0, dp(6), 0, dp(4)); texts.addView(title);
+            TextView detail = text(info.host.isEmpty() ? info.protocol : info.host, 12, p.muted, false); detail.setMaxLines(1); detail.setEllipsize(TextUtils.TruncateAt.MIDDLE); texts.addView(detail);
+            card.addView(texts, new LinearLayout.LayoutParams(-1, -2));
+            card.setOnClickListener(v -> { selectedId = info.id; reload(); });
+            card.setOnLongClickListener(v -> { profileActions(info); return true; });
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(isSelected ? 168 : 150), -1); params.setMarginEnd(dp(10));
+            strip.addView(card, params);
+        }
+        LinearLayout add = column(); add.setGravity(Gravity.CENTER); add.setBackground(rippled(glass(dp(22), p.card)));
+        ImageView plus = new ImageView(this); plus.setImageDrawable(tinted(R.drawable.ic_add, p.text)); add.addView(plus, new LinearLayout.LayoutParams(dp(24), dp(24)));
+        add.setClickable(true); add.setFocusable(true); add.setContentDescription(getString(R.string.add_profile)); add.setOnClickListener(v -> show(ADD));
+        strip.addView(add, new LinearLayout.LayoutParams(dp(60), -1));
+    }
+
+    // ---- Profiles ---------------------------------------------------------------------
+
+    private View profilesScreen() {
+        LinearLayout root = column(); root.setPadding(dp(20), dp(16), dp(20), dp(16));
+        LinearLayout header = header(getString(R.string.v3_profiles), false);
+        TextView count = text(getString(R.string.v3_profiles_count, profiles.size()), 13, p.muted, true); header.addView(count);
+        root.addView(header);
+        search = field(getString(R.string.v3_profiles_search), false);
+        LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(-1, dp(50)); searchParams.setMargins(0, dp(14), 0, dp(12));
+        root.addView(search, searchParams);
+        ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false);
+        list = column(); scroll.addView(list); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        search.addTextChangedListener(watcher(this::fillProfiles));
+        TextView hint = text(getString(R.string.v3_profiles_hint), 12, p.muted, false); hint.setPadding(dp(4), dp(10), dp(4), dp(12)); root.addView(hint);
+        root.addView(pill(getString(R.string.add_profile), R.drawable.ic_add, () -> show(ADD)), new LinearLayout.LayoutParams(-1, dp(58)));
+        fillProfiles();
+        return root;
+    }
+    private void fillProfiles() {
+        if (list == null) return;
+        list.removeAllViews();
+        String query = search == null ? "" : search.getText().toString().trim();
+        Info primary = info(selectedId);
+        for (Info info : profiles) {
+            if (!query.isEmpty() && !info.matches(query)) continue;
+            LinearLayout card = new LinearLayout(this); card.setGravity(Gravity.CENTER_VERTICAL); card.setPadding(dp(14), dp(14), dp(6), dp(14));
+            card.setBackground(rippled(glass(dp(24), p.card))); card.setClickable(true); card.setFocusable(true);
+            card.addView(badge(info), new LinearLayout.LayoutParams(dp(44), dp(44)));
+            LinearLayout texts = column(); texts.setPadding(dp(12), 0, dp(8), 0);
+            LinearLayout titleRow = new LinearLayout(this); titleRow.setGravity(Gravity.CENTER_VERTICAL);
+            TextView title = text(info.name, 16, p.text, true); title.setMaxLines(1); title.setEllipsize(TextUtils.TruncateAt.END);
+            titleRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+            if (info.isDefault) {
+                ImageView star = new ImageView(this); star.setImageDrawable(tinted(R.drawable.ic_star, p.yellowText)); star.setContentDescription(getString(R.string.default_profile_label));
+                LinearLayout.LayoutParams starParams = new LinearLayout.LayoutParams(dp(16), dp(16)); starParams.setMarginStart(dp(6)); titleRow.addView(star, starParams);
+            }
+            texts.addView(titleRow);
+            TextView detail = text(info.protocol + (info.host.isEmpty() ? "" : " · " + info.host), 12, p.muted, false); detail.setMaxLines(1); detail.setEllipsize(TextUtils.TruncateAt.MIDDLE); detail.setPadding(0, dp(2), 0, dp(6));
+            texts.addView(detail);
+            MainActivity.Wrap tags = new MainActivity.Wrap(this, dp(6));
+            tags.addView(tag(getString(info.server ? R.string.v3_tag_server : R.string.v3_tag_local)));
+            if (primary != null && primary != info && backups.contains(info.id)) tags.addView(tag(getString(R.string.v3_tag_backup, primary.name)));
+            if (info.managed != null) tags.addView(tag(info.managed));
+            texts.addView(tags);
+            card.addView(texts, new LinearLayout.LayoutParams(0, -2, 1));
+            if (info.id.equals(liveProfileId) || info.id.equals(selectedId)) {
+                boolean live = info.id.equals(liveProfileId);
+                TextView chip = text(getString(live ? R.string.v3_state_running : R.string.v3_state_selected), 12, live ? p.blueText : p.muted, true);
+                chip.setPadding(dp(10), dp(5), dp(10), dp(5)); chip.setBackground(round(live ? p.blueSoft : p.chip, dp(12)));
+                card.addView(chip);
+            }
+            ImageButton more = new ImageButton(this); more.setImageDrawable(tinted(R.drawable.ic_more, p.muted)); more.setBackground(rippled(round(Color.TRANSPARENT, dp(22))));
+            more.setContentDescription(getString(R.string.profile_menu)); more.setOnClickListener(v -> profileActions(info));
+            card.addView(more, new LinearLayout.LayoutParams(dp(44), dp(44)));
+            card.setOnClickListener(v -> { selectedId = info.id; reload(); home(); });
+            card.setOnLongClickListener(v -> { profileActions(info); return true; });
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.bottomMargin = dp(10);
+            list.addView(card, params);
+        }
+        if (list.getChildCount() == 0) {
+            TextView none = text(getString(profiles.isEmpty() ? R.string.import_a_profile_to_get_started : R.string.v3_no_match), 14, p.muted, false);
+            none.setPadding(dp(4), dp(16), dp(4), dp(16)); list.addView(none);
+        }
+    }
+    private View badge(Info info) {
+        int fg, bgColor; String letters;
+        if ("Hysteria 2".equals(info.protocol)) { letters = "H2"; fg = p.light ? 0xFF5B48C9 : 0xFFB9A6FF; bgColor = p.light ? 0xFFE6E0FF : 0xFF2A2340; }
+        else if ("AmneziaWG".equals(info.protocol)) { letters = "AW"; fg = p.light ? 0xFF9A4A0C : 0xFFFFB27A; bgColor = p.light ? 0xFFFFE6D3 : 0xFF3A2A1C; }
+        else { letters = "TT"; fg = p.blueText; bgColor = p.blueSoft; }
+        TextView badge = text(letters, 13, fg, true); badge.setGravity(Gravity.CENTER); badge.setBackground(round(bgColor, dp(15)));
+        badge.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        return badge;
+    }
+    private TextView tag(String value) {
+        TextView tag = text(value, 12, p.muted, false); tag.setPadding(dp(10), dp(4), dp(10), dp(4)); tag.setBackground(round(p.chip, dp(10)));
+        tag.setMaxLines(1); tag.setEllipsize(TextUtils.TruncateAt.END); return tag;
+    }
+
+    // ---- Add --------------------------------------------------------------------------
+
+    private View addScreen() {
+        LinearLayout root = column(); root.setPadding(dp(20), dp(16), dp(20), 0);
+        root.addView(header(getString(R.string.v3_add_title), true));
+        ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false);
+        LinearLayout body = column(); body.setPadding(0, dp(14), 0, dp(16));
+
+        LinearLayout scan = column(); scan.setGravity(Gravity.CENTER); scan.setPadding(dp(16), dp(26), dp(16), dp(22));
+        scan.setBackground(rippled(round(0xFF05070A, dp(28)))); scan.setClickable(true); scan.setFocusable(true); scan.setOnClickListener(v -> qrCamera());
+        ImageView qr = new ImageView(this); qr.setImageDrawable(tinted(R.drawable.ic_qr, BUSY)); scan.addView(qr, new LinearLayout.LayoutParams(dp(72), dp(72)));
+        TextView scanTitle = text(getString(R.string.v3_scan), 16, 0xFFF4F5F7, true); scanTitle.setPadding(0, dp(14), 0, dp(2)); scan.addView(scanTitle);
+        scan.addView(text(getString(R.string.qr_camera_detail), 13, 0xFFC9D3E0, false));
+        body.addView(scan);
+
+        LinearLayout grid = new LinearLayout(this); grid.setPadding(0, dp(10), 0, dp(10));
+        grid.addView(tile(R.drawable.ic_image, getString(R.string.v3_qr_photo), getString(R.string.qr_image_detail), false,
+            () -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE), QR_IMAGE)), weight(true));
+        grid.addView(tile(R.drawable.ic_file, getString(R.string.v3_file), getString(R.string.import_file_detail), false,
+            () -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE), PICK)), weight(false));
+        body.addView(grid);
+
+        LinearLayout paste = column(); paste.setPadding(dp(14), dp(14), dp(14), dp(14)); paste.setBackground(glass(dp(22), p.card));
+        paste.addView(text(getString(R.string.v3_paste_title), 15, p.text, true));
+        EditText input = field(getString(R.string.v3_paste_hint), true);
+        LinearLayout.LayoutParams inputParams = new LinearLayout.LayoutParams(-1, -2); inputParams.setMargins(0, dp(10), 0, dp(8)); paste.addView(input, inputParams);
+        TextView note = text(getString(R.string.v3_paste_note), 12, p.muted, false); paste.addView(note);
+        TextView previewButton = text(getString(R.string.preview), 14, p.onBlue, true); previewButton.setGravity(Gravity.CENTER);
+        previewButton.setBackground(rippled(round(p.light ? p.blueText : p.blue, dp(14)))); previewButton.setPadding(dp(18), 0, dp(18), 0);
+        previewButton.setOnClickListener(v -> { String raw = input.getText().toString(); input.setText(""); if (!raw.trim().isEmpty()) preview(raw); });
+        LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(-2, dp(44)); buttonParams.topMargin = dp(10); buttonParams.gravity = Gravity.END;
+        paste.addView(previewButton, buttonParams);
+        body.addView(paste);
+
+        String portalDetail = portalHost == null ? getString(R.string.v3_portal_detail) : getString(R.string.portal_enrolled_detail, portalHost);
+        LinearLayout portal = row(R.drawable.ic_cloud, getString(portalHost == null ? R.string.v3_portal : R.string.portal_title), portalDetail, () -> new PortalDialog(this, vault, this::reload).show());
+        LinearLayout.LayoutParams portalParams = new LinearLayout.LayoutParams(-1, -2); portalParams.topMargin = dp(10);
+        body.addView(portal, portalParams);
+
+        LinearLayout footer = new LinearLayout(this); footer.setGravity(Gravity.CENTER_VERTICAL); footer.setPadding(dp(4), dp(16), dp(4), 0);
+        ImageView lock = new ImageView(this); lock.setImageDrawable(tinted(R.drawable.ic_lock, p.muted));
+        LinearLayout.LayoutParams lockParams = new LinearLayout.LayoutParams(dp(18), dp(18)); lockParams.setMarginEnd(dp(10)); footer.addView(lock, lockParams);
+        footer.addView(text(getString(R.string.v3_encrypted_note), 12, p.muted, false), new LinearLayout.LayoutParams(0, -2, 1));
+        body.addView(footer);
+        scroll.addView(body); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        return root;
+    }
+
+    // ---- Checks -----------------------------------------------------------------------
+
+    private View checksScreen() {
+        LinearLayout root = column(); root.setPadding(dp(20), dp(16), dp(20), 0);
+        LinearLayout header = header(getString(R.string.checks_title), false);
+        stateChip = text("", 12, p.text, true); stateChip.setPadding(dp(10), dp(6), dp(10), dp(6)); header.addView(stateChip);
+        root.addView(header);
+        ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false);
+        LinearLayout body = column(); body.setPadding(0, dp(14), 0, dp(16));
+        checksBox = column(); checksBox.setPadding(dp(16), dp(2), dp(16), dp(2)); checksBox.setBackground(glass(dp(24), p.card)); body.addView(checksBox);
         String live = TunnelService.active ? null : getString(R.string.needs_connection);
-        String version = "";
-        try { version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception ignored) { /* Footer only. */ }
-        new Sheet(this, getString(R.string.home_settings), null)
-            .section(R.string.settings_connection)
-            .item(R.drawable.ic_lock, getString(R.string.always_on), getString(R.string.always_on_detail), this::vpnSettings)
-            .item(R.drawable.ic_restore, getString(R.string.recovery_menu), getString(R.string.recovery_menu_detail), () -> recovery(selectedId))
-            .item(R.drawable.ic_sync, getString(R.string.metering_title), getString(TunnelService.inheritMetering(this) ? R.string.metering_detail_inherit : R.string.metering_detail_always), this::meteringSettings)
-            .section(R.string.settings_diagnostics)
-            .item(R.drawable.ic_search, getString(R.string.diagnostics_title), live != null ? live : getString(R.string.diagnostics_detail), () -> live(DiagnosticsDialog::show))
-            .item(R.drawable.ic_eye, getString(R.string.flow_capture_title), live != null ? live : getString(R.string.flow_capture_detail), () -> live(FlowCaptureDialog::show))
-            .item(R.drawable.ic_tune, getString(R.string.flow_policy_title), live != null ? live : getString(R.string.flow_policy_detail), () -> live(FlowPolicyDialog::show))
-            .section(R.string.settings_server)
-            .item(R.drawable.ic_cloud, getString(R.string.portal_title), portal, () -> new PortalDialog(this, vault, this::reload).show())
-            .footer(getString(R.string.app_version, version))
-            .show();
+        LinearLayout actions = column(); actions.setPadding(dp(4), dp(4), dp(4), dp(4)); actions.setBackground(glass(dp(24), p.card));
+        actions.addView(row(R.drawable.ic_search, getString(R.string.diagnostics_title), live != null ? live : getString(R.string.diagnostics_detail), () -> live(DiagnosticsDialog::show), false));
+        actions.addView(row(R.drawable.ic_eye, getString(R.string.flow_capture_title), live != null ? live : getString(R.string.flow_capture_detail), () -> live(FlowCaptureDialog::show), false));
+        actions.addView(row(R.drawable.ic_tune, getString(R.string.flow_policy_title), live != null ? live : getString(R.string.flow_policy_detail), () -> live(FlowPolicyDialog::show), false));
+        LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(-1, -2); actionsParams.topMargin = dp(14); body.addView(actions, actionsParams);
+        TextView note = text(getString(R.string.checks_note), 12, p.muted, false); note.setLineSpacing(0, 1.2f); note.setPadding(dp(4), dp(14), dp(4), 0); body.addView(note);
+        scroll.addView(body); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        return root;
     }
-    /** One live diagnostic dialog at a time; each explains itself when VPN is not connected. */
-    private void live(java.util.function.Function<Activity, AlertDialog> open) {
-        if (flowCapture != null) flowCapture.dismiss();
-        flowCapture = open.apply(this);
+
+    // ---- Actions ----------------------------------------------------------------------
+
+    private static final class Entry {
+        final int icon; final String title, detail; final Runnable action; final boolean wide;
+        Entry(int icon, String title, String detail, Runnable action, boolean wide) { this.icon = icon; this.title = title; this.detail = detail; this.action = action; this.wide = wide; }
     }
-    private void recovery(String profileId) {
-        try { RecoveryDialog.show(this, vault, profileId); } catch (Exception e) { error(getString(R.string.recovery_invalid)); }
+    private View actionsScreen() {
+        LinearLayout root = column(); root.setPadding(dp(20), dp(16), dp(20), 0);
+        LinearLayout top = new LinearLayout(this); top.setGravity(Gravity.CENTER_VERTICAL);
+        top.addView(circle(R.drawable.ic_chevron_back, R.string.v3_back, this::goBack), new LinearLayout.LayoutParams(dp(44), dp(44)));
+        search = field(getString(R.string.v3_actions_search), false);
+        LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(0, dp(50), 1); searchParams.setMarginStart(dp(10));
+        top.addView(search, searchParams);
+        root.addView(top);
+        ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false);
+        results = column(); results.setPadding(0, dp(8), 0, dp(16)); scroll.addView(results);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        search.addTextChangedListener(watcher(this::fillActions));
+        fillActions();
+        return root;
     }
-    /** Every check with a result and its outcome; the card itself only shows short chips. */
-    private void checksSheet() {
-        JSONObject snapshot = observations;
-        Sheet sheet = new Sheet(this, getString(R.string.checks_title), status.getText());
-        if (snapshot != null) for (int i = 0; i < ObservationStatus.KEYS.length; i++) {
-            String outcome = ObservationStatus.outcome(snapshot.optJSONObject(ObservationStatus.KEYS[i]));
-            String label = ObservationStatus.label(this, outcome);
-            if (label != null) sheet.status(ObservationStatus.color(outcome), getString(ObservationStatus.NAMES[i]), label);
+    private void fillActions() {
+        if (results == null) return;
+        results.removeAllViews();
+        String live = TunnelService.active ? null : getString(R.string.needs_connection);
+        List<Entry> actions = Arrays.asList(
+            new Entry(R.drawable.ic_search, getString(R.string.diagnostics_title), live != null ? live : getString(R.string.diagnostics_detail), () -> live(DiagnosticsDialog::show), false),
+            new Entry(R.drawable.ic_eye, getString(R.string.flow_capture_title), live != null ? live : getString(R.string.flow_capture_detail), () -> live(FlowCaptureDialog::show), false),
+            new Entry(R.drawable.ic_tune, getString(R.string.flow_policy_title), live != null ? live : getString(R.string.flow_policy_detail), () -> live(FlowPolicyDialog::show), false),
+            new Entry(R.drawable.ic_restore, getString(R.string.recovery_menu), getString(R.string.recovery_menu_detail), () -> recovery(selectedId), false));
+        String always = TunnelService.active ? getString(TunnelService.alwaysOn ? R.string.v3_on : R.string.v3_off) : getString(R.string.v3_android_settings);
+        String mode = Palette.mode(this);
+        String theme = getString(Palette.MODE_DARK.equals(mode) ? R.string.v3_theme_dark : Palette.MODE_LIGHT.equals(mode) ? R.string.v3_theme_light : R.string.v3_theme_system);
+        List<Entry> rest = Arrays.asList(
+            new Entry(R.drawable.ic_add, getString(R.string.add_profile), getString(R.string.v3_add_detail), () -> show(ADD), true),
+            new Entry(R.drawable.ic_apps, getString(R.string.vpn_apps), routingSummary, () -> {
+                try { AppRoutingDialog.show(this, vault, this::reload); }
+                catch (Exception error) { error(getString(R.string.app_selection_could_not_be_opened)); }
+            }, false),
+            new Entry(R.drawable.ic_lock, getString(R.string.v3_always_short), always, this::vpnSettings, false),
+            new Entry(R.drawable.ic_cloud, getString(R.string.settings_server), portalHost == null ? getString(R.string.portal_not_enrolled) : portalHost, () -> new PortalDialog(this, vault, this::reload).show(), false),
+            new Entry(R.drawable.ic_sync, getString(R.string.v3_traffic), getString(TunnelService.inheritMetering(this) ? R.string.metering_detail_inherit : R.string.metering_detail_always), this::meteringSettings, false),
+            new Entry(R.drawable.ic_eye, getString(R.string.v3_theme), theme, this::themeSettings, false));
+        String query = search == null ? "" : search.getText().toString().trim().toLowerCase(Locale.getDefault());
+        if (query.isEmpty()) {
+            results.addView(section(R.string.v3_section_actions));
+            LinearLayout group = column(); group.setPadding(dp(4), dp(4), dp(4), dp(4)); group.setBackground(glass(dp(24), p.card));
+            for (Entry entry : actions) group.addView(row(entry.icon, entry.title, entry.detail, entry.action, false));
+            results.addView(group);
+            results.addView(section(R.string.v3_section_rest));
+            LinearLayout pair = null;
+            for (Entry entry : rest) {
+                if (entry.wide) {
+                    LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.bottomMargin = dp(10);
+                    results.addView(tile(entry.icon, entry.title, entry.detail, true, entry.action), params); continue;
+                }
+                if (pair == null) { pair = new LinearLayout(this); LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.bottomMargin = dp(10); results.addView(pair, params); pair.addView(tile(entry.icon, entry.title, entry.detail, false, entry.action), weight(true)); }
+                else { pair.addView(tile(entry.icon, entry.title, entry.detail, false, entry.action), weight(false)); pair = null; }
+            }
+            String version = "";
+            try { version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception ignored) { /* Footer only. */ }
+            TextView footer = text(getString(R.string.app_version, version), 12, p.muted, false); footer.setPadding(dp(4), dp(10), 0, 0); results.addView(footer);
+            return;
         }
-        sheet.item(R.drawable.ic_search, getString(R.string.diagnostics_title), TunnelService.active ? getString(R.string.diagnostics_detail) : getString(R.string.needs_connection), () -> live(DiagnosticsDialog::show))
-            .footer(getString(R.string.checks_note)).show();
-    }
-    /** Checks that never produced a result are omitted, as in the text summary. */
-    private void showChecks(JSONObject snapshot) {
-        StringBuilder key = new StringBuilder();
-        if (snapshot != null) for (String name : ObservationStatus.KEYS) key.append(ObservationStatus.outcome(snapshot.optJSONObject(name))).append(',');
-        if (key.toString().equals(checksKey)) return;
-        checksKey = key.toString(); checks.removeAllViews();
-        if (snapshot != null) for (int i = 0; i < ObservationStatus.KEYS.length; i++) {
-            String outcome = ObservationStatus.outcome(snapshot.optJSONObject(ObservationStatus.KEYS[i]));
-            String label = ObservationStatus.label(this, outcome);
-            if (label == null) continue;
-            String name = getString(ObservationStatus.NAMES[i]);
-            LinearLayout chip = new LinearLayout(this); chip.setGravity(Gravity.CENTER_VERTICAL); chip.setPadding(dp(8), dp(4), dp(10), dp(4));
-            chip.setBackground(card(color(R.color.surface_raised), dp(12)));
-            View dot = new View(this); GradientDrawable fill = new GradientDrawable(); fill.setShape(GradientDrawable.OVAL); fill.setColor(ObservationStatus.color(outcome)); dot.setBackground(fill);
-            LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(7), dp(7)); dotParams.setMarginEnd(dp(6)); chip.addView(dot, dotParams);
-            TextView text = new TextView(this); text.setText(name); text.setTextSize(12); text.setTextColor(color(R.color.text)); chip.addView(text);
-            chip.setContentDescription(name + ": " + label);
-            checks.addView(chip);
+        List<Entry> matches = new ArrayList<>();
+        for (List<Entry> group : Arrays.asList(actions, rest)) for (Entry entry : group)
+            if ((entry.title + " " + entry.detail).toLowerCase(Locale.getDefault()).contains(query)) matches.add(entry);
+        if (!matches.isEmpty()) {
+            results.addView(section(R.string.v3_section_actions));
+            LinearLayout group = column(); group.setPadding(dp(4), dp(4), dp(4), dp(4)); group.setBackground(glass(dp(24), p.card));
+            for (Entry entry : matches) group.addView(row(entry.icon, entry.title, entry.detail, entry.action, false));
+            results.addView(group);
         }
-        checks.setVisibility(checks.getChildCount() == 0 ? View.GONE : View.VISIBLE);
+        LinearLayout found = column(); found.setPadding(dp(4), dp(4), dp(4), dp(4)); found.setBackground(glass(dp(24), p.card));
+        for (Info info : profiles) if (info.matches(query)) {
+            LinearLayout entry = row(0, info.name, info.protocol + (info.host.isEmpty() ? "" : " · " + info.host), () -> { selectedId = info.id; reload(); home(); }, false);
+            ((ViewGroup) entry).removeViewAt(0); ((ViewGroup) entry).addView(badge(info), 0, iconParams());
+            found.addView(entry);
+        }
+        if (found.getChildCount() > 0) { results.addView(section(R.string.v3_section_profiles)); results.addView(found); }
+        if (results.getChildCount() == 0) { TextView none = text(getString(R.string.v3_no_match), 14, p.muted, false); none.setPadding(dp(4), dp(16), 0, 0); results.addView(none); }
     }
-    /** The profile marked connected: only a connected primary, never while connecting, failing or on a backup. */
-    static String badgeProfile(boolean connected, int backup, String requested) { return connected && backup == 0 ? requested : null; }
-    private static void setText(TextView view, String text) { if (!view.getText().toString().equals(text)) view.setText(text); }
-    /** Left-to-right rows that wrap, for chips on narrow phones. */
+    private void themeSettings() {
+        String mode = Palette.mode(this);
+        String[] modes = {Palette.MODE_SYSTEM, Palette.MODE_DARK, Palette.MODE_LIGHT};
+        int[] names = {R.string.v3_theme_system, R.string.v3_theme_dark, R.string.v3_theme_light};
+        Sheet sheet = new Sheet(this, getString(R.string.v3_theme), null);
+        for (int i = 0; i < modes.length; i++) {
+            String next = modes[i];
+            sheet.item(next.equals(mode) ? R.drawable.ic_check : 0, getString(names[i]), null, () -> { if (!next.equals(Palette.mode(this))) { Palette.setMode(this, next); recreate(); } });
+        }
+        sheet.show();
+    }
+
+    // ---- Building blocks --------------------------------------------------------------
+
+    private int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
+    private static Typeface display() { return Typeface.create(Typeface.SANS_SERIF, 800, false); }
+    private LinearLayout column() { LinearLayout column = new LinearLayout(this); column.setOrientation(LinearLayout.VERTICAL); return column; }
+    private TextView text(String value, int size, int color, boolean bold) {
+        TextView view = new TextView(this); view.setText(value); view.setTextSize(size); view.setTextColor(color);
+        if (bold) view.setTypeface(Typeface.create(Typeface.SANS_SERIF, 700, false)); return view;
+    }
+    private GradientDrawable round(int fill, int radius) { GradientDrawable bg = new GradientDrawable(); bg.setColor(fill); bg.setCornerRadius(radius); return bg; }
+    /** Card surface: opaque in the dark theme, translucent with a light rim in the light (glass) theme. */
+    private GradientDrawable glass(int radius, int fill) { GradientDrawable bg = round(fill, radius); bg.setStroke(Math.max(1, dp(1)), p.cardStroke); return bg; }
+    private Drawable rippled(Drawable content) { return new RippleDrawable(ColorStateList.valueOf(p.ripple), content, content); }
+    private Drawable tinted(int id, int tint) { Drawable icon = getDrawable(id).mutate(); icon.setTint(tint); return icon; }
+    private LinearLayout.LayoutParams weight(boolean gap) { LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -1, 1); if (gap) params.setMarginEnd(dp(10)); return params; }
+    private LinearLayout.LayoutParams iconParams() { LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(40), dp(40)); params.setMarginEnd(dp(12)); return params; }
+    private ImageButton circle(int icon, int description, Runnable click) {
+        ImageButton button = new ImageButton(this); button.setImageDrawable(tinted(icon, p.text)); button.setBackground(rippled(glass(dp(22), p.chip)));
+        button.setContentDescription(getString(description)); button.setOnClickListener(v -> click.run()); return button;
+    }
+    private LinearLayout header(String title, boolean close) {
+        LinearLayout header = new LinearLayout(this); header.setGravity(Gravity.CENTER_VERTICAL);
+        header.addView(circle(close ? R.drawable.ic_close : R.drawable.ic_chevron_back, close ? R.string.v3_close : R.string.v3_back, this::goBack), new LinearLayout.LayoutParams(dp(44), dp(44)));
+        TextView text = new TextView(this); text.setText(title); text.setTypeface(display()); text.setTextSize(26); text.setTextColor(p.text); text.setMaxLines(1); text.setEllipsize(TextUtils.TruncateAt.END);
+        text.setPadding(dp(12), 0, dp(8), 0); header.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
+        return header;
+    }
+    private TextView section(int title) {
+        TextView label = text(getString(title).toUpperCase(Locale.getDefault()), 11, p.muted, true); label.setLetterSpacing(0.1f); label.setPadding(dp(4), dp(16), 0, dp(8));
+        return label;
+    }
+    private EditText field(String hint, boolean multiline) {
+        EditText input = new EditText(this); input.setHint(hint); input.setTextColor(p.text); input.setHintTextColor(p.muted); input.setTextSize(15);
+        input.setBackground(glass(dp(multiline ? 14 : 25), multiline ? p.field : p.card)); input.setPadding(dp(16), dp(10), dp(16), dp(10));
+        input.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
+        input.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+        if (multiline) {
+            input.setMinLines(3); input.setMaxLines(8); input.setGravity(Gravity.TOP | Gravity.START);
+            input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+            input.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(1024 * 1024)});
+        } else {
+            input.setSingleLine(true); input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        }
+        return input;
+    }
+    private static TextWatcher watcher(Runnable changed) {
+        return new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+            public void onTextChanged(CharSequence s, int start, int before, int count) { changed.run(); }
+            public void afterTextChanged(Editable value) { }
+        };
+    }
+    private TextView pill(String title, int icon, Runnable click) {
+        TextView pill = text(title, 16, p.light ? Color.WHITE : p.onBlue, true); pill.setGravity(Gravity.CENTER);
+        pill.setCompoundDrawablesRelativeWithIntrinsicBounds(tinted(icon, p.light ? Color.WHITE : p.onBlue), null, null, null); pill.setCompoundDrawablePadding(dp(10));
+        pill.setPadding(dp(20), 0, dp(20), 0); pill.setBackground(rippled(round(p.light ? p.blueText : p.blue, dp(29))));
+        pill.setClickable(true); pill.setFocusable(true); pill.setOnClickListener(v -> click.run()); return pill;
+    }
+    private LinearLayout row(int icon, String title, String detail, Runnable click) { return row(icon, title, detail, click, true); }
+    /** Icon tile, title and detail. As a standalone card it carries its own glass surface. */
+    private LinearLayout row(int icon, String title, String detail, Runnable click, boolean card) {
+        LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL); row.setMinimumHeight(dp(60));
+        row.setPadding(dp(card ? 14 : 10), dp(10), dp(10), dp(10));
+        row.setBackground(rippled(card ? glass(dp(22), p.card) : round(Color.TRANSPARENT, dp(18))));
+        ImageView image = new ImageView(this); if (icon != 0) image.setImageDrawable(tinted(icon, p.blueText)); image.setPadding(dp(9), dp(9), dp(9), dp(9)); image.setBackground(round(p.blueSoft, dp(14)));
+        row.addView(image, iconParams());
+        LinearLayout texts = column();
+        texts.addView(text(title, 15, p.text, true));
+        if (detail != null && !detail.isEmpty()) { TextView sub = text(detail, 12, p.muted, false); sub.setPadding(0, dp(2), 0, 0); sub.setMaxLines(2); sub.setEllipsize(TextUtils.TruncateAt.END); texts.addView(sub); }
+        row.addView(texts, new LinearLayout.LayoutParams(0, -2, 1));
+        row.setClickable(true); row.setFocusable(true); row.setOnClickListener(v -> click.run());
+        return row;
+    }
+    /** Bento tile; the wide one is the filled primary action. */
+    private LinearLayout tile(int icon, String title, String detail, boolean primary, Runnable click) {
+        LinearLayout tile = column(); tile.setPadding(dp(16), dp(16), dp(16), dp(16));
+        int fg = primary ? (p.light ? Color.WHITE : p.onBlue) : p.text;
+        tile.setBackground(rippled(primary ? round(p.light ? p.blueText : p.blue, dp(22)) : glass(dp(22), p.card)));
+        if (primary) { tile.setOrientation(LinearLayout.HORIZONTAL); tile.setGravity(Gravity.CENTER_VERTICAL); }
+        ImageView image = new ImageView(this); image.setImageDrawable(tinted(icon, fg));
+        LinearLayout.LayoutParams imageParams = new LinearLayout.LayoutParams(dp(24), dp(24)); if (primary) imageParams.setMarginEnd(dp(12)); else imageParams.bottomMargin = dp(10);
+        tile.addView(image, imageParams);
+        TextView head = text(title, 15, fg, true); head.setMaxLines(2);
+        if (primary) tile.addView(head, new LinearLayout.LayoutParams(0, -2, 1)); else tile.addView(head);
+        TextView sub = text(detail, 12, primary ? fg : p.muted, false); sub.setMaxLines(2); sub.setEllipsize(TextUtils.TruncateAt.END); if (!primary) sub.setPadding(0, dp(4), 0, 0);
+        tile.addView(sub);
+        tile.setClickable(true); tile.setFocusable(true); tile.setOnClickListener(v -> click.run());
+        return tile;
+    }
+    /** Left-to-right rows that wrap, for tags on narrow phones. */
     static final class Wrap extends ViewGroup {
         private final int gap;
         Wrap(Context context, int gap) { super(context); this.gap = gap; }
@@ -240,123 +761,54 @@ public class MainActivity extends Activity {
             }
         }
     }
-    private int dp(int n) { return Math.round(n * getResources().getDisplayMetrics().density); }
-    private int color(int id) { return getColor(id); }
-    private GradientDrawable card(int fill, int radius) { GradientDrawable bg = new GradientDrawable(); bg.setColor(fill); bg.setCornerRadius(radius); return bg; }
-    private Drawable ripple(Drawable content) { return new RippleDrawable(ColorStateList.valueOf(color(R.color.ripple)), content, content); }
-    private Drawable tinted(int id, int tint) { Drawable icon = getDrawable(id).mutate(); icon.setTint(tint); return icon; }
-    private LinearLayout.LayoutParams actionParams(boolean gap) { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, -1, 1); if (gap) p.setMarginEnd(dp(10)); return p; }
-    /** Icon tile with a caption and optional second line (e.g. "All apps"). */
-    private LinearLayout action(int icon, String caption, String detail, Runnable click) {
-        LinearLayout tile = new LinearLayout(this); tile.setOrientation(LinearLayout.VERTICAL); tile.setGravity(Gravity.CENTER);
-        tile.setPadding(dp(8), dp(14), dp(8), dp(12)); tile.setBackground(ripple(card(color(R.color.surface), dp(16)))); tile.setClickable(true); tile.setFocusable(true);
-        ImageView image = new ImageView(this); image.setImageDrawable(tinted(icon, color(R.color.accent))); tile.addView(image, new LinearLayout.LayoutParams(dp(26), dp(26)));
-        TextView text = new TextView(this); text.setText(caption); text.setTextSize(13); text.setTypeface(null, Typeface.BOLD); text.setTextColor(color(R.color.text)); text.setGravity(Gravity.CENTER); text.setMaxLines(2); text.setPadding(0, dp(8), 0, 0); tile.addView(text);
-        TextView sub = new TextView(this); sub.setTextSize(11); sub.setTextColor(color(R.color.text_muted)); sub.setGravity(Gravity.CENTER); sub.setMaxLines(1); sub.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        if (detail == null) sub.setVisibility(View.INVISIBLE); else sub.setText(detail); tile.addView(sub);
-        tile.setOnClickListener(v -> click.run()); return tile;
-    }
-    private Button button(String text, Runnable click) {
-        Button button = new Button(this); button.setText(text); button.setAllCaps(false); button.setGravity(Gravity.CENTER); button.setTypeface(null, Typeface.BOLD); button.setTextColor(Color.WHITE); button.setBackgroundTintList(null);
-        button.setBackground(ripple(card(color(R.color.surface_raised), dp(14)))); button.setStateListAnimator(null);
-        button.setOnClickListener(v -> click.run()); return button;
-    }
-    /** Tapping selects the app profile; the menu separately assigns the widget default. */
-    private View profileRow(String id, String name, String detail, boolean isDefault, boolean isSelected, boolean isConnected) {
-        LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL); row.setPadding(dp(16), dp(14), dp(6), dp(14));
-        GradientDrawable bg = card(color(isSelected ? R.color.accent_soft : R.color.surface), dp(16)); if (isSelected) bg.setStroke(dp(1), color(R.color.accent));
-        row.setBackground(ripple(bg)); row.setClickable(true); row.setFocusable(true);
-        ImageView mark = new ImageView(this); mark.setImageDrawable(tinted(R.drawable.ic_check, color(R.color.accent))); mark.setVisibility(isSelected ? View.VISIBLE : View.INVISIBLE);
-        LinearLayout.LayoutParams markParams = new LinearLayout.LayoutParams(dp(22), dp(22)); markParams.setMarginEnd(dp(12)); row.addView(mark, markParams);
-        LinearLayout text = new LinearLayout(this); text.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout titleRow = new LinearLayout(this); titleRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = new TextView(this); title.setText(name); title.setTextSize(16); title.setTypeface(null, Typeface.BOLD); title.setTextColor(color(R.color.text)); title.setMaxLines(1); title.setEllipsize(android.text.TextUtils.TruncateAt.END); titleRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        if (isConnected) {
-            TextView badge = new TextView(this); badge.setText(R.string.connected_badge); badge.setTextSize(11); badge.setTypeface(null, Typeface.BOLD); badge.setTextColor(ON);
-            badge.setPadding(dp(8), dp(2), dp(8), dp(2)); badge.setBackground(card(Color.argb(38, Color.red(ON), Color.green(ON), Color.blue(ON)), dp(10)));
-            LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(-2, -2); badgeParams.setMarginStart(dp(8)); titleRow.addView(badge, badgeParams);
-        }
-        text.addView(titleRow);
-        TextView sub = new TextView(this); sub.setText(detail + (isDefault ? " · " + getString(R.string.default_profile_label) : "")); sub.setTextSize(12); sub.setTextColor(color(R.color.text_muted)); sub.setMaxLines(1); sub.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE); text.addView(sub);
-        row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
-        ImageButton more = new ImageButton(this); more.setImageDrawable(tinted(R.drawable.ic_more, color(R.color.text_muted))); more.setBackground(ripple(card(Color.TRANSPARENT, dp(20)))); more.setContentDescription(getString(R.string.profile_menu));
-        row.addView(more, new LinearLayout.LayoutParams(dp(40), dp(40)));
-        row.setOnClickListener(v -> { selectedId = id; reload(); });
-        more.setOnClickListener(v -> profileActions(id, name, detail, isDefault));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.setMargins(0, 0, 0, dp(8)); row.setLayoutParams(params); return row;
-    }
+
+    // ---- Data -------------------------------------------------------------------------
+
+    /** The profile marked connected: only a connected primary, never while connecting, failing or on a backup. */
+    static String badgeProfile(boolean connected, int backup, String requested) { return connected && backup == 0 ? requested : null; }
     /**
-     * Lifecycle colour. A running tunnel is teal, never green: green needs every check
-     * passed and fresh (ObservationStatus.level). Amber is reserved for failed checks.
+     * Lifecycle colour. A running tunnel is blue, never green: green needs every check
+     * passed and fresh (ObservationStatus.level). Yellow is reserved for failed checks.
      */
     static int connectionColor(boolean active, int state, boolean problem) {
         if (problem || state == 4 || state < 0 || state > 4) return ERROR;
         if (!active) return IDLE;
         return state == 2 ? ON : BUSY;
     }
-    /** The dot and card edge carry the state; the button shows the next action. */
-    private void paintConnection(int color, boolean active) {
-        int key = color ^ (active ? 1 : 0);
-        if (connectionColor == key) return;
-        connectionColor = key;
-        GradientDrawable heroBg = card(color(R.color.surface), dp(20));
-        heroBg.setStroke(dp(1), color == IDLE ? color(R.color.outline) : Color.argb(110, Color.red(color), Color.green(color), Color.blue(color)));
-        hero.setBackground(ripple(heroBg));
-        ((GradientDrawable) statusDot.getBackground()).setColor(color);
-        GradientDrawable button = card(color(active ? R.color.surface_raised : R.color.accent), dp(14));
-        if (active) button.setStroke(dp(1), color(R.color.outline));
-        connect.setBackground(ripple(button));
-        connect.setCompoundDrawablesRelativeWithIntrinsicBounds(tinted(R.drawable.ic_power, active ? color(R.color.danger) : Color.WHITE), null, null, null);
-        connect.setTextColor(active ? color(R.color.text) : Color.WHITE);
-    }
-    @Override public void onResume() {
-        super.onResume(); reload();
-        // The service re-checks that this app is still the system Always-on VPN before connecting.
-        if (TunnelService.alwaysOnSessionLost(this))
-            try { startService(new Intent(this, TunnelService.class).setAction(TunnelService.RECOVER)); } catch (Exception ignored) { /* Retry on next resume. */ }
-        handler.post(poll);
-    }
-    @Override public void onPause() { if (flowCapture != null) {flowCapture.dismiss(); flowCapture=null;} handler.removeCallbacks(poll); super.onPause(); }
-    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); setIntent(intent); incoming(intent); }
-    private void incoming(Intent intent) {
-        if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null && java.util.Arrays.asList("tt", "hy2", "hysteria2").contains(intent.getData().getScheme())) {
-            String raw = intent.getDataString(); intent.setData(null); preview(raw);
-        }
-    }
-    private void error(String message) { new AlertDialog.Builder(this).setTitle("R-TrustTunnel").setMessage(message).setPositiveButton("OK", null).show(); }
+    /** Re-reads display data from the vault and refreshes the visible screen. */
     private void reload() {
-        rows.removeAllViews();
+        profiles.clear(); backups.clear(); portalHost = null;
         try {
-            JSONObject data = vault.read(); JSONArray profiles = data.getJSONArray("profiles");
+            JSONObject data = vault.read(); JSONArray entries = data.getJSONArray("profiles");
             AppRouting selection = AppRouting.read(data);
-            routingLabel.setText(selection.selectedOnly ? getString(R.string.selected_count, selection.packages.size()) : getString(R.string.all_apps));
+            routingSummary = selection.selectedOnly ? getString(R.string.selected_count, selection.packages.size()) : getString(R.string.all_apps);
+            JSONObject session = data.optJSONObject("portal");
+            if (session != null) portalHost = Uri.parse(session.optString("origin")).getHost();
             boolean found = false;
-            for (int i = 0; i < profiles.length(); i++) if (profiles.getJSONObject(i).getString("id").equals(selectedId)) found = true;
+            for (int i = 0; i < entries.length(); i++) if (entries.getJSONObject(i).getString("id").equals(selectedId)) found = true;
             if (!found) selectedId = data.optString("default");
-            selectedProfile.setText(R.string.no_selected_profile);
-            String connected = liveProfileId;
-            String shown = connected != null ? connected : selectedId;
-            selectedProfileLabel.setText(connected != null ? R.string.connected_profile_label : R.string.selected_profile_label);
-            profilesHeader.setText(getString(R.string.profiles_header, profiles.length()));
-            for (int i = 0; i < profiles.length(); i++) {
-                JSONObject item = profiles.getJSONObject(i), profile = item.getJSONObject("profile"); String id = item.getString("id");
-                String name = profile.optString("name"); if (name.trim().isEmpty()) name = "Profile " + (i + 1);
-                boolean isDefault = id.equals(data.getString("default"));
-                if (id.equals(shown)) selectedProfile.setText(name);
-                String host = profile.optJSONObject("endpoint") == null ? "" : profile.getJSONObject("endpoint").optString("hostname");
-                String detail = protocolName(profile) + (host.isEmpty() ? "" : " · " + host);
-                JSONObject managed=item.optJSONObject("managed_routing");
-                if (managed!=null) detail += " · " + getString(managed.getString("revision").startsWith("admin:") ? R.string.routing_admin : R.string.routing_user) + " · " + managed.getString("group");
-                rows.addView(profileRow(id, name, detail, isDefault, id.equals(selectedId), id.equals(connected)));
+            for (int i = 0; i < entries.length(); i++) {
+                JSONObject item = entries.getJSONObject(i), profile = item.getJSONObject("profile");
+                Info info = new Info(); info.id = item.getString("id");
+                info.name = profile.optString("name"); if (info.name.trim().isEmpty()) info.name = "Profile " + (i + 1);
+                info.protocol = protocolName(profile);
+                info.host = profile.optJSONObject("endpoint") == null ? "" : profile.getJSONObject("endpoint").optString("hostname");
+                info.isDefault = info.id.equals(data.getString("default"));
+                info.server = item.has("remote_id");
+                JSONObject managed = item.optJSONObject("managed_routing");
+                if (managed != null) info.managed = getString(managed.getString("revision").startsWith("admin:") ? R.string.routing_admin : R.string.routing_user) + " · " + managed.getString("group");
+                profiles.add(info);
             }
-            if (profiles.length() == 0) {
-                LinearLayout empty = new LinearLayout(this); empty.setOrientation(LinearLayout.VERTICAL); empty.setGravity(Gravity.CENTER); empty.setPadding(dp(20), dp(28), dp(20), dp(28));
-                GradientDrawable bg = card(Color.TRANSPARENT, dp(16)); bg.setStroke(dp(1), color(R.color.outline), dp(6), dp(5)); empty.setBackground(bg);
-                TextView head = new TextView(this); head.setText(R.string.import_a_profile_to_get_started); head.setTextSize(15); head.setTypeface(null, Typeface.BOLD); head.setTextColor(color(R.color.text)); head.setGravity(Gravity.CENTER); empty.addView(head);
-                TextView hint = new TextView(this); hint.setText(R.string.empty_hint); hint.setTextSize(13); hint.setTextColor(color(R.color.text_muted)); hint.setGravity(Gravity.CENTER); hint.setPadding(0, dp(6), 0, 0); empty.addView(hint);
-                rows.addView(empty);
+            JSONObject recovery = data.optJSONObject("mobile_recovery");
+            if (recovery != null && Objects.equals(selectedId, recovery.optString("primary"))) {
+                JSONArray ids = recovery.optJSONArray("backups");
+                if (ids != null) for (int i = 0; i < ids.length(); i++) backups.add(ids.getString(i));
             }
         } catch (Exception e) { error(getString(R.string.encrypted_profiles_could_not_be_opened)); }
+        if (host == null) return;
+        renderKey = "";
+        fillStrip(); fillProfiles(); fillActions();
+        renderState();
     }
     private void setDefault(String id) {
         try {
@@ -367,13 +819,14 @@ public class MainActivity extends Activity {
             }); reload();
         } catch (Exception e) { error(getString(R.string.could_not_save_profile_changes)); }
     }
-    private void profileActions(String id, String name, String detail, boolean isDefault) {
-        Sheet sheet = new Sheet(this, name, detail);
-        if (isDefault) sheet.item(R.drawable.ic_star, getString(R.string.default_profile_label), getString(R.string.default_profile_detail), null);
-        else sheet.item(R.drawable.ic_star, getString(R.string.make_default_profile), getString(R.string.default_profile_detail), () -> setDefault(id));
-        sheet.item(R.drawable.ic_restore, getString(R.string.recovery_menu), getString(R.string.recovery_profile_detail), () -> recovery(id))
-            .item(R.drawable.ic_upload, getString(R.string.export), getString(R.string.export_detail), () -> profileAction(id, true))
-            .danger(R.drawable.ic_delete, getString(R.string.delete_text), getString(R.string.delete_detail), () -> profileAction(id, false))
+    private void profileActions(Info info) {
+        String detail = info.protocol + (info.host.isEmpty() ? "" : " · " + info.host);
+        Sheet sheet = new Sheet(this, info.name, detail);
+        if (info.isDefault) sheet.item(R.drawable.ic_star, getString(R.string.default_profile_label), getString(R.string.default_profile_detail), null);
+        else sheet.item(R.drawable.ic_star, getString(R.string.make_default_profile), getString(R.string.default_profile_detail), () -> setDefault(info.id));
+        sheet.item(R.drawable.ic_restore, getString(R.string.recovery_menu), getString(R.string.recovery_profile_detail), () -> recovery(info.id))
+            .item(R.drawable.ic_upload, getString(R.string.export), getString(R.string.export_detail), () -> profileAction(info.id, true))
+            .danger(R.drawable.ic_delete, getString(R.string.delete_text), getString(R.string.delete_detail), () -> profileAction(info.id, false))
             .show();
     }
     private void profileAction(String id, boolean export) {
@@ -392,14 +845,36 @@ public class MainActivity extends Activity {
                 }).show();
             } catch (Exception e) { error(getString(R.string.could_not_open_profile)); }
     }
-    private void paste() {
-        EditText input = new EditText(this); input.setHint("TOML, YAML, JSON, tt:// or hy2://"); input.setMinLines(4); input.setMaxLines(10);
-        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        input.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
-        input.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
-        input.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(1024 * 1024)});
-        new AlertDialog.Builder(this).setTitle(getString(R.string.import_profile)).setView(input).setNegativeButton(getString(R.string.cancel), null).setPositiveButton(getString(R.string.preview), (d, w) -> { String raw = input.getText().toString(); input.setText(""); preview(raw); }).show();
+    /** One live diagnostic dialog at a time; each explains itself when VPN is not connected. */
+    private void live(java.util.function.Function<Activity, AlertDialog> open) {
+        if (flowCapture != null) flowCapture.dismiss();
+        flowCapture = open.apply(this);
     }
+    private void recovery(String profileId) {
+        try { RecoveryDialog.show(this, vault, profileId); } catch (Exception e) { error(getString(R.string.recovery_invalid)); }
+    }
+
+    // ---- Lifecycle, import and export (unchanged behaviour) ---------------------------
+
+    private void startSelectedConnection() {
+        if (pendingConnectId == null || pendingConnectId.isEmpty()) { error(getString(R.string.import_and_select_a_profile)); return; }
+        startForegroundService(new Intent(this, TunnelService.class).putExtra(TunnelService.PROFILE_ID, pendingConnectId));
+    }
+    @Override public void onResume() {
+        super.onResume(); reload();
+        // The service re-checks that this app is still the system Always-on VPN before connecting.
+        if (TunnelService.alwaysOnSessionLost(this))
+            try { startService(new Intent(this, TunnelService.class).setAction(TunnelService.RECOVER)); } catch (Exception ignored) { /* Retry on next resume. */ }
+        handler.post(poll);
+    }
+    @Override public void onPause() { if (flowCapture != null) {flowCapture.dismiss(); flowCapture=null;} handler.removeCallbacks(poll); super.onPause(); }
+    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); setIntent(intent); incoming(intent); }
+    private void incoming(Intent intent) {
+        if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null && java.util.Arrays.asList("tt", "hy2", "hysteria2").contains(intent.getData().getScheme())) {
+            String raw = intent.getDataString(); intent.setData(null); preview(raw);
+        }
+    }
+    private void error(String message) { new AlertDialog.Builder(this).setTitle("R-TrustTunnel").setMessage(message).setPositiveButton("OK", null).show(); }
     private void preview(String raw) {
         try {
             JSONObject parsed = new JSONObject(NativeCore.INSTANCE.parse(raw));
@@ -414,6 +889,7 @@ public class MainActivity extends Activity {
                         String id = UUID.randomUUID().toString(); list.put(new JSONObject().put("id", id).put("profile", profile));
                         if (data.getString("default").isEmpty()) data.put("default", id);
                         }); reload();
+                        if (screen == ADD) home();
                     } catch (Exception e) { error(getString(R.string.could_not_save_encrypted_profile)); }
                 }).show();
         } catch (Exception e) { error(getString(R.string.invalid_or_oversized_profile)); }
@@ -432,21 +908,19 @@ public class MainActivity extends Activity {
         sheet.show();
     }
     private void exportAs(String raw, int choice, boolean hysteria, boolean amnezia) {
-        {
-            // Rust codec format indices: 3 is a link, 4 an AmneziaWG config.
-            int format=choice==1?(hysteria?3:amnezia?4:1):choice;
-            try {
-                JSONObject output = new JSONObject(NativeCore.INSTANCE.export(raw, format));
-                if (!output.getBoolean("ok")) { error(output.optString("message")); return; }
-                new AlertDialog.Builder(this).setTitle(getString(R.string.save_unencrypted_credentials)).setMessage(getString(R.string.anyone_with_this_file_can_use) + output.getJSONArray("losses").toString())
-                    .setNegativeButton(getString(R.string.cancel), null).setPositiveButton(getString(R.string.choose_file), (confirm, which) -> {
-                        try { vault.pendingExport(output.getString("content")); }
-                        catch (Exception e) { error(getString(R.string.export_failed)); return; }
-                        startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).setType(format == 0 ? "application/json" : format >= 3 ? "text/plain" : "application/toml").addCategory(Intent.CATEGORY_OPENABLE)
-                            .putExtra(Intent.EXTRA_TITLE, "rtrust-profile." + (format == 0 ? "json" : format == 3 ? "txt" : format == 4 ? "conf" : "toml")), SAVE);
-                    }).show();
-            } catch (Exception e) { error(getString(R.string.could_not_export_this_profile)); }
-        }
+        // Rust codec format indices: 3 is a link, 4 an AmneziaWG config.
+        int format=choice==1?(hysteria?3:amnezia?4:1):choice;
+        try {
+            JSONObject output = new JSONObject(NativeCore.INSTANCE.export(raw, format));
+            if (!output.getBoolean("ok")) { error(output.optString("message")); return; }
+            new AlertDialog.Builder(this).setTitle(getString(R.string.save_unencrypted_credentials)).setMessage(getString(R.string.anyone_with_this_file_can_use) + output.getJSONArray("losses").toString())
+                .setNegativeButton(getString(R.string.cancel), null).setPositiveButton(getString(R.string.choose_file), (confirm, which) -> {
+                    try { vault.pendingExport(output.getString("content")); }
+                    catch (Exception e) { error(getString(R.string.export_failed)); return; }
+                    startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).setType(format == 0 ? "application/json" : format >= 3 ? "text/plain" : "application/toml").addCategory(Intent.CATEGORY_OPENABLE)
+                        .putExtra(Intent.EXTRA_TITLE, "rtrust-profile." + (format == 0 ? "json" : format == 3 ? "txt" : format == 4 ? "conf" : "toml")), SAVE);
+                }).show();
+        } catch (Exception e) { error(getString(R.string.could_not_export_this_profile)); }
     }
     private void qrCamera() {
         new com.google.zxing.integration.android.IntentIntegrator(this).setCaptureActivity(QrCaptureActivity.class)
@@ -474,6 +948,7 @@ public class MainActivity extends Activity {
         if (inherit == TunnelService.inheritMetering(this)) return;
         TunnelService.setInheritMetering(this, inherit);
         if (TunnelService.active) Toast.makeText(this, R.string.metering_next_connection, Toast.LENGTH_LONG).show();
+        fillActions();
     }
     private void vpnSettings() {
         String state = TunnelService.active ? getString(R.string.always_status, TunnelService.alwaysOn, TunnelService.lockdown) : getString(R.string.always_status_unknown);

@@ -29,9 +29,9 @@ public final class VpnWidget extends AppWidgetProvider {
 
     /**
      * The 1×1 layout has no room for text, so the button colour carries the
-     * state, in MainActivity.connectionColor's palette: grey off, blue while
-     * connecting, teal while running (never green: lifecycle is not verified
-     * availability, and amber would read as a warning) and red on error.
+     * state, in MainActivity.connectionColor's palette: grey off, a blue ring
+     * while connecting, solid blue while running (never green: lifecycle is not
+     * verified availability, and yellow would read as a warning) and red on error.
      */
     static int button(int status) {
         if (status == R.string.disconnected) return R.drawable.widget_button_off;

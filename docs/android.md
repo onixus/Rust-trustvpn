@@ -17,28 +17,37 @@ This branding build has not been installed on a physical phone; the preceding
 
 ## Navigation
 
-The default profile appears at the top, with Connect/Disconnect at the bottom.
-**+ Add profile** groups file, pasted configuration/link and QR import.
-**Settings** groups Always-on, backup profiles and traffic metering, the live
-diagnostics (path check, flow observation, session rules) and Server profiles.
-The **⋮** on a profile opens default-for-widget, backups, export and delete.
-**VPN apps** remains on the home screen. English/Russian labels follow the system
-locale. Screenshots are blocked by `FLAG_SECURE` in the released Android app;
-do not disable that protection or publish real profiles to create documentation.
+One activity hosts five screens with its own back stack (predictive Back on API 33+):
+
+- **Home**: a large two-line state headline, a plain-language description, the five
+  checks, a horizontal strip of profiles (selected first, then its backups) and a
+  slide-to-connect/disconnect control at the bottom. A tap only nudges the knob, so a
+  pocket tap cannot change the tunnel; TalkBack activates it directly.
+- **Profiles**: search, protocol badges, server/device and backup tags, the widget
+  star and a ⋮ menu (widget default, backups, export, delete).
+- **New profile**: QR camera, QR from an image, file, an inline link/text field that
+  always opens the import preview, and server enrollment.
+- **Checks**: each check with its outcome and what it covers, plus the path check,
+  flow observation and session rules.
+- **Actions**: search over every action and profile, and tiles that show the current
+  value of VPN apps, Always-on, server, traffic metering and theme.
+
+English/Russian labels follow the system locale. Screenshots are blocked by
+`FLAG_SECURE` in the released Android app; do not disable that protection or
+publish real profiles to create documentation.
 
 ## Implemented
 
-- A status card with a short state, a coloured dot and one chip per check that has a
-  result. Grey is off, blue is connecting, teal is a running transport (lifecycle is not
-  verified availability, so not green), green only when every check passed and is fresh,
-  amber only when a check failed, and red on error. Tapping the card lists every check
-  with its outcome. The bottom Connect/Disconnect button shows the next action: filled
-  blue to connect, outlined to disconnect. The home-screen widget button uses the state
-  colours (grey, blue, teal, red), so the state is visible on a 1×1 widget without text.
-- Menus (Add profile, Settings, profile actions, export formats, portal) open as
-  app-styled bottom sheets with icons and one-line explanations, not system list
-  dialogs. Settings group Connection, Diagnostics and Server entries. The profile that
-  is connected (state connected, primary, not a backup) carries a "connected" badge.
+- State colours, shared by the headline, the slider knob, the checks and the widget:
+  grey off, a blue ring while connecting, solid blue for a running transport (lifecycle
+  is not verified availability, so not green), green only when all five checks passed
+  and are fresh, yellow only when a check failed, and red on error.
+- Dark theme and a light "frosted glass" theme (translucent cards over soft colour
+  blobs), following the system or chosen under Actions → Theme. Dialogs follow the
+  theme. Without a backdrop blur API before Android 12 the glass is simulated.
+- Menus (profile actions, export formats, portal, metering, theme) open as app-styled
+  bottom sheets with icons and one-line explanations. A profile is marked running only
+  while its primary tunnel is connected, never while connecting, failing or on a backup.
 - Device-local app routing: all apps (default), or only selected installed apps,
   with searchable selection stored in the encrypted vault. Unselected apps use
   their normal network, or lose connectivity under system lockdown. Disconnect before editing the selection; reconnect to apply.

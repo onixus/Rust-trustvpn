@@ -30,15 +30,6 @@ final class ObservationStatus {
         }
         return outcome;
     }
-    /** Per-check dot colour, in MainActivity.connectionColor's palette. */
-    static int color(String outcome) {
-        switch (outcome) {
-            case "passed": return MainActivity.VERIFIED;
-            case "failed": return MainActivity.ERROR;
-            case "configured": return MainActivity.ON;
-            default: return MainActivity.IDLE;
-        }
-    }
     static int level(JSONObject snapshot) {
         snapshot = snapshot(snapshot);
         boolean verified = true;
