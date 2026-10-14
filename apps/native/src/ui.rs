@@ -4,8 +4,8 @@
 use super::*;
 use iced::widget::{Space, column};
 use rtrust_control::observations::{
-    FRESH_MS, Mode as ObservationMode, Observation, Outcome, PROBE_TTL_MS,
-    Reason as ObservationReason, Snapshot, Source, ttl_cap,
+    Mode as ObservationMode, Observation, Outcome, PROBE_TTL_MS, Reason as ObservationReason,
+    Snapshot, Source, ttl_cap,
 };
 
 // ---------------------------------------------------------------- language
@@ -2916,7 +2916,7 @@ pub(super) fn native_window(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rtrust_control::observations::{Mode as ObsMode, Monitor, Source, now_ms};
+    use rtrust_control::observations::{FRESH_MS, Mode as ObsMode, Monitor, Source, now_ms};
     use rtrust_profile::routing::Action;
     fn passed(now: u64) -> Observation {
         Observation {
