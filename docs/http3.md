@@ -50,9 +50,8 @@ same connection's first check returned 200, which also proves the credentials.
 
 Main adds per-session bounded, in-memory liveness counters in
 `crates/engine/src/liveness.rs`. An idle session remains healthy. Unanswered
-outgoing demand for at least 20 seconds together with at least five failing or
-silent TCP opens across at least three destinations in the recent window
-(three 20-second buckets) yields `Degraded`. Lost `_check` responses alone
+outgoing demand for at least 20 seconds together with at least five failing TCP opens or at least five accepted-but-silent TCP
+opens across at least three destination hash bits in the 60-second evidence window yields `Degraded`. Lost `_check` responses alone
 remain compatible with endpoint 1.1.0. Degradation enters the existing guarded
 reconnect path without direct fallback; sessions with no delivered bytes do
 not reset backoff. Android refunds a degraded-session attempt only after
