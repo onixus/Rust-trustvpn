@@ -2,18 +2,19 @@
 //! destination or address is kept. Each session owns its own instance, so a
 //! stale flow of a previous session can never vouch for a newer one.
 use std::{
-    sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed},
+    hash::BuildHasher,
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed},
     time::{Duration, Instant},
 };
 
 /// Outbound demand must stay unanswered this long before a session is judged.
 pub(crate) const SILENCE: Duration = Duration::from_secs(20);
-/// Opens that failed in transport (timeout, protocol, I/O) since the last inbound byte.
-pub(crate) const FAILED_OPENS: u32 = 3;
-/// Accepted TCP CONNECTs since the last inbound byte: accepted, yet all silent.
-pub(crate) const SILENT_OPENS: u32 = 5;
-/// Consecutive health checks finished without their response.
-pub(crate) const LOST_CHECKS: u32 = 2;
+/// Opens of one kind (failed in transport, or accepted yet silent) since the
+/// last inbound byte.
+pub(crate) const OPENS: u32 = 5;
+/// Distinct destinations among those opens: an application retrying one or
+/// two dead hosts on an otherwise idle session is not a dead session.
+pub(crate) const DESTINATIONS: u32 = 3;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
@@ -21,46 +22,89 @@ pub(crate) enum Verdict {
     Degraded,
 }
 #[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Tally {
+    pub opens: u32,
+    /// Lower bound: destinations whose keyed hashes collide count once.
+    pub destinations: u32,
+}
+impl Tally {
+    fn conclusive(&self) -> bool {
+        self.opens >= OPENS && self.destinations >= DESTINATIONS
+    }
+}
+#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Snapshot {
     /// Oldest outbound demand not followed by any inbound byte.
     pub demand: Option<Duration>,
-    pub failed: u32,
-    pub silent: u32,
-    pub lost: u32,
+    pub failed: Tally,
+    pub silent: Tally,
 }
-/// Degraded only with unanswered demand AND transport failure evidence. An
-/// idle session stays healthy whatever its checks report (endpoint 1.1.0
-/// loses `_check` responses on blocked streams).
+/// Degraded only with unanswered demand AND opens failing (or accepted but
+/// silent) across several destinations. An idle session stays healthy, and
+/// lost `_check` responses are no evidence: endpoint 1.1.0 loses them on
+/// flow-control-blocked streams during long uploads. An endpoint that answers
+/// `_check` but rejects every CONNECT (5xx) is out of scope: a rejection is
+/// an answer, so it is neutral here.
 pub(crate) fn verdict(s: &Snapshot, now: Duration, silence: Duration) -> Verdict {
     let unanswered = s
         .demand
         .is_some_and(|since| now.saturating_sub(since) >= silence);
-    if unanswered && (s.failed >= FAILED_OPENS || s.lost >= LOST_CHECKS || s.silent >= SILENT_OPENS)
-    {
+    if unanswered && (s.failed.conclusive() || s.silent.conclusive()) {
         Verdict::Degraded
     } else {
         Verdict::Healthy
     }
 }
 
+/// Open count plus a 64-bit set of keyed destination hashes.
+#[derive(Default)]
+struct Evidence {
+    opens: AtomicU32,
+    spread: AtomicU64,
+}
+impl Evidence {
+    fn add(&self, bit: u64) {
+        self.opens.fetch_add(1, Relaxed);
+        self.spread.fetch_or(bit, Relaxed);
+    }
+    fn clear(&self) {
+        if self.opens.load(Relaxed) != 0 {
+            self.opens.store(0, Relaxed);
+        }
+        if self.spread.load(Relaxed) != 0 {
+            self.spread.store(0, Relaxed);
+        }
+    }
+    fn tally(&self) -> Tally {
+        Tally {
+            opens: self.opens.load(Relaxed),
+            destinations: self.spread.load(Relaxed).count_ones(),
+        }
+    }
+}
+
 pub(crate) struct Liveness {
     epoch: Instant,
     silence: Duration,
+    /// Per-session key: the set reveals nothing comparable across sessions.
+    keys: std::collections::hash_map::RandomState,
     /// Milliseconds since `epoch` plus one; zero means no unanswered demand.
     demand: AtomicU64,
-    failed: AtomicU32,
-    silent: AtomicU32,
-    lost: AtomicU32,
+    failed: Evidence,
+    silent: Evidence,
+    /// Ever received an inbound byte; never cleared.
+    delivered: AtomicBool,
 }
 impl Liveness {
     pub fn new(silence: Duration) -> Self {
         Self {
             epoch: Instant::now(),
             silence,
+            keys: Default::default(),
             demand: AtomicU64::new(0),
-            failed: AtomicU32::new(0),
-            silent: AtomicU32::new(0),
-            lost: AtomicU32::new(0),
+            failed: Evidence::default(),
+            silent: Evidence::default(),
+            delivered: AtomicBool::new(false),
         }
     }
     fn now(&self) -> Duration {
@@ -76,42 +120,38 @@ impl Liveness {
     /// Any byte from the endpoint answers all pending demand. Loads first:
     /// this runs on every read.
     pub fn inbound(&self) {
-        for counter in [&self.failed, &self.silent] {
-            if counter.load(Relaxed) != 0 {
-                counter.store(0, Relaxed);
-            }
+        self.failed.clear();
+        self.silent.clear();
+        if !self.delivered.load(Relaxed) {
+            self.delivered.store(true, Relaxed);
         }
         if self.demand.load(Relaxed) != 0 {
             self.demand.store(0, Relaxed);
         }
     }
-    pub fn opened(&self, outcome: &crate::Result<()>, flow: bool) {
+    /// `target` is hashed by host only (ports of one host are one
+    /// destination) and never stored. `flow`: one CONNECT per flow, not a
+    /// shared UDP/ICMP relay stream that the endpoint may recycle silently.
+    pub fn opened(&self, outcome: &crate::Result<()>, target: &str, flow: bool) {
         use crate::Error;
+        let host = target.rsplit_once(':').map_or(target, |(host, _)| host);
+        let bit = 1u64 << (self.keys.hash_one(host) % 64);
         match outcome {
-            Ok(()) if flow => {
-                self.silent.fetch_add(1, Relaxed);
-            }
-            Err(Error::Protocol | Error::Timeout | Error::Io) => {
-                self.failed.fetch_add(1, Relaxed);
-            }
+            Ok(()) if flow => self.silent.add(bit),
+            Err(Error::Protocol | Error::Timeout | Error::Io) => self.failed.add(bit),
             // Rejected, authentication or destination: the endpoint answered.
             _ => {}
         }
     }
-    pub fn checked(&self, answered: bool) {
-        if answered {
-            self.lost.store(0, Relaxed);
-        } else {
-            self.lost.fetch_add(1, Relaxed);
-        }
+    pub fn delivered(&self) -> bool {
+        self.delivered.load(Relaxed)
     }
     fn snapshot(&self) -> Snapshot {
         let demand = self.demand.load(Relaxed);
         Snapshot {
             demand: (demand != 0).then(|| Duration::from_millis(demand - 1)),
-            failed: self.failed.load(Relaxed),
-            silent: self.silent.load(Relaxed),
-            lost: self.lost.load(Relaxed),
+            failed: self.failed.tally(),
+            silent: self.silent.tally(),
         }
     }
     pub fn verdict(&self) -> Verdict {
@@ -123,124 +163,175 @@ impl Liveness {
 mod tests {
     use super::*;
     const S: fn(u64) -> Duration = Duration::from_secs;
-    fn judge(s: &Snapshot, now: u64) -> Verdict {
-        verdict(s, S(now), SILENCE)
+    fn host(i: u32) -> String {
+        format!("192.0.2.{i}:443")
     }
-    #[test]
-    fn idle_session_with_lost_checks_stays_healthy() {
-        let l = Liveness::new(SILENCE);
-        l.checked(true);
-        for _ in 0..120 {
-            l.checked(false);
+    /// Distinct test hosts whose keyed hashes do not collide in this session.
+    fn hosts(l: &Liveness, n: usize) -> Vec<String> {
+        let mut seen = 0u64;
+        let mut out = Vec::new();
+        for i in 1.. {
+            let h = host(i);
+            let name = h.rsplit_once(':').unwrap().0;
+            let bit = 1u64 << (l.keys.hash_one(name) % 64);
+            if seen & bit == 0 {
+                seen |= bit;
+                out.push(h);
+            }
+            if out.len() == n {
+                return out;
+            }
         }
-        let s = l.snapshot();
-        assert_eq!(s.lost, 120);
-        assert_eq!(judge(&s, 600), Verdict::Healthy);
+        unreachable!()
+    }
+    /// Replays one event per second; `event(t)` runs before judging at `t`.
+    fn run(l: &Liveness, seconds: u64, mut event: impl FnMut(&Liveness, u64)) -> Option<u64> {
+        for t in 0..=seconds {
+            event(l, t);
+            let mut s = l.snapshot();
+            // Demand stamps use real time; rebase them on the replay clock.
+            s.demand = s.demand.map(|_| S(0));
+            if verdict(&s, S(t), SILENCE) == Verdict::Degraded {
+                return Some(t);
+            }
+        }
+        None
     }
     #[test]
-    fn failed_opens_degrade_only_after_the_silence_window() {
-        let s = Snapshot {
-            demand: Some(S(100)),
-            failed: 3,
+    fn idle_session_stays_healthy() {
+        let l = Liveness::new(SILENCE);
+        assert_eq!(run(&l, 600, |_, _| {}), None);
+    }
+    #[test]
+    fn one_or_two_dead_destinations_retried_for_a_minute_are_healthy() {
+        for n in [1, 2] {
+            let l = Liveness::new(SILENCE);
+            let dead = hosts(&l, n);
+            let degraded = run(&l, 60, |l, t| {
+                l.outbound();
+                if t % 2 == 0 {
+                    for (port, target) in dead.iter().enumerate() {
+                        let other = target.replace(":443", &format!(":{}", 80 + port));
+                        l.opened(&Err(crate::Error::Timeout), target, true);
+                        l.opened(&Err(crate::Error::Protocol), &other, true);
+                    }
+                }
+            });
+            assert_eq!(degraded, None, "{n} dead destination(s)");
+        }
+    }
+    #[test]
+    fn upload_and_long_poll_on_one_silent_flow_are_healthy() {
+        let l = Liveness::new(SILENCE);
+        let [one] = hosts(&l, 1).try_into().unwrap();
+        l.opened(&Ok(()), &one, true);
+        // Outbound progress, checks losing responses, no inbound byte.
+        assert_eq!(run(&l, 60, |l, _| l.outbound()), None);
+        let l = Liveness::new(SILENCE);
+        l.opened(&Ok(()), &one, true);
+        assert_eq!(run(&l, 60, |_, _| {}), None);
+    }
+    #[test]
+    fn incident_pattern_degrades_exactly_at_the_silence_window() {
+        let l = Liveness::new(SILENCE);
+        let targets = hosts(&l, 3);
+        let degraded = run(&l, 60, |l, t| {
+            l.outbound();
+            let target = &targets[t as usize % 3];
+            let error = if t % 2 == 0 {
+                crate::Error::Timeout
+            } else {
+                crate::Error::Protocol
+            };
+            l.opened(&Err(error), target, true);
+        });
+        assert_eq!(degraded, Some(SILENCE.as_secs()));
+    }
+    #[test]
+    fn accepted_but_silent_flows_across_destinations_degrade() {
+        let l = Liveness::new(SILENCE);
+        let targets = hosts(&l, 3);
+        let degraded = run(&l, 60, |l, t| {
+            l.outbound();
+            if t < 5 {
+                l.opened(&Ok(()), &targets[t as usize % 3], true);
+            }
+        });
+        assert_eq!(degraded, Some(SILENCE.as_secs()));
+        // Shared UDP/ICMP relay streams are not individual flows.
+        let l = Liveness::new(SILENCE);
+        for target in hosts(&l, 10) {
+            l.opened(&Ok(()), &target, false);
+        }
+        assert_eq!(l.snapshot().silent.opens, 0);
+    }
+    #[test]
+    fn thresholds_need_both_count_and_spread() {
+        let at = |opens, destinations| Snapshot {
+            demand: Some(S(0)),
+            failed: Tally {
+                opens,
+                destinations,
+            },
             ..Default::default()
         };
-        assert_eq!(judge(&s, 119), Verdict::Healthy);
-        assert_eq!(judge(&s, 120), Verdict::Degraded);
-        let two = Snapshot { failed: 2, ..s };
-        assert_eq!(judge(&two, 200), Verdict::Healthy);
+        assert_eq!(verdict(&at(5, 3), S(19), SILENCE), Verdict::Healthy);
+        assert_eq!(verdict(&at(5, 3), S(20), SILENCE), Verdict::Degraded);
+        assert_eq!(verdict(&at(4, 3), S(600), SILENCE), Verdict::Healthy);
+        assert_eq!(verdict(&at(50, 2), S(600), SILENCE), Verdict::Healthy);
+        let none = Snapshot {
+            demand: None,
+            ..at(50, 50)
+        };
+        assert_eq!(verdict(&none, S(600), SILENCE), Verdict::Healthy);
     }
     #[test]
-    fn inbound_answers_demand_and_clears_failures() {
+    fn inbound_answers_demand_and_clears_evidence() {
         let l = Liveness::new(SILENCE);
         l.outbound();
-        for _ in 0..3 {
-            l.opened(&Err(crate::Error::Timeout), true);
+        for target in hosts(&l, 6) {
+            l.opened(&Err(crate::Error::Timeout), &target, true);
+            l.opened(&Ok(()), &target, true);
         }
         l.inbound();
         let s = l.snapshot();
         assert!(s.demand.is_none());
-        assert_eq!((s.failed, s.silent), (0, 0));
-        assert_eq!(judge(&s, 3600), Verdict::Healthy);
-    }
-    #[test]
-    fn one_way_traffic_without_failure_evidence_is_healthy() {
-        let l = Liveness::new(SILENCE);
-        for _ in 0..1000 {
-            l.outbound();
-        }
-        assert_eq!(l.snapshot().demand, Some(Duration::ZERO));
-        let s = Snapshot {
-            demand: Some(S(0)),
-            ..Default::default()
-        };
-        assert_eq!(judge(&s, 3600), Verdict::Healthy);
-    }
-    #[test]
-    fn consecutive_lost_checks_with_demand_degrade_and_an_answer_resets() {
-        let l = Liveness::new(SILENCE);
-        l.checked(false);
-        l.checked(false);
-        let mut s = l.snapshot();
-        s.demand = Some(S(0));
-        assert_eq!(judge(&s, 20), Verdict::Degraded);
-        l.checked(false);
-        l.checked(true);
-        l.checked(false);
-        let mut s = l.snapshot();
-        assert_eq!(s.lost, 1);
-        s.demand = Some(S(0));
-        assert_eq!(judge(&s, 20), Verdict::Healthy);
+        assert_eq!((s.failed.opens, s.failed.destinations), (0, 0));
+        assert_eq!((s.silent.opens, s.silent.destinations), (0, 0));
+        // Proof of delivery outlives the counters it reset.
+        assert!(l.delivered());
+        l.outbound();
+        l.opened(&Err(crate::Error::Timeout), "192.0.2.1:443", true);
+        assert!(l.delivered());
+        assert!(!Liveness::new(SILENCE).delivered());
     }
     #[test]
     fn rejected_and_local_errors_are_neutral() {
         let l = Liveness::new(SILENCE);
-        for error in [
-            crate::Error::Rejected(502),
-            crate::Error::Authentication,
-            crate::Error::Destination,
-            crate::Error::Unsupported("x"),
-        ] {
-            for _ in 0..10 {
-                l.opened(&Err(error.clone()), true);
+        for target in hosts(&l, 10) {
+            for error in [
+                crate::Error::Rejected(502),
+                crate::Error::Authentication,
+                crate::Error::Destination,
+                crate::Error::Unsupported("x"),
+            ] {
+                l.opened(&Err(error), &target, true);
             }
         }
-        let mut s = l.snapshot();
-        assert_eq!((s.failed, s.silent), (0, 0));
-        s.demand = Some(S(0));
-        assert_eq!(judge(&s, 3600), Verdict::Healthy);
-    }
-    #[test]
-    fn accepted_but_silent_flows_degrade() {
-        let l = Liveness::new(SILENCE);
-        for _ in 0..4 {
-            l.opened(&Ok(()), true);
-        }
-        // Shared UDP/ICMP relay streams are not individual flows.
-        for _ in 0..10 {
-            l.opened(&Ok(()), false);
-        }
-        let mut s = l.snapshot();
-        s.demand = Some(S(0));
-        assert_eq!(judge(&s, 20), Verdict::Healthy);
-        l.opened(&Ok(()), true);
-        let mut s = l.snapshot();
-        s.demand = Some(S(0));
-        assert_eq!(judge(&s, 19), Verdict::Healthy);
-        assert_eq!(judge(&s, 20), Verdict::Degraded);
+        let s = l.snapshot();
+        assert_eq!((s.failed.opens, s.silent.opens), (0, 0));
     }
     #[test]
     fn sessions_do_not_share_evidence() {
         let old = Liveness::new(SILENCE);
         let new = Liveness::new(SILENCE);
         new.outbound();
-        for _ in 0..3 {
-            new.opened(&Err(crate::Error::Protocol), true);
+        for target in hosts(&new, 5) {
+            new.opened(&Err(crate::Error::Protocol), &target, true);
         }
         old.inbound();
-        let mut s = new.snapshot();
-        assert_eq!(s.failed, 3);
+        let s = new.snapshot();
         assert!(s.demand.is_some());
-        s.demand = Some(S(0));
-        assert_eq!(judge(&s, 20), Verdict::Degraded);
+        assert_eq!((s.failed.opens, s.failed.destinations), (5, 5));
     }
 }

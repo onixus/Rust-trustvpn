@@ -56,9 +56,11 @@ pub enum Error {
     Io,
     #[error("Invalid destination authority")]
     Destination,
-    /// Outbound traffic stayed unanswered while the transport failed opens or checks.
+    /// Outbound traffic stayed unanswered while opens to several destinations
+    /// failed or stayed silent. `proven`: the session delivered inbound data
+    /// earlier in its life, so it was not dead from the start.
     #[error("Tunnel carries no traffic")]
-    Degraded,
+    Degraded { proven: bool },
 }
 impl From<std::io::Error> for Error {
     fn from(_: std::io::Error) -> Self {
@@ -111,7 +113,7 @@ impl Session {
         )
     }
     /// Test hook: a shorter silence window, set before any flow is opened.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn with_silence(mut self, silence: Duration) -> Self {
         self.2 = Arc::new(liveness::Liveness::new(silence));
         self
@@ -240,18 +242,20 @@ impl Session {
         self.1
     }
     /// Fails when the endpoint stopped answering, and also when outbound
-    /// traffic has stayed unanswered while opens or checks failed in transport.
+    /// traffic has stayed unanswered while opens to several destinations failed
+    /// or stayed silent.
     pub async fn health(&self) -> Result<()> {
-        let answered = match &self.0 {
-            Transport::H2(s) => s.health().await.map(|_| true)?,
+        match &self.0 {
+            Transport::H2(s) => s.health().await?,
             Transport::H3(s) => s.health().await?,
-            Transport::Hysteria(s) => s.health().await.map(|_| true)?,
-            Transport::Amnezia(s) => s.health().await.map(|_| true)?,
-        };
-        self.2.checked(answered);
+            Transport::Hysteria(s) => s.health().await?,
+            Transport::Amnezia(s) => s.health().await?,
+        }
         match self.2.verdict() {
             liveness::Verdict::Healthy => Ok(()),
-            liveness::Verdict::Degraded => Err(Error::Degraded),
+            liveness::Verdict::Degraded => Err(Error::Degraded {
+                proven: self.2.delivered(),
+            }),
         }
     }
     pub async fn open_tcp(&self, target: &str) -> Result<Tunnel> {
@@ -264,7 +268,7 @@ impl Session {
             Transport::Hysteria(s) => s.open_tcp(target).await,
             Transport::Amnezia(s) => s.open_tcp(target).await,
         };
-        self.track(opened, true)
+        self.track(opened, target, true)
     }
     pub async fn open_icmp(&self) -> Result<Tunnel> {
         let opened = match &self.0 {
@@ -275,7 +279,7 @@ impl Session {
             }
             Transport::Amnezia(_) => return Err(Error::Unsupported("ICMP relay over AmneziaWG")),
         };
-        self.track(opened, false)
+        self.track(opened, "_icmp", false)
     }
     pub async fn open_udp(&self) -> Result<Tunnel> {
         let opened = match &self.0 {
@@ -284,13 +288,15 @@ impl Session {
             Transport::Hysteria(s) => s.open_udp().await,
             Transport::Amnezia(s) => s.open_udp().await,
         };
-        self.track(opened, false)
+        self.track(opened, "_udp2", false)
     }
-    /// `flow`: one CONNECT per flow, not a shared UDP/ICMP relay stream that
-    /// the endpoint may recycle without any reply.
-    fn track(&self, opened: Result<Tunnel>, flow: bool) -> Result<Tunnel> {
-        self.2
-            .opened(&opened.as_ref().map(|_| ()).map_err(Clone::clone), flow);
+    /// See `Liveness::opened`; the target is hashed, never kept.
+    fn track(&self, opened: Result<Tunnel>, target: &str, flow: bool) -> Result<Tunnel> {
+        self.2.opened(
+            &opened.as_ref().map(|_| ()).map_err(Clone::clone),
+            target,
+            flow,
+        );
         opened.map(|mut tunnel| {
             tunnel.liveness = Some(self.2.clone());
             tunnel

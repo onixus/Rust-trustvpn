@@ -316,8 +316,8 @@ async fn run(
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .transport_lost(runner_session);
-                // A session that carried no traffic is not a stable connection.
-                if started.elapsed() > Duration::from_secs(30) && !rtrust_tun::degraded(&ended) {
+                // A degraded session that never delivered data is not a stable connection.
+                if started.elapsed() > Duration::from_secs(30) && !rtrust_tun::unproven(&ended) {
                     delay = 1;
                 }
             }

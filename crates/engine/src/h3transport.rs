@@ -176,16 +176,15 @@ impl H3Session {
     }
     /// A `_check` finished without its response still proves a live,
     /// authenticated session once a first check returned 200; the endpoint
-    /// received and answered it on this connection. Returns whether this
-    /// check's response arrived, so repeated losses stay visible.
-    pub async fn health(&self) -> Result<bool> {
+    /// received and answered it on this connection.
+    pub async fn health(&self) -> Result<()> {
         use std::sync::atomic::Ordering;
         match self.request("_check").await? {
             Answer::Response(_) => {
                 self.0.verified.store(true, Ordering::Relaxed);
-                Ok(true)
+                Ok(())
             }
-            Answer::Lost if self.0.verified.load(Ordering::Relaxed) => Ok(false),
+            Answer::Lost if self.0.verified.load(Ordering::Relaxed) => Ok(()),
             Answer::Lost => Err(Error::Protocol),
         }
     }

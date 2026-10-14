@@ -182,14 +182,14 @@ impl Worker {
     fn new(task: tokio::task::JoinHandle<RunResult>) -> Self {
         Self(Some(task))
     }
-    /// True when the session ended because it carried no traffic.
+    /// True when the session ended degraded without ever delivering data.
     async fn finished(&mut self) -> bool {
-        let mut degraded = false;
+        let mut unproven = false;
         if let Some(task) = self.0.as_mut() {
-            degraded = task.await.as_ref().is_ok_and(crate::dataplane::degraded);
+            unproven = task.await.as_ref().is_ok_and(crate::dataplane::unproven);
         }
         self.0 = None;
-        degraded
+        unproven
     }
     async fn stop(&mut self) {
         if let Some(task) = self.0.take() {
@@ -557,9 +557,9 @@ async fn lease_loop(
                     crate::netwatch::Change::Resumed => monitor.resumed(rtrust_control::observations::now_ms()),
                 },
                 _ = stop.changed() => return Ok(None),
-                degraded = worker.finished(), if state == State::Connected => {
+                unproven = worker.finished(), if state == State::Connected => {
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
-                    budget.disconnected(connected_since.elapsed(), degraded);
+                    budget.disconnected(connected_since.elapsed(), unproven);
                     if failover.ended(connected_since.elapsed(), std::time::Instant::now()) {
                         monitor.failed_over(rtrust_control::observations::now_ms());
                     }

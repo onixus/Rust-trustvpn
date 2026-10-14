@@ -5288,6 +5288,7 @@ dependencies = [
  "quinn-proto",
  "rand 0.9.5",
  "rcgen",
+ "rtrust-engine",
  "rtrust-profile",
  "rustls",
  "rustls-native-certs",
