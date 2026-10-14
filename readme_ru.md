@@ -6,26 +6,27 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 
 Клиент реализует транспорт самостоятельно и **не является оболочкой** над официальными CLI TrustTunnel или Hysteria.
 
-> **Статус проекта: development preview, 7 октября 2026 года.**
+> **Статус проекта: development preview, 14 октября 2026 года.**
 >
-> Исходники workspace — **0.6.1** (update sequence 11, не production-ready; см. [v0.6.1](docs/releases/v0.6.1.md) и [кандидат v0.6.0](docs/releases/v0.6.0.md)). Последняя опубликованная desktop-пересборка — **v0.5.0-rebuild.9** от 6 октября; Android и iOS артефакты остаются в исходном релизе **v0.5.0**. Rebuild исправляет идентичность desktop update/rollback sequence и собран уже после разделения клиентского и серверного репозиториев. См. [описание v0.5.0](docs/releases/v0.5.0.md).
+> Workspace — **0.6.1**, update sequence 11. [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) опубликован 13 октября из `db8796a`. H3 health, Linux TUI и UI вариант 3 вошли в main после тега и отсутствуют в опубликованных пакетах 0.6.1. Публикация не доказывает приёмку установленного пакета или production-ready статус. См. [текущее состояние и открытые gates](docs/project-status.md).
 
 ## Скачать
 
-Актуальные preview-релизы:
-
-- **Desktop rebuild:** [v0.5.0-rebuild.9](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9)
-- **Mobile-артефакты и исходный набор 0.5.0:** [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0)
-
-| Платформа | Актуальный артефакт | Примечание |
+| Платформа | Последний опубликованный набор | Ограничения |
 | --- | --- | --- |
-| Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` из v0.5.0-rebuild.9 | Signed update metadata sequence 9; Authenticode-подписи у пакета нет. Реальный signed update 7→9, принудительный unhealthy install, rollback на 7 и повторный update на 9 прошли. |
-| Linux x86_64, Wayland | Native / WebView / Both Flatpak из v0.5.0-rebuild.9 | Проверены подписанные install/update/rollback и отказ от unsigned update; системному VPN по-прежнему нужен отдельный host package. |
-| macOS Apple Silicon | UI Choices / system candidate из v0.5.0-rebuild.9 | Ad-hoc sealed, без Developer ID/notarization. Автоматическое обновление не промотировано; приёмка system VPN ещё не закрыта полностью. |
-| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` из v0.5.0 | versionCode 50001, versionName 0.5.0-preview.1. |
-| iOS arm64 / Simulator | Device и Simulator archives из v0.5.0 | Preview. Device archive требует Apple signing и не является готовым IPA. |
+| Windows x64 | Installer из [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) | Наличие артефакта проверено; Authenticode и update/rollback точного пакета в этой актуализации не проверялись. |
+| macOS Apple Silicon | UI Choices, preview, bundled/system candidate DMG/PKG из v0.6.1 | Пакеты остаются кандидатами; публикация не подтверждает Developer ID/notarization или system-VPN acceptance. |
+| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` из v0.6.1 | Версия исходников 0.6.1-preview.1 / 60101; ключ релиза введён в 0.6.0. Для старых 0.5.x нужен reinstall. Сертификат артефакта здесь повторно не проверялся. |
+| Linux x86_64, Wayland | Native / WebView / Both Flatpak из [v0.5.0-rebuild.9](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0-rebuild.9) | В v0.6.1 нет Linux assets. Исторические signed install/update/rollback относятся к rebuild.9; системному VPN нужен отдельный host package. |
+| iOS arm64 / Simulator | Архивы из [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0) | В v0.6.1 нет iOS assets. Device archive требует Apple signing и не является готовым IPA. |
 
-В релизах опубликованы SHA256SUMS, подписи и evidence-файлы.
+В v0.6.1 есть SHA256SUMS и native source identity/manifest. Наличие файлов не заменяет проверку подписи, provenance или канала обновлений. [Объём релиза](docs/releases/v0.6.1.md).
+
+## Изменения main после v0.6.1
+
+- H3 data-plane liveness и ограниченное восстановление degraded-сессии ([#69](https://github.com/onixus/Rust-trustvpn/pull/69)); macOS sleep/roam acceptance остаётся в #62.
+- [Консольный клиент Linux](docs/tui.md) поверх общего desktop controller (#72).
+- Android UI вариант 3 с route/DNS/HTTPS checks через собственную VPN network (#73); Native/WebView/iOS UI вариант 3 (#74). Desktop/iOS ещё не имеют непрерывных producers route/DNS/guard/connectivity; работающий транспорт остаётся синим.
 
 ## Что нового в v0.5.0 / rebuild.9
 

@@ -46,6 +46,26 @@ A vendored h3 0.0.8 ([patch notes](../vendor/h3/RTRUST-PATCH.md)) fails only
 that request. A health check whose response is lost counts as healthy once the
 same connection's first check returned 200, which also proves the credentials.
 
+## Data-plane liveness after v0.6.1 (#62 / #69)
+
+Main adds per-session bounded, in-memory liveness counters in
+`crates/engine/src/liveness.rs`. An idle session remains healthy. Unanswered
+outgoing demand for at least 20 seconds together with at least five failing TCP opens or at least five accepted-but-silent TCP
+opens across at least three destination hash bits in the 60-second evidence window yields `Degraded`. Lost `_check` responses alone
+remain compatible with endpoint 1.1.0. Degradation enters the existing guarded
+reconnect path without direct fallback; sessions with no delivered bytes do
+not reset backoff. Android refunds a degraded-session attempt only after
+proven delivery and at least 30 seconds of session life.
+
+This is a heuristic, not a VPN-bound HTTPS acceptance check. An endpoint that
+returns 200 for `_check` but rejects CONNECT with 5xx remains outside its
+coverage; independent remote failures can also trigger reconnect. Installed
+macOS sleep/wake and roam reproduction remains open in
+[#62](https://github.com/onixus/Rust-trustvpn/issues/62), slow Stop in
+[#70](https://github.com/onixus/Rust-trustvpn/issues/70), and the server cause in
+[onixus/tunnel#30](https://github.com/onixus/tunnel/issues/30).
+These changes were merged after the published v0.6.1 tag.
+
 ## Transport bypass
 
 The QUIC socket is routed around the tunnel before its first packet, exactly as
