@@ -445,7 +445,7 @@ public class MainActivity extends Activity {
         box.removeAllViews();
         for (int i = 0; i < rows.size(); i++) {
             Row row = rows.get(i);
-            int gap = !notes && screen == HOME && unfolded() ? 7 : 11; // the unfolded upper half must hold all five
+            int gap = !notes && screen == HOME && unfolded() ? 8 : 11; // the unfolded upper half must hold all five
             LinearLayout line = new LinearLayout(this); line.setGravity(notes ? Gravity.TOP : Gravity.CENTER_VERTICAL); line.setPadding(0, dp(gap), 0, dp(gap));
             View dot = new View(this); GradientDrawable shape = new GradientDrawable(); shape.setShape(GradientDrawable.OVAL);
             if (row.ring) shape.setStroke(dp(2), row.color); else shape.setColor(row.color);
@@ -468,6 +468,7 @@ public class MainActivity extends Activity {
     // ---- Home -------------------------------------------------------------------------
 
     private View homeScreen() {
+        boolean split = unfolded();
         LinearLayout root = column(); root.setPadding(dp(20), dp(16), dp(20), dp(16));
         LinearLayout top = new LinearLayout(this); top.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout tag = new LinearLayout(this); tag.setGravity(Gravity.CENTER_VERTICAL); tag.setPadding(dp(12), dp(8), dp(12), dp(8)); tag.setBackground(glass(dp(16), p.chip));
@@ -477,49 +478,79 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams tagParams = new LinearLayout.LayoutParams(0, -2, 1); tagParams.setMarginEnd(dp(12));
         LinearLayout tagWrap = new LinearLayout(this); tagWrap.addView(tag); top.addView(tagWrap, tagParams);
         top.addView(circle(R.drawable.ic_settings, R.string.v3_settings, () -> show(ACTIONS)), new LinearLayout.LayoutParams(dp(44), dp(44)));
-        root.addView(top);
 
-        ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false); scroll.setFillViewport(true);
-        LinearLayout body = column(); body.setPadding(0, dp(unfolded() ? 12 : 18), 0, dp(8));
-        headlineMax = unfolded() ? 34 : 44;
+        headlineMax = split ? 34 : 44;
         headline = new TextView(this); headline.setTypeface(display()); headline.setTextSize(headlineMax); headline.setTextColor(p.text); headline.setLineSpacing(0, 0.95f); headline.setLetterSpacing(-0.02f);
         headline.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> { if (r - l != or - ol) v.post(this::fitHeadline); });
-        body.addView(headline);
-        description = text("", 14, p.muted, false); description.setLineSpacing(0, 1.2f); description.setPadding(0, dp(unfolded() ? 8 : 12), 0, dp(unfolded() ? 12 : 18)); body.addView(description);
+        description = text("", 14, p.muted, false); description.setLineSpacing(0, 1.2f); description.setPadding(0, dp(split ? 8 : 12), 0, dp(split ? 0 : 18));
         checksBox = column(); checksBox.setPadding(dp(16), dp(2), dp(16), dp(2)); checksBox.setBackground(rippled(glass(dp(24), p.card)));
         checksBox.setClickable(true); checksBox.setFocusable(true); checksBox.setOnClickListener(v -> show(CHECKS));
-        body.addView(checksBox);
-        // Unfolded (large) screen: state and checks fill the upper half, profiles and the
-        // slider the lower half, with a gap where a horizontal hinge would be.
-        boolean split = unfolded();
-        LinearLayout lower = body;
-        if (split) {
-            scroll.addView(body); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-            scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false); scroll.setFillViewport(true);
-            lower = column(); lower.setPadding(0, dp(24), 0, dp(8));
-        }
         LinearLayout header = new LinearLayout(this); header.setGravity(Gravity.CENTER_VERTICAL); header.setPadding(dp(4), split ? 0 : dp(20), 0, dp(10));
         TextView label = text(getString(R.string.v3_section_profiles).toUpperCase(Locale.getDefault()), 11, p.muted, true); label.setLetterSpacing(0.1f);
         header.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
         TextView all = text(getString(R.string.v3_all_profiles) + "  →", 13, p.blueText, true); all.setPadding(dp(8), dp(6), 0, dp(6));
         all.setOnClickListener(v -> show(PROFILES)); header.addView(all);
-        lower.addView(header);
-        strip = column(); lower.addView(strip);
-        scroll.addView(lower);
-
+        strip = column();
         slider = new SlideButton(this); slider.setAction(this::toggle);
         LinearLayout.LayoutParams sliderParams = new LinearLayout.LayoutParams(-1, dp(64)); sliderParams.topMargin = dp(12);
-        if (split) {
-            LinearLayout bottom = column();
-            bottom.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-            bottom.addView(slider, sliderParams);
-            root.addView(bottom, new LinearLayout.LayoutParams(-1, 0, 1));
-        } else {
-            root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        if (!split) {
+            root.addView(top);
+            ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false); scroll.setFillViewport(true);
+            LinearLayout body = column(); body.setPadding(0, dp(18), 0, dp(8));
+            body.addView(headline); body.addView(description); body.addView(checksBox); body.addView(header); body.addView(strip);
+            scroll.addView(body); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
             root.addView(slider, sliderParams);
+        } else {
+            // Unfolded: one half holds the state and the five checks, the other the profiles
+            // and the slider. The halves follow the fold: side by side when it runs top to
+            // bottom, stacked when it runs across. The border sits on the screen's middle.
+            boolean sideBySide = foldVertical();
+            if (sideBySide) root.setOrientation(LinearLayout.HORIZONTAL);
+            LinearLayout first = column(); first.addView(top);
+            LinearLayout state = sideBySide ? column() : new LinearLayout(this); state.setPadding(0, dp(12), 0, 0);
+            LinearLayout words = column(); words.addView(headline); words.addView(description);
+            if (sideBySide) { state.addView(words); LinearLayout.LayoutParams checksParams = new LinearLayout.LayoutParams(-1, -2); checksParams.topMargin = dp(16); state.addView(checksBox, checksParams); }
+            else { LinearLayout.LayoutParams wordsParams = new LinearLayout.LayoutParams(0, -2, 1); wordsParams.setMarginEnd(dp(16)); state.addView(words, wordsParams); state.addView(checksBox, new LinearLayout.LayoutParams(0, -2, 1)); }
+            ScrollView firstScroll = new ScrollView(this); firstScroll.setVerticalScrollBarEnabled(false); firstScroll.addView(state);
+            first.addView(firstScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+            LinearLayout second = column(); if (sideBySide) second.setPadding(dp(24), 0, 0, 0);
+            ScrollView secondScroll = new ScrollView(this); secondScroll.setVerticalScrollBarEnabled(false);
+            LinearLayout list = column(); list.setPadding(0, dp(sideBySide ? 4 : 24), 0, dp(8)); list.addView(header); list.addView(strip); secondScroll.addView(list);
+            second.addView(secondScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+            second.addView(slider, sliderParams);
+            root.addView(first, sideBySide ? new LinearLayout.LayoutParams(0, -1, 1) : new LinearLayout.LayoutParams(-1, 0, 1));
+            root.addView(second, sideBySide ? new LinearLayout.LayoutParams(0, -1, 1) : new LinearLayout.LayoutParams(-1, 0, 1));
+            root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> alignToFold(root, first, sideBySide));
         }
         fillStrip();
         return root;
+    }
+    /** Ends the first half 12 dp before the screen's middle along the split axis. */
+    private void alignToFold(View root, View first, boolean sideBySide) {
+        int[] at = new int[2]; first.getLocationOnScreen(at);
+        android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
+        int middle = sideBySide ? metrics.widthPixels / 2 : metrics.heightPixels / 2;
+        if (Build.VERSION.SDK_INT >= 30) {
+            android.graphics.Rect bounds = getWindowManager().getCurrentWindowMetrics().getBounds();
+            middle = sideBySide ? bounds.left + bounds.width() / 2 : bounds.top + bounds.height() / 2;
+        }
+        int size = middle - at[sideBySide ? 0 : 1] - dp(12);
+        LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) first.getLayoutParams();
+        int current = sideBySide ? params.width : params.height;
+        if (size <= dp(120) || current == size) return; // too small to split by the fold; keep equal weights
+        if (sideBySide) params.width = size; else params.height = size;
+        params.weight = 0;
+        root.post(first::requestLayout);
+    }
+    /**
+     * A book-style foldable (hinge sensor, large unfolded screen) has its fold top to
+     * bottom in its natural orientation and across it when turned by 90 degrees.
+     */
+    private boolean foldVertical() {
+        if (!getPackageManager().hasSystemFeature(android.content.pm.PackageManager.FEATURE_SENSOR_HINGE_ANGLE)) return false;
+        int rotation = Build.VERSION.SDK_INT >= 30 ? getDisplay().getRotation() : getWindowManager().getDefaultDisplay().getRotation();
+        return rotation == Surface.ROTATION_0 || rotation == Surface.ROTATION_180;
     }
     /**
      * Unfolded foldable or tablet: the window's shorter side is at least 600 dp. Folding

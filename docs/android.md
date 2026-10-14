@@ -24,10 +24,12 @@ One activity hosts five screens with its own back stack (Back goes through `OnBa
   slide-to-connect/disconnect control at the bottom. A tap only nudges the knob, so a
   pocket tap cannot change the tunnel; TalkBack activates it directly.
 - **Unfolded foldables and tablets** (window shorter side ≥ 600 dp): Home splits into
-  halves, state and the five checks above, profiles and the slider below, with a gap
-  where a horizontal hinge would be. Folding recreates the activity and restores the
-  single-column phone layout. The hinge position itself is not read (no WindowManager
-  dependency), so a half-folded tabletop posture is not aligned to the fold.
+  two halves, state with the five checks and profiles with the slider. On a book-style
+  foldable (hinge-angle sensor) the halves follow the fold: side by side in its natural
+  orientation, stacked when turned by 90 degrees; the border sits on the screen's middle
+  with a 12 dp margin each side. Tablets without a hinge stack the halves. Folding
+  recreates the activity and restores the single column. The exact hinge bounds are not
+  read (no WindowManager dependency), so a fold away from the middle is not followed.
 - **Profiles**: search, protocol badges, server/device and backup tags, the widget
   star and a ⋮ menu (widget default, backups, export, delete).
 - **New profile**: QR camera, QR from an image, file, an inline link/text field that
