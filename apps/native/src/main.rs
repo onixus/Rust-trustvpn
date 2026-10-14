@@ -136,7 +136,7 @@ fn main() -> iced::Result {
         App::update,
         App::view_window,
     )
-    .title("R-TrustTunnel · Native Preview")
+    .title("R-TrustTunnel")
     .subscription(App::subscription)
     .theme(|app: &App, _| ui::theme(&app.tokens()))
     .style(|_app: &App, theme: &Theme| {
@@ -145,7 +145,12 @@ fn main() -> iced::Result {
         let background = {
             let mut background = background;
             if _app.glass_enabled && glass::transparency_allowed() {
-                background.a = 0.68;
+                // iced blends quads premultiplied but clears with this colour
+                // as given; a straight colour here washes every translucent
+                // card and colour field above it out to white.
+                let a = 0.68;
+                background =
+                    iced::Color::from_rgba(background.r * a, background.g * a, background.b * a, a);
             }
             background
         };
@@ -1858,7 +1863,7 @@ impl App {
             && (self.system_target_edited_at.is_some()
                 || self
                     .last_diagnostic
-                    .is_none_or(|t| t.elapsed().as_secs() >= 30)
+                    .is_none_or(|t| t.elapsed() >= ui::PROBE_INTERVAL)
                 || self.diagnostic_report.as_ref().is_some_and(|(_, report)| {
                     self.session.as_ref().unwrap().observations().generation
                         != report.lifecycle.generation
@@ -1888,11 +1893,12 @@ impl App {
         {
             let age =
                 rtrust_control::observations::now_ms().saturating_sub(report.finished_at_ms) / 1000;
+            // The full DNS/route/HTTPS breakdown lives on the checks page; a
+            // multi-line status here squeezed the scrolling content away.
             return format!(
-                "Последняя проверка ({} с назад): {} {}",
+                "Последняя проверка ({} с назад): {} Подробности — в разделе «Проверки».",
                 age,
-                report.verdict_text(),
-                report.summary()
+                report.verdict_text()
             );
         }
         "Транспорт запущен. Проверка системного пути ожидается.".into()

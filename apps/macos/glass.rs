@@ -53,6 +53,10 @@ pub unsafe fn install(window: *mut AnyObject) -> bool {
         }
         let _: () =
             msg_send![parent, addSubview: &*wrapper, positioned: -1isize, relativeTo: content];
+        // AppKit lays out the title text wrongly once the frame view holds a
+        // foreign subview (it slides under the traffic lights); the sidebar
+        // already names the app, so keep only the buttons.
+        let _: () = msg_send![window, setTitleVisibility: 1isize]; // NSWindowTitleHidden
         let _: () = msg_send![window, setOpaque: false];
         let color = AnyClass::get(c"NSColor").expect("AppKit NSColor");
         let clear: *mut AnyObject = msg_send![color, clearColor];

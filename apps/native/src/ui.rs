@@ -5,6 +5,7 @@ use super::*;
 use iced::widget::{Space, column};
 use rtrust_control::observations::{
     FRESH_MS, Mode as ObservationMode, Observation, Outcome, Reason as ObservationReason, Snapshot,
+    Source,
 };
 
 // ---------------------------------------------------------------- language
@@ -198,6 +199,8 @@ pub(super) const LIGHT_TOKENS: Tokens = Tokens {
     bg: rgb(0xE8EDF5),
     text: rgb(0x0E1726),
     muted: rgb(0x4A566B),
+    // Translucent everywhere so the colour fields show through, as in the
+    // mockups; without macOS glass the fields are simply not blurred again.
     card: rgba(0xFFFFFF, 0.55),
     stroke: rgba(0xFFFFFF, 0.85),
     chip: rgba(0xFFFFFF, 0.6),
@@ -425,14 +428,92 @@ impl Check {
         }
     }
 }
+/// How often the app repeats its own system path check while TUN is up.
+pub(super) const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// A probe result stays fresh until the next run is overdue: runs start
+/// PROBE_INTERVAL apart and each may take up to TOTAL, plus a few seconds of
+/// scheduling slack. Measured from `finished_at_ms`.
+pub(super) const PROBE_FRESH_MS: u64 =
+    (PROBE_INTERVAL.as_millis() + rtrust_desktop::diagnostics::TOTAL.as_millis()) as u64 + 5_000;
+/// Fold the app's own path check (one destination: route to the VPN interface,
+/// then HTTPS through it) into the service snapshot it was taken against.
+/// DNS and the guard are not inferred: a system lookup does not prove the DNS
+/// path and the check never tests the firewall.
+pub(super) fn apply_probe(
+    snapshot: &mut Snapshot,
+    report: &rtrust_desktop::diagnostics::Report,
+    now: u64,
+) {
+    use rtrust_desktop::diagnostics::Fact;
+    use rtrust_profile::routing::Action;
+    if report.finished_at_ms == 0 || report.lifecycle.generation != snapshot.generation {
+        return;
+    }
+    let probe = |outcome| Observation {
+        outcome,
+        source: Source::AppProbe,
+        observed_at_ms: Some(report.finished_at_ms),
+        valid_for_ms: PROBE_FRESH_MS,
+        mode: snapshot.transport.mode,
+        reason: ObservationReason::NotChecked,
+    };
+    // Fresh service evidence wins; the probe only fills checks the service
+    // left open, including results that have since expired.
+    let open = |o: &Observation| {
+        matches!(
+            normalized(o, now),
+            Outcome::Unknown | Outcome::Stale | Outcome::Configured
+        )
+    };
+    // The destination is user-chosen: a route outside the VPN is a tunnel
+    // failure only when the policy sends it into the tunnel (or, in full
+    // mode, does not explicitly exclude it). Split rules may bypass it on purpose.
+    let expected_tunnel = match report.policy.as_ref().map(|d| d.action) {
+        Some(Action::Tunnel) => true,
+        Some(Action::Direct | Action::Block) => false,
+        _ => snapshot.transport.mode == ObservationMode::Full,
+    };
+    let route = match report.route {
+        Fact::Passed => Some(Outcome::Passed),
+        Fact::RouteMismatch if expected_tunnel => Some(Outcome::Failed),
+        _ => None,
+    };
+    if let Some(outcome) = route.filter(|_| open(&snapshot.route)) {
+        snapshot.route = probe(outcome);
+    }
+    // One site answering proves the path; one site failing is about that site
+    // (down, blocked, bad TLS), so failures stay on the path check page.
+    let connectivity = match report.https {
+        Fact::Passed => Some(Outcome::Passed),
+        _ => None,
+    };
+    if let Some(outcome) = connectivity.filter(|_| open(&snapshot.connectivity)) {
+        let generation = snapshot.generation;
+        let observation = probe(outcome);
+        snapshot.apply_connectivity(generation, observation);
+    }
+}
 /// Passed and configured results expire after their TTL (at most FRESH_MS),
 /// exactly as Android ObservationStatus normalises them.
 pub(super) fn normalized(observation: &Observation, now: u64) -> Outcome {
     match observation.outcome {
         Outcome::Passed | Outcome::Configured => {
-            let ttl = observation.valid_for_ms.min(FRESH_MS);
+            let cap = if observation.source == Source::AppProbe {
+                PROBE_FRESH_MS
+            } else {
+                FRESH_MS
+            };
+            let ttl = observation.valid_for_ms.min(cap);
             match observation.observed_at_ms {
                 Some(time) if now >= time && now - time <= ttl => observation.outcome,
+                _ => Outcome::Stale,
+            }
+        }
+        // The app's own check is repeated; its failure must not outlive the
+        // runs that stopped confirming it.
+        Outcome::Failed if observation.source == Source::AppProbe => {
+            match observation.observed_at_ms {
+                Some(time) if now >= time && now - time <= PROBE_FRESH_MS => Outcome::Failed,
                 _ => Outcome::Stale,
             }
         }
@@ -649,8 +730,10 @@ fn card<'a>(
         })
 }
 /// Light theme cards float on a soft shadow; dark cards rely on their stroke.
+/// tiny-skia (Windows, Linux) leaves stale pixels of blurred shadows behind:
+/// its damage tracking covers only the quad, not the shadow around it.
 fn lift(tk: Tokens) -> iced::Shadow {
-    if tk.dark {
+    if tk.dark || cfg!(not(target_os = "macos")) {
         iced::Shadow::default()
     } else {
         iced::Shadow {
@@ -658,6 +741,146 @@ fn lift(tk: Tokens) -> iced::Shadow {
             offset: iced::Vector::new(0.0, 4.0),
             blur_radius: 18.0,
         }
+    }
+}
+// ---------------------------------------------------------------- backdrop
+/// Standard deviation of the mockups' `filter: blur(90px)`.
+const BLOB_SIGMA: f32 = 90.0;
+/// Logical pixels per backdrop texel. The fields are blurred by BLOB_SIGMA, so
+/// neighbouring texels differ by about one 8-bit level and nearest filtering
+/// shows no steps; on tiny-skia it costs half as much as bilinear.
+const BLOB_TEXEL: f32 = 4.0;
+/// A field: centre in logical pixels, disk radius, colour and peak opacity.
+type Field = (f32, f32, f32, Color, f32);
+/// Light theme colour fields behind the frosted cards (mockup variant 3): the
+/// first takes `state`, the other two are fixed violet and sky. Placed as in
+/// the 1280×800 mockups, anchored to the same window edges.
+///
+/// The fields are rasterised once per texel grid and state colour, and drawn
+/// as one image. Layered translucent shapes would be re-blended on every
+/// scroll frame by tiny-skia (Windows, Linux), which renders on the CPU; a
+/// shadow blur would also leave stale pixels outside its quad's damage.
+fn backdrop<'a>(state: Color) -> Element<'a, Message> {
+    iced::widget::responsive(move |size| {
+        let (handle, snapped) = backdrop_image(size, state);
+        // One texel per BLOB_TEXEL exactly: the image may overhang the window
+        // by less than a texel, which the container clips.
+        container(
+            iced::widget::image(handle)
+                .width(snapped.width)
+                .height(snapped.height)
+                .content_fit(iced::ContentFit::Fill)
+                .filter_method(iced::widget::image::FilterMethod::Nearest),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .clip(true)
+        .into()
+    })
+    .into()
+}
+/// The fields for a window of `size`, anchored as in the mockups.
+fn backdrop_fields(size: iced::Size, state: Color) -> [Field; 3] {
+    // (left, top, diameter) as in the mockups, converted to centre and radius.
+    let field = |diameter: f32, color: Color, opacity: f32, x: f32, y: f32| -> Field {
+        let r = diameter / 2.0;
+        (x + r, y + r, r, color, opacity)
+    };
+    [
+        field(520.0, state, 0.35, 180.0, -120.0),
+        field(440.0, rgb(0xB9AEFF), 0.4, size.width + 60.0 - 440.0, 260.0),
+        field(
+            420.0,
+            rgb(0x9FDCFF),
+            0.4,
+            520.0,
+            size.height + 200.0 - 420.0,
+        ),
+    ]
+}
+/// The raster for `size` snapped up to whole texels, and that snapped size.
+/// The fields are placed for the snapped size, so the cache key (texel counts
+/// and state colour) determines the image completely; a new handle (and
+/// upload) only when the key changes, so redraws reuse the renderer's copy.
+fn backdrop_image(size: iced::Size, state: Color) -> (iced::widget::image::Handle, iced::Size) {
+    use std::cell::RefCell;
+    type Key = (u32, u32, [u32; 4]);
+    thread_local! {
+        static CACHE: RefCell<Option<(Key, iced::widget::image::Handle)>> =
+            const { RefCell::new(None) };
+    }
+    let texels = |v: f32| (v / BLOB_TEXEL).ceil().clamp(1.0, 2048.0) as u32;
+    let (width, height) = (texels(size.width), texels(size.height));
+    let snapped = iced::Size::new(width as f32 * BLOB_TEXEL, height as f32 * BLOB_TEXEL);
+    let key = (
+        width,
+        height,
+        [state.r, state.g, state.b, state.a].map(f32::to_bits),
+    );
+    let handle = CACHE.with_borrow_mut(|cache| match cache {
+        Some((cached, handle)) if *cached == key => handle.clone(),
+        _ => {
+            let fields = backdrop_fields(snapped, state);
+            let pixels = backdrop_pixels(width, height, snapped, &fields);
+            let handle = iced::widget::image::Handle::from_rgba(width, height, pixels);
+            *cache = Some((key, handle.clone()));
+            handle
+        }
+    });
+    (handle, snapped)
+}
+/// Straight-alpha RGBA texels of `fields` composed in order over transparency.
+/// Each field is `opacity` × a disk blurred with BLOB_SIGMA, sampled at the
+/// texel centres of a `width`×`height` grid stretched over `size`.
+fn backdrop_pixels(width: u32, height: u32, size: iced::Size, fields: &[Field]) -> Vec<u8> {
+    // Φ((radius - d) / σ) tabulated per logical pixel of (radius - d): one
+    // lookup per texel and field instead of an exp, so a resize of a large
+    // window stays cheap. A pixel of offset changes the alpha by under 0.002.
+    const REACH: i32 = (4.0 * BLOB_SIGMA) as i32;
+    let profile: Vec<f32> = (-REACH..=REACH)
+        .map(|offset| normal_cdf(offset as f32 / BLOB_SIGMA))
+        .collect();
+    let cdf = |offset: f32| match offset.round() as i32 {
+        o if o < -REACH => 0.0,
+        o if o > REACH => 1.0,
+        o => profile[(o + REACH) as usize],
+    };
+    let (sx, sy) = (size.width / width as f32, size.height / height as f32);
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for j in 0..height {
+        let y = (j as f32 + 0.5) * sy;
+        for i in 0..width {
+            let x = (i as f32 + 0.5) * sx;
+            let (mut a, mut rgb) = (0.0_f32, [0.0_f32; 3]);
+            for &(cx, cy, radius, color, opacity) in fields {
+                let d = (x - cx).hypot(y - cy);
+                let fa = opacity * cdf(radius - d);
+                let out = fa + a * (1.0 - fa);
+                if out > 0.0 {
+                    for (c, f) in rgb.iter_mut().zip([color.r, color.g, color.b]) {
+                        *c = (f * fa + *c * a * (1.0 - fa)) / out;
+                    }
+                }
+                a = out;
+            }
+            let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            pixels.extend([byte(rgb[0]), byte(rgb[1]), byte(rgb[2]), byte(a)]);
+        }
+    }
+    pixels
+}
+/// Standard normal CDF (Abramowitz–Stegun 7.1.26, error below 1.5e-7).
+fn normal_cdf(x: f32) -> f32 {
+    let z = x.abs() / std::f32::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.327_591_1 * z);
+    let poly = t
+        * (0.254_829_6
+            + t * (-0.284_496_74 + t * (1.421_413_7 + t * (-1.453_152_1 + t * 1.061_405_4))));
+    let erf = 1.0 - poly * (-z * z).exp();
+    if x >= 0.0 {
+        0.5 * (1.0 + erf)
+    } else {
+        0.5 * (1.0 - erf)
     }
 }
 fn soft<'a>(
@@ -892,7 +1115,12 @@ impl App {
         }
         let now = rtrust_control::observations::now_ms();
         if let Some(session) = &self.session {
-            let snapshot = session.observations();
+            let mut snapshot = session.observations();
+            if let Some((epoch, report)) = &self.diagnostic_report
+                && *epoch == self.connection_epoch
+            {
+                apply_probe(&mut snapshot, report, now);
+            }
             return (tunnel_level(&snapshot, now), Some(snapshot));
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -1012,8 +1240,23 @@ impl App {
                                 }
                             })
                             .unwrap_or_default();
+                        let probe = t(
+                            "Системная проверка одного адреса.",
+                            "System check of one address.",
+                        );
                         match normalized(o, now) {
                             Outcome::Unknown => reason_text(o.reason).to_owned(),
+                            Outcome::Failed if o.source == Source::AppProbe => format!(
+                                "{}{age}",
+                                t(
+                                    "Системная проверка одного адреса не прошла; подробности — в последней проверке пути.",
+                                    "The system check of one address failed; see the last path check.",
+                                )
+                            ),
+                            _ if o.source == Source::AppProbe => format!(
+                                "{} {probe}{age}",
+                                check.meaning(s.transport.mode)
+                            ),
                             _ => format!(
                                 "{} {}{age}",
                                 check.meaning(s.transport.mode),
@@ -1244,7 +1487,18 @@ impl App {
                     ..Default::default()
                 }),
         );
-        container(row![sidebar, edge, main.width(Length::Fill)])
+        let window = container(row![sidebar, edge, main.width(Length::Fill)])
+            .width(Length::Fill)
+            .height(Length::Fill);
+        if tk.dark {
+            return window.into();
+        }
+        // As in the mockups, the main field shows the state only where the state is the subject.
+        let field = match self.page {
+            Page::Home | Page::Diagnostics => hue.fill(false),
+            _ => Hue::Blue.fill(false),
+        };
+        iced::widget::stack![backdrop(field), window]
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -2355,7 +2609,7 @@ impl App {
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
-                muted(tk, t("Системное разрешение имени и один HEAD-запрос HTTPS:443, только если маршрут идёт на интерфейс RTrustTunnel. Без proxy среды, перенаправлений и прямого сравнения. Запускается при подключении TUN и повторяется каждые 30 секунд. Windows пока не поддерживается.", "System name resolution and one HTTPS:443 HEAD request, sent only if the route goes to the RTrustTunnel interface. No environment proxy, redirects or direct comparison. Runs when TUN connects and repeats every 30 seconds. Not supported on Windows yet.")),
+                muted(tk, t("Системное разрешение имени и один HEAD-запрос HTTPS:443, только если маршрут идёт на интерфейс RTrustTunnel. Без proxy среды, перенаправлений и прямого сравнения. Запускается при подключении TUN и повторяется каждые 30 секунд.", "System name resolution and one HTTPS:443 HEAD request, sent only if the route goes to the RTrustTunnel interface. No environment proxy, redirects or direct comparison. Runs when TUN connects and repeats every 30 seconds.")),
             ]
             .spacing(10),
         );
@@ -2600,11 +2854,12 @@ pub(super) fn native_window(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rtrust_control::observations::{Mode as ObsMode, Monitor, Source};
+    use rtrust_control::observations::{Mode as ObsMode, Monitor, Source, now_ms};
+    use rtrust_profile::routing::Action;
     fn passed(now: u64) -> Observation {
         Observation {
             outcome: Outcome::Passed,
-            source: Source::SystemProbe,
+            source: Source::ServiceLifecycle,
             observed_at_ms: Some(now),
             valid_for_ms: FRESH_MS,
             mode: ObsMode::Full,
@@ -2624,6 +2879,181 @@ mod tests {
             *o = passed(now);
         }
         s
+    }
+    #[test]
+    fn path_check_fills_route_and_connectivity_only_for_its_session() {
+        use rtrust_desktop::diagnostics::{Fact, Report};
+        let mut service = Snapshot::unknown(ObsMode::Split);
+        service.transport = Observation {
+            mode: ObsMode::Split,
+            ..passed(now_ms())
+        };
+        let mut report = Report::new(service.clone());
+        report.route = Fact::Passed;
+        report.https = Fact::Passed;
+        report.dns = Fact::Passed;
+        // Not finished yet: nothing to show.
+        let mut shown = service.clone();
+        apply_probe(&mut shown, &report, now_ms());
+        assert_eq!(shown, service);
+        report.finished_at_ms = now_ms();
+        apply_probe(&mut shown, &report, now_ms());
+        let now = now_ms();
+        assert_eq!(normalized(&shown.route, now), Outcome::Passed);
+        assert_eq!(normalized(&shown.connectivity, now), Outcome::Passed);
+        // A system lookup is not DNS-path evidence, and the guard is never probed.
+        assert_eq!(shown.dns.outcome, Outcome::Unknown);
+        assert_eq!(shown.guard.outcome, Outcome::Unknown);
+        // Probe results outlive the 6 s service TTL until the next 30 s run is overdue.
+        assert_eq!(normalized(&shown.route, now + 20_000), Outcome::Passed);
+        assert_eq!(
+            normalized(&shown.route, now + PROBE_FRESH_MS + 1),
+            Outcome::Stale
+        );
+        // A report from an earlier generation is ignored.
+        let mut later = service.clone();
+        later.generation += 1;
+        let before = later.clone();
+        apply_probe(&mut later, &report, now_ms());
+        assert_eq!(later, before);
+        // One site failing over the tunnel says nothing about the tunnel.
+        report.https = Fact::Timeout;
+        let mut shown = service.clone();
+        apply_probe(&mut shown, &report, now_ms());
+        assert_eq!(shown.connectivity, service.connectivity);
+        // In split mode an unexplained bypass may be a rule doing its job.
+        report.route = Fact::RouteMismatch;
+        report.https = Fact::NotChecked;
+        let mut shown = service.clone();
+        apply_probe(&mut shown, &report, now_ms());
+        assert_eq!(shown, service);
+        report.policy = Some(policy(Action::Direct));
+        apply_probe(&mut shown, &report, now_ms());
+        assert_eq!(shown, service);
+        // A bypass of a destination the policy tunnels is a failure; service
+        // evidence is never overwritten.
+        report.policy = Some(policy(Action::Tunnel));
+        shown.connectivity = Observation {
+            outcome: Outcome::Failed,
+            source: Source::ServiceLifecycle,
+            ..shown.connectivity
+        };
+        apply_probe(&mut shown, &report, now_ms());
+        assert_eq!(shown.route.outcome, Outcome::Failed);
+        assert_eq!(shown.connectivity.source, Source::ServiceLifecycle);
+        assert_eq!(tunnel_level(&shown, now), Level::Warning);
+        // The probe failure expires like its passes do.
+        assert_eq!(
+            normalized(&shown.route, now + PROBE_FRESH_MS + 1),
+            Outcome::Stale
+        );
+    }
+    #[test]
+    fn full_mode_route_bypass_fails_unless_policy_excludes_it() {
+        use rtrust_desktop::diagnostics::{Fact, Report};
+        let mut service = Snapshot::unknown(ObsMode::Full);
+        service.transport = passed(now_ms());
+        let mut report = Report::new(service.clone());
+        report.route = Fact::RouteMismatch;
+        report.finished_at_ms = now_ms();
+        let mut shown = service.clone();
+        apply_probe(&mut shown, &report, now_ms());
+        assert_eq!(shown.route.outcome, Outcome::Failed);
+        // Endpoint and local-network bypasses are direct by design.
+        report.policy = Some(policy(Action::Direct));
+        let mut shown = service.clone();
+        apply_probe(&mut shown, &report, now_ms());
+        assert_eq!(shown, service);
+    }
+    #[test]
+    fn backdrop_fields_are_blurred_disks() {
+        let size = iced::Size::new(80.0, 40.0);
+        let white = Color::WHITE;
+        let pixels = backdrop_pixels(10, 5, size, &[(20.0, 20.0, 260.0, white, 0.35)]);
+        assert_eq!(pixels.len(), 10 * 5 * 4);
+        // Well inside the disk the field reaches its full opacity.
+        let alpha = |i: usize| pixels[i * 4 + 3];
+        assert!(
+            (alpha(0) as f32 / 255.0 - 0.35).abs() < 0.01,
+            "{}",
+            alpha(0)
+        );
+        // A far field fades out; two fields compose over each other.
+        let far = backdrop_pixels(1, 1, size, &[(1000.0, 0.0, 10.0, white, 0.4)]);
+        assert_eq!(far[3], 0);
+        let red = Color::from_rgb(1.0, 0.0, 0.0);
+        let both = backdrop_pixels(
+            1,
+            1,
+            size,
+            &[
+                (40.0, 20.0, 500.0, white, 0.4),
+                (40.0, 20.0, 500.0, red, 0.4),
+            ],
+        );
+        assert_eq!(both[0], 255);
+        assert!(both[1] > 60 && both[1] < 120, "{both:?}");
+        assert!((both[3] as f32 / 255.0 - 0.64).abs() < 0.01, "{both:?}");
+        assert!((normal_cdf(0.0) - 0.5).abs() < 1e-6 && normal_cdf(3.0) > 0.998);
+    }
+    #[test]
+    fn backdrop_raster_is_reused_until_its_grid_or_state_changes() {
+        let blue = Hue::Blue.fill(false);
+        let (first, snapped) = backdrop_image(iced::Size::new(1001.0, 701.0), blue);
+        // Whole texels, covering the window by less than one texel.
+        assert_eq!(snapped, iced::Size::new(1004.0, 704.0));
+        let (same, _) = backdrop_image(iced::Size::new(1003.0, 703.5), blue);
+        assert_eq!(first.id(), same.id());
+        let (wider, _) = backdrop_image(iced::Size::new(1005.0, 701.0), blue);
+        assert_ne!(first.id(), wider.id());
+        let (recoloured, _) = backdrop_image(iced::Size::new(1005.0, 701.0), Hue::Red.fill(false));
+        assert_ne!(wider.id(), recoloured.id());
+    }
+    #[test]
+    fn disabled_pills_halve_their_own_alpha() {
+        for tk in [LIGHT_TOKENS, DARK_TOKENS] {
+            let enabled = pill_style(tk, Kind::Danger, buttons::Status::Active);
+            let disabled = pill_style(tk, Kind::Danger, buttons::Status::Disabled);
+            let alpha = |s: &buttons::Style| match s.background {
+                Some(iced::Background::Color(c)) => c.a,
+                _ => panic!("pill without a colour"),
+            };
+            assert!((alpha(&disabled) - alpha(&enabled) / 2.0).abs() < 1e-6);
+        }
+    }
+    #[test]
+    fn probe_stays_fresh_until_the_next_run_is_overdue() {
+        let slowest_gap = PROBE_INTERVAL + rtrust_desktop::diagnostics::TOTAL;
+        assert!(u128::from(PROBE_FRESH_MS) > slowest_gap.as_millis());
+    }
+    #[test]
+    fn path_check_replaces_expired_service_evidence() {
+        use rtrust_desktop::diagnostics::{Fact, Report};
+        let now = now_ms();
+        let mut service = Snapshot::unknown(ObsMode::Full);
+        service.transport = passed(now);
+        // The service proved the route once; that proof has since expired.
+        service.route = passed(now - FRESH_MS - 1_000);
+        let mut report = Report::new(service.clone());
+        report.route = Fact::Passed;
+        report.finished_at_ms = now;
+        let mut shown = service.clone();
+        apply_probe(&mut shown, &report, now);
+        assert_eq!(shown.route.source, Source::AppProbe);
+        assert_eq!(normalized(&shown.route, now), Outcome::Passed);
+        // Fresh service evidence is kept.
+        let mut fresh = service.clone();
+        fresh.route = passed(now);
+        let before = fresh.clone();
+        apply_probe(&mut fresh, &report, now);
+        assert_eq!(fresh, before);
+    }
+    fn policy(action: Action) -> rtrust_profile::routing::Decision {
+        use rtrust_profile::routing::{Context, Decision, Reason};
+        Decision {
+            action,
+            ..Decision::unknown(Context::default(), Reason::MatchedRule)
+        }
     }
     #[test]
     fn green_only_when_every_check_passed_and_is_fresh() {
