@@ -201,7 +201,7 @@
     <string name="v3_portal_detail">Одноразовый код из панели — профили приходят синхронизацией</string>
     <string name="v3_encrypted_note">Учётные данные шифруются на этом устройстве.</string>
     <string name="v3_note_transport">Соединение с сервером профиля установлено.</string>
-    <string name="v3_note_route">Проверочный адрес доступен через VPN, а не в обход.</string>
+    <string name="v3_note_route">Android направляет проверочный адрес в VPN по таблице маршрутов.</string>
     <string name="v3_note_dns">Имена сайтов разрешаются через сеть VPN.</string>
     <string name="v3_note_guard">Android блокирует трафик, если VPN отключится (постоянная VPN с блокировкой).</string>
     <string name="v3_note_connectivity">HTTPS-запрос через туннель получил ответ.</string>
@@ -249,4 +249,8 @@
     <string name="v3_checked_via">Проверено %1$s через %2$s.</string>
     <string name="v3_recheck">Проверить снова</string>
     <string name="v3_recheck_detail">Маршрут, DNS и HTTPS через туннель</string>
+    <string name="v3_check_needs_android12">Автопроверкам нужен Android 12 или новее.</string>
+    <string name="v3_check_app_excluded">Проверки недоступны: само приложение не входит в список VPN-приложений.</string>
+    <string name="v3_check_unavailable">недоступно</string>
+    <string name="v3_route_split">мимо VPN по правилам профиля</string>
 </resources>

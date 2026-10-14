@@ -79,7 +79,9 @@ public class MainActivity extends Activity {
     private JSONObject pathResult;
     private DiagnosticsDialog.Job pathJob;
     private long sessionGeneration = -1, pathGeneration = -1, pathAt, pathStarted = -PATH_MIN_GAP_MS;
-    private boolean pathForce = true;
+    private boolean pathForce = true, pathSplit, routingExcludesSelf;
+    /** Instrumentation turns this off so automatic checks add no traffic to stand fixtures. */
+    static volatile boolean autoPathChecks = true;
 
     private final Runnable poll = new Runnable() {
         public void run() {
@@ -204,11 +206,37 @@ public class MainActivity extends Activity {
 
     /** Index of each check in ObservationStatus.KEYS. */
     private static final int TRANSPORT = 0, ROUTE = 1, DNS = 2, GUARD = 3, CONNECTIVITY = 4;
-    private static final int PASSED = 1, FAILED = -1, UNKNOWN = 0;
+    private static final int PASSED = 1, FAILED = -1, UNKNOWN = 0, OUTSIDE = 2;
 
     private boolean pathRunning() { return pathJob != null; }
-    private boolean pathFresh() { return pathResult != null && pathGeneration == sessionGeneration && sessionGeneration >= 0; }
+    private boolean pathFresh() {
+        return pathResult != null && pathGeneration == sessionGeneration && sessionGeneration >= 0
+            && System.currentTimeMillis() - pathAt <= PATH_REFRESH_MS + PATH_DEADLINE_MS;
+    }
+    /** Why the app cannot check its own VPN path, or 0. */
+    private int pathBlocked() {
+        if (Build.VERSION.SDK_INT < 31) return R.string.v3_check_needs_android12; // network ownership needs API 31
+        if (routingExcludesSelf) return R.string.v3_check_app_excluded;
+        return 0;
+    }
+    /** True when this app's VPN carries no IPv4 default route, so the test address may lawfully stay outside. */
+    private boolean splitTunnel() {
+        if (Build.VERSION.SDK_INT < 31) return false; // checks never run there; see pathBlocked()
+        try {
+            ConnectivityManager cm = getSystemService(ConnectivityManager.class);
+            for (Network network : cm.getAllNetworks()) {
+                NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+                if (caps == null || !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) || caps.getOwnerUid() != android.os.Process.myUid()) continue;
+                LinkProperties links = cm.getLinkProperties(network);
+                if (links == null) return false;
+                for (RouteInfo route : links.getRoutes()) if (route.isDefaultRoute() && route.getDestination().getAddress() instanceof java.net.Inet4Address) return false;
+                return true;
+            }
+        } catch (Exception ignored) { /* Treat as full tunnel: a mismatch then stays a failure. */ }
+        return false;
+    }
     private void maybeCheckPath() {
+        if (!autoPathChecks || pathBlocked() != 0) return;
         long now = SystemClock.elapsedRealtime();
         if (pathRunning() || now - pathStarted < PATH_MIN_GAP_MS) return;
         boolean stale = !pathFresh() || System.currentTimeMillis() - pathAt > PATH_REFRESH_MS;
@@ -216,7 +244,13 @@ public class MainActivity extends Activity {
         pathForce = false; pathStarted = now;
         DiagnosticsDialog.Job job = new DiagnosticsDialog.Job(); pathJob = job;
         long generation = sessionGeneration;
-        Runnable deadline = () -> { if (pathJob == job) { job.cancel(); pathJob = null; renderKey = ""; } };
+        // No answer within the deadline counts as no access, never as the previous pass.
+        Runnable deadline = () -> {
+            if (pathJob != job) return;
+            job.cancel(); pathJob = null; renderKey = "";
+            try { pathResult = new JSONObject().put("https", "timeout").put("generation", generation); pathGeneration = generation; pathAt = System.currentTimeMillis(); }
+            catch (JSONException ignored) { pathResult = null; }
+        };
         handler.postDelayed(deadline, PATH_DEADLINE_MS);
         try {
             DiagnosticsDialog.WORKER.execute(() -> {
@@ -227,12 +261,12 @@ public class MainActivity extends Activity {
                     pathJob = null;
                     // A result from an earlier session or network says nothing about this one.
                     if (result.optLong("generation", -2) == generation && generation == sessionGeneration && !"session_changed".equals(result.optString("cause"))) {
-                        pathResult = result; pathGeneration = generation; pathAt = System.currentTimeMillis();
+                        pathResult = result; pathGeneration = generation; pathAt = System.currentTimeMillis(); pathSplit = splitTunnel();
                     }
                     renderKey = ""; renderState();
                 });
             });
-        } catch (java.util.concurrent.RejectedExecutionException busy) { handler.removeCallbacks(deadline); pathJob = null; }
+        } catch (java.util.concurrent.RejectedExecutionException busy) { handler.removeCallbacks(deadline); pathJob = null; pathResult = null; }
     }
     private void stopPathCheck(boolean forget) {
         if (pathJob != null) { pathJob.cancel(); pathJob = null; }
@@ -246,6 +280,7 @@ public class MainActivity extends Activity {
         if (pathFresh()) {
             String value = check == ROUTE ? pathResult.optString("route") : check == DNS ? pathResult.optString("dns") : check == CONNECTIVITY ? pathResult.optString("https") : "";
             if (check == ROUTE && value.equals("configured") || check != ROUTE && value.equals("passed")) return PASSED;
+            if (check == ROUTE && value.equals("route_mismatch") && pathSplit) return OUTSIDE;
             if (check == ROUTE && value.equals("route_mismatch") || check == DNS && value.equals("failed")
                 || check == CONNECTIVITY && (value.equals("tls_failed") || value.equals("timeout") || value.equals("connection_failed"))) return FAILED;
         }
@@ -290,6 +325,8 @@ public class MainActivity extends Activity {
                 int v = verdict(i);
                 if (v == PASSED) { row.value = getString(words[i][0]); row.color = p.green; row.ring = false; }
                 else if (v == FAILED) { row.value = getString(words[i][1]); row.color = p.yellow; row.ring = false; }
+                else if (v == OUTSIDE) row.value = getString(R.string.v3_route_split);
+                else if (i != GUARD && i != TRANSPORT && pathBlocked() != 0) row.value = getString(R.string.v3_check_unavailable);
                 else if (i == GUARD) row.value = getString(R.string.v3_guard_off);
                 else if (pathRunning()) { row.value = getString(R.string.v3_checking); row.color = p.blue; }
             }
@@ -337,7 +374,7 @@ public class MainActivity extends Activity {
             switch (uiState) {
                 case S_CONNECTING: text = getString(R.string.v3_connecting_desc, host); break;
                 case S_RECONNECTING: text = getString(R.string.v3_reconnecting_desc); break;
-                case S_RUNNING: text = getString(pathRunning() || pathForce ? R.string.v3_running_desc : R.string.v3_running_unchecked_desc); break;
+                case S_RUNNING: text = getString(pathBlocked() != 0 ? pathBlocked() : pathRunning() || pathForce ? R.string.v3_running_desc : R.string.v3_running_unchecked_desc); break;
                 case S_VERIFIED: text = getString(R.string.v3_verified_desc, ago(pathAt)); break;
                 case S_WARNING: text = getString(R.string.v3_warning_desc, failedName()); break;
                 case S_ERROR: text = problemText; break;
@@ -350,7 +387,7 @@ public class MainActivity extends Activity {
         }
         if (checksBox != null) fillChecks(checksBox, rows, screen == CHECKS);
         if (checkedAt != null) {
-            checkedAt.setText(pathFresh() ? getString(R.string.v3_checked_via, ago(pathAt), PATH_TARGET) : pathRunning() ? getString(R.string.v3_running_desc) : getString(R.string.v3_running_unchecked_desc));
+            checkedAt.setText(pathBlocked() != 0 ? getString(pathBlocked()) : pathFresh() ? getString(R.string.v3_checked_via, ago(pathAt), PATH_TARGET) : pathRunning() ? getString(R.string.v3_running_desc) : getString(R.string.v3_running_unchecked_desc));
             checkedAt.setVisibility(uiState == S_RUNNING || uiState == S_VERIFIED || uiState == S_WARNING ? View.VISIBLE : View.GONE);
         }
         if (stateChip != null) {
@@ -1051,6 +1088,7 @@ public class MainActivity extends Activity {
             JSONObject data = vault.read(); JSONArray entries = data.getJSONArray("profiles");
             AppRouting selection = AppRouting.read(data);
             routingSummary = selection.selectedOnly ? getString(R.string.selected_count, selection.packages.size()) : getString(R.string.all_apps);
+            routingExcludesSelf = selection.selectedOnly && !selection.packages.contains(getPackageName());
             JSONObject session = data.optJSONObject("portal");
             if (session != null) portalHost = Uri.parse(session.optString("origin")).getHost();
             boolean found = false;
@@ -1117,6 +1155,7 @@ public class MainActivity extends Activity {
     /** One live diagnostic dialog at a time; each explains itself when VPN is not connected. */
     private void live(java.util.function.Function<Activity, AlertDialog> open) {
         if (flowCapture != null) flowCapture.dismiss();
+        stopPathCheck(false); // free the single diagnostic worker for the user's own check
         flowCapture = open.apply(this);
     }
     private void recovery(String profileId) {

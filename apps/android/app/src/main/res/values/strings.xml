@@ -201,7 +201,7 @@
     <string name="v3_portal_detail">One-time code from the panel; profiles arrive by sync</string>
     <string name="v3_encrypted_note">Credentials are encrypted on this device.</string>
     <string name="v3_note_transport">Connection to the profile\'s server is up.</string>
-    <string name="v3_note_route">The test address is reached through the VPN, not around it.</string>
+    <string name="v3_note_route">Android sends the test address into the VPN by its routing table.</string>
     <string name="v3_note_dns">Site names resolve through the VPN network.</string>
     <string name="v3_note_guard">Android blocks traffic if the VPN drops (Always-on VPN with blocking).</string>
     <string name="v3_note_connectivity">An HTTPS request through the tunnel got an answer.</string>
@@ -247,4 +247,8 @@
     <string name="v3_checked_via">Checked %1$s via %2$s.</string>
     <string name="v3_recheck">Check again</string>
     <string name="v3_recheck_detail">Route, DNS and HTTPS through the tunnel</string>
+    <string name="v3_check_needs_android12">Automatic checks need Android 12 or newer.</string>
+    <string name="v3_check_app_excluded">Checks are off: this app is not in the VPN apps list.</string>
+    <string name="v3_check_unavailable">unavailable</string>
+    <string name="v3_route_split">outside by profile rules</string>
 </resources>

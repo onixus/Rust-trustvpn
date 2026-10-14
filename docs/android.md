@@ -45,6 +45,15 @@ publish real profiles to create documentation.
 - Dark theme and a light "frosted glass" theme (translucent cards over soft colour
   blobs), following the system or chosen under Actions → Theme. Dialogs follow the
   theme. Without a backdrop blur API before Android 12 the glass is simulated.
+- Automatic path checks (Android 12+): on connect, on every app open, after a session or
+  network change and every five minutes while the app is open, the app resolves
+  `connectivitycheck.gstatic.com` and sends one HTTPS `HEAD` to it, only through its own
+  VPN network, never directly. "Route" reports that Android's VPN routing table sends the
+  test address into the VPN (configuration, not packet attestation); a split-tunnel
+  profile that keeps it outside is shown as such, not as a failure. Green needs route,
+  DNS and HTTPS access passed within the last five minutes; a timeout counts as no
+  access. The guard row reports system Always-on with blocking and is not required for
+  green. Checks are off when the app excludes itself from VPN apps, and below Android 12.
 - Menus (profile actions, export formats, portal, metering, theme) open as app-styled
   bottom sheets with icons and one-line explanations. A profile is marked running only
   while its primary tunnel is connected, never while connecting, failing or on a backup.
