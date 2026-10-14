@@ -465,6 +465,7 @@ pub(super) const PROBE_FRESH_MS: u64 = 40_000;
 /// path and the check never tests the firewall.
 pub(super) fn apply_probe(snapshot: &mut Snapshot, report: &rtrust_desktop::diagnostics::Report) {
     use rtrust_desktop::diagnostics::Fact;
+    use rtrust_profile::routing::Action;
     if report.finished_at_ms == 0 || report.lifecycle.generation != snapshot.generation {
         return;
     }
@@ -484,20 +485,26 @@ pub(super) fn apply_probe(snapshot: &mut Snapshot, report: &rtrust_desktop::diag
                 Outcome::Unknown | Outcome::Stale | Outcome::Configured
             )
     };
+    // The destination is user-chosen: a route outside the VPN is a tunnel
+    // failure only when the policy sends it into the tunnel (or, in full
+    // mode, does not explicitly exclude it). Split rules may bypass it on purpose.
+    let expected_tunnel = match report.policy.as_ref().map(|d| d.action) {
+        Some(Action::Tunnel) => true,
+        Some(Action::Direct | Action::Block) => false,
+        _ => snapshot.transport.mode == ObservationMode::Full,
+    };
     let route = match report.route {
         Fact::Passed => Some(Outcome::Passed),
-        Fact::RouteMismatch => Some(Outcome::Failed),
+        Fact::RouteMismatch if expected_tunnel => Some(Outcome::Failed),
         _ => None,
     };
     if let Some(outcome) = route.filter(|_| open(&snapshot.route)) {
         snapshot.route = probe(outcome);
     }
-    // HTTPS is sent only after the route was confirmed, so any result is about the tunnel.
+    // One site answering proves the path; one site failing is about that site
+    // (down, blocked, bad TLS), so failures stay on the path check page.
     let connectivity = match report.https {
         Fact::Passed => Some(Outcome::Passed),
-        Fact::Failed | Fact::Timeout | Fact::ConnectionFailed | Fact::TlsFailed => {
-            Some(Outcome::Failed)
-        }
         _ => None,
     };
     if let Some(outcome) = connectivity.filter(|_| open(&snapshot.connectivity)) {
@@ -519,6 +526,14 @@ pub(super) fn normalized(observation: &Observation, now: u64) -> Outcome {
             let ttl = observation.valid_for_ms.min(cap);
             match observation.observed_at_ms {
                 Some(time) if now >= time && now - time <= ttl => observation.outcome,
+                _ => Outcome::Stale,
+            }
+        }
+        // The app's own check is repeated; its failure must not outlive the
+        // runs that stopped confirming it.
+        Outcome::Failed if observation.source == Source::SystemProbe => {
+            match observation.observed_at_ms {
+                Some(time) if now >= time && now - time <= PROBE_FRESH_MS => Outcome::Failed,
                 _ => Outcome::Stale,
             }
         }
@@ -2701,10 +2716,11 @@ pub(super) fn native_window(
 mod tests {
     use super::*;
     use rtrust_control::observations::{Mode as ObsMode, Monitor, Source, now_ms};
+    use rtrust_profile::routing::Action;
     fn passed(now: u64) -> Observation {
         Observation {
             outcome: Outcome::Passed,
-            source: Source::SystemProbe,
+            source: Source::ServiceLifecycle,
             observed_at_ms: Some(now),
             valid_for_ms: FRESH_MS,
             mode: ObsMode::Full,
@@ -2761,10 +2777,23 @@ mod tests {
         let before = later.clone();
         apply_probe(&mut later, &report);
         assert_eq!(later, before);
-        // A route outside the VPN is a failure; service evidence is never overwritten.
+        // One site failing over the tunnel says nothing about the tunnel.
+        report.https = Fact::Timeout;
+        let mut shown = service.clone();
+        apply_probe(&mut shown, &report);
+        assert_eq!(shown.connectivity, service.connectivity);
+        // In split mode an unexplained bypass may be a rule doing its job.
         report.route = Fact::RouteMismatch;
         report.https = Fact::NotChecked;
         let mut shown = service.clone();
+        apply_probe(&mut shown, &report);
+        assert_eq!(shown, service);
+        report.policy = Some(policy(Action::Direct));
+        apply_probe(&mut shown, &report);
+        assert_eq!(shown, service);
+        // A bypass of a destination the policy tunnels is a failure; service
+        // evidence is never overwritten.
+        report.policy = Some(policy(Action::Tunnel));
         shown.connectivity = Observation {
             outcome: Outcome::Failed,
             source: Source::ServiceLifecycle,
@@ -2774,6 +2803,35 @@ mod tests {
         assert_eq!(shown.route.outcome, Outcome::Failed);
         assert_eq!(shown.connectivity.source, Source::ServiceLifecycle);
         assert_eq!(tunnel_level(&shown, now), Level::Warning);
+        // The probe failure expires like its passes do.
+        assert_eq!(
+            normalized(&shown.route, now + PROBE_FRESH_MS + 1),
+            Outcome::Stale
+        );
+    }
+    #[test]
+    fn full_mode_route_bypass_fails_unless_policy_excludes_it() {
+        use rtrust_desktop::diagnostics::{Fact, Report};
+        let mut service = Snapshot::unknown(ObsMode::Full);
+        service.transport = passed(now_ms());
+        let mut report = Report::new(service.clone());
+        report.route = Fact::RouteMismatch;
+        report.finished_at_ms = now_ms();
+        let mut shown = service.clone();
+        apply_probe(&mut shown, &report);
+        assert_eq!(shown.route.outcome, Outcome::Failed);
+        // Endpoint and local-network bypasses are direct by design.
+        report.policy = Some(policy(Action::Direct));
+        let mut shown = service.clone();
+        apply_probe(&mut shown, &report);
+        assert_eq!(shown, service);
+    }
+    fn policy(action: Action) -> rtrust_profile::routing::Decision {
+        use rtrust_profile::routing::{Context, Decision, Reason};
+        Decision {
+            action,
+            ..Decision::unknown(Context::default(), Reason::MatchedRule)
+        }
     }
     #[test]
     fn green_only_when_every_check_passed_and_is_fresh() {
