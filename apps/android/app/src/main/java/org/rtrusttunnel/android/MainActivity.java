@@ -78,6 +78,9 @@ public class MainActivity extends Activity {
     private static final long PATH_REFRESH_MS = 5 * 60_000, PATH_MIN_GAP_MS = 5_000, PATH_DEADLINE_MS = 15_000;
     private JSONObject pathResult;
     private DiagnosticsDialog.Job pathJob;
+    /** A check that missed its deadline and still holds the single diagnostic worker, and its session. */
+    private DiagnosticsDialog.Job hungJob;
+    private long hungGeneration = -1;
     private long sessionGeneration = -1, pathGeneration = -1, pathAt, pathStarted = -PATH_MIN_GAP_MS;
     private boolean pathForce = true, pathSplit, routingExcludesSelf;
     /** Instrumentation turns this off so automatic checks add no traffic to stand fixtures. */
@@ -237,6 +240,8 @@ public class MainActivity extends Activity {
     }
     private void maybeCheckPath() {
         if (!autoPathChecks || pathBlocked() != 0) return;
+        // The user's own diagnostic dialog needs the single worker; do not compete for it.
+        if (flowCapture != null && flowCapture.isShowing()) return;
         long now = SystemClock.elapsedRealtime();
         if (pathRunning() || now - pathStarted < PATH_MIN_GAP_MS) return;
         boolean stale = !pathFresh() || System.currentTimeMillis() - pathAt > PATH_REFRESH_MS;
@@ -244,12 +249,10 @@ public class MainActivity extends Activity {
         pathForce = false; pathStarted = now;
         DiagnosticsDialog.Job job = new DiagnosticsDialog.Job(); pathJob = job;
         long generation = sessionGeneration;
-        // No answer within the deadline counts as no access, never as the previous pass.
         Runnable deadline = () -> {
             if (pathJob != job) return;
-            job.cancel(); pathJob = null; renderKey = "";
-            try { pathResult = new JSONObject().put("https", "timeout").put("generation", generation); pathGeneration = generation; pathAt = System.currentTimeMillis(); }
-            catch (JSONException ignored) { pathResult = null; }
+            job.cancel(); pathJob = null; hungJob = job; hungGeneration = generation;
+            pathTimedOut(generation);
         };
         handler.postDelayed(deadline, PATH_DEADLINE_MS);
         try {
@@ -257,6 +260,7 @@ public class MainActivity extends Activity {
                 JSONObject result = DiagnosticsDialog.check(this, PATH_TARGET, job);
                 handler.post(() -> {
                     handler.removeCallbacks(deadline);
+                    if (hungJob == job) hungJob = null;
                     if (pathJob != job || isDestroyed()) return;
                     pathJob = null;
                     // A result from an earlier session or network says nothing about this one.
@@ -266,7 +270,18 @@ public class MainActivity extends Activity {
                     renderKey = ""; renderState();
                 });
             });
-        } catch (java.util.concurrent.RejectedExecutionException busy) { handler.removeCallbacks(deadline); pathJob = null; pathResult = null; }
+        } catch (java.util.concurrent.RejectedExecutionException busy) {
+            handler.removeCallbacks(deadline); pathJob = null; pathForce = true; // retry once the worker is free
+            // Our own timed-out check still blocks the worker in this session: there is still no
+            // answer, so the timeout stands. Otherwise keep whatever result was there.
+            if (hungJob != null && hungGeneration == generation) pathTimedOut(generation);
+        }
+    }
+    /** No answer within the deadline counts as no access, never as the previous pass. */
+    private void pathTimedOut(long generation) {
+        renderKey = "";
+        try { pathResult = new JSONObject().put("https", "timeout").put("generation", generation); pathGeneration = generation; pathAt = System.currentTimeMillis(); }
+        catch (JSONException ignored) { pathResult = null; }
     }
     private void stopPathCheck(boolean forget) {
         if (pathJob != null) { pathJob.cancel(); pathJob = null; }
