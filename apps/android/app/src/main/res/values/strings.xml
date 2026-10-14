@@ -164,13 +164,11 @@
     <string name="v3_warning_2">attention</string>
     <string name="v3_error_1">Not</string>
     <string name="v3_error_2">connected</string>
-    <string name="v3_off_desc">Traffic goes directly, without the tunnel. Slide to connect “%1$s”.</string>
+    <string name="v3_off_desc">Traffic goes directly, without the tunnel.</string>
     <string name="v3_off_desc_none">Add a profile to connect.</string>
     <string name="v3_connecting_desc">Connecting to %1$s.</string>
-    <string name="v3_reconnecting_desc">The connection dropped; reconnecting.</string>
     <string name="v3_running_desc">The tunnel is up. Checking route, DNS and internet access through the VPN…</string>
-    <string name="v3_verified_desc">Route, DNS and internet access through the VPN checked %1$s.</string>
-    <string name="v3_warning_desc">The tunnel is up, but the “%1$s” check failed. See Checks for details.</string>
+    <string name="v3_verified_desc">Checked %1$s.</string>
     <string name="v3_slide_connect">Slide to connect</string>
     <string name="v3_slide_disconnect">Slide to disconnect</string>
     <string name="v3_slide_cancel">Slide to cancel</string>
@@ -230,7 +228,6 @@
         <item quantity="other">%1$d more profiles</item>
     </plurals>
     <string name="v3_running_unchecked_desc">The tunnel is up, but the checks have not run yet. Open Checks to run them.</string>
-    <string name="v3_guard_off_note">Blocking without VPN is off.</string>
     <string name="v3_just_now">just now</string>
     <string name="v3_minutes_ago">%1$d min ago</string>
     <string name="v3_checking">checking…</string>

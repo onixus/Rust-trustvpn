@@ -299,10 +299,6 @@ public class MainActivity extends Activity {
         }
         return all ? ObservationStatus.VERIFIED : ObservationStatus.RUNNING;
     }
-    private String failedName() {
-        for (int check : new int[]{TRANSPORT, ROUTE, DNS, CONNECTIVITY}) if (verdict(check) == FAILED) return getString(ObservationStatus.NAMES[check]);
-        return getString(ObservationStatus.NAMES[CONNECTIVITY]);
-    }
     private String ago(long at) {
         long minutes = (System.currentTimeMillis() - at) / 60_000;
         return minutes < 1 ? getString(R.string.v3_just_now) : getString(R.string.v3_minutes_ago, minutes);
@@ -370,19 +366,19 @@ public class MainActivity extends Activity {
         }
         if (description != null) {
             String host = selected == null ? "" : selected.host.isEmpty() ? selected.name : selected.host;
-            String text;
+            // Only what the headline, the check rows and the slider do not already say.
+            String text = "";
             switch (uiState) {
                 case S_CONNECTING: text = getString(R.string.v3_connecting_desc, host); break;
-                case S_RECONNECTING: text = getString(R.string.v3_reconnecting_desc); break;
-                case S_RUNNING: text = getString(pathBlocked() != 0 ? pathBlocked() : pathRunning() || pathForce ? R.string.v3_running_desc : R.string.v3_running_unchecked_desc); break;
+                case S_RUNNING: if (pathBlocked() != 0) text = getString(pathBlocked()); break;
                 case S_VERIFIED: text = getString(R.string.v3_verified_desc, ago(pathAt)); break;
-                case S_WARNING: text = getString(R.string.v3_warning_desc, failedName()); break;
                 case S_ERROR: text = problemText; break;
-                default: text = name == null ? getString(R.string.v3_off_desc_none) : getString(R.string.v3_off_desc, name);
+                case S_OFF: text = getString(name == null ? R.string.v3_off_desc_none : R.string.v3_off_desc); break;
+                default: break;
             }
-            if ((uiState == S_VERIFIED || uiState == S_WARNING) && verdict(GUARD) != PASSED) text += " " + getString(R.string.v3_guard_off_note); // resources trim leading spaces
             if (backupIndex > 0 && (uiState == S_RUNNING || uiState == S_VERIFIED || uiState == S_WARNING))
-                text = getString(R.string.recovery_backup_active, backupIndex) + ". " + text;
+                text = getString(R.string.recovery_backup_active, backupIndex) + (text.isEmpty() ? "" : ". " + text);
+            description.setVisibility(text.isEmpty() ? View.GONE : View.VISIBLE);
             description.setText(text);
         }
         if (checksBox != null) fillChecks(checksBox, rows, screen == CHECKS);

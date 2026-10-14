@@ -164,13 +164,11 @@
     <string name="v3_warning_2">внимание</string>
     <string name="v3_error_1">Нет</string>
     <string name="v3_error_2">подключения</string>
-    <string name="v3_off_desc">Трафик идёт напрямую, без туннеля. Сдвиньте кнопку, чтобы подключить «%1$s».</string>
+    <string name="v3_off_desc">Трафик идёт напрямую, без туннеля.</string>
     <string name="v3_off_desc_none">Добавьте профиль, чтобы подключиться.</string>
     <string name="v3_connecting_desc">Подключаемся к %1$s.</string>
-    <string name="v3_reconnecting_desc">Связь потеряна, переподключаемся.</string>
     <string name="v3_running_desc">Туннель поднят. Проверяем маршрут, DNS и доступ в интернет через VPN…</string>
-    <string name="v3_verified_desc">Маршрут, DNS и доступ в интернет через VPN проверены %1$s.</string>
-    <string name="v3_warning_desc">Туннель поднят, но проверка «%1$s» не прошла. Подробности — в «Проверках».</string>
+    <string name="v3_verified_desc">Проверено %1$s.</string>
     <string name="v3_slide_connect">Сдвиньте, чтобы подключить</string>
     <string name="v3_slide_disconnect">Сдвиньте, чтобы отключить</string>
     <string name="v3_slide_cancel">Сдвиньте, чтобы отменить</string>
@@ -232,7 +230,6 @@
         <item quantity="other">Ещё %1$d профиля</item>
     </plurals>
     <string name="v3_running_unchecked_desc">Туннель поднят, но проверки ещё не выполнены. Запустите их в «Проверках».</string>
-    <string name="v3_guard_off_note">Блокировка без VPN не включена.</string>
     <string name="v3_just_now">только что</string>
     <string name="v3_minutes_ago">%1$d мин назад</string>
     <string name="v3_checking">проверяется…</string>
