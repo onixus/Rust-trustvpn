@@ -224,4 +224,6 @@
     <string name="v3_back">Back</string>
     <string name="v3_close">Close</string>
     <string name="v3_search_actions">Search actions</string>
+    <string name="v3_apps_loading">Loading apps…</string>
+    <string name="v3_apps_all_detail">Every app uses the tunnel. Choose “Only selected apps” to limit it.</string>
 </resources>

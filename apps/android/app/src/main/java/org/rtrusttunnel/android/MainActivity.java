@@ -27,7 +27,7 @@ import org.json.*;
  */
 public class MainActivity extends Activity {
     private static final int PICK = 10, SAVE = 11, CONSENT = 12, QR_IMAGE = 13, DIAGNOSTIC_SAVE = 14;
-    static final int HOME = 0, PROFILES = 1, ADD = 2, CHECKS = 3, ACTIONS = 4;
+    static final int HOME = 0, PROFILES = 1, ADD = 2, CHECKS = 3, ACTIONS = 4, APPS = 5;
     /** Connection state shown to the user. */
     static final int S_OFF = 0, S_CONNECTING = 1, S_RECONNECTING = 2, S_RUNNING = 3, S_VERIFIED = 4, S_WARNING = 5, S_ERROR = 6;
     /** Connection state colours: grey off, blue connecting or running, green verified, yellow warning, red error. */
@@ -136,12 +136,13 @@ public class MainActivity extends Activity {
     }
     private void goBack() {
         if (back.isEmpty()) return;
+        if (screen == APPS) picker = null;
         screen = back.pop(); build();
     }
     /** Below API 33 only; syncBack() registers the API 33+ callback. */
     @SuppressWarnings("deprecation") @android.annotation.SuppressLint("GestureBackNavigation")
     @Override public void onBackPressed() { if (back.isEmpty()) super.onBackPressed(); else goBack(); }
-    private void home() { back.clear(); screen = HOME; build(); }
+    private void home() { back.clear(); picker = null; screen = HOME; build(); }
     /** API 33+ (and always when targeting 36) routes Back here instead of onBackPressed. */
     private void syncBack() {
         if (Build.VERSION.SDK_INT < 33) return;
@@ -157,13 +158,14 @@ public class MainActivity extends Activity {
     private void build() {
         host.removeAllViews();
         tagText = headline = description = stateChip = null; tagDot = null;
-        checksBox = strip = list = results = null; slider = null; search = null; renderKey = "";
+        checksBox = strip = list = results = appsList = null; slider = null; search = null; appsMessage = appsCount = null; renderKey = "";
         View view;
         switch (screen) {
             case PROFILES: view = profilesScreen(); break;
             case ADD: view = addScreen(); break;
             case CHECKS: view = checksScreen(); break;
             case ACTIONS: view = actionsScreen(); break;
+            case APPS: view = appsScreen(); break;
             default: view = homeScreen();
         }
         host.addView(view, new FrameLayout.LayoutParams(-1, -1));
@@ -556,6 +558,172 @@ public class MainActivity extends Activity {
         return root;
     }
 
+    // ---- VPN apps ---------------------------------------------------------------------
+
+    /** Unsaved selection; lives while the apps screen is open, including theme recreation. */
+    private static final class Picker {
+        boolean selectedOnly; final Set<String> selected = new TreeSet<>();
+        List<String[]> apps; // {package, label}; null while loading
+        int generation;
+    }
+    private Picker picker;
+    private final Map<String, View> appRows = new HashMap<>();
+    private TextView appsMessage, appsCount;
+    private LinearLayout appsList;
+    private void openApps() {
+        try {
+            AppRouting current = AppRouting.read(vault.read());
+            picker = new Picker(); picker.selectedOnly = current.selectedOnly; picker.selected.addAll(current.packages);
+            show(APPS);
+        } catch (Exception error) { error(getString(R.string.app_selection_could_not_be_opened)); }
+    }
+    private View appsScreen() {
+        if (picker == null) { openApps(); if (picker == null) return column(); }
+        appRows.clear();
+        LinearLayout root = column(); root.setPadding(dp(20), dp(16), dp(20), dp(16));
+        root.addView(header(getString(R.string.apps_using_vpn), false));
+
+        LinearLayout modes = new LinearLayout(this); modes.setPadding(dp(4), dp(4), dp(4), dp(4)); modes.setBackground(glass(dp(24), p.chip));
+        TextView all = segment(getString(R.string.all_apps)), only = segment(getString(R.string.only_selected_apps));
+        modes.addView(all, weight(false)); modes.addView(only, weight(false));
+        LinearLayout.LayoutParams modesParams = new LinearLayout.LayoutParams(-1, dp(52)); modesParams.setMargins(0, dp(16), 0, dp(8));
+        root.addView(modes, modesParams);
+        TextView explain = text("", 12, p.muted, false); explain.setLineSpacing(0, 1.15f); explain.setPadding(dp(4), 0, dp(4), dp(12)); root.addView(explain);
+
+        EditText query = field(getString(R.string.search_apps), false);
+        root.addView(query, new LinearLayout.LayoutParams(-1, dp(50)));
+        appsCount = text("", 12, p.muted, true); appsCount.setLetterSpacing(0.08f); appsCount.setPadding(dp(4), dp(14), 0, dp(8)); root.addView(appsCount);
+        ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false);
+        appsList = column(); appsList.setPadding(dp(4), dp(4), dp(4), dp(4)); appsList.setBackground(glass(dp(24), p.card)); scroll.addView(appsList);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        appsMessage = text("", 13, p.muted, false); appsMessage.setPadding(dp(4), dp(10), dp(4), dp(10)); root.addView(appsMessage);
+        root.addView(pill(getString(R.string.save), R.drawable.ic_check, this::saveApps), new LinearLayout.LayoutParams(-1, dp(58)));
+
+        Runnable mode = () -> {
+            boolean selected = picker.selectedOnly;
+            styleSegment(all, !selected); styleSegment(only, selected);
+            explain.setText(selected ? R.string.unselected_apps_connect_directly_or_have : R.string.v3_apps_all_detail);
+            query.setEnabled(selected); query.setAlpha(selected ? 1f : 0.5f);
+            appsList.setAlpha(selected ? 1f : 0.45f);
+            for (View row : appRows.values()) row.setEnabled(selected);
+            countApps();
+        };
+        all.setOnClickListener(v -> { picker.selectedOnly = false; mode.run(); });
+        only.setOnClickListener(v -> { picker.selectedOnly = true; mode.run(); });
+        query.addTextChangedListener(watcher(() -> filterApps(query.getText().toString())));
+        if (TunnelService.active) { appsMessage.setText(R.string.disconnect_vpn_before_saving_changes_your); appsMessage.setTextColor(p.yellowText); }
+        if (picker.apps == null) { loadApps(() -> { fillApps(); mode.run(); filterApps(query.getText().toString()); }); appsList.addView(text(getString(R.string.v3_apps_loading), 14, p.muted, false)); }
+        else fillApps();
+        mode.run();
+        return root;
+    }
+    private TextView segment(String title) {
+        TextView view = text(title, 14, p.muted, true); view.setGravity(Gravity.CENTER); view.setMaxLines(1); view.setEllipsize(TextUtils.TruncateAt.END);
+        view.setClickable(true); view.setFocusable(true); return view;
+    }
+    private void styleSegment(TextView view, boolean on) {
+        view.setTextColor(on ? p.blueText : p.muted);
+        view.setBackground(rippled(round(on ? (p.light ? 0xE6FFFFFF : p.blueSoft) : Color.TRANSPARENT, dp(20))));
+        view.setSelected(on);
+    }
+    /** Installed apps with Internet access, plus saved ones that are gone so they can be unchecked. */
+    private void loadApps(Runnable done) {
+        Picker target = picker; int generation = ++target.generation;
+        android.content.pm.PackageManager pm = getPackageManager();
+        String self = getPackageName();
+        Set<String> chosen = new HashSet<>(target.selected);
+        String unavailable = getString(R.string.unavailable_app);
+        new Thread(() -> {
+            List<String[]> apps = new ArrayList<>(); Set<String> known = new HashSet<>();
+            for (android.content.pm.ApplicationInfo app : pm.getInstalledApplications(0)) {
+                if (app.packageName.equals(self)) continue;
+                if (pm.checkPermission("android.permission.INTERNET", app.packageName) != android.content.pm.PackageManager.PERMISSION_GRANTED && !chosen.contains(app.packageName)) continue;
+                apps.add(new String[]{app.packageName, app.loadLabel(pm).toString()}); known.add(app.packageName);
+            }
+            for (String name : chosen) if (!known.contains(name)) apps.add(new String[]{name, unavailable});
+            apps.sort(Comparator.comparing((String[] app) -> !chosen.contains(app[0])).thenComparing(app -> app[1], String.CASE_INSENSITIVE_ORDER).thenComparing(app -> app[0]));
+            runOnUiThread(() -> {
+                if (isDestroyed() || picker != target || target.generation != generation) return;
+                target.apps = apps; if (screen == APPS) done.run();
+            });
+        }, "vpn-apps").start();
+    }
+    private void fillApps() {
+        if (appsList == null || picker.apps == null) return;
+        appsList.removeAllViews(); appRows.clear();
+        for (String[] app : picker.apps) {
+            String name = app[0];
+            LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL); row.setPadding(dp(10), dp(8), dp(10), dp(8)); row.setMinimumHeight(dp(60));
+            row.setBackground(rippled(round(Color.TRANSPARENT, dp(18))));
+            ImageView icon = new ImageView(this); icon.setTag(name);
+            icon.setImageDrawable(tinted(R.drawable.ic_apps, p.muted)); icon.setPadding(dp(8), dp(8), dp(8), dp(8)); icon.setBackground(round(p.chip, dp(12)));
+            row.addView(icon, iconParams());
+            LinearLayout texts = column();
+            TextView label = text(app[1], 15, p.text, true); label.setMaxLines(1); label.setEllipsize(TextUtils.TruncateAt.END); texts.addView(label);
+            TextView pkg = text(name, 12, p.muted, false); pkg.setMaxLines(1); pkg.setEllipsize(TextUtils.TruncateAt.MIDDLE); texts.addView(pkg);
+            row.addView(texts, new LinearLayout.LayoutParams(0, -2, 1));
+            ImageView check = new ImageView(this); check.setPadding(dp(4), dp(4), dp(4), dp(4));
+            LinearLayout.LayoutParams checkParams = new LinearLayout.LayoutParams(dp(26), dp(26)); checkParams.setMarginStart(dp(10)); row.addView(check, checkParams);
+            Runnable paint = () -> {
+                boolean on = picker.selected.contains(name);
+                GradientDrawable mark = new GradientDrawable(); mark.setShape(GradientDrawable.OVAL);
+                if (on) mark.setColor(p.light ? p.blueText : p.blue); else mark.setStroke(dp(2), p.empty);
+                check.setBackground(mark); check.setImageDrawable(on ? tinted(R.drawable.ic_check, p.light ? Color.WHITE : p.onBlue) : null);
+                row.setContentDescription(app[1] + (on ? ", " + getString(R.string.v3_state_selected) : ""));
+            };
+            paint.run();
+            row.setOnClickListener(v -> {
+                if (!picker.selectedOnly) return;
+                if (!picker.selected.remove(name)) picker.selected.add(name);
+                paint.run(); countApps();
+            });
+            row.setEnabled(picker.selectedOnly);
+            appRows.put(name, row); appsList.addView(row);
+        }
+        countApps(); loadIcons();
+    }
+    /** Icons arrive after the list, on one background thread, only for the open screen. */
+    private void loadIcons() {
+        Picker target = picker; int generation = target.generation;
+        android.content.pm.PackageManager pm = getPackageManager();
+        List<String> names = new ArrayList<>(appRows.keySet());
+        new Thread(() -> {
+            for (String name : names) {
+                Drawable icon;
+                try { icon = pm.getApplicationIcon(name); } catch (Exception missing) { continue; }
+                runOnUiThread(() -> {
+                    if (isDestroyed() || picker != target || target.generation != generation) return;
+                    View row = appRows.get(name); if (row == null) return;
+                    ImageView view = (ImageView) ((ViewGroup) row).getChildAt(0);
+                    view.setPadding(0, 0, 0, 0); view.setBackground(null); view.setImageDrawable(icon);
+                });
+                if (isDestroyed() || picker != target) return;
+            }
+        }, "vpn-app-icons").start();
+    }
+    private void filterApps(String query) {
+        String q = query.trim().toLowerCase(Locale.ROOT);
+        if (picker == null || picker.apps == null) return;
+        for (String[] app : picker.apps) {
+            View row = appRows.get(app[0]); if (row == null) continue;
+            row.setVisibility(q.isEmpty() || app[0].toLowerCase(Locale.ROOT).contains(q) || app[1].toLowerCase(Locale.ROOT).contains(q) ? View.VISIBLE : View.GONE);
+        }
+    }
+    private void countApps() {
+        if (appsCount != null) appsCount.setText(getString(R.string.selected_count, picker.selected.size()).toUpperCase(Locale.getDefault()));
+    }
+    private void saveApps() {
+        if (TunnelService.active) { appsMessage.setText(R.string.disconnect_vpn_before_saving_changes_your); appsMessage.setTextColor(p.yellowText); return; }
+        try {
+            AppRouting next = new AppRouting(picker.selectedOnly, picker.selected);
+            next.validateInstalled(getPackageManager());
+            vault.saveAppRouting(next);
+            picker = null; reload(); goBack();
+        } catch (android.content.pm.PackageManager.NameNotFoundException error) { appsMessage.setText(R.string.a_selected_app_is_no_longer); appsMessage.setTextColor(p.redText); }
+        catch (IllegalArgumentException error) { appsMessage.setText(R.string.select_at_least_one_installed_app); appsMessage.setTextColor(p.redText); }
+        catch (Exception error) { appsMessage.setText(R.string.could_not_save_app_selection_existing); appsMessage.setTextColor(p.redText); }
+    }
+
     // ---- Actions ----------------------------------------------------------------------
 
     private static final class Entry {
@@ -591,10 +759,7 @@ public class MainActivity extends Activity {
         String theme = getString(Palette.MODE_DARK.equals(mode) ? R.string.v3_theme_dark : Palette.MODE_LIGHT.equals(mode) ? R.string.v3_theme_light : R.string.v3_theme_system);
         List<Entry> rest = Arrays.asList(
             new Entry(R.drawable.ic_add, getString(R.string.add_profile), getString(R.string.v3_add_detail), () -> show(ADD), true),
-            new Entry(R.drawable.ic_apps, getString(R.string.vpn_apps), routingSummary, () -> {
-                try { AppRoutingDialog.show(this, vault, this::reload); }
-                catch (Exception error) { error(getString(R.string.app_selection_could_not_be_opened)); }
-            }, false),
+            new Entry(R.drawable.ic_apps, getString(R.string.vpn_apps), routingSummary, this::openApps, false),
             new Entry(R.drawable.ic_lock, getString(R.string.v3_always_short), always, this::vpnSettings, false),
             new Entry(R.drawable.ic_cloud, getString(R.string.settings_server), portalHost == null ? getString(R.string.portal_not_enrolled) : portalHost, () -> new PortalDialog(this, vault, this::reload).show(), false),
             new Entry(R.drawable.ic_sync, getString(R.string.v3_traffic), getString(TunnelService.inheritMetering(this) ? R.string.metering_detail_inherit : R.string.metering_detail_always), this::meteringSettings, false),

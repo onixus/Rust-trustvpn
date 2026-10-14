@@ -224,4 +224,6 @@
     <string name="v3_back">Назад</string>
     <string name="v3_close">Закрыть</string>
     <string name="v3_search_actions">Поиск действий</string>
+    <string name="v3_apps_loading">Загружаем приложения…</string>
+    <string name="v3_apps_all_detail">Весь трафик всех приложений идёт через туннель. Выберите «Только выбранные», чтобы ограничить.</string>
 </resources>
