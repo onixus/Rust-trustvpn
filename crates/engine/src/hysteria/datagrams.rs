@@ -112,7 +112,11 @@ pub(super) async fn open(session: HysteriaSession) -> Result<Tunnel> {
         let _permit = permit;
         let _ = relay(session, bridge).await;
     });
-    Ok(Tunnel { io, pump })
+    Ok(Tunnel {
+        io,
+        pump,
+        liveness: None,
+    })
 }
 async fn relay(session: HysteriaSession, bridge: DuplexStream) -> Result<()> {
     let mut registration = Registration {

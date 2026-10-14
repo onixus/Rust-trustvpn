@@ -260,8 +260,10 @@ pub struct Budget {
 impl Budget {
     /// Reset only after sustained liveness; a briefly successful endpoint must
     /// not permit an unbounded rapid retry loop. This is not an egress probe.
-    pub fn disconnected(&mut self, connected_for: Duration) {
-        if connected_for >= STABLE_CONNECTION {
+    /// An `unproven` session ended degraded without ever delivering data:
+    /// no liveness evidence, however long it lasted.
+    pub fn disconnected(&mut self, connected_for: Duration, unproven: bool) {
+        if connected_for >= STABLE_CONNECTION && !unproven {
             *self = Self::default();
         }
     }
@@ -294,7 +296,7 @@ mod budget_tests {
         let mut budget = Budget::default();
         for seconds in [2, 4, 8, 16, 30, 30, 30, 30] {
             assert_eq!(budget.next_delay(0), Duration::from_secs(seconds));
-            budget.disconnected(Duration::from_secs(29));
+            budget.disconnected(Duration::from_secs(29), false);
         }
         assert_eq!(budget.next_delay(0), COOLDOWN);
         assert!(budget.cooling());
@@ -315,7 +317,27 @@ mod budget_tests {
                 assert!((Duration::from_secs(2)..=Duration::from_millis(37_500)).contains(&delay));
             }
         }
-        budget.disconnected(STABLE_CONNECTION);
+        budget.disconnected(STABLE_CONNECTION, false);
         assert_eq!(budget.next_delay(0), Duration::from_secs(2));
+    }
+    #[test]
+    fn unproven_degraded_sessions_never_restore_budget() {
+        let mut budget = Budget::default();
+        for seconds in [2, 4, 8, 16, 30, 30, 30, 30] {
+            assert_eq!(budget.next_delay(0), Duration::from_secs(seconds));
+            budget.disconnected(Duration::from_secs(3600), true);
+        }
+        assert_eq!(budget.next_delay(0), COOLDOWN);
+        assert!(budget.cooling());
+    }
+    #[test]
+    fn degraded_exit_after_proven_traffic_restores_budget() {
+        let mut budget = Budget::default();
+        for _ in 0..7 {
+            budget.next_delay(0);
+        }
+        budget.disconnected(STABLE_CONNECTION, false);
+        assert_eq!(budget.next_delay(0), Duration::from_secs(2));
+        assert!(!budget.cooling());
     }
 }

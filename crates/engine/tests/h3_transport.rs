@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// In-process HTTP/3 CONNECT endpoint: the first `_check` answers 200, any
 /// other target echoes the request body after the client's FIN. Like endpoint
-/// 1.1.0 with a blocked stream, it finishes `lost.invalid` and every later
+/// 1.1.0 with a blocked stream, it finishes `lost*.invalid`, `_icmp` and every later
 /// `_check` without a response.
 async fn endpoint() -> (Profile, tokio::task::JoinHandle<()>) {
     let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -63,7 +63,9 @@ async fn endpoint() -> (Profile, tokio::task::JoinHandle<()>) {
                             return;
                         }
                         let authority = request.uri().authority().unwrap().as_str().to_owned();
-                        let lost = authority == "lost.invalid:1"
+                        let lost = (authority.starts_with("lost")
+                            && authority.ends_with(".invalid:1"))
+                            || authority == "_icmp"
                             || (authority == "_check"
                                 && checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0);
                         if lost {
@@ -193,5 +195,83 @@ async fn lost_response_fails_only_its_stream() {
     let mut echoed = Vec::new();
     active.read_to_end(&mut echoed).await.unwrap();
     assert_eq!(echoed, b"before after");
+    server.abort();
+}
+
+/// Issue #62: a session whose CONNECTs to many destinations all lose their
+/// response while nothing comes back must not stay "healthy". Retrying one
+/// dead host is not enough, and evidence is per session.
+#[tokio::test(flavor = "multi_thread")]
+async fn unanswered_traffic_degrades_only_its_own_session() {
+    let (p, server) = endpoint().await;
+    let silence = std::time::Duration::from_millis(1500);
+    let session = Session::connect(&p).await.unwrap().with_silence(silence);
+    session.health().await.unwrap();
+    // Idle: lost checks never fail a verified session.
+    for _ in 0..3 {
+        session.health().await.unwrap();
+    }
+    // One dead destination retried past the window stays healthy.
+    let single = Session::connect(&p).await.unwrap().with_silence(silence);
+    single.health().await.unwrap();
+    for _ in 0..6 {
+        assert!(matches!(
+            single.open_tcp("lost.invalid:1").await,
+            Err(Error::Protocol)
+        ));
+    }
+    // Nor do two dead hosts while shared relay streams keep failing too.
+    let relays = Session::connect(&p).await.unwrap().with_silence(silence);
+    relays.health().await.unwrap();
+    for i in 0..10 {
+        assert!(matches!(
+            relays.open_tcp(&format!("lost{}.invalid:1", i % 2)).await,
+            Err(Error::Protocol)
+        ));
+        assert!(matches!(relays.open_icmp().await, Err(Error::Protocol)));
+        let _udp = relays.open_udp().await.unwrap();
+    }
+    let old = Session::connect(&p).await.unwrap();
+    old.health().await.unwrap();
+    let mut answered = old.open_tcp("192.0.2.1:7").await.unwrap();
+    // Distinct lost hosts; with 64 keyed buckets, 8 hosts yield 3+ almost surely.
+    for i in 0..8 {
+        assert!(matches!(
+            session.open_tcp(&format!("lost{i}.invalid:1")).await,
+            Err(Error::Protocol)
+        ));
+    }
+    // Failed opens within the silence window are not yet a verdict.
+    session.health().await.unwrap();
+    answered.write_all(b"ping").await.unwrap();
+    answered.shutdown().await.unwrap();
+    let mut echoed = Vec::new();
+    answered.read_to_end(&mut echoed).await.unwrap();
+    assert_eq!(echoed, b"ping");
+    tokio::time::sleep(silence).await;
+    single.health().await.unwrap();
+    relays.health().await.unwrap();
+    // Inbound on the previous session's flow cannot vouch for this one.
+    assert!(matches!(
+        session.health().await,
+        Err(Error::Degraded { proven: false })
+    ));
+    old.health().await.unwrap();
+    // A session that delivered data before it went silent is reported as such.
+    let proven = Session::connect(&p).await.unwrap().with_silence(silence);
+    proven.health().await.unwrap();
+    let mut echo = proven.open_tcp("192.0.2.1:7").await.unwrap();
+    echo.write_all(b"x").await.unwrap();
+    echo.shutdown().await.unwrap();
+    let mut byte = Vec::new();
+    echo.read_to_end(&mut byte).await.unwrap();
+    for i in 0..8 {
+        let _ = proven.open_tcp(&format!("lost{i}.invalid:1")).await;
+    }
+    tokio::time::sleep(silence).await;
+    assert!(matches!(
+        proven.health().await,
+        Err(Error::Degraded { proven: true })
+    ));
     server.abort();
 }

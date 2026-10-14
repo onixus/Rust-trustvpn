@@ -849,6 +849,8 @@ async fn connected(
                 result = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() => {
                     workers.tunnel = None;
                     if restart_pending { continue; }
+                    let degraded = result.as_ref().ok().and_then(crate::dataplane::degraded);
+                    if let Some(proven) = degraded { events::record(&format!("transport_degraded proven={proven}")); }
                     last_failure = match result {
                         Ok(Err(_)) => "VPN transport stopped".into(),
                         Ok(Ok(())) => "VPN transport stopped".into(),
@@ -858,7 +860,7 @@ async fn connected(
                     state = State::Blocked;
                     // A flapping endpoint must not reset the backoff indefinitely.
                     monitor.transition(false, rtrust_control::observations::now_ms());
-                    retry_delay.disconnected(connected_since.elapsed());
+                    retry_delay.disconnected(connected_since.elapsed(), degraded == Some(false));
                     if failover.ended(connected_since.elapsed(), Instant::now()) {
                         monitor.failed_over(rtrust_control::observations::now_ms());
                     }

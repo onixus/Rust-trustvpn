@@ -37,7 +37,12 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rustls-native-certs = "0.8"
 rustls-pemfile = "2"
 
+[features]
+# Shorter liveness windows for integration tests; never enabled in builds.
+test-hooks = []
+
 [dev-dependencies]
+rtrust-engine = { path = ".", features = ["test-hooks"] }
 serde_json.workspace = true
 rcgen = "0.14"
 

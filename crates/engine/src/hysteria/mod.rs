@@ -298,7 +298,11 @@ impl HysteriaSession {
             };
             let _ = tokio::try_join!(upload, download);
         });
-        Ok(Tunnel { io, pump })
+        Ok(Tunnel {
+            io,
+            pump,
+            liveness: None,
+        })
     }
     pub async fn open_udp(&self) -> Result<Tunnel> {
         datagrams::open(self.clone()).await

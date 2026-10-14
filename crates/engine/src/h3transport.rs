@@ -222,7 +222,11 @@ impl H3Session {
             };
             let _ = tokio::try_join!(upload, download);
         });
-        Ok(Tunnel { io: client, pump })
+        Ok(Tunnel {
+            io: client,
+            pump,
+            liveness: None,
+        })
     }
 }
 

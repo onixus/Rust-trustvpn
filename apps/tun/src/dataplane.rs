@@ -35,6 +35,24 @@ impl PacketDevice for tun_rs::AsyncDevice {
     }
 }
 
+/// True when the data plane ended degraded (`Session::health`) in a session
+/// that never delivered an inbound byte: however long it lasted, it is no
+/// evidence of a stable connection. A degraded exit after proven traffic is.
+pub fn unproven<T>(result: &Result<T, Box<dyn std::error::Error + Send + Sync>>) -> bool {
+    degraded(result) == Some(false)
+}
+/// `Some(proven)` when the data plane ended degraded.
+pub fn degraded<T>(result: &Result<T, Box<dyn std::error::Error + Send + Sync>>) -> Option<bool> {
+    match result
+        .as_ref()
+        .err()?
+        .downcast_ref::<rtrust_engine::Error>()?
+    {
+        rtrust_engine::Error::Degraded { proven } => Some(*proven),
+        _ => None,
+    }
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub async fn run(
     session: Session,
@@ -390,6 +408,27 @@ async fn direct_udp_flow(
                 let _ = output.try_send(Datagram { source:key.1, destination:key.0, payload:buffer[..length].to_vec() });
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => return Ok(()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_a_degraded_exit_without_any_delivery_is_unproven() {
+        let exit = |proven| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Err(rtrust_engine::Error::Degraded { proven }.into())
+        };
+        assert!(super::unproven(&exit(false)));
+        assert_eq!(super::degraded(&exit(true)), Some(true));
+        assert!(!super::unproven(&exit(true)));
+        for other in [
+            Err(rtrust_engine::Error::Timeout.into()),
+            Err("Transport worker stopped".into()),
+            Ok(()),
+        ] {
+            assert_eq!(super::degraded(&other), None);
+            assert!(!super::unproven(&other));
         }
     }
 }
