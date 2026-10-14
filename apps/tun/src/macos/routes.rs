@@ -68,11 +68,14 @@ impl Route {
         Ok(())
     }
 }
-// Read each participating address family once before and once after a batch.
-// Validate every prefix before mutating any route. Deletion remains constrained
-// by gateway, interface and protocol marker; never flush a table. The kernel
-// CLI offers no atomic compare-and-delete, so an externally replaced identical
-// route between snapshot and deletion cannot be distinguished from our route.
+// Batch preflight and post-verification use one snapshot per address family.
+// Before each deletion, re-read and verify ownership: earlier deletions may
+// have given another process time to replace a later route. Darwin RTM_DELETE
+// matches destination/netmask, not gateway/interface/proto2 ownership; these
+// command arguments are NOT compare-and-delete predicates. A residual race
+// between the fresh ownership check and delete remains, as in the original
+// per-route boundary. Use the existing netstat reader until a native snapshot
+// parser has independent validation; removal timing remains device-unverified.
 #[derive(Clone, Copy)]
 enum Operation {
     Vacant,
@@ -114,6 +117,14 @@ fn batch_with(
         return Ok(());
     }
     for route in changes {
+        if matches!(operation, Operation::Remove) {
+            let fresh = read(route.v6)?;
+            match route.current(&fresh)? {
+                Some(row) if route.owns(row) => {}
+                Some(_) => return Err("VPN route changed externally; protection retained".into()),
+                None => continue,
+            }
+        }
         mutate(route, matches!(operation, Operation::Remove))?;
     }
     for v6 in [false, true] {
@@ -228,7 +239,7 @@ mod tests {
         }
     }
     #[test]
-    fn batches_read_each_family_twice_regardless_of_route_count() {
+    fn ensure_reads_each_family_twice_regardless_of_route_count() {
         let routes = vec![
             fixture(false, "0.0.0.0/1"),
             fixture(false, "128.0.0.0/1"),
@@ -238,18 +249,18 @@ mod tests {
         let mutations = std::cell::Cell::new(0);
         batch_with(
             &routes,
-            Operation::Remove,
+            Operation::Ensure,
             |v6| {
                 let mut reads = reads.borrow_mut();
                 reads[v6 as usize] += 1;
-                Ok(if reads[v6 as usize] == 1 {
+                Ok(if reads[v6 as usize] == 2 {
                     routes.iter().filter(|r| r.v6 == v6).map(row).collect()
                 } else {
                     vec![]
                 })
             },
             |_, remove| {
-                assert!(remove);
+                assert!(!remove);
                 mutations.set(mutations.get() + 1);
                 Ok(())
             },
@@ -342,6 +353,121 @@ mod tests {
                     Ok(rows)
                 },
                 |_, _| Ok(())
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn deletion_rechecks_later_route_replaced_during_earlier_delete() {
+        let routes = vec![
+            Route {
+                v6: false,
+                prefix: "192.0.2.1/32".into(),
+                gateway: "192.0.2.254".into(),
+                interface: "en0".into(),
+                direct: false,
+            },
+            Route {
+                v6: false,
+                prefix: "192.0.2.2/32".into(),
+                gateway: "192.0.2.254".into(),
+                interface: "en0".into(),
+                direct: false,
+            },
+        ];
+        for changed in ["protocol", "interface", "gateway", "ambiguity"] {
+            let table = std::cell::RefCell::new(
+                routes
+                    .iter()
+                    .map(|r| route_table::Entry {
+                        destination: r.prefix.clone(),
+                        gateway: r.gateway.clone(),
+                        interface: r.interface.clone(),
+                        flags: "UGHS2".into(),
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let deletes = std::cell::RefCell::new(vec![]);
+            let result = batch_with(
+                &routes,
+                Operation::Remove,
+                |_| {
+                    Ok(table
+                        .borrow()
+                        .iter()
+                        .map(|r| route_table::Entry {
+                            destination: r.destination.clone(),
+                            gateway: r.gateway.clone(),
+                            interface: r.interface.clone(),
+                            flags: r.flags.clone(),
+                        })
+                        .collect())
+                },
+                |route, remove| {
+                    assert!(remove);
+                    deletes.borrow_mut().push(route.prefix.clone());
+                    assert_eq!(
+                        route.prefix, routes[0].prefix,
+                        "foreign replacement must never be deleted"
+                    );
+                    let mut table = table.borrow_mut();
+                    table.remove(0);
+                    match changed {
+                        "protocol" => table[0].flags = "UGHS".into(),
+                        "interface" => table[0].interface = "en1".into(),
+                        "gateway" => table[0].gateway = "192.0.2.253".into(),
+                        "ambiguity" => table.push(route_table::Entry {
+                            destination: routes[1].prefix.clone(),
+                            gateway: "192.0.2.253".into(),
+                            interface: "en1".into(),
+                            flags: "UGHS".into(),
+                        }),
+                        _ => unreachable!(),
+                    }
+                    Ok(())
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(*deletes.borrow(), vec![routes[0].prefix.clone()]);
+            assert!(
+                !table.borrow().is_empty(),
+                "partial failure preserves foreign state"
+            );
+        }
+    }
+    #[test]
+    fn disappeared_route_is_not_deleted_and_unreadable_fresh_snapshot_fails_closed() {
+        let routes = vec![fixture(false, "0.0.0.0/1")];
+        let mut reads = 0;
+        batch_with(
+            &routes,
+            Operation::Remove,
+            |_| {
+                reads += 1;
+                Ok(if reads == 1 {
+                    vec![row(&routes[0])]
+                } else {
+                    vec![]
+                })
+            },
+            |_, _| panic!("route already disappeared"),
+        )
+        .unwrap();
+        assert_eq!(reads, 3);
+        let mut reads = 0;
+        assert!(
+            batch_with(
+                &routes,
+                Operation::Remove,
+                |_| {
+                    reads += 1;
+                    if reads == 1 {
+                        Ok(vec![row(&routes[0])])
+                    } else {
+                        Err("synthetic unreadable table".into())
+                    }
+                },
+                |_, _| panic!("cannot delete without fresh ownership evidence")
             )
             .is_err()
         );
