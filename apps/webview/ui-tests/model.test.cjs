@@ -51,4 +51,14 @@ assert.deepEqual(M.rows({ ...base, connected: false, snapshot: null }, 'off').ma
 assert.deepEqual(M.rows({ ...base, connected: false, phase: 'connecting', snapshot: null }, 'connecting').map(r => r.value), ['connecting', 'unknown', 'unknown', 'unknown', 'unknown']);
 assert.deepEqual(M.rows({ ...base, connected: false, error: 'x', snapshot: null }, 'error').map(r => r.value), ['error', 'unknown', 'unknown', 'unknown', 'unknown']);
 assert.deepEqual(M.rows({ ...base, unavailable: true, snapshot: allPassed() }, 'error').map(r => r.value), ['unknown', 'unknown', 'unknown', 'unknown', 'unknown']);
+// Status line: an action error stays across polls until the service status changes.
+let line = M.statusLine({ notice: 'Unsupported profile format', noticeBase: undefined, status: '', connected: false, connectError: null });
+assert.deepEqual(line, { text: 'Unsupported profile format', keepNotice: true, noticeBase: '' });
+line = M.statusLine({ notice: 'Unsupported profile format', noticeBase: line.noticeBase, status: '', connected: false, connectError: null });
+assert.equal(line.text, 'Unsupported profile format');
+line = M.statusLine({ notice: 'Unsupported profile format', noticeBase: line.noticeBase, status: 'Pending import: Office. Confirm it under Profiles, Add profile.', connected: false, connectError: null });
+assert.deepEqual(line, { text: 'Pending import: Office. Confirm it under Profiles, Add profile.', keepNotice: false, noticeBase: undefined });
+// Without a notice: service status, else the last connect error while disconnected.
+assert.equal(M.statusLine({ notice: '', status: '', connected: false, connectError: 'refused' }).text, 'refused');
+assert.equal(M.statusLine({ notice: '', status: '', connected: true, connectError: 'refused' }).text, '');
 console.log('PASS webview state model');

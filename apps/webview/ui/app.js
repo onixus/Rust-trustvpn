@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id),invoke=window.__TAURI__.core.invoke,M=window.RTModel;
 // The view model carries no credentials; Rust keeps vault, tokens and portal baselines.
-let state,notice='',noticeTimer=null,busy=false,selected=0,phase=null,connectError=null,unavailable=false,armedDelete=null,lastListKey='';
+let state,notice='',noticeBase,noticeTimer=null,busy=false,selected=0,phase=null,connectError=null,unavailable=false,armedDelete=null,lastListKey='';
 
 /* ---------- Copy (RU/EN by system language) ---------- */
 const LANG=String(navigator.language||'en').toLowerCase().startsWith('ru')?'ru':'en';
@@ -165,16 +165,18 @@ function snapshotInput(){return {connected:!!state?.connected,verified:state?.ve
 // The last action's error or notice stays visible on every page until the next
 // action or navigation; the background poll does not overwrite it.
 function setNotice(text,expire){
- clearTimeout(noticeTimer);noticeTimer=null;notice=text;
+ clearTimeout(noticeTimer);noticeTimer=null;notice=text;noticeBase=undefined;
  if(text&&expire)noticeTimer=setTimeout(clearNotice,expire);
 }
 function clearNotice(){
  clearTimeout(noticeTimer);noticeTimer=null;
  if(notice&&$('status').textContent===notice)$('status').textContent='';
- notice='';
+ notice='';noticeBase=undefined;
 }
 function goto(page){
  clearNotice();
+ // Leaving a page discards unsaved Network/Sync edits so every page shows stored values.
+ if(dirty.size){dirty.clear();if(state)fillForms();}
  document.querySelectorAll('main>section').forEach(s=>{s.hidden=s.id!==page});
  const nav=page==='add-page'?'profiles-page':page;
  document.querySelectorAll('.nav-item').forEach(b=>{if(b.dataset.page===nav)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});
@@ -405,7 +407,9 @@ setInterval(async()=>{
   const next=await invoke('view',{russian:LANG==='ru'});
   state.connected=next.connected;state.verified=next.verified;state.observations=next.observations;state.status=next.status;state.diagnostics=next.diagnostics;state.connected_profile=next.connected_profile;state.active_profile=next.active_profile;state.on_fallback=next.on_fallback;
   unavailable=false;if(state.connected)connectError=null;
-  $('status').textContent=notice||state.status||(!state.connected&&connectError)||'';
+  const line=M.statusLine({notice,noticeBase,status:state.status,connected:state.connected,connectError});
+  if(line.keepNotice)noticeBase=line.noticeBase;else if(notice)clearNotice();
+  $('status').textContent=line.text;
   const key=listKey();if(key!==lastListKey){lastListKey=key;renderHome();renderProfiles();}
  }catch{unavailable=true;}
  renderStatus();applyDisabled();

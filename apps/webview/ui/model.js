@@ -88,7 +88,24 @@
  // dot style per row value: fill colour or an empty ring
  const ROW_TONE = { passed: 'green', failed: 'yellow', configured: 'blue', stale: 'ring-grey', unsupported: 'grey', unknown: 'ring', off: 'ring', connecting: 'ring-blue', error: 'red' };
 
- const api = { KEYS, MAX_TTL_MS, snapshot, outcome, outcomes, level, failed, pending, derive, rows, TONE, ROW_TONE };
+ /**
+  * Status line for one poll. An action's error/notice stays until the service
+  * status changes after it was shown: noticeBase is the status seen at the
+  * first poll after the notice (undefined until then), so a later event such
+  * as a link's pending import replaces a stale error.
+  * input: {notice, noticeBase, status, connected, connectError}
+  * returns {text, keepNotice, noticeBase}
+  */
+ function statusLine(input) {
+  const status = input.status || '';
+  const fallback = status || (!input.connected && input.connectError) || '';
+  if (!input.notice) return { text: fallback, keepNotice: false, noticeBase: undefined };
+  if (input.noticeBase === undefined || input.noticeBase === status)
+   return { text: input.notice, keepNotice: true, noticeBase: status };
+  return { text: fallback, keepNotice: false, noticeBase: undefined };
+ }
+
+ const api = { KEYS, MAX_TTL_MS, snapshot, outcome, outcomes, level, failed, pending, derive, statusLine, rows, TONE, ROW_TONE };
  if (typeof module !== 'undefined' && module.exports) module.exports = api;
  else root.RTModel = Object.freeze(api);
 })(typeof window !== 'undefined' ? window : globalThis);
