@@ -16,8 +16,10 @@ import android.widget.Button;
 
 /**
  * Slide-to-act control: the knob must be dragged to the end, so a pocket tap cannot
- * connect or disconnect. A tap only nudges the knob. Accessibility services and
- * performClick() act directly, so TalkBack users are not asked to drag.
+ * connect or disconnect. Forward slides left to right; reverse (used to disconnect)
+ * starts the knob on the right and slides right to left. A tap only nudges the knob.
+ * Accessibility services and performClick() act directly, so TalkBack users are not
+ * asked to drag.
  */
 final class SlideButton extends View {
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG), stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -28,7 +30,7 @@ final class SlideButton extends View {
     private Runnable action;
     private String text = "";
     private int track, trackStroke, knob, iconTint, labelColor;
-    private boolean outline, dragging;
+    private boolean outline, dragging, reverse;
     private float progress, grab, downX;
     private ValueAnimator animator;
 
@@ -46,10 +48,11 @@ final class SlideButton extends View {
     String text() { return text; }
 
     /** Repaints only when something changed; called from the 500 ms status poll. */
-    void set(String text, int knob, int iconTint, boolean outline, int track, int trackStroke, int labelColor) {
-        if (text.equals(this.text) && knob == this.knob && iconTint == this.iconTint && outline == this.outline
+    void set(String text, int knob, int iconTint, boolean outline, boolean reverse, int track, int trackStroke, int labelColor) {
+        if (text.equals(this.text) && knob == this.knob && iconTint == this.iconTint && outline == this.outline && reverse == this.reverse
             && track == this.track && trackStroke == this.trackStroke && labelColor == this.labelColor) return;
-        this.text = text; this.knob = knob; this.iconTint = iconTint; this.outline = outline;
+        if (reverse != this.reverse) { stop(); progress = 0; }
+        this.text = text; this.knob = knob; this.iconTint = iconTint; this.outline = outline; this.reverse = reverse;
         this.track = track; this.trackStroke = trackStroke; this.labelColor = labelColor;
         setContentDescription(text);
         invalidate();
@@ -58,6 +61,8 @@ final class SlideButton extends View {
     private float pad() { return 6 * density; }
     private float knobSize() { return getHeight() - 2 * pad(); }
     private float range() { return Math.max(1, getWidth() - 2 * pad() - knobSize()); }
+    /** Left edge of the knob for the current progress and direction. */
+    private float knobX() { return pad() + (reverse ? 1 - progress : progress) * range(); }
 
     @Override protected void onDraw(Canvas canvas) {
         float w = getWidth(), h = getHeight(), r = h / 2, pad = pad(), d = knobSize();
@@ -65,16 +70,17 @@ final class SlideButton extends View {
         stroke.setStrokeWidth(density); stroke.setColor(trackStroke);
         rect.inset(density / 2, density / 2); canvas.drawRoundRect(rect, r, r, stroke);
 
-        float start = pad + d + 14 * density;
         int alpha = Math.round(Math.max(0, 1 - progress * 1.6f) * 255);
         if (alpha > 0) {
             label.setColor(labelColor); label.setAlpha(alpha);
-            CharSequence shown = TextUtils.ellipsize(text + "  →", label, w - start - 16 * density, TextUtils.TruncateAt.END);
+            float room = w - (pad + d + 14 * density) - 16 * density;
+            CharSequence shown = TextUtils.ellipsize(reverse ? "←  " + text : text + "  →", label, room, TextUtils.TruncateAt.END);
             float baseline = h / 2 - (label.descent() + label.ascent()) / 2;
+            float start = reverse ? w - pad - d - 14 * density - label.measureText(shown, 0, shown.length()) : pad + d + 14 * density;
             canvas.drawText(shown, 0, shown.length(), start, baseline, label);
         }
 
-        float x = pad + progress * range(), cx = x + d / 2, cy = h / 2;
+        float x = knobX(), cx = x + d / 2, cy = h / 2;
         if (outline) {
             stroke.setStrokeWidth(2.5f * density); stroke.setColor(knob);
             canvas.drawCircle(cx, cy, d / 2 - 1.25f * density, stroke);
@@ -89,7 +95,7 @@ final class SlideButton extends View {
     @android.annotation.SuppressLint("ClickableViewAccessibility")
     @Override public boolean onTouchEvent(MotionEvent event) {
         if (!isEnabled()) return false;
-        float x = pad() + progress * range();
+        float x = knobX();
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 stop(); downX = event.getX();
@@ -98,7 +104,10 @@ final class SlideButton extends View {
                 if (dragging && getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
                 return true;
             case MotionEvent.ACTION_MOVE:
-                if (dragging) { progress = clamp((event.getX() - grab - pad()) / range()); invalidate(); }
+                if (dragging) {
+                    float left = (event.getX() - grab - pad()) / range();
+                    progress = clamp(reverse ? 1 - left : left); invalidate();
+                }
                 return true;
             case MotionEvent.ACTION_UP:
                 if (dragging && progress > 0.8f) { animateTo(1, this::fire); }

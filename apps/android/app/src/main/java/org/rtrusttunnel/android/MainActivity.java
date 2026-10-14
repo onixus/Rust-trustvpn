@@ -420,7 +420,8 @@ public class MainActivity extends Activity {
         else label = R.string.connect_selected_profile;
         // The idle label keeps the long wording for screen readers and tests; show the short one.
         String text = getString(label == R.string.connect_selected_profile ? R.string.v3_slide_connect : label);
-        slider.set(text, knob, icon, ring, p.card, p.cardStroke, p.muted);
+        // Stopping a running or starting tunnel slides right to left; connecting slides left to right.
+        slider.set(text, knob, icon, ring, TunnelService.active, p.card, p.cardStroke, p.muted);
         slider.setContentDescription(getString(label));
     }
     /** The two-line headline shrinks until its longer line fits, from 44 sp down to 26 sp. */
