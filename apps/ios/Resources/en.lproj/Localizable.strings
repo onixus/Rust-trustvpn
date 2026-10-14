@@ -117,3 +117,6 @@
 "v3.widget.open" = "Open to check";
 "v3.widget.last" = "Last observation";
 "v3.widget.on" = "ON";
+"v3.desc.connecting.unnamed" = "Connecting to the server. It has up to 30 seconds to answer.";
+"v3.card.unknown" = "Started outside the app";
+"v3.card.unknown.detail" = "widget, On Demand or an earlier session";

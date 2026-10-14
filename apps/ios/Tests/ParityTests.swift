@@ -514,6 +514,39 @@ final class StateModelTests: XCTestCase {
         model.track(.connected); model.track(.disconnected)
         XCTAssertFalse(model.attemptFailed, "A tunnel that was up and ended is shown as off, not as a failed attempt")
     }
+    @MainActor
+    func testReconnectThenExternalStopIsNotAFailedAttempt() {
+        let model = VPNModel()
+        VPNController.userStopped = false
+        for status: NEVPNStatus in [.connecting, .connected, .reasserting, .disconnected] { model.track(status) }
+        XCTAssertFalse(model.attemptFailed)
+        XCTAssertEqual(model.level, .off)
+    }
+    @MainActor
+    func testNoProfileNamedUnlessThisAppStartedIt() {
+        let model = VPNModel()
+        let office = SavedProfile(id: "a", name: "Synthetic Office", hostname: "office.invalid", content: "")
+        let home = SavedProfile(id: "b", name: "Synthetic Home", hostname: "home.invalid", content: "")
+        model.vault = VaultData(profiles: [office, home], selected: "a", defaultProfileID: "b")
+        // Widget or On Demand start: no profile ID recorded by the app.
+        model.track(.disconnected); model.recordStart(nil)
+        for status: NEVPNStatus in [.connecting, .connected] {
+            model.track(status)
+            for text in [model.homeTag(model.level), model.homeDescription(model.level)] {
+                XCTAssertFalse(text.contains("Synthetic"), text); XCTAssertFalse(text.contains(".invalid"), text)
+            }
+            XCTAssertNil(model.runningProfile)
+        }
+        model.track(.disconnected)
+        // App start records the profile it passed; the name is shown and cleared on stop.
+        model.recordStart("a"); model.track(.connecting)
+        XCTAssertTrue(model.homeTag(model.level).contains("SYNTHETIC OFFICE"))
+        XCTAssertTrue(model.homeDescription(model.level).contains("office.invalid"))
+        model.track(.connected); model.track(.disconnected)
+        XCTAssertNil(model.runningProfileID)
+        model.track(.connecting)
+        XCTAssertFalse(model.homeTag(model.level).contains("SYNTHETIC"))
+    }
     func testLocalizationTablesHaveTheSameKeys() throws {
         let bundle = Bundle(for: VPNModel.self)
         let tables = try ["en", "ru"].map { language -> [String: String] in

@@ -47,7 +47,10 @@ passed within min(6 s, `valid_for_ms`), yellow when any check failed, red when a
 connection attempt ended before the tunnel came up. The iOS provider currently
 reports transport only; route, DNS, guard and connectivity show "no data", so the
 app shows blue while connected. The widget shows only the last recorded transport
-status with its age and never shows green.
+status with its age and never shows green. The UI names the running profile only
+when this app started it; a tunnel started by the widget or On Demand (the provider
+loads the default profile) is shown without a profile name. The privacy cover is
+applied to the root view and to app sheets; system alerts and pickers are not covered.
 
 ## Security and platform boundaries
 

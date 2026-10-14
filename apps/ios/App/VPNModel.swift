@@ -21,6 +21,14 @@ final class VPNModel: ObservableObject {
     /// threw). Cleared by the next toggle or a connected state. Drives the red state only.
     @Published private(set) var attemptFailed = false
     private var attempting = false
+    /// Profile this app passed to startTunnel in this session. nil when the tunnel was
+    /// started elsewhere (widget, On Demand, an earlier app session): the provider then
+    /// loads the default profile itself, so the UI names no profile.
+    @Published private(set) var runningProfileID: String?
+    var runningProfile: SavedProfile? {
+        guard active, let id = runningProfileID else { return nil }
+        return vault.profiles.first { $0.id == id }
+    }
     /// The provider snapshot if it was received in the last 6 seconds while connected.
     var snapshot: [String: Any]? {
         guard state == .connected, Date().timeIntervalSince(observationReceived) <= 6 else { return nil }
@@ -173,15 +181,42 @@ final class VPNModel: ObservableObject {
     /// Records whether a connection attempt ended before the tunnel came up.
     /// Only status transitions are used; nothing is probed.
     func track(_ next: NEVPNStatus) {
+        let wasUp = state == .connected || state == .reasserting
         switch next {
-        case .connecting, .reasserting: if !VPNController.userStopped { attempting = true }
+        // Only a fresh attempt counts; reasserting after a connected session does not.
+        case .connecting: if !wasUp && !VPNController.userStopped { attempting = true }
         case .connected: attempting = false; attemptFailed = false
         case .disconnected, .invalid:
             if attempting && !VPNController.userStopped { attemptFailed = true }
+            if attempting || VPNController.isActive(state) { runningProfileID = nil }
             attempting = false; VPNController.userStopped = false
         default: break
         }
+        // Results from before a reconnect or stop must not reappear afterwards.
+        if state == .connected && next != .connected { observations = nil }
         state = next
+    }
+    /// Records the profile passed by this app to startTunnel (also used by tests).
+    func recordStart(_ profileID: String?) { runningProfileID = profileID }
+    /// Status chip text; names a profile only if this app started it.
+    func homeTag(_ level: TunnelLevel) -> String {
+        if level == .off { return loc("v3.tag.off") }
+        let state = loc("v3.tag." + level.rawValue)
+        guard let profile = runningProfile else { return state }
+        return profile.name.uppercased() + " · " + state
+    }
+    func homeDescription(_ level: TunnelLevel) -> String {
+        switch level {
+        case .off: return vault.active == nil ? loc("v3.desc.off.none") : loc("v3.desc.off")
+        case .connecting:
+            if state == .reasserting { return loc("v3.desc.reconnecting") }
+            return runningProfile.map { loc("v3.desc.connecting", shownHost($0)) } ?? loc("v3.desc.connecting.unnamed")
+        case .disconnecting: return loc("v3.desc.disconnecting")
+        case .running: return loc("v3.desc.running")
+        case .verified: return loc("v3.desc.verified")
+        case .warning: return loc("v3.desc.warning", loc("v3.check." + (ObservationStatus.firstFailed(snapshot) ?? "transport")))
+        case .error: return loc("v3.desc.error")
+        }
     }
     func previewImport(_ data: Data) {
         guard canEdit else { error = tr("Disconnect and disable On Demand before editing profiles", "Перед изменением профилей отключите VPN и On Demand"); return }
@@ -243,11 +278,17 @@ final class VPNModel: ObservableObject {
                 current.localizedDescription = "R-TrustTunnel"
                 let rule = NEOnDemandRuleConnect(); rule.interfaceTypeMatch = .any
                 current.onDemandRules = [rule]; current.isOnDemandEnabled = onDemand
+                recordStart(profileID)
                 try await VPNController.start(current, profileID: profileID)
+                // A start that fails before .connecting is observed still counts as an attempt.
+                attempting = true
                 manager = current
             }
             error = nil; await refresh()
-        } catch { if starting { attemptFailed = true }; report(error) }
+        } catch {
+            if starting { attemptFailed = true; attempting = false; recordStart(nil) }
+            report(error)
+        }
     }
     func setOnDemand(_ enabled: Bool) async {
         guard !busy, VPNController.supportsVPN else { return }

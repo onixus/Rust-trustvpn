@@ -117,3 +117,6 @@
 "v3.widget.open" = "Откройте и проверьте";
 "v3.widget.last" = "Последнее наблюдение";
 "v3.widget.on" = "ВКЛ";
+"v3.desc.connecting.unnamed" = "Подключаемся к серверу. Ждём ответа не дольше 30 секунд.";
+"v3.card.unknown" = "Запущен вне приложения";
+"v3.card.unknown.detail" = "виджет, On Demand или прошлый сеанс";

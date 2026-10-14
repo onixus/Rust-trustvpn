@@ -22,22 +22,33 @@ struct RTrustApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = VPNModel()
     @Environment(\.scenePhase) private var phase
-    @State private var captured = UIScreen.main.isCaptured
     @AppStorage(ThemeMode.key) private var theme = ThemeMode.system.rawValue
     var body: some Scene {
         WindowGroup {
             RootView(model: model)
-                .overlay {
-                    if phase != .active || captured { PrivacyCover() }
-                }
+                .privacyShield()
                 .preferredColorScheme(ThemeMode(rawValue: theme)?.scheme)
-                .onReceive(NotificationCenter.default.publisher(for: UIScreen.capturedDidChangeNotification)) { _ in captured = UIScreen.main.isCaptured }
                 .onChange(of: phase) { state in
                     if state == .active { Task { await model.refresh() } }
                     if state == .background { PortalSync.schedule() }
                 }
         }
     }
+}
+/// Covers its content while the scene is inactive or screen capture is reported.
+/// Applied to the root and to every sheet, since an overlay on the root does not
+/// cover presented sheets. System alerts and pickers are not covered.
+struct PrivacyShield: ViewModifier {
+    @Environment(\.scenePhase) private var phase
+    @State private var captured = UIScreen.main.isCaptured
+    func body(content: Content) -> some View {
+        content
+            .overlay { if phase != .active || captured { PrivacyCover() } }
+            .onReceive(NotificationCenter.default.publisher(for: UIScreen.capturedDidChangeNotification)) { _ in captured = UIScreen.main.isCaptured }
+    }
+}
+extension View {
+    func privacyShield() -> some View { modifier(PrivacyShield()) }
 }
 /// Opaque cover while inactive or while screen capture is reported.
 struct PrivacyCover: View {
@@ -216,8 +227,8 @@ struct RootView: View {
                     }
                 }
         }
-        .sheet(isPresented: $add) { ImportView(model: model, initial: incoming) }
-        .sheet(item: $exported) { ExportView(profile: $0) }
+        .sheet(isPresented: $add) { ImportView(model: model, initial: incoming).privacyShield() }
+        .sheet(item: $exported) { ExportView(profile: $0).privacyShield() }
         .alert(tr("Delete profile?", "Удалить профиль?"), isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
             Button(tr("Delete", "Удалить"), role: .destructive) { if let item = deleting { model.delete(item.id) }; deleting = nil }
             Button(tr("Cancel", "Отмена"), role: .cancel) { deleting = nil }
@@ -252,7 +263,7 @@ struct HomeView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     header(palette, level)
                     headline(palette, level)
-                    Text(description(level)).font(.subheadline).foregroundStyle(palette.muted)
+                    Text(model.homeDescription(level)).font(.subheadline).foregroundStyle(palette.muted)
                         .fixedSize(horizontal: false, vertical: true)
                     Button { open(.checks) } label: { checks(palette, level) }
                         .buttonStyle(.plain)
@@ -272,17 +283,20 @@ struct HomeView: View {
         .animation(.easeInOut(duration: 0.25), value: level)
     }
     private var profile: SavedProfile? { model.vault.active }
-    private func tag(_ level: TunnelLevel) -> String {
-        if level == .off { return loc("v3.tag.off") }
-        let state = loc("v3.tag." + level.rawValue)
-        guard let profile else { return state }
-        return profile.name.uppercased() + " · " + state
+    /// While the tunnel is up, the card names only the profile this app started.
+    private var cardTitle: String {
+        if model.active { return model.runningProfile?.name ?? loc("v3.card.unknown") }
+        return profile?.name ?? loc("v3.card.noprofile")
+    }
+    private var cardDetail: String {
+        if model.active { return model.runningProfile.map(shownHost) ?? loc("v3.card.unknown.detail") }
+        return profile.map(shownHost) ?? loc("v3.add")
     }
     private func header(_ palette: Palette, _ level: TunnelLevel) -> some View {
         HStack(spacing: 8) {
             HStack(spacing: 8) {
                 Circle().fill(palette.fill(level.tone)).frame(width: 8, height: 8)
-                Text(tag(level)).font(.system(size: 12, weight: .bold)).tracking(0.9).foregroundStyle(palette.muted).lineLimit(1)
+                Text(model.homeTag(level)).font(.system(size: 12, weight: .bold)).tracking(0.9).foregroundStyle(palette.muted).lineLimit(1)
             }
             .padding(.vertical, 8).padding(.horizontal, 12)
             .glass(palette, radius: 16)
@@ -321,21 +335,6 @@ struct HomeView: View {
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
     }
-    private func description(_ level: TunnelLevel) -> String {
-        switch level {
-        case .off: return profile == nil ? loc("v3.desc.off.none") : loc("v3.desc.off")
-        case .connecting:
-            if model.state == .reasserting { return loc("v3.desc.reconnecting") }
-            return loc("v3.desc.connecting", profile.map(shownHost) ?? "R-TrustTunnel")
-        case .disconnecting: return loc("v3.desc.disconnecting")
-        case .running: return loc("v3.desc.running")
-        case .verified: return loc("v3.desc.verified")
-        case .warning:
-            let key = ObservationStatus.firstFailed(model.snapshot) ?? "transport"
-            return loc("v3.desc.warning", loc("v3.check." + key))
-        case .error: return loc("v3.desc.error")
-        }
-    }
     private func checks(_ palette: Palette, _ level: TunnelLevel) -> some View {
         let rows = ObservationStatus.rows(status: model.state, level: level, snapshot: model.snapshot)
         return VStack(spacing: 0) {
@@ -359,8 +358,8 @@ struct HomeView: View {
         Button { profile == nil ? add() : open(.profiles) } label: {
             VStack(alignment: .leading, spacing: 6) {
                 CardLabel(text: loc("v3.card.profile"), palette: palette)
-                Text(profile?.name ?? loc("v3.card.noprofile")).font(.body.weight(.heavy)).foregroundStyle(palette.text).lineLimit(1)
-                Text(profile.map(shownHost) ?? loc("v3.add")).font(.caption).foregroundStyle(palette.muted).lineLimit(1)
+                Text(cardTitle).font(.body.weight(.heavy)).foregroundStyle(palette.text).lineLimit(1)
+                Text(cardDetail).font(.caption).foregroundStyle(palette.muted).lineLimit(2)
             }
             .frame(maxWidth: .infinity, alignment: .leading).padding(14).glass(palette, radius: 22)
         }
@@ -476,6 +475,7 @@ struct ProfilesView: View {
     }
     private func row(_ profile: SavedProfile, _ palette: Palette) -> some View {
         let selected = model.vault.selected == profile.id
+        let running = model.runningProfile?.id == profile.id
         return HStack(spacing: 12) {
             Button { model.select(profile.id) } label: {
                 HStack(spacing: 12) {
@@ -493,7 +493,7 @@ struct ProfilesView: View {
                         }
                     }
                     Spacer(minLength: 4)
-                    if selected { status(palette) }
+                    if running || selected { status(palette, running: running) }
                 }
                 .contentShape(Rectangle())
             }
@@ -513,10 +513,11 @@ struct ProfilesView: View {
             .padding(.vertical, 4).padding(.horizontal, 8)
             .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(palette.chip))
     }
-    private func status(_ palette: Palette) -> some View {
+    /// The tunnel state is shown only on the profile this app started.
+    private func status(_ palette: Palette, running: Bool) -> some View {
         let level = model.level
-        let tone: StateTone = model.active ? level.tone : .grey
-        let text = model.active ? loc("v3.tag." + level.rawValue).lowercased() : loc("v3.state.selected")
+        let tone: StateTone = running ? level.tone : .grey
+        let text = running ? loc("v3.tag." + level.rawValue).lowercased() : loc("v3.state.selected")
         return HStack(spacing: 6) {
             Circle().fill(palette.fill(tone)).frame(width: 7, height: 7)
             Text(text).font(.caption.weight(.heavy)).foregroundStyle(palette.text(tone)).lineLimit(1)
@@ -656,6 +657,7 @@ struct ImportView: View {
             .sheet(isPresented: $camera) {
                 QRScanner { raw in camera = false; model.previewImport(Data(raw.utf8)) } failed: { camera = false; model.error = tr("Camera unavailable. Use QR from image.", "Камера недоступна. Выберите QR из изображения.") }
                     .ignoresSafeArea()
+                    .privacyShield()
             }
         }
     }
