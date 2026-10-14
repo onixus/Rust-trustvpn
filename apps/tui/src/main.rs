@@ -6,7 +6,7 @@ use ratatui::crossterm::{
     execute,
 };
 use rtrust_desktop::Controller;
-use std::{process::ExitCode, sync::Arc, time::Duration};
+use std::{io::Write, process::ExitCode, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, mpsc};
 use zeroize::Zeroizing;
 
@@ -17,9 +17,10 @@ type Health = Arc<std::sync::Mutex<(u64, Option<String>)>>;
 const HELP: &str = "\
 rtrust-tui — terminal client for R-TrustTunnel
 
-Usage: rtrust-tui [OPTIONS] [LINK | FILE]
+Usage: rtrust-tui [OPTIONS] [FILE]
 
-  LINK | FILE          tt:// or hy2:// link, or a profile file, to preview for import
+  FILE                 profile file to preview for import (paste links with `i`;
+                       a link argument is visible in shell history and ps)
   --no-auto-connect    do not connect the default profile at start
   -h, --help           show this help
   -V, --version        show the version
@@ -135,7 +136,19 @@ async fn run(
     let (signal_tx, mut signal_rx) = mpsc::channel::<()>(4);
     watch_signals(signal_tx);
 
-    let mut terminal = ratatui::init();
+    let mut terminal = match ratatui::try_init() {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "A terminal is required: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let restore = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+        ratatui::restore();
+        restore(info);
+    }));
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut input_open = true;
@@ -144,7 +157,10 @@ async fn run(
         if let Some(command) = pending.take() {
             let (shared, done) = (shared.clone(), done_tx.clone());
             tokio::spawn(async move {
-                let outcome = execute(command, &shared, ru).await;
+                // A panicking action must still clear "busy", or quit would wait forever.
+                let outcome = tokio::spawn(async move { execute(command, &shared, ru).await })
+                    .await
+                    .unwrap_or_else(|_| Outcome::Failed("Internal error".into()));
                 let _ = done.send(outcome).await;
             });
         }
@@ -186,49 +202,71 @@ async fn run(
     ratatui::restore();
     match last_words {
         Some(error) => {
-            eprintln!("{error}");
+            // The terminal may be gone after SIGHUP; never panic on stderr.
+            let _ = writeln!(std::io::stderr(), "{error}");
             ExitCode::FAILURE
         }
         None => ExitCode::SUCCESS,
     }
 }
 
+/// Store and keyring calls block on D-Bus (Secret Service); they must run on
+/// a blocking thread, never on a runtime worker, or they never complete.
+async fn blocking(
+    shared: &Shared,
+    work: impl FnOnce(&mut Controller) -> Outcome + Send + 'static,
+) -> Outcome {
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || work(&mut shared.blocking_lock()))
+        .await
+        .unwrap_or_else(|_| Outcome::Failed("Internal error".into()))
+}
+
 async fn execute(command: Command, shared: &Shared, ru: bool) -> Outcome {
-    let mut c = shared.lock().await;
     let done = |r: Result<(), String>, text: &'static str| match r {
         Ok(()) => Outcome::Done(text.into()),
         Err(e) => Outcome::Failed(e),
     };
+    match command {
+        Command::Preview(input) => {
+            return blocking(shared, move |c| match preview(c, &input) {
+                Ok(row) => Outcome::Previewed {
+                    revision: c.revision,
+                    row,
+                },
+                Err(e) => Outcome::Failed(e),
+            })
+            .await;
+        }
+        Command::Import { revision } => {
+            let text = tr(ru, "Профиль добавлен", "Profile added");
+            return blocking(shared, move |c| done(c.import(revision), text)).await;
+        }
+        Command::Discard => {
+            return blocking(shared, |c| {
+                c.discard_preview();
+                Outcome::Done(String::new())
+            })
+            .await;
+        }
+        Command::Edit {
+            revision,
+            action,
+            index,
+        } => return blocking(shared, move |c| done(c.edit(revision, action, index), "")).await,
+        Command::Settings { revision, settings } => {
+            let text = tr(ru, "Настройки сохранены", "Settings saved");
+            return blocking(shared, move |c| done(c.settings(revision, *settings), text)).await;
+        }
+        _ => {}
+    }
+    let mut c = shared.lock().await;
     match command {
         Command::Connect { revision, index } => match c.connect_profile(revision, index).await {
             Ok(()) => Outcome::Done(c.connected_note().into()),
             Err(e) => Outcome::Failed(e),
         },
         Command::Disconnect => done(c.disconnect().await, ""),
-        Command::Preview(input) => match preview(&mut c, &input) {
-            Ok(row) => Outcome::Previewed {
-                revision: c.revision,
-                row,
-            },
-            Err(e) => Outcome::Failed(e),
-        },
-        Command::Import { revision } => done(
-            c.import(revision),
-            tr(ru, "Профиль добавлен", "Profile added"),
-        ),
-        Command::Discard => {
-            c.discard_preview();
-            Outcome::Done(String::new())
-        }
-        Command::Edit {
-            revision,
-            action,
-            index,
-        } => done(c.edit(revision, action, index), ""),
-        Command::Settings { revision, settings } => done(
-            c.settings(revision, *settings),
-            tr(ru, "Настройки сохранены", "Settings saved"),
-        ),
         Command::Recover => {
             if c.session.is_some() {
                 return Outcome::Failed(tr(ru, "Сначала отключитесь", "Disconnect first").into());
@@ -244,12 +282,20 @@ async fn execute(command: Command, shared: &Shared, ru: bool) -> Outcome {
             Err(e) if force => Outcome::Exit(Some(e)),
             Err(e) => Outcome::Failed(e),
         },
+        Command::Preview(_)
+        | Command::Import { .. }
+        | Command::Discard
+        | Command::Edit { .. }
+        | Command::Settings { .. } => unreachable!("handled on a blocking thread"),
     }
 }
 
-/// A link or pasted config is parsed as is; anything else is a file path.
+/// A clear path or an existing file is read; anything else is profile text.
 fn preview(c: &mut Controller, input: &str) -> Result<Row, String> {
-    let summary = if app::is_inline(input) {
+    let input = app::clean(input);
+    let file =
+        app::is_path(input) || (!app::is_inline(input) && std::path::Path::new(input).is_file());
+    let summary = if !file {
         c.preview(input)?
     } else {
         let path = match input.strip_prefix("~/") {

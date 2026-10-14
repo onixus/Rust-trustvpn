@@ -18,9 +18,25 @@ pub fn tr(ru: bool, russian: &'static str, english: &'static str) -> &'static st
     if ru { russian } else { english }
 }
 
-/// Inline profile text (a link or a pasted config) rather than a file path.
+/// Import input without a byte-order mark or surrounding whitespace.
+pub fn clean(input: &str) -> &str {
+    input.trim().trim_start_matches('\u{feff}').trim()
+}
+/// Clearly profile text: a link, JSON or a multi-line config.
 pub fn is_inline(input: &str) -> bool {
-    LINK_SCHEMES.iter().any(|s| input.starts_with(s)) || input.contains('\n')
+    let input = clean(input);
+    LINK_SCHEMES.iter().any(|s| input.starts_with(s))
+        || input.contains("://")
+        || input.starts_with('{')
+        || input.contains('\n')
+}
+/// Clearly a file path; the only import input shown unmasked.
+pub fn is_path(input: &str) -> bool {
+    let input = clean(input);
+    !is_inline(input)
+        && ["/", "~/", "./", "../"]
+            .iter()
+            .any(|p| input.starts_with(p))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -306,7 +322,6 @@ impl App {
     }
     pub fn paste(&mut self, pasted: &str) {
         if let Modal::Input { text, .. } = &mut self.modal {
-            let pasted = pasted.replace('\r', "\n");
             if text.len() + pasted.len() > rtrust_profile::MAX_INPUT {
                 self.message = Some((
                     true,
@@ -314,7 +329,10 @@ impl App {
                 ));
                 return;
             }
-            text.push_str(&pasted);
+            // Char by char into the zeroized buffer: no plain copy of a secret.
+            pasted
+                .chars()
+                .for_each(|ch| text.push(if ch == '\r' { '\n' } else { ch }));
         }
     }
     pub fn key(&mut self, key: KeyEvent) -> Option<Command> {
@@ -403,7 +421,14 @@ impl App {
         }
     }
     fn input(&mut self, field: Field, text: String, then_tun: bool) {
-        let mut buffer = Zeroizing::new(String::with_capacity(text.len().max(64)));
+        // Import holds credentials: never let the buffer reallocate and leave
+        // unzeroized copies behind.
+        let capacity = if field == Field::Import {
+            rtrust_profile::MAX_INPUT
+        } else {
+            text.len().max(64)
+        };
+        let mut buffer = Zeroizing::new(String::with_capacity(capacity));
         buffer.push_str(&text);
         self.modal = Modal::Input {
             field,
@@ -540,7 +565,7 @@ impl App {
         }
     }
     fn submit(&mut self, field: Field, text: &str, then_tun: bool) -> Option<Command> {
-        let text = text.trim();
+        let text = clean(text);
         let mut next = self.snap.settings();
         let result = match field {
             Field::Import => {
@@ -895,14 +920,14 @@ fn parse_networks(text: &str) -> Result<Vec<rtrust_control::Ipv4Net>, String> {
         })
         .collect()
 }
-/// Links and pasted configs carry credentials; only a file path is shown.
+/// Links and pasted configs carry credentials; only a clear file path is shown.
 fn masked(text: &str) -> String {
-    if !is_inline(text) {
+    if is_path(text) {
         return text.to_owned();
     }
     let scheme = LINK_SCHEMES
         .iter()
-        .find(|s| text.starts_with(*s))
+        .find(|s| clean(text).starts_with(*s))
         .copied()
         .unwrap_or("");
     let rest = text.chars().count() - scheme.chars().count();
@@ -990,6 +1015,37 @@ mod tests {
     fn pasted_config_text_is_masked_but_a_file_path_is_shown() {
         assert!(!masked("[endpoint]\npassword = \"p\"").contains("password"));
         assert_eq!(masked("~/profiles/home.toml"), "~/profiles/home.toml");
+        for secret in [
+            r#"{"server":"h:443","auth":"regression-secret"}"#,
+            "  tt://regression-secret@h",
+            "\u{feff}tt://regression-secret@h",
+            "/x\n[endpoint]\npassword = \"regression-secret\"",
+            "regression-secret",
+        ] {
+            assert!(!masked(secret).contains("regression-secret"), "{secret:?}");
+        }
+        assert!(is_inline(r#"{"server":"h"}"#));
+        assert!(is_inline("\u{feff}tt://x"));
+        assert!(!is_path("/tmp/x\nsecret"));
+    }
+
+    #[test]
+    fn a_one_line_json_paste_is_previewed_cleaned_and_keeps_its_buffer() {
+        let mut app = app_with_profiles();
+        app.key(key(KeyCode::Char('i')));
+        let Modal::Input { text, .. } = &app.modal else {
+            panic!("input")
+        };
+        let capacity = text.capacity();
+        app.paste("\u{feff} {\"server\":\"h:443\",\"auth\":\"a\"}\r");
+        let Modal::Input { text, .. } = &app.modal else {
+            panic!("input")
+        };
+        assert_eq!(text.capacity(), capacity, "no reallocation");
+        let Some(Command::Preview(input)) = app.key(key(KeyCode::Enter)) else {
+            panic!("expected preview")
+        };
+        assert!(input.starts_with('{') && is_inline(&input));
     }
 
     #[test]
