@@ -260,15 +260,16 @@ impl Session {
     }
     pub async fn open_tcp(&self, target: &str) -> Result<Tunnel> {
         rtrust_profile::validate_address(target).map_err(|_| Error::Destination)?;
-        // A CONNECT is demand of its own: a flow that never opens never writes.
-        self.2.outbound();
+        // A CONNECT is demand of its own (a flow that never opens never
+        // writes), dated from its start once its outcome counts as evidence.
+        let started = self.2.now();
         let opened = match &self.0 {
             Transport::H2(s) => s.open_tcp(target).await,
             Transport::H3(s) => s.open(target).await,
             Transport::Hysteria(s) => s.open_tcp(target).await,
             Transport::Amnezia(s) => s.open_tcp(target).await,
         };
-        self.track(opened, Some(target))
+        self.track(opened, Some((target, started)))
     }
     pub async fn open_icmp(&self) -> Result<Tunnel> {
         let opened = match &self.0 {
@@ -290,13 +291,16 @@ impl Session {
         };
         self.track(opened, None)
     }
-    /// `flow`: the target of a per-destination TCP CONNECT, the only open
+    /// `flow`: target and start of a per-destination TCP CONNECT, the only open
     /// that counts as evidence (see `Liveness::opened`). Every tunnel still
     /// records its traffic.
-    fn track(&self, opened: Result<Tunnel>, flow: Option<&str>) -> Result<Tunnel> {
-        if let Some(target) = flow {
-            self.2
-                .opened(&opened.as_ref().map(|_| ()).map_err(Clone::clone), target);
+    fn track(&self, opened: Result<Tunnel>, flow: Option<(&str, Duration)>) -> Result<Tunnel> {
+        if let Some((target, started)) = flow {
+            self.2.opened(
+                &opened.as_ref().map(|_| ()).map_err(Clone::clone),
+                target,
+                started,
+            );
         }
         opened.map(|mut tunnel| {
             tunnel.liveness = Some(self.2.clone());

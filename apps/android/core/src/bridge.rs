@@ -714,17 +714,23 @@ async fn run(
                     },
                 );
                 let started = std::time::Instant::now();
-                tokio::select! {
+                let ended = tokio::select! {
                     biased;
                     _=cancel.changed()=>break,
                     _=async{loop{if !valid(){break;}tokio::time::sleep(std::time::Duration::from_millis(100)).await;}}=>{state(4,"Access refresh required; traffic blocked");let _=cancel.changed().await;break;},
-                    _=rtrust_tun::run_with_policy(session,tunnel,device.clone(),"169.254.254.2".parse().unwrap(),dns.clone(),routing.clone(),Some(&mut policy))=>{},
-                }
+                    ended=rtrust_tun::run_with_policy(session,tunnel,device.clone(),"169.254.254.2".parse().unwrap(),dns.clone(),routing.clone(),Some(&mut policy))=>ended,
+                };
                 FLOWS
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .transport_lost(runner_session);
                 connected_for = started.elapsed();
+                if let Some(proven) = rtrust_tun::degraded(&ended) {
+                    budget
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .degraded(proven, connected_for);
+                }
                 state(3, "Connection lost; traffic blocked while reconnecting");
             }
             Err(error) => {
