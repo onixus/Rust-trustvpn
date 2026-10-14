@@ -744,21 +744,28 @@ fn lift(tk: Tokens) -> iced::Shadow {
 // ---------------------------------------------------------------- backdrop
 /// Standard deviation of the mockups' `filter: blur(90px)`.
 const BLOB_SIGMA: f32 = 90.0;
-/// How far a blurred field reaches past its disk.
-const BLOB_REACH: f32 = 2.5 * BLOB_SIGMA;
-/// Rings per field: fewer show bands, more cost fill time on tiny-skia.
-const BLOB_RINGS: usize = 28;
+/// Logical pixels per backdrop texel. The fields are blurred by BLOB_SIGMA, so
+/// neighbouring texels differ by about one 8-bit level and nearest filtering
+/// shows no steps; on tiny-skia it costs half as much as bilinear.
+const BLOB_TEXEL: f32 = 4.0;
+/// A field: centre in logical pixels, disk radius, colour and peak opacity.
+type Field = (f32, f32, f32, Color, f32);
 /// Light theme colour fields behind the frosted cards (mockup variant 3): the
 /// first takes `state`, the other two are fixed violet and sky. Placed as in
 /// the 1280×800 mockups, anchored to the same window edges.
+///
+/// The fields are rasterised once per window size and state colour, and drawn
+/// as one image. Layered translucent shapes would be re-blended on every
+/// scroll frame by tiny-skia (Windows, Linux), which renders on the CPU; a
+/// shadow blur would also leave stale pixels outside its quad's damage.
 fn backdrop<'a>(state: Color) -> Element<'a, Message> {
     iced::widget::responsive(move |size| {
-        let field = |diameter: f32, color: Color, opacity: f32, x: f32, y: f32| {
-            iced::widget::pin(blob(diameter, color, opacity))
-                .x(x - BLOB_REACH)
-                .y(y - BLOB_REACH)
+        // (left, top, diameter) as in the mockups, converted to centre and radius.
+        let field = |diameter: f32, color: Color, opacity: f32, x: f32, y: f32| -> Field {
+            let r = diameter / 2.0;
+            (x + r, y + r, r, color, opacity)
         };
-        iced::widget::stack![
+        let fields = [
             field(520.0, state, 0.35, 180.0, -120.0),
             field(440.0, rgb(0xB9AEFF), 0.4, size.width + 60.0 - 440.0, 260.0),
             field(
@@ -766,59 +773,72 @@ fn backdrop<'a>(state: Color) -> Element<'a, Message> {
                 rgb(0x9FDCFF),
                 0.4,
                 520.0,
-                size.height + 200.0 - 420.0
+                size.height + 200.0 - 420.0,
             ),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        ];
+        iced::widget::image(backdrop_image(size, &fields))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .content_fit(iced::ContentFit::Fill)
+            .filter_method(iced::widget::image::FilterMethod::Nearest)
+            .into()
     })
     .into()
 }
-/// One blurred disk as concentric translucent circles. A real blur (shadow)
-/// would leave stale pixels on tiny-skia, whose damage covers only the quad;
-/// every circle here lies inside its own quad, so partial redraws repeat it exactly.
-fn blob<'a>(diameter: f32, color: Color, opacity: f32) -> Element<'a, Message> {
-    let side = diameter + 2.0 * BLOB_REACH;
-    let mut layers = iced::widget::Stack::new().width(side).height(side);
-    for (radius, alpha) in blob_rings(diameter / 2.0, opacity) {
-        let fill = Color { a: alpha, ..color };
-        layers = layers.push(
-            container(
-                container(Space::new())
-                    .width(2.0 * radius)
-                    .height(2.0 * radius)
-                    .style(move |_| container::Style {
-                        background: Some(fill.into()),
-                        border: iced::Border {
-                            radius: radius.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-            )
-            .center(side),
-        );
+/// The cached raster for `size` and `fields`; a new handle (and upload) only
+/// when either changes, so redraws reuse the renderer's copy.
+fn backdrop_image(size: iced::Size, fields: &[Field; 3]) -> iced::widget::image::Handle {
+    use std::cell::RefCell;
+    type Key = (u32, u32, [u32; 4]);
+    thread_local! {
+        static CACHE: RefCell<Option<(Key, iced::widget::image::Handle)>> =
+            const { RefCell::new(None) };
     }
-    layers.into()
+    let width = (size.width / BLOB_TEXEL).ceil().clamp(1.0, 1024.0) as u32;
+    let height = (size.height / BLOB_TEXEL).ceil().clamp(1.0, 1024.0) as u32;
+    let state = fields[0].3;
+    let key = (
+        width,
+        height,
+        [state.r, state.g, state.b, state.a].map(f32::to_bits),
+    );
+    CACHE.with_borrow_mut(|cache| match cache {
+        Some((cached, handle)) if *cached == key => handle.clone(),
+        _ => {
+            let pixels = backdrop_pixels(width, height, size, fields);
+            let handle = iced::widget::image::Handle::from_rgba(width, height, pixels);
+            *cache = Some((key, handle.clone()));
+            handle
+        }
+    })
 }
-/// Outer-to-inner (radius, alpha) so that the stacked circles compose to
-/// `opacity` × a disk of `radius` blurred with BLOB_SIGMA.
-fn blob_rings(radius: f32, opacity: f32) -> Vec<(f32, f32)> {
-    let outer = radius + BLOB_REACH;
-    let inner = (radius - BLOB_REACH).max(BLOB_SIGMA / 2.0);
-    let step = (outer - inner) / (BLOB_RINGS - 1) as f32;
-    let mut covered = 0.0;
-    (0..BLOB_RINGS)
-        .map(|k| {
-            let edge = outer - step * k as f32;
-            let inside = (edge - step / 2.0).max(0.0);
-            let target = opacity * normal_cdf((radius - inside) / BLOB_SIGMA);
-            let alpha = (1.0 - (1.0 - target) / (1.0 - covered)).max(0.0);
-            covered = target.max(covered);
-            (edge, alpha)
-        })
-        .collect()
+/// Straight-alpha RGBA texels of `fields` composed in order over transparency.
+/// Each field is `opacity` × a disk blurred with BLOB_SIGMA, sampled at the
+/// texel centres of a `width`×`height` grid stretched over `size`.
+fn backdrop_pixels(width: u32, height: u32, size: iced::Size, fields: &[Field]) -> Vec<u8> {
+    let (sx, sy) = (size.width / width as f32, size.height / height as f32);
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for j in 0..height {
+        let y = (j as f32 + 0.5) * sy;
+        for i in 0..width {
+            let x = (i as f32 + 0.5) * sx;
+            let (mut a, mut rgb) = (0.0_f32, [0.0_f32; 3]);
+            for &(cx, cy, radius, color, opacity) in fields {
+                let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+                let fa = opacity * normal_cdf((radius - d) / BLOB_SIGMA);
+                let out = fa + a * (1.0 - fa);
+                if out > 0.0 {
+                    for (c, f) in rgb.iter_mut().zip([color.r, color.g, color.b]) {
+                        *c = (f * fa + *c * a * (1.0 - fa)) / out;
+                    }
+                }
+                a = out;
+            }
+            let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            pixels.extend([byte(rgb[0]), byte(rgb[1]), byte(rgb[2]), byte(a)]);
+        }
+    }
+    pixels
 }
 /// Standard normal CDF (Abramowitz–Stegun 7.1.26, error below 1.5e-7).
 fn normal_cdf(x: f32) -> f32 {
@@ -2909,19 +2929,34 @@ mod tests {
         assert_eq!(shown, service);
     }
     #[test]
-    fn blob_rings_compose_a_blurred_disk() {
-        let rings = blob_rings(260.0, 0.35);
-        assert_eq!(rings.len(), BLOB_RINGS);
-        let mut covered = 0.0_f32;
-        let mut previous = f32::MAX;
-        for &(radius, alpha) in &rings {
-            assert!(radius < previous && (0.0..=1.0).contains(&alpha));
-            previous = radius;
-            covered = 1.0 - (1.0 - covered) * (1.0 - alpha);
-        }
-        // Faint at the reach, the full opacity at the centre.
-        assert!(rings[0].1 < 0.01);
-        assert!((covered - 0.35).abs() < 0.01, "{covered}");
+    fn backdrop_fields_are_blurred_disks() {
+        let size = iced::Size::new(80.0, 40.0);
+        let white = Color::WHITE;
+        let pixels = backdrop_pixels(10, 5, size, &[(20.0, 20.0, 260.0, white, 0.35)]);
+        assert_eq!(pixels.len(), 10 * 5 * 4);
+        // Well inside the disk the field reaches its full opacity.
+        let alpha = |i: usize| pixels[i * 4 + 3];
+        assert!(
+            (alpha(0) as f32 / 255.0 - 0.35).abs() < 0.01,
+            "{}",
+            alpha(0)
+        );
+        // A far field fades out; two fields compose over each other.
+        let far = backdrop_pixels(1, 1, size, &[(1000.0, 0.0, 10.0, white, 0.4)]);
+        assert_eq!(far[3], 0);
+        let red = Color::from_rgb(1.0, 0.0, 0.0);
+        let both = backdrop_pixels(
+            1,
+            1,
+            size,
+            &[
+                (40.0, 20.0, 500.0, white, 0.4),
+                (40.0, 20.0, 500.0, red, 0.4),
+            ],
+        );
+        assert_eq!(both[0], 255);
+        assert!(both[1] > 60 && both[1] < 120, "{both:?}");
+        assert!((both[3] as f32 / 255.0 - 0.64).abs() < 0.01, "{both:?}");
         assert!((normal_cdf(0.0) - 0.5).abs() < 1e-6 && normal_cdf(3.0) > 0.998);
     }
     fn policy(action: Action) -> rtrust_profile::routing::Decision {
