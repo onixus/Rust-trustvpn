@@ -1,23 +1,31 @@
 'use strict';
 const $=id=>document.getElementById(id),invoke=window.__TAURI__.core.invoke,M=window.RTModel;
 // The view model carries no credentials; Rust keeps vault, tokens and portal baselines.
-let state,busy=false,selected=0,phase=null,connectError=null,unavailable=false,armedDelete=null,lastListKey='';
+let state,notice='',busy=false,selected=0,phase=null,connectError=null,unavailable=false,armedDelete=null,lastListKey='';
 
 /* ---------- Copy (RU/EN by system language) ---------- */
 const LANG=String(navigator.language||'en').toLowerCase().startsWith('ru')?'ru':'en';
 const T={en:{
  'nav.sections':'Sections','nav.home':'Home','nav.profiles':'Profiles','nav.checks':'Checks','nav.network':'Network','nav.sync':'Sync','nav.settings':'Settings',
  'common.back':'Back','working':'Working…','connected':'Connected','disconnected':'Disconnected',
- 'line.vpn':'VPN','line.tunnel':'Tunnel','line.off':'is off','line.connecting':'connecting','line.disconnecting':'disconnecting','line.running':'is up','line.verified':'verified','line.warning1':'Needs','line.warning2':'attention','line.error1':'Not','line.error2':'connected','line.status':'Status','line.unavailable':'unavailable',
- 'short.off':'VPN off','short.connecting':'Connecting…','short.disconnecting':'Disconnecting…','short.running':'Tunnel is up','short.proxy':'Proxy is up','short.verified':'Tunnel verified','short.warning':'Needs attention','short.error':'Not connected','short.unavailable':'Status unavailable',
+ 'line.vpn':'VPN','line.tunnel':'Tunnel','line.off':'is off','line.connecting':'connecting','line.reconnecting':'reconnecting','line.disconnecting':'disconnecting','line.running':'is up','line.verified':'verified','line.warning1':'Needs','line.warning2':'attention','line.error1':'Not','line.error2':'connected','line.status':'Status','line.unavailable':'unavailable',
+ 'short.off':'VPN off','short.connecting':'Connecting…','short.reconnecting':'Reconnecting…','short.disconnecting':'Disconnecting…','short.running':'Tunnel is up','short.proxy':'Proxy is up','short.verified':'Tunnel verified','short.warning':'Needs attention','short.error':'Not connected','short.unavailable':'Status unavailable',
  'desc.off':'No tunnel from this app is running. Connect the selected profile “{name}”.','desc.off_none':'Add a profile to connect.',
  'desc.connecting':'Connecting to {host}.','desc.disconnecting':'Stopping the tunnel.',
- 'desc.running':'The transport is running. Route, DNS and guard have no fresh result yet. This does not mean they fail.',
+ 'desc.running':'The tunnel is running. No fresh result yet for: {checks}. This does not mean they fail.',
+ 'desc.running_partial':'Every check passed, but only for the networks sent through the VPN; other traffic is not covered, so the status stays blue.',
+ 'desc.running_confirm':'The checks passed; waiting for the service to confirm them.',
+ 'desc.reconnecting':'Reconnecting to check the path again.',
+ 'desc.fallback':'The service switched from “{requested}” to a backup profile.',
+ 'tag.backup':'backup','live.backup':'Backup profile','home.active_backup':'Backup in use','row.requested':'requested',
+ 'checks.sub_nohost':'{name} · results expire after {ttl} s',
+ 'mode.tun_managed':'server routes','net.managed':'The server assigns the routes for this device; the local network list is not used while that policy applies.',
+ 'notice.conflict':'Profiles or settings changed elsewhere (sync or another window). The view is refreshed; repeat the action.',
  'desc.running_proxy':'The local SOCKS5 proxy is running. Only apps configured to use it go through the tunnel; the system path is not checked.',
  'desc.verified':'All five checks passed in the last few seconds. Results expire; the status returns to blue unless they are repeated.',
  'desc.warning':'The tunnel is running, but these checks failed: {checks}. Open Checks to see details.',
  'desc.error':'The connection did not start. Check the profile and network, then retry.','desc.unavailable':'The app cannot read the connection state right now.',
- 'action.connect':'Connect “{name}”','action.add':'Add a profile first','action.connecting':'Connecting…','action.disconnecting':'Disconnecting…','action.disconnect':'Disconnect','action.retry':'Retry connection',
+ 'action.connect':'Connect “{name}”','action.add':'Add a profile first','action.connecting':'Connecting…','action.reconnecting':'Reconnecting…','action.disconnecting':'Disconnecting…','action.disconnect':'Disconnect','action.retry':'Retry connection',
  'checks.eyebrow':'Checks','checks.open':'Open checks','checks.hint':'Checks come from the connection service. A check without a result shows “no data”, never “passed”. Results expire after a few seconds.',
  'checks.sub':'{name} · {host} · results expire after {ttl} s','checks.sub_none':'No active session',
  'check.transport':'Transport','check.route':'Route','check.dns':'DNS','check.guard':'Guard','check.connectivity':'Connectivity',
@@ -61,16 +69,24 @@ const T={en:{
 },ru:{
  'nav.sections':'Разделы','nav.home':'Главная','nav.profiles':'Профили','nav.checks':'Проверки','nav.network':'Сеть','nav.sync':'Синхронизация','nav.settings':'Настройки',
  'common.back':'Назад','working':'Выполняется…','connected':'Подключено','disconnected':'Отключено',
- 'line.vpn':'VPN','line.tunnel':'Туннель','line.off':'выключен','line.connecting':'подключается','line.disconnecting':'отключается','line.running':'работает','line.verified':'проверен','line.warning1':'Нужно','line.warning2':'внимание','line.error1':'Нет','line.error2':'подключения','line.status':'Состояние','line.unavailable':'недоступно',
- 'short.off':'VPN выключен','short.connecting':'Подключение…','short.disconnecting':'Отключение…','short.running':'Туннель работает','short.proxy':'Прокси работает','short.verified':'Туннель проверен','short.warning':'Нужно внимание','short.error':'Нет подключения','short.unavailable':'Состояние недоступно',
+ 'line.vpn':'VPN','line.tunnel':'Туннель','line.off':'выключен','line.connecting':'подключается','line.reconnecting':'переподключается','line.disconnecting':'отключается','line.running':'работает','line.verified':'проверен','line.warning1':'Нужно','line.warning2':'внимание','line.error1':'Нет','line.error2':'подключения','line.status':'Состояние','line.unavailable':'недоступно',
+ 'short.off':'VPN выключен','short.connecting':'Подключение…','short.reconnecting':'Переподключение…','short.disconnecting':'Отключение…','short.running':'Туннель работает','short.proxy':'Прокси работает','short.verified':'Туннель проверен','short.warning':'Нужно внимание','short.error':'Нет подключения','short.unavailable':'Состояние недоступно',
  'desc.off':'Туннель этого приложения не запущен. Подключите выбранный профиль «{name}».','desc.off_none':'Добавьте профиль, чтобы подключиться.',
  'desc.connecting':'Подключаемся к {host}.','desc.disconnecting':'Останавливаем туннель.',
- 'desc.running':'Транспорт запущен. Для маршрута, DNS и защиты пока нет свежего результата — это не значит, что они не работают.',
+ 'desc.running':'Туннель работает. Пока нет свежего результата: {checks}. Это не значит, что они не работают.',
+ 'desc.running_partial':'Все проверки пройдены, но только для сетей, идущих через VPN; остальной трафик не охвачен, поэтому значок остаётся синим.',
+ 'desc.running_confirm':'Проверки пройдены; ждём подтверждения службы.',
+ 'desc.reconnecting':'Переподключаемся, чтобы проверить путь снова.',
+ 'desc.fallback':'Служба перешла с «{requested}» на резервный профиль.',
+ 'tag.backup':'резерв','live.backup':'Резервный профиль','home.active_backup':'Используется резерв','row.requested':'запрошен',
+ 'checks.sub_nohost':'{name} · результаты устаревают через {ttl} с',
+ 'mode.tun_managed':'маршруты сервера','net.managed':'Маршруты для этого устройства задаёт сервер; локальный список сетей не используется, пока действует эта политика.',
+ 'notice.conflict':'Профили или настройки изменились в другом месте (синхронизация или другое окно). Экран обновлён; повторите действие.',
  'desc.running_proxy':'Локальный прокси SOCKS5 запущен. Через туннель идут только приложения, настроенные на него; системный путь не проверяется.',
  'desc.verified':'Все пять проверок пройдены в последние секунды. Результаты устаревают — значок вернётся к синему, если их не повторить.',
  'desc.warning':'Туннель работает, но не пройдены проверки: {checks}. Откройте «Проверки», чтобы увидеть подробности.',
  'desc.error':'Подключение не установлено. Проверьте профиль и сеть, затем повторите.','desc.unavailable':'Приложение сейчас не может прочитать состояние подключения.',
- 'action.connect':'Подключить «{name}»','action.add':'Сначала добавьте профиль','action.connecting':'Подключение…','action.disconnecting':'Отключение…','action.disconnect':'Отключить','action.retry':'Повторить подключение',
+ 'action.connect':'Подключить «{name}»','action.add':'Сначала добавьте профиль','action.connecting':'Подключение…','action.reconnecting':'Переподключение…','action.disconnecting':'Отключение…','action.disconnect':'Отключить','action.retry':'Повторить подключение',
  'checks.eyebrow':'Проверки','checks.open':'Открыть проверки','checks.hint':'Проверки выполняет служба подключения. Проверка без результата показывается как «нет данных», а не «пройдено». Результаты устаревают через несколько секунд.',
  'checks.sub':'{name} · {host} · результаты устаревают через {ttl} с','checks.sub_none':'Нет активного сеанса',
  'check.transport':'Транспорт','check.route':'Маршрут','check.dns':'DNS','check.guard':'Защита','check.connectivity':'Доступность',
@@ -135,9 +151,17 @@ function button(text,action,cls){const b=el('button',cls||'btn',text);b.type='bu
 function code(p){const s=String(p?.protocol||'');return /hysteria/i.test(s)?'H2':/amnezia|wireguard/i.test(s)?'AW':'TT';}
 function avatarClass(p){return {H2:'violet',AW:'orange',TT:'blue'}[code(p)];}
 function setAvatar(node,p){node.textContent=p?code(p):'—';node.className='avatar '+(p?avatarClass(p):'');}
-function liveProfileIndex(){return state?.connected&&Number.isInteger(state.connected_profile)?state.connected_profile:selected;}
+// The profile the session really runs on: after failover the service may use a backup.
+function live(){
+ const profiles=state?.profiles||[];
+ if(!state?.connected){const p=profiles[selected];return {p,name:p?.name||'',host:p?.hostname||'',fallback:false,requested:null};}
+ const requested=profiles[state.connected_profile]||null,fallback=state.on_fallback===true;
+ if(Number.isInteger(state.active_profile)){const p=profiles[state.active_profile];if(p)return {p,name:p.name,host:p.hostname,fallback,requested};}
+ if(fallback)return {p:null,name:t('live.backup'),host:'',fallback,requested};
+ return {p:requested,name:requested?.name||'',host:requested?.hostname||'',fallback,requested};
+}
 function backupNames(){return Array.isArray(state?.connection?.fallback_profiles)?state.connection.fallback_profiles:[];}
-function snapshotInput(){return {connected:!!state?.connected,verified:state?.verified===true,snapshot:state?.observations,phase,error:connectError,unavailable,now:Date.now()};}
+function snapshotInput(){return {connected:!!state?.connected,verified:state?.verified===true,full:state?.connection?.mode==='Full',snapshot:state?.observations,phase,error:connectError,unavailable,now:Date.now()};}
 function goto(page){
  document.querySelectorAll('main>section').forEach(s=>{s.hidden=s.id!==page});
  const nav=page==='add-page'?'profiles-page':page;
@@ -151,25 +175,29 @@ document.querySelectorAll('[data-goto]').forEach(b=>b.onclick=()=>goto(b.dataset
 function renderStatus(){
  const input=snapshotInput(),key=M.derive(input),tone=M.TONE[key];
  document.body.dataset.state=key;document.body.dataset.tone=tone;
- const profiles=state?.profiles||[],p=profiles[liveProfileIndex()],name=p?.name||'',host=p?.hostname||'';
+ const profiles=state?.profiles||[],L=live(),name=L.name,host=L.host,reconnecting=phase==='reconnecting';
  const proxy=state?.connection?.mode==='Socks';
- const lines={off:['line.vpn','line.off'],connecting:['line.tunnel','line.connecting'],disconnecting:['line.tunnel','line.disconnecting'],running:['line.tunnel','line.running'],verified:['line.tunnel','line.verified'],warning:['line.warning1','line.warning2'],error:unavailable?['line.status','line.unavailable']:['line.error1','line.error2']}[key];
+ const lines={off:['line.vpn','line.off'],connecting:['line.tunnel',reconnecting?'line.reconnecting':'line.connecting'],disconnecting:['line.tunnel','line.disconnecting'],running:['line.tunnel','line.running'],verified:['line.tunnel','line.verified'],warning:['line.warning1','line.warning2'],error:unavailable?['line.status','line.unavailable']:['line.error1','line.error2']}[key];
  $('line1').textContent=t(lines[0]);$('line2').textContent=t(lines[1]);
- const short=unavailable?t('short.unavailable'):key==='running'&&proxy?t('short.proxy'):t('short.'+key);
- $('state-tag').textContent=key==='off'||!name?short:`${name} · ${short}`;
+ const short=unavailable?t('short.unavailable'):key==='running'&&proxy?t('short.proxy'):key==='connecting'&&reconnecting?t('short.reconnecting'):t('short.'+key);
+ $('state-tag').textContent=key==='off'||!name?short:`${name}${L.fallback&&L.p?' · '+t('tag.backup'):''} · ${short}`;
  $('side-state').textContent=short;$('checks-short').textContent=short;
  let desc;
  if(key==='off')desc=profiles.length?t('desc.off',{name}):t('desc.off_none');
- else if(key==='connecting')desc=t('desc.connecting',{host});
- else if(key==='running')desc=proxy?t('desc.running_proxy'):t('desc.running');
+ else if(key==='connecting')desc=reconnecting?t('desc.reconnecting'):t('desc.connecting',{host});
+ else if(key==='running'){
+  const missing=M.pending(state?.observations,input.now);
+  desc=proxy?t('desc.running_proxy'):missing.length?t('desc.running',{checks:missing.map(k=>t('check.'+k)).join(', ')}):!input.full?t('desc.running_partial'):t('desc.running_confirm');
+ }
  else if(key==='warning')desc=t('desc.warning',{checks:M.failed(state?.observations,input.now).map(k=>t('check.'+k)).join(', ')});
  else if(key==='error')desc=unavailable?t('desc.unavailable'):t('desc.error');
  else desc=t('desc.'+key);
+ if(L.fallback&&['running','verified','warning'].includes(key)&&L.requested)desc+=' '+t('desc.fallback',{requested:L.requested.name});
  $('state-desc').textContent=desc;
  const connected=!!state?.connected;
- $('connect-label').textContent=key==='connecting'?t('action.connecting'):key==='disconnecting'?t('action.disconnecting'):connected?t('action.disconnect'):!profiles.length?t('action.add'):key==='error'?t('action.retry'):t('action.connect',{name});
+ $('connect-label').textContent=key==='connecting'?t(reconnecting?'action.reconnecting':'action.connecting'):key==='disconnecting'?t('action.disconnecting'):connected?t('action.disconnect'):!profiles.length?t('action.add'):key==='error'?t('action.retry'):t('action.connect',{name});
  $('connect').classList.toggle('is-connected',connected);
- $('checks-sub').textContent=connected?t('checks.sub',{name,host,ttl:M.MAX_TTL_MS/1000}):t('checks.sub_none');
+ $('checks-sub').textContent=!connected?t('checks.sub_none'):host?t('checks.sub',{name,host,ttl:M.MAX_TTL_MS/1000}):t('checks.sub_nohost',{name,ttl:M.MAX_TTL_MS/1000});
  renderChecks(input,key);
 }
 function checkValue(value){return t('val.'+value);}
@@ -188,17 +216,17 @@ function renderChecks(input,key){
 /* ---------- Home cards ---------- */
 function renderHome(){
  if(!state)return;
- const profiles=state.profiles,index=liveProfileIndex(),p=profiles[index];
+ const profiles=state.profiles,L=live(),p=L.p;
  setAvatar($('profile-code'),p);
- $('profile-eyebrow').textContent=p?.default?t('home.default'):t('home.profile');
- $('default-name').textContent=p?.name||t('desc.off_none');
+ $('profile-eyebrow').textContent=L.fallback?t('home.active_backup'):p?.default?t('home.default'):t('home.profile');
+ $('default-name').textContent=p?.name||(L.fallback?L.name:t('desc.off_none'));
  $('profile-sub').textContent=p?`${p.protocol} · ${p.hostname}`:'';
- const backupName=backupNames().find(n=>n!==p?.name),backup=profiles.find(x=>x.name===backupName);
+ const backupName=backupNames().find(n=>n!==p?.name&&n!==L.requested?.name),backup=profiles.find(x=>x.name===backupName);
  $('backup-card').hidden=!backup;
  if(backup){setAvatar($('backup-code'),backup);$('backup-name').textContent=backup.name;$('backup-sub').textContent=`${backup.protocol} · ${backup.hostname}`;}
  const c=state.connection;
  $('tile-mode').textContent=t({Full:'mode.full',Tun:'mode.tun',Socks:'mode.socks'}[c.mode]||'mode.full');
- $('tile-mode-sub').textContent=c.mode==='Socks'?t('mode.socks_tile',{port:c.socks_port}):c.mode==='Tun'?t('mode.tun_tile',{n:(c.networks||[]).length}):t('mode.full_tile');
+ $('tile-mode-sub').textContent=c.mode==='Socks'?t('mode.socks_tile',{port:c.socks_port}):c.mode==='Tun'?(c.managed_routes?t('mode.tun_managed'):t('mode.tun_tile',{n:(c.networks||[]).length})):t('mode.full_tile');
  $('tile-dns').textContent=String(c.dns||'—');
  $('tile-sync').textContent=c.sync?.enabled?t('tile.on'):t('tile.off');
  let origin='';try{origin=c.sync?.origin?new URL(c.sync.origin).host:''}catch{origin=''}
@@ -208,7 +236,8 @@ function renderHome(){
 
 /* ---------- Profiles ---------- */
 function rowStatus(index){
- if(state.connected&&state.connected_profile===index)return ['active',t('row.active')];
+ if(state.connected&&state.active_profile===index)return ['active',t('row.active')];
+ if(state.connected&&state.on_fallback&&state.connected_profile===index)return ['idle',t('row.requested')];
  if(!state.connected&&index===selected)return ['selected',t('row.selected')];
  return ['idle',t('row.idle')];
 }
@@ -282,7 +311,7 @@ function fillForms(){
  const c=state.connection;
  $('auto').checked=c.auto_connect;$('syncauto').checked=c.sync.enabled;$('mode').value=c.mode;
  document.querySelectorAll('[name=mode-choice]').forEach(r=>r.checked=r.value===c.mode);
- $('port').value=c.socks_port;$('networks').value=c.networks.join(', ');$('dns').value=c.dns;$('address').value=c.sync.origin;modeFields();
+ $('port').value=c.socks_port;$('networks').value=c.networks.join(', ');$('dns').value=c.dns;$('address').value=c.sync.origin;$('networks-managed').hidden=!c.managed_routes;modeFields();
 }
 async function refresh(){
  state=await invoke('view',{russian:LANG==='ru'});unavailable=false;
@@ -299,7 +328,7 @@ function applyDisabled(){
  renderDiagnostics();
 }
 async function run(action,opts={}){
- if(busy)return;busy=true;phase=opts.phase||null;document.body.classList.add('is-busy');setButtons(true);
+ if(busy)return;busy=true;notice='';phase=opts.phase||null;document.body.classList.add('is-busy');setButtons(true);
  $('status').textContent=t('working');renderStatus();
  try{
   await action();
@@ -309,8 +338,13 @@ async function run(action,opts={}){
   $('status').textContent=state.status||(state.connected?t('connected'):t('disconnected'));
  }catch(e){
   phase=null;
-  if(opts.phase==='connecting')connectError=String(e);
-  $('status').textContent=String(e);
+  if(/^Profiles changed/.test(String(e))){
+   // Another frontend or background sync bumped the revision: reload, do not show a failure state.
+   try{await refresh();notice=t('notice.conflict');$('status').textContent=notice;}catch(r){$('status').textContent=String(r);}
+  }else{
+   if(opts.phase==='connecting'||opts.phase==='reconnecting')connectError=String(e);
+   $('status').textContent=String(e);
+  }
  }finally{
   phase=null;busy=false;document.body.classList.remove('is-busy');setButtons(false);
   if(state)renderStatus();applyDisabled();
@@ -338,14 +372,16 @@ applyCopy();applyTheme(readTheme());preview(null);
 run(async()=>{}).then(()=>{if(state)invoke('ui_ready').catch(e=>{$('status').textContent=String(e)})});
 
 // Refresh evidence without replacing editable settings, profile inputs or the revision.
-function listKey(){return `${state?.connected}|${state?.connected_profile}`;}
+function listKey(){return `${state?.connected}|${state?.connected_profile}|${state?.active_profile}|${state?.on_fallback}`;}
 setInterval(async()=>{
- if(busy||!state)return;
+ if(!state)return;
+ // While an action runs, do not fetch, but let results decay by the clock.
+ if(busy){renderStatus();return;}
  try{
   const next=await invoke('view',{russian:LANG==='ru'});
-  state.connected=next.connected;state.verified=next.verified;state.observations=next.observations;state.status=next.status;state.diagnostics=next.diagnostics;state.connected_profile=next.connected_profile;
+  state.connected=next.connected;state.verified=next.verified;state.observations=next.observations;state.status=next.status;state.diagnostics=next.diagnostics;state.connected_profile=next.connected_profile;state.active_profile=next.active_profile;state.on_fallback=next.on_fallback;
   unavailable=false;if(state.connected)connectError=null;
-  $('status').textContent=state.status||(!state.connected&&connectError)||'';
+  $('status').textContent=state.status||(!state.connected&&connectError)||notice||'';
   const key=listKey();if(key!==lastListKey){lastListKey=key;renderHome();renderProfiles();}
  }catch{unavailable=true;}
  renderStatus();applyDisabled();
@@ -364,7 +400,7 @@ function renderDiagnostics(){
 }
 $('diagnostic-run').onclick=()=>run(()=>invoke('diagnostic_start',{target:$('diagnostic-target').value,action:'recheck'}));
 $('diagnostic-endpoint').onclick=()=>run(()=>invoke('diagnostic_start',{target:$('diagnostic-target').value,action:'check_endpoint'}));
-$('diagnostic-reconnect').onclick=()=>run(()=>invoke('diagnostic_start',{target:$('diagnostic-target').value,action:'reconnect'}));
+$('diagnostic-reconnect').onclick=()=>run(()=>invoke('diagnostic_start',{target:$('diagnostic-target').value,action:'reconnect'}),{phase:'reconnecting'});
 $('diagnostic-cancel').onclick=()=>run(()=>invoke('diagnostic_cancel'));
 $('diagnostic-target').oninput=()=>invoke('diagnostic_cancel').catch(e=>{$('diagnostic-result').textContent=String(e)});
 $('diagnostic-preview').onchange=()=>invoke('diagnostic_edit',{text:$('diagnostic-preview').value}).catch(e=>{$('diagnostic-result').textContent=String(e)});

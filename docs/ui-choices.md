@@ -26,13 +26,15 @@ theme that follow the system unless Settings overrides them (stored only in the
 WebView's local storage). Home shows a state chip, a two-line headline, one row
 per check, the profile Connect will use, the first backup named by the
 connection settings, mode/DNS/sync/autoconnect tiles and a large connect pill.
-The state is grey off, blue connecting or running, green only when all five
-checks of the existing observation snapshot passed within their TTL (capped at
-6 s) and Rust reports verified, yellow when any check failed (named in the
+The state is grey off, blue connecting or running, green only in whole-device
+mode when all five checks of the existing observation snapshot passed within
+their TTL (capped at 6 s) and Rust reports verified (split and proxy sessions
+stay blue), yellow when any check failed (named in the
 text), and red after a failed connect or when the state cannot be read. Checks
-without a result show "no data". The view model gained only the index of the
-profile the live session was started from; it still carries no credentials or
-portal baselines. Network shows only mode-relevant fields, profile deletion
+without a result show "no data". The view model gained the index of the
+profile the live session was started from and, after failover, the backup the
+service reports as active; it still carries no credentials or portal
+baselines. A revision conflict reloads the view with a neutral notice. Network shows only mode-relevant fields, profile deletion
 needs a second click, and import keeps the preview and explicit confirmation.
 Copy follows the system language (Russian or English); messages from the Rust
 core stay English except the observation summary. Not in WebView: QR import,

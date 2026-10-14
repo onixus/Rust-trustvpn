@@ -134,7 +134,7 @@
  <select id="mode" hidden><option value="Socks">Socks</option><option value="Tun">Tun</option><option value="Full">Full</option></select>
  <div class="card form-card">
   <label id="port-field"><span data-i18n="net.port">SOCKS port</span><input id="port" type="number" min="1" max="65535"></label>
-  <label id="networks-field"><span data-i18n="net.networks">IPv4 networks</span><input id="networks" placeholder="192.0.2.0/24, 10.0.0.0/8"></label>
+  <label id="networks-field"><span data-i18n="net.networks">IPv4 networks</span><input id="networks" placeholder="192.0.2.0/24, 10.0.0.0/8"><small id="networks-managed" data-i18n="net.managed" hidden>The server assigns the routes for this device.</small></label>
   <label><span data-i18n="net.dns">DNS server</span><input id="dns" placeholder="1.1.1.1"></label>
  </div>
  <label class="card switch"><span data-i18n="net.auto">Connect on launch</span><input id="auto" type="checkbox"></label>

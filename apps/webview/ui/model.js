@@ -44,19 +44,27 @@
   return KEYS.filter(key => o[key] === 'failed');
  }
 
+ /** Checks without a fresh result: neither passed nor failed (stale transport included). */
+ function pending(s, now) {
+  const o = outcomes(s, now);
+  return KEYS.filter(key => o[key] !== 'passed' && o[key] !== 'failed');
+ }
+
  /**
-  * input: {connected, verified, snapshot, phase, error, unavailable, now}
-  * phase is the frontend's own pending action ('connecting'|'disconnecting'|null).
+  * input: {connected, verified, full, snapshot, phase, error, unavailable, now}
+  * phase is the frontend's own pending action ('connecting'|'reconnecting'|'disconnecting'|null).
+  * full: whole-device mode. Split and proxy sessions cover only part of the
+  * traffic, so they never turn green (as the previous WebView UI).
   */
  function derive(input) {
   if (input.unavailable) return 'error';
-  if (input.phase === 'connecting') return 'connecting';
+  if (input.phase === 'connecting' || input.phase === 'reconnecting') return 'connecting';
   if (input.phase === 'disconnecting') return 'disconnecting';
   if (!input.connected) return input.error ? 'error' : 'off';
   const l = level(input.snapshot, input.now);
   if (l === 'warning') return 'warning';
   // Green needs both the Rust verdict and a fresh client-side reading.
-  if (l === 'verified' && input.verified === true) return 'verified';
+  if (l === 'verified' && input.verified === true && input.full === true) return 'verified';
   return 'running';
  }
 
@@ -80,7 +88,7 @@
  // dot style per row value: fill colour or an empty ring
  const ROW_TONE = { passed: 'green', failed: 'yellow', configured: 'blue', stale: 'ring-grey', unsupported: 'grey', unknown: 'ring', off: 'ring', connecting: 'ring-blue', error: 'red' };
 
- const api = { KEYS, MAX_TTL_MS, snapshot, outcome, outcomes, level, failed, derive, rows, TONE, ROW_TONE };
+ const api = { KEYS, MAX_TTL_MS, snapshot, outcome, outcomes, level, failed, pending, derive, rows, TONE, ROW_TONE };
  if (typeof module !== 'undefined' && module.exports) module.exports = api;
  else root.RTModel = Object.freeze(api);
 })(typeof window !== 'undefined' ? window : globalThis);

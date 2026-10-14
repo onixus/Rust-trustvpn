@@ -8,11 +8,22 @@ const now = 1_000_000;
 const obs = (outcome, age = 1000, ttl = 6000) => ({ outcome, source: 'service_lifecycle', observed_at_ms: now - age, valid_for_ms: ttl, mode: 'full', reason: 'not_checked' });
 const snap = (o = {}) => ({ schema: 2, generation: 1, events: [], ...Object.fromEntries(M.KEYS.map(k => [k, o[k] || { outcome: 'unknown', source: 'not_observed', observed_at_ms: null, valid_for_ms: 6000, mode: 'full', reason: 'not_checked' }])) });
 const allPassed = () => snap(Object.fromEntries(M.KEYS.map(k => [k, obs('passed')])));
-const base = { connected: true, verified: true, phase: null, error: null, unavailable: false, now };
+const base = { connected: true, verified: true, full: true, phase: null, error: null, unavailable: false, now };
 
 // Green only when every check passed, is fresh, and Rust agrees.
 assert.equal(M.derive({ ...base, snapshot: allPassed() }), 'verified');
 assert.equal(M.derive({ ...base, verified: false, snapshot: allPassed() }), 'running');
+// Split or proxy sessions never turn green, even when every check passed.
+assert.equal(M.derive({ ...base, full: false, snapshot: allPassed() }), 'running');
+// Time passing alone leaves green: 6.5 s later every result is stale (no new fetch needed).
+const fresh = allPassed();
+assert.equal(M.derive({ ...base, snapshot: fresh }), 'verified');
+assert.equal(M.derive({ ...base, snapshot: fresh, now: now + 6500 }), 'running');
+assert.deepEqual(M.pending(fresh, now + 6500), M.KEYS);
+// Pending lists only checks without a fresh result, stale transport included.
+const mixed = snap({ transport: obs('configured', 9000), route: obs('passed'), dns: obs('failed') });
+assert.deepEqual(M.pending(mixed, now), ['transport', 'guard', 'connectivity']);
+assert.equal(M.derive({ ...base, connected: true, phase: 'reconnecting', snapshot: fresh }), 'connecting');
 // TTL decay: older than min(valid_for_ms, 6 s) is stale, even if the service claims a longer TTL.
 const old = allPassed(); old.dns = obs('passed', 7000, 60000);
 assert.equal(M.outcome(old.dns, now), 'stale');
