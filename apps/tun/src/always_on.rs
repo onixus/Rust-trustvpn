@@ -398,7 +398,8 @@ fn launch(
                 .await
                 .map(|t| t.elapsed().as_secs().max(1))
                 .unwrap_or(0);
-            fixed_budget.disconnected(Duration::from_secs(connected_seconds));
+            // The inner service supervisor owns transport-level degraded exits.
+            fixed_budget.disconnected(Duration::from_secs(connected_seconds), false);
             let delay = planner
                 .as_mut()
                 .map(|p| Duration::from_secs(p.failed(rand::random(), connected_seconds)))

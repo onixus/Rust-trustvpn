@@ -4,6 +4,7 @@ pub mod dns;
 mod h3transport;
 mod hysteria;
 pub mod icmp;
+mod liveness;
 pub mod proxy;
 pub mod routing;
 pub mod udp;
@@ -55,6 +56,9 @@ pub enum Error {
     Io,
     #[error("Invalid destination authority")]
     Destination,
+    /// Outbound traffic stayed unanswered while the transport failed opens or checks.
+    #[error("Tunnel carries no traffic")]
+    Degraded,
 }
 impl From<std::io::Error> for Error {
     fn from(_: std::io::Error) -> Self {
@@ -90,7 +94,7 @@ pub fn check_capabilities(p: &Profile) -> Result<()> {
 
 /// The flag records whether the endpoint relays IPv6 (`has_ipv6` in the profile).
 #[derive(Clone)]
-pub struct Session(Transport, bool);
+pub struct Session(Transport, bool, Arc<liveness::Liveness>);
 #[derive(Clone)]
 enum Transport {
     H2(H2Session),
@@ -99,28 +103,41 @@ enum Transport {
     Amnezia(amnezia::AmneziaSession),
 }
 impl Session {
+    fn new(transport: Transport, ipv6: bool) -> Self {
+        Self(
+            transport,
+            ipv6,
+            Arc::new(liveness::Liveness::new(liveness::SILENCE)),
+        )
+    }
+    /// Test hook: a shorter silence window, set before any flow is opened.
+    #[doc(hidden)]
+    pub fn with_silence(mut self, silence: Duration) -> Self {
+        self.2 = Arc::new(liveness::Liveness::new(silence));
+        self
+    }
     pub async fn connect(p: &Profile) -> Result<Self> {
         check_capabilities(p)?;
         tokio::time::timeout(Duration::from_secs(20), async {
             if p.protocol == rtrust_profile::Protocol::AmneziaWg {
-                return Ok(Self(
+                return Ok(Self::new(
                     Transport::Amnezia(amnezia::AmneziaSession::connect(p, None, None).await?),
                     p.endpoint.has_ipv6,
                 ));
             }
             if p.protocol == rtrust_profile::Protocol::Hysteria2 {
-                return Ok(Self(
+                return Ok(Self::new(
                     Transport::Hysteria(hysteria::HysteriaSession::connect(p, None, None).await?),
                     p.endpoint.has_ipv6,
                 ));
             }
             if p.endpoint.upstream_protocol == "http3" {
-                Ok(Self(
+                Ok(Self::new(
                     Transport::H3(h3transport::H3Session::connect(p, None, None).await?),
                     p.endpoint.has_ipv6,
                 ))
             } else {
-                Ok(Self(
+                Ok(Self::new(
                     Transport::H2(H2Session::connect(p).await?),
                     p.endpoint.has_ipv6,
                 ))
@@ -140,7 +157,7 @@ impl Session {
             )
             .await
             .map_err(|_| Error::Timeout)?
-            .map(|s| Self(Transport::Amnezia(s), p.endpoint.has_ipv6));
+            .map(|s| Self::new(Transport::Amnezia(s), p.endpoint.has_ipv6));
         }
         if p.protocol == rtrust_profile::Protocol::Hysteria2 && mark != 0 {
             return tokio::time::timeout(
@@ -149,7 +166,7 @@ impl Session {
             )
             .await
             .map_err(|_| Error::Timeout)?
-            .map(|s| Self(Transport::Hysteria(s), p.endpoint.has_ipv6));
+            .map(|s| Self::new(Transport::Hysteria(s), p.endpoint.has_ipv6));
         }
         if mark == 0 {
             return Err(Error::Unsupported("marked transport requires a mark"));
@@ -161,7 +178,7 @@ impl Session {
             )
             .await
             .map_err(|_| Error::Timeout)?
-            .map(|s| Self(Transport::H3(s), p.endpoint.has_ipv6));
+            .map(|s| Self::new(Transport::H3(s), p.endpoint.has_ipv6));
         }
         let session = tokio::time::timeout(
             Duration::from_secs(20),
@@ -169,7 +186,7 @@ impl Session {
         )
         .await
         .map_err(|_| Error::Timeout)??;
-        Ok(Self(Transport::H2(session), p.endpoint.has_ipv6))
+        Ok(Self::new(Transport::H2(session), p.endpoint.has_ipv6))
     }
     #[cfg(unix)]
     pub async fn connect_protected(p: &Profile, protector: &SocketProtector) -> Result<Self> {
@@ -181,7 +198,7 @@ impl Session {
             )
             .await
             .map_err(|_| Error::Timeout)?
-            .map(|s| Self(Transport::Amnezia(s), p.endpoint.has_ipv6));
+            .map(|s| Self::new(Transport::Amnezia(s), p.endpoint.has_ipv6));
         }
         if p.protocol == rtrust_profile::Protocol::Hysteria2 {
             return tokio::time::timeout(
@@ -190,7 +207,7 @@ impl Session {
             )
             .await
             .map_err(|_| Error::Timeout)?
-            .map(|s| Self(Transport::Hysteria(s), p.endpoint.has_ipv6));
+            .map(|s| Self::new(Transport::Hysteria(s), p.endpoint.has_ipv6));
         }
         if p.endpoint.upstream_protocol == "http3" {
             return tokio::time::timeout(
@@ -199,7 +216,7 @@ impl Session {
             )
             .await
             .map_err(|_| Error::Timeout)?
-            .map(|s| Self(Transport::H3(s), p.endpoint.has_ipv6));
+            .map(|s| Self::new(Transport::H3(s), p.endpoint.has_ipv6));
         }
         if p.endpoint
             .addresses
@@ -216,44 +233,68 @@ impl Session {
         )
         .await
         .map_err(|_| Error::Timeout)??;
-        Ok(Self(Transport::H2(session), p.endpoint.has_ipv6))
+        Ok(Self::new(Transport::H2(session), p.endpoint.has_ipv6))
     }
     /// False when the endpoint has no IPv6 egress; IPv6 flows must fail locally.
     pub fn ipv6(&self) -> bool {
         self.1
     }
+    /// Fails when the endpoint stopped answering, and also when outbound
+    /// traffic has stayed unanswered while opens or checks failed in transport.
     pub async fn health(&self) -> Result<()> {
-        match &self.0 {
-            Transport::H2(s) => s.health().await,
-            Transport::H3(s) => s.health().await,
-            Transport::Hysteria(s) => s.health().await,
-            Transport::Amnezia(s) => s.health().await,
+        let answered = match &self.0 {
+            Transport::H2(s) => s.health().await.map(|_| true)?,
+            Transport::H3(s) => s.health().await?,
+            Transport::Hysteria(s) => s.health().await.map(|_| true)?,
+            Transport::Amnezia(s) => s.health().await.map(|_| true)?,
+        };
+        self.2.checked(answered);
+        match self.2.verdict() {
+            liveness::Verdict::Healthy => Ok(()),
+            liveness::Verdict::Degraded => Err(Error::Degraded),
         }
     }
     pub async fn open_tcp(&self, target: &str) -> Result<Tunnel> {
         rtrust_profile::validate_address(target).map_err(|_| Error::Destination)?;
-        match &self.0 {
+        // A CONNECT is demand of its own: a flow that never opens never writes.
+        self.2.outbound();
+        let opened = match &self.0 {
             Transport::H2(s) => s.open_tcp(target).await,
             Transport::H3(s) => s.open(target).await,
             Transport::Hysteria(s) => s.open_tcp(target).await,
             Transport::Amnezia(s) => s.open_tcp(target).await,
-        }
+        };
+        self.track(opened, true)
     }
     pub async fn open_icmp(&self) -> Result<Tunnel> {
-        match &self.0 {
+        let opened = match &self.0 {
             Transport::H2(s) => s.open("_icmp").await,
             Transport::H3(s) => s.open("_icmp").await,
-            Transport::Hysteria(_) => Err(Error::Unsupported("Hysteria does not relay ICMP")),
-            Transport::Amnezia(_) => Err(Error::Unsupported("ICMP relay over AmneziaWG")),
-        }
+            Transport::Hysteria(_) => {
+                return Err(Error::Unsupported("Hysteria does not relay ICMP"));
+            }
+            Transport::Amnezia(_) => return Err(Error::Unsupported("ICMP relay over AmneziaWG")),
+        };
+        self.track(opened, false)
     }
     pub async fn open_udp(&self) -> Result<Tunnel> {
-        match &self.0 {
+        let opened = match &self.0 {
             Transport::H2(s) => s.open_udp().await,
             Transport::H3(s) => s.open("_udp2").await,
             Transport::Hysteria(s) => s.open_udp().await,
             Transport::Amnezia(s) => s.open_udp().await,
-        }
+        };
+        self.track(opened, false)
+    }
+    /// `flow`: one CONNECT per flow, not a shared UDP/ICMP relay stream that
+    /// the endpoint may recycle without any reply.
+    fn track(&self, opened: Result<Tunnel>, flow: bool) -> Result<Tunnel> {
+        self.2
+            .opened(&opened.as_ref().map(|_| ()).map_err(Clone::clone), flow);
+        opened.map(|mut tunnel| {
+            tunnel.liveness = Some(self.2.clone());
+            tunnel
+        })
     }
 }
 struct Inner {
@@ -433,13 +474,19 @@ impl H2Session {
             };
             let _ = tokio::try_join!(upload, download);
         });
-        Ok(Tunnel { io: client, pump })
+        Ok(Tunnel {
+            io: client,
+            pump,
+            liveness: None,
+        })
     }
 }
 
 pub struct Tunnel {
     io: DuplexStream,
     pump: tokio::task::JoinHandle<()>,
+    /// The owning session's evidence; set by `Session`, never shared across sessions.
+    liveness: Option<Arc<liveness::Liveness>>,
 }
 impl Drop for Tunnel {
     fn drop(&mut self) {
@@ -452,7 +499,14 @@ impl AsyncRead for Tunnel {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.io).poll_read(cx, buf)
+        let before = buf.filled().len();
+        let polled = Pin::new(&mut self.io).poll_read(cx, buf);
+        if let (Some(liveness), Poll::Ready(Ok(()))) = (&self.liveness, &polled)
+            && buf.filled().len() > before
+        {
+            liveness.inbound();
+        }
+        polled
     }
 }
 impl AsyncWrite for Tunnel {
@@ -461,7 +515,11 @@ impl AsyncWrite for Tunnel {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.io).poll_write(cx, buf)
+        let polled = Pin::new(&mut self.io).poll_write(cx, buf);
+        if let (Some(liveness), Poll::Ready(Ok(1..))) = (&self.liveness, &polled) {
+            liveness.outbound();
+        }
+        polled
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.io).poll_flush(cx)

@@ -35,6 +35,17 @@ impl PacketDevice for tun_rs::AsyncDevice {
     }
 }
 
+/// True when the data plane ended because its session carried no traffic
+/// (`Session::health`). Such an exit is no evidence of a stable connection.
+pub fn degraded<T>(result: &Result<T, Box<dyn std::error::Error + Send + Sync>>) -> bool {
+    result.as_ref().is_err_and(|error| {
+        matches!(
+            error.downcast_ref::<rtrust_engine::Error>(),
+            Some(rtrust_engine::Error::Degraded)
+        )
+    })
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub async fn run(
     session: Session,
@@ -390,6 +401,23 @@ async fn direct_udp_flow(
                 let _ = output.try_send(Datagram { source:key.1, destination:key.0, payload:buffer[..length].to_vec() });
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => return Ok(()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_a_degraded_session_exit_is_recognised() {
+        let degraded: Result<(), Box<dyn std::error::Error + Send + Sync>> =
+            Err(rtrust_engine::Error::Degraded.into());
+        assert!(super::degraded(&degraded));
+        for other in [
+            Err(rtrust_engine::Error::Timeout.into()),
+            Err("Transport worker stopped".into()),
+            Ok(()),
+        ] {
+            assert!(!super::degraded(&other));
         }
     }
 }

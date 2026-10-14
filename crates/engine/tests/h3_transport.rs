@@ -195,3 +195,38 @@ async fn lost_response_fails_only_its_stream() {
     assert_eq!(echoed, b"before after");
     server.abort();
 }
+
+/// Issue #62: checks that keep finishing without a response while every flow
+/// fails must not keep a dead session "healthy". Evidence is per session.
+#[tokio::test(flavor = "multi_thread")]
+async fn unanswered_traffic_degrades_only_its_own_session() {
+    let (p, server) = endpoint().await;
+    let silence = std::time::Duration::from_millis(1500);
+    let session = Session::connect(&p).await.unwrap().with_silence(silence);
+    session.health().await.unwrap();
+    // Idle: lost checks alone never fail a verified session.
+    for _ in 0..3 {
+        session.health().await.unwrap();
+    }
+    let old = Session::connect(&p).await.unwrap();
+    old.health().await.unwrap();
+    let mut answered = old.open_tcp("192.0.2.1:7").await.unwrap();
+    for _ in 0..3 {
+        assert!(matches!(
+            session.open_tcp("lost.invalid:1").await,
+            Err(Error::Protocol)
+        ));
+    }
+    // Failed opens within the silence window are not yet a verdict.
+    session.health().await.unwrap();
+    answered.write_all(b"ping").await.unwrap();
+    answered.shutdown().await.unwrap();
+    let mut echoed = Vec::new();
+    answered.read_to_end(&mut echoed).await.unwrap();
+    assert_eq!(echoed, b"ping");
+    tokio::time::sleep(silence).await;
+    // Inbound on the previous session's flow cannot vouch for this one.
+    assert!(matches!(session.health().await, Err(Error::Degraded)));
+    old.health().await.unwrap();
+    server.abort();
+}
