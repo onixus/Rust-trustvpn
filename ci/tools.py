@@ -6,10 +6,15 @@ def _digest(stream):
     for block in iter(lambda:stream.read(1024*1024),b''):digest.update(block)
     return digest.hexdigest()
 
-def _matches(path,size,digest):
+def _matches(path,size,digest,*,filesystem=None):
     try:
         metadata=path.lstat()
-        if not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode&0o111 or metadata.st_size!=size:return False
+        # Windows stat/chmod do not represent POSIX execute permission for
+        # extensionless binaries. The tar member execute-mode gate remains
+        # mandatory on every platform before this filesystem content check.
+        require_execute=(os.name if filesystem is None else filesystem)!='nt'
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_size!=size
+                or (require_execute and not metadata.st_mode&0o111)):return False
         with path.open('rb') as content:return _digest(content)==digest
     except FileNotFoundError:return False
 

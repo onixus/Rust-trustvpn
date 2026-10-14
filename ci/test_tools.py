@@ -1,15 +1,15 @@
-import contextlib,hashlib,io,pathlib,tarfile,tempfile,unittest,json,platform,threading,concurrent.futures,os
-from unittest.mock import patch
+import contextlib,hashlib,io,pathlib,tarfile,tempfile,unittest,json,platform,threading,concurrent.futures,os,stat,types
+from unittest.mock import patch,Mock
 import tools
 
 class ExtractionTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=pathlib.Path(self.temp.name);self.archive=self.root/'download.tar.gz'
-    def archive_with(self,members=None):
+    def archive_with(self,members=None,mode=0o755):
         with tarfile.open(self.archive,'w:gz') as tar:
             for name,kind,body in members or [('nested/trivy','file',b'good-tool')]:
-                item=tarfile.TarInfo(name);item.mode=0o755
+                item=tarfile.TarInfo(name);item.mode=mode
                 if kind=='file':item.size=len(body);tar.addfile(item,io.BytesIO(body))
                 else:item.type=tarfile.SYMTYPE;item.linkname=body;tar.addfile(item)
         return hashlib.sha256(self.archive.read_bytes()).hexdigest()
@@ -109,5 +109,22 @@ class ExtractionTests(unittest.TestCase):
         with patch.object(pathlib.Path,'replace',side_effect=PermissionError('synthetic busy executable')):
             with self.assertRaises(PermissionError):self.extract(sha)
         self.assertEqual(output.read_bytes(),b'evil-tool');self.assertEqual(list(self.root.glob('extract-*')),[])
+
+    def test_windows_stat_without_posix_execute_bits(self):
+        body=b'good-tool';digest=hashlib.sha256(body).hexdigest()
+        path=Mock()
+        path.lstat.return_value=types.SimpleNamespace(st_mode=stat.S_IFREG|0o666,st_size=len(body))
+        path.open.side_effect=lambda mode:io.BytesIO(body)
+        self.assertTrue(tools._matches(path,len(body),digest,filesystem='nt'))
+        self.assertFalse(tools._matches(path,len(body),digest,filesystem='posix'))
+        self.assertFalse(tools._matches(path,len(body),'0'*64,filesystem='nt'))
+        self.assertFalse(tools._matches(path,len(body)+1,digest,filesystem='nt'))
+        path.lstat.return_value.st_mode=stat.S_IFLNK|0o777
+        self.assertFalse(tools._matches(path,len(body),digest,filesystem='nt'))
+    def test_archive_execute_mode_required_on_every_platform(self):
+        sha=self.archive_with(mode=0o644)
+        with patch.object(tarfile.TarFile,'extractall') as extraction:
+            with self.assertRaisesRegex(RuntimeError,'Ambiguous tool executable'):self.extract(sha)
+        extraction.assert_not_called()
 
 if __name__=='__main__':unittest.main()
