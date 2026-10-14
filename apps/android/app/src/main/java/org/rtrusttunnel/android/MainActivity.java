@@ -28,7 +28,7 @@ public class MainActivity extends Activity {
     private Wrap checks;
     private Button connect;
     private int connectionColor;
-    private String checksKey = "", connectedId;
+    private String checksKey = "", liveProfileId;
     private JSONObject observations;
     /** Connection state palette. Amber is reserved for real warnings. */
     static final int IDLE = Color.rgb(107, 122, 140), BUSY = Color.rgb(77, 163, 255), ON = Color.rgb(43, 184, 154),
@@ -44,14 +44,15 @@ public class MainActivity extends Activity {
                 boolean problem = !TunnelService.problem.isEmpty(), running = nativeState == 2 && !problem;
                 observations = running ? ObservationStatus.snapshot(state.optJSONObject("observations")) : null;
                 int level = running ? ObservationStatus.level(observations) : ObservationStatus.RUNNING;
+                JSONObject recovery = state.optJSONObject("recovery");
+                int backup = recovery == null ? 0 : recovery.optInt("selected_index");
                 String headline, detail = "";
                 if (problem) { headline = getString(R.string.state_problem); detail = TunnelService.problem; }
                 else if (nativeState == 4) { headline = getString(R.string.state_problem); detail = getString(R.string.connection_failed); }
                 else if (running) {
                     headline = getString(level == ObservationStatus.VERIFIED ? R.string.state_verified : level == ObservationStatus.WARNING ? R.string.state_warning : R.string.connected);
                     detail = getString(R.string.state_details_hint);
-                    JSONObject recovery = state.optJSONObject("recovery");
-                    if (recovery != null && recovery.optInt("selected_index") > 0) detail = getString(R.string.recovery_backup_active, recovery.optInt("selected_index"));
+                    if (backup > 0) detail = getString(R.string.recovery_backup_active, backup);
                 }
                 else if (nativeState == 1) headline = getString(R.string.connecting);
                 else if (nativeState == 3) headline = getString(R.string.reconnecting);
@@ -66,10 +67,13 @@ public class MainActivity extends Activity {
                 if (running && level == ObservationStatus.VERIFIED) color = VERIFIED;
                 if (running && level == ObservationStatus.WARNING) color = WARNING;
                 paintConnection(color, TunnelService.active);
-                if (!java.util.Objects.equals(TunnelService.connectedProfileId(), connectedId)) reload();
+                // Only a connected primary earns the badge: not while connecting, failing or on a backup.
+                String live = badgeProfile(running, backup, TunnelService.connectedProfileId());
+                if (!java.util.Objects.equals(live, liveProfileId)) { liveProfileId = live; reload(); }
             } catch (Exception ignored) {
                 paintConnection(connectionColor(false, 0, true), TunnelService.active);
                 observations = null; showChecks(null);
+                if (liveProfileId != null) { liveProfileId = null; reload(); }
                 setText(status, getString(R.string.vpn_status_unavailable)); statusDetail.setVisibility(View.GONE);
             }
             handler.postDelayed(this, 500);
@@ -210,6 +214,8 @@ public class MainActivity extends Activity {
         }
         checks.setVisibility(checks.getChildCount() == 0 ? View.GONE : View.VISIBLE);
     }
+    /** The profile marked connected: only a connected primary, never while connecting, failing or on a backup. */
+    static String badgeProfile(boolean connected, int backup, String requested) { return connected && backup == 0 ? requested : null; }
     private static void setText(TextView view, String text) { if (!view.getText().toString().equals(text)) view.setText(text); }
     /** Left-to-right rows that wrap, for chips on narrow phones. */
     static final class Wrap extends ViewGroup {
@@ -320,7 +326,6 @@ public class MainActivity extends Activity {
     private void error(String message) { new AlertDialog.Builder(this).setTitle("R-TrustTunnel").setMessage(message).setPositiveButton("OK", null).show(); }
     private void reload() {
         rows.removeAllViews();
-        connectedId = TunnelService.connectedProfileId(); // before any failure, so polling cannot repeat it
         try {
             JSONObject data = vault.read(); JSONArray profiles = data.getJSONArray("profiles");
             AppRouting selection = AppRouting.read(data);
@@ -329,7 +334,7 @@ public class MainActivity extends Activity {
             for (int i = 0; i < profiles.length(); i++) if (profiles.getJSONObject(i).getString("id").equals(selectedId)) found = true;
             if (!found) selectedId = data.optString("default");
             selectedProfile.setText(R.string.no_selected_profile);
-            String connected = connectedId;
+            String connected = liveProfileId;
             String shown = connected != null ? connected : selectedId;
             selectedProfileLabel.setText(connected != null ? R.string.connected_profile_label : R.string.selected_profile_label);
             profilesHeader.setText(getString(R.string.profiles_header, profiles.length()));

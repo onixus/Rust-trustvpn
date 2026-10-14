@@ -38,7 +38,7 @@ do not disable that protection or publish real profiles to create documentation.
 - Menus (Add profile, Settings, profile actions, export formats, portal) open as
   app-styled bottom sheets with icons and one-line explanations, not system list
   dialogs. Settings group Connection, Diagnostics and Server entries. The profile that
-  is actually connected carries a "connected" badge.
+  is connected (state connected, primary, not a backup) carries a "connected" badge.
 - Device-local app routing: all apps (default), or only selected installed apps,
   with searchable selection stored in the encrypted vault. Unselected apps use
   their normal network, or lose connectivity under system lockdown. Disconnect before editing the selection; reconnect to apply.

@@ -81,6 +81,8 @@ final class AppRoutingAcceptance {
         check(MainActivity.connectionColor(true, 2, false) != MainActivity.WARNING, "A running tunnel is not shown as a warning");
         check(VpnWidget.button(R.string.connected) == R.drawable.widget_button_on && VpnWidget.button(R.string.connecting) == R.drawable.widget_button_busy
             && VpnWidget.button(R.string.disconnected) == R.drawable.widget_button_off, "Widget separates off, connecting and running");
+        check("p".equals(MainActivity.badgeProfile(true, 0, "p")) && MainActivity.badgeProfile(false, 0, "p") == null
+            && MainActivity.badgeProfile(true, 1, "p") == null, "Connected badge only on a connected primary");
         long now = System.currentTimeMillis();
         JSONObject passed = new JSONObject().put("outcome", "passed").put("observed_at_ms", now).put("valid_for_ms", 5000);
         JSONObject checks = new JSONObject().put("schema", 2);
