@@ -19,17 +19,26 @@ This branding build has not been installed on a physical phone; the preceding
 
 The default profile appears at the top, with Connect/Disconnect at the bottom.
 **+ Add profile** groups file, pasted configuration/link and QR import.
-**Settings** contains Server profiles and the entry to system Always-on controls.
+**Settings** groups Always-on, backup profiles and traffic metering, the live
+diagnostics (path check, flow observation, session rules) and Server profiles.
+The **⋮** on a profile opens default-for-widget, backups, export and delete.
 **VPN apps** remains on the home screen. English/Russian labels follow the system
 locale. Screenshots are blocked by `FLAG_SECURE` in the released Android app;
 do not disable that protection or publish real profiles to create documentation.
 
 ## Implemented
 
-- A bottom-anchored Connect/Disconnect button: blue when off, amber while the tunnel
-  is starting or running (lifecycle is not verified availability, so never green) and
-  red on error. Status text remains visible. The home-screen widget button uses the
-  same colours, so the state is visible on a 1×1 widget without text.
+- A status card with a short state, a coloured dot and one chip per check that has a
+  result. Grey is off, blue is connecting, teal is a running transport (lifecycle is not
+  verified availability, so not green), green only when every check passed and is fresh,
+  amber only when a check failed, and red on error. Tapping the card lists every check
+  with its outcome. The bottom Connect/Disconnect button shows the next action: filled
+  blue to connect, outlined to disconnect. The home-screen widget button uses the state
+  colours (grey, blue, teal, red), so the state is visible on a 1×1 widget without text.
+- Menus (Add profile, Settings, profile actions, export formats, portal) open as
+  app-styled bottom sheets with icons and one-line explanations, not system list
+  dialogs. Settings group Connection, Diagnostics and Server entries. The profile that
+  is actually connected carries a "connected" badge.
 - Device-local app routing: all apps (default), or only selected installed apps,
   with searchable selection stored in the encrypted vault. Unselected apps use
   their normal network, or lose connectivity under system lockdown. Disconnect before editing the selection; reconnect to apply.

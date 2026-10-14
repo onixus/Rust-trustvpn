@@ -29,13 +29,14 @@ public final class VpnWidget extends AppWidgetProvider {
 
     /**
      * The 1×1 layout has no room for text, so the button colour carries the
-     * state, in MainActivity.connectionColor's palette: a running tunnel is
-     * amber, never green, because lifecycle is not verified availability.
+     * state, in MainActivity.connectionColor's palette: grey off, blue while
+     * connecting, teal while running (never green: lifecycle is not verified
+     * availability, and amber would read as a warning) and red on error.
      */
     static int button(int status) {
         if (status == R.string.disconnected) return R.drawable.widget_button_off;
-        if (status == R.string.connected || status == R.string.connecting
-            || status == R.string.reconnecting) return R.drawable.widget_button_on;
+        if (status == R.string.connected) return R.drawable.widget_button_on;
+        if (status == R.string.connecting || status == R.string.reconnecting) return R.drawable.widget_button_busy;
         return R.drawable.widget_button_error;
     }
 

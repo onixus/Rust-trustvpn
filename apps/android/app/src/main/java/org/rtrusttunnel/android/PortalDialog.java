@@ -37,19 +37,19 @@ final class PortalDialog {
         try {
             JSONObject session = vault.read().optJSONObject("portal");
             if (session == null) { enroll(); return; }
-            new AlertDialog.Builder(activity).setTitle(session.getString("origin"))
-                .setItems(new String[]{activity.getString(R.string.portal_sync), activity.getString(R.string.portal_upload), activity.getString(R.string.portal_forget), activity.getString(R.string.portal_background),activity.getString(R.string.portal_renew)}, (d, choice) -> {
-                    if (choice == 0) sync(session);
-                    if (choice == 1) upload(session);
-                    if (choice == 2) new AlertDialog.Builder(activity).setMessage(R.string.portal_forget_warning).setNegativeButton(android.R.string.cancel, null)
-                        .setPositiveButton(R.string.portal_forget, (a,b) -> { try { if (TunnelService.active) throw new IllegalStateException(); vault.forgetPortal(); PortalSyncWorker.schedule(activity); saved.run(); } catch (Exception e) { error(activity.getString(R.string.portal_disconnect)); } }).show();
-                    if (choice == 3) backgroundSettings(session);
-                    if (choice == 4) background(session,() -> {
-                        long deadline=client(session).renewAccess();
-                        vault.renewPortalAccess(session,deadline);
-                        activity.runOnUiThread(() -> error(activity.getString(R.string.portal_renewed)));
-                    });
-                }).show();
+            new Sheet(activity, activity.getString(R.string.portal_title), session.getString("origin"))
+                .item(R.drawable.ic_sync, activity.getString(R.string.portal_sync), activity.getString(R.string.portal_sync_detail), () -> sync(session))
+                .item(R.drawable.ic_upload, activity.getString(R.string.portal_upload), activity.getString(R.string.portal_upload_detail), () -> upload(session))
+                .item(R.drawable.ic_schedule, activity.getString(R.string.portal_background), activity.getString(R.string.portal_background_detail), () -> backgroundSettings(session))
+                .item(R.drawable.ic_restore, activity.getString(R.string.portal_renew), activity.getString(R.string.portal_renew_detail), () -> background(session,() -> {
+                    long deadline=client(session).renewAccess();
+                    vault.renewPortalAccess(session,deadline);
+                    activity.runOnUiThread(() -> error(activity.getString(R.string.portal_renewed)));
+                }))
+                .danger(R.drawable.ic_logout, activity.getString(R.string.portal_forget), activity.getString(R.string.portal_forget_detail), () ->
+                    new AlertDialog.Builder(activity).setMessage(R.string.portal_forget_warning).setNegativeButton(android.R.string.cancel, null)
+                        .setPositiveButton(R.string.portal_forget, (a,b) -> { try { if (TunnelService.active) throw new IllegalStateException(); vault.forgetPortal(); PortalSyncWorker.schedule(activity); saved.run(); } catch (Exception e) { error(activity.getString(R.string.portal_disconnect)); } }).show())
+                .show();
         } catch (Exception e) { error(activity.getString(R.string.portal_failed)); }
     }
     void backgroundSettings(JSONObject session) {
@@ -113,14 +113,16 @@ final class PortalDialog {
         try {
             JSONArray profiles = vault.read().getJSONArray("profiles"); String[] names = new String[profiles.length()];
             for (int i = 0; i < names.length; i++) names[i] = profiles.getJSONObject(i).getJSONObject("profile").optString("name", "Profile");
-            new AlertDialog.Builder(activity).setTitle(R.string.portal_upload).setItems(names, (d,index) -> {
+            Sheet sheet = new Sheet(activity, activity.getString(R.string.portal_upload), activity.getString(R.string.portal_upload_detail));
+            for (int item = 0; item < names.length; item++) { final int index = item; sheet.item(R.drawable.ic_upload, names[index], null, () -> {
                 new AlertDialog.Builder(activity).setMessage(R.string.portal_upload_warning).setNegativeButton(android.R.string.cancel, null).setPositiveButton(R.string.portal_upload, (a,b) -> background(session,() -> {
                     PortalClient client = client(session);
                     JSONObject preview = client.request("/portal/v2/profile-imports/preview", new JSONObject().put("intent", "external_stored").put("content", profiles.getJSONObject(index).getJSONObject("profile").toString()));
                     client.request("/portal/v2/profile-imports/" + PortalClient.id(preview.getString("preview_id")) + "/commit", new JSONObject().put("action", "create").put("consent", true));
                     activity.runOnUiThread(() -> error(activity.getString(R.string.portal_uploaded)));
                 })).show();
-            }).show();
+            }); }
+            sheet.show();
         } catch (Exception e) { error(activity.getString(R.string.portal_failed)); }
     }
 }

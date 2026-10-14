@@ -9,4 +9,13 @@
     <color name="accent">#4DA3FF</color>
     <color name="accent_soft">#1E3A5A</color>
     <color name="ripple">#33FFFFFF</color>
+    <!-- Connection state. Amber is reserved for real warnings; a running tunnel is
+         teal, and only fresh passed checks earn green. -->
+    <color name="state_idle">#6B7A8C</color>
+    <color name="state_busy">#4DA3FF</color>
+    <color name="state_on">#2BB89A</color>
+    <color name="state_verified">#3DD68C</color>
+    <color name="state_warning">#E0A526</color>
+    <color name="state_error">#E5484D</color>
+    <color name="danger">#FF7A7E</color>
 </resources>

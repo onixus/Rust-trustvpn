@@ -78,6 +78,19 @@ final class AppRoutingAcceptance {
         check(MainActivity.connectionColor(true, 2, false) != MainActivity.connectionColor(false, 0, false), "Connected color differs from disconnected");
         check(MainActivity.connectionColor(true, 1, false) == MainActivity.connectionColor(true, 3, false), "Connect/reconnect color");
         check(MainActivity.connectionColor(false, 0, true) == MainActivity.connectionColor(true, 4, false), "Service and core errors use error color");
+        check(MainActivity.connectionColor(true, 2, false) != MainActivity.WARNING, "A running tunnel is not shown as a warning");
+        check(VpnWidget.button(R.string.connected) == R.drawable.widget_button_on && VpnWidget.button(R.string.connecting) == R.drawable.widget_button_busy
+            && VpnWidget.button(R.string.disconnected) == R.drawable.widget_button_off, "Widget separates off, connecting and running");
+        long now = System.currentTimeMillis();
+        JSONObject passed = new JSONObject().put("outcome", "passed").put("observed_at_ms", now).put("valid_for_ms", 5000);
+        JSONObject checks = new JSONObject().put("schema", 2);
+        for (String key : ObservationStatus.KEYS) checks.put(key, passed);
+        check(ObservationStatus.level(checks) == ObservationStatus.VERIFIED, "Fresh passed checks are verified");
+        checks.put("dns", new JSONObject().put("outcome", "failed"));
+        check(ObservationStatus.level(checks) == ObservationStatus.WARNING, "A failed check is a warning");
+        checks.put("dns", new JSONObject().put("outcome", "passed").put("observed_at_ms", now - 60000).put("valid_for_ms", 5000));
+        check(ObservationStatus.level(checks) == ObservationStatus.RUNNING, "A stale pass is not verified");
+        check(ObservationStatus.level(new JSONObject().put("schema", 2).put("transport", new JSONObject().put("outcome", "configured").put("observed_at_ms", now).put("valid_for_ms", 5000))) == ObservationStatus.RUNNING, "Transport alone is running, not verified");
         Activity activity = test.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         try {
             test.runOnMainSync(() -> {
