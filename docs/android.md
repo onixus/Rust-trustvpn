@@ -17,19 +17,53 @@ This branding build has not been installed on a physical phone; the preceding
 
 ## Navigation
 
-The default profile appears at the top, with Connect/Disconnect at the bottom.
-**+ Add profile** groups file, pasted configuration/link and QR import.
-**Settings** contains Server profiles and the entry to system Always-on controls.
-**VPN apps** remains on the home screen. English/Russian labels follow the system
-locale. Screenshots are blocked by `FLAG_SECURE` in the released Android app;
-do not disable that protection or publish real profiles to create documentation.
+One activity hosts five screens with its own back stack (Back goes through `OnBackInvokedCallback` where the system uses it, Android 16 for this target SDK):
+
+- **Home**: a large two-line state headline, a plain-language description, the five
+  checks, a horizontal strip of profiles (selected first, then its backups) and a
+  slide-to-connect/disconnect control at the bottom. A tap only nudges the knob, so a
+  pocket tap cannot change the tunnel; TalkBack activates it directly.
+- **Unfolded foldables and tablets** (window shorter side ≥ 600 dp): Home splits into
+  two halves, state with the five checks and profiles with the slider. On a book-style
+  foldable (hinge-angle sensor) the halves follow the fold: side by side in its natural
+  orientation, stacked when turned by 90 degrees; the border sits on the screen's middle
+  with a 12 dp margin each side. Tablets without a hinge stack the halves. Folding
+  recreates the activity and restores the single column. The exact hinge bounds are not
+  read (no WindowManager dependency), so a fold away from the middle is not followed.
+- **Profiles**: search, protocol badges, server/device and backup tags, the widget
+  star and a ⋮ menu (widget default, backups, export, delete).
+- **New profile**: QR camera, QR from an image, file, an inline link/text field that
+  always opens the import preview, and server enrollment.
+- **Checks**: each check with its outcome and what it covers, plus the path check,
+  flow observation and session rules.
+- **Actions**: search over every action and profile, and tiles that show the current
+  value of VPN apps, Always-on, server, traffic metering and theme.
+
+English/Russian labels follow the system locale. Screenshots are blocked by
+`FLAG_SECURE` in the released Android app; do not disable that protection or
+publish real profiles to create documentation.
 
 ## Implemented
 
-- A bottom-anchored Connect/Disconnect button: blue when off, amber while the tunnel
-  is starting or running (lifecycle is not verified availability, so never green) and
-  red on error. Status text remains visible. The home-screen widget button uses the
-  same colours, so the state is visible on a 1×1 widget without text.
+- State colours, shared by the headline, the slider knob, the checks and the widget:
+  grey off, a blue ring while connecting, solid blue for a running transport (lifecycle
+  is not verified availability, so not green), green only when all five checks passed
+  and are fresh, yellow only when a check failed, and red on error.
+- Dark theme and a light "frosted glass" theme (translucent cards over soft colour
+  blobs), following the system or chosen under Actions → Theme. Dialogs follow the
+  theme. Without a backdrop blur API before Android 12 the glass is simulated.
+- Automatic path checks (Android 12+): on connect, on every app open, after a session or
+  network change and every five minutes while the app is open, the app resolves
+  `connectivitycheck.gstatic.com` and sends one HTTPS `HEAD` to it, only through its own
+  VPN network, never directly. "Route" reports that Android's VPN routing table sends the
+  test address into the VPN (configuration, not packet attestation); a split-tunnel
+  profile that keeps it outside is shown as such, not as a failure. Green needs route,
+  DNS and HTTPS access passed within the last five minutes; a timeout counts as no
+  access. The guard row reports system Always-on with blocking and is not required for
+  green. Checks are off when the app excludes itself from VPN apps, and below Android 12.
+- Menus (profile actions, export formats, portal, metering, theme) open as app-styled
+  bottom sheets with icons and one-line explanations. A profile is marked running only
+  while its primary tunnel is connected, never while connecting, failing or on a backup.
 - Device-local app routing: all apps (default), or only selected installed apps,
   with searchable selection stored in the encrypted vault. Unselected apps use
   their normal network, or lose connectivity under system lockdown. Disconnect before editing the selection; reconnect to apply.

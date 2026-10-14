@@ -11,7 +11,16 @@ import org.json.JSONObject;
 
 /** Rendering only: the Rust core supplies all decisions and reason codes. */
 final class ObservationStatus {
-    private static String label(Context context, JSONObject observation) {
+    static final String[] KEYS = {"transport", "route", "dns", "guard", "connectivity"};
+    static final int[] NAMES = {R.string.check_transport, R.string.check_route, R.string.check_dns, R.string.check_guard, R.string.check_connectivity};
+    /** Overall level of a running tunnel. Only every check passed and fresh is VERIFIED. */
+    static final int RUNNING = 0, VERIFIED = 1, WARNING = 2;
+
+    static JSONObject snapshot(JSONObject snapshot) {
+        return snapshot == null || snapshot.optInt("schema") != 2 ? new JSONObject() : snapshot;
+    }
+    /** Normalised outcome: passed or configured results become stale after their TTL. */
+    static String outcome(JSONObject observation) {
         String outcome = observation == null ? "unknown" : observation.optString("outcome", "unknown");
         if (outcome.equals("passed") || outcome.equals("configured")) {
             long time = observation.optLong("observed_at_ms", -1);
@@ -19,6 +28,20 @@ final class ObservationStatus {
             long ttl = Math.min(6000, observation.optLong("valid_for_ms", 0));
             if (time < 0 || now < time || now - time > ttl) outcome = "stale";
         }
+        return outcome;
+    }
+    static int level(JSONObject snapshot) {
+        snapshot = snapshot(snapshot);
+        boolean verified = true;
+        for (String key : KEYS) {
+            String outcome = outcome(snapshot.optJSONObject(key));
+            if (outcome.equals("failed")) return WARNING;
+            if (!outcome.equals("passed")) verified = false;
+        }
+        return verified ? VERIFIED : RUNNING;
+    }
+    static String label(Context context, JSONObject observation) { return label(context, outcome(observation)); }
+    static String label(Context context, String outcome) {
         int id;
         switch (outcome) {
             case "passed": id = R.string.observation_passed; break;

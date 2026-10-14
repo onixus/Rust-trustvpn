@@ -298,6 +298,10 @@ final class NetworkAcceptance {
             check(v6Blocked, "IPv6 cannot bypass an IPv4-only VPN");
             context.startService(new Intent(context, TunnelService.class).setAction(TunnelService.STOP));
             await(0, 10000);
+            // The core reports 0 before the old service finishes cleanup. A start sent to
+            // that stopping instance is ignored, and its stopSelf() then drops the start.
+            for (int i = 0; i < 100 && TunnelService.active; i++) Thread.sleep(100);
+            check(!TunnelService.active, "IPv4-only VPN stopped");
             Thread.sleep(300);
             JSONObject unavailable = vault.read();
             unavailable.getJSONArray("profiles").getJSONObject(0).getJSONObject("profile").getJSONObject("endpoint")

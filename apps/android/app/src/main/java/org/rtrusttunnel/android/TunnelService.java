@@ -153,6 +153,9 @@ public final class TunnelService extends VpnService {
     private String adapterKey="";
     private boolean meteringInherited;
     private int boot;
+    /** Primary profile requested by the running service, for display only; null when stopped.
+     *  It is set before the tunnel connects, so callers must also check the connection state. */
+    static String connectedProfileId(){TunnelService s=running;return s!=null && active?s.requestedId:null;}
     static boolean accessBlocked(){TunnelService s=running;return s!=null && s.accessHeld;}
     static Network portalRecoveryNetwork(){TunnelService s=running;return s!=null && s.accessHeld && !s.stopping?s.underlying:null;}
     static void recoverySettingsChanged(){TunnelService s=running;if(s!=null)synchronized(s.networkEvents){s.logicalSession=System.nanoTime() & Long.MAX_VALUE;s.networkEpoch++;s.transitioning=true;s.requestRefresh();}}
