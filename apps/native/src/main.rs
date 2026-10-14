@@ -1888,11 +1888,12 @@ impl App {
         {
             let age =
                 rtrust_control::observations::now_ms().saturating_sub(report.finished_at_ms) / 1000;
+            // The full DNS/route/HTTPS breakdown lives on the checks page; a
+            // multi-line status here squeezed the scrolling content away.
             return format!(
-                "Последняя проверка ({} с назад): {} {}",
+                "Последняя проверка ({} с назад): {} Подробности — в разделе «Проверки».",
                 age,
-                report.verdict_text(),
-                report.summary()
+                report.verdict_text()
             );
         }
         "Транспорт запущен. Проверка системного пути ожидается.".into()

@@ -5,6 +5,7 @@ use super::*;
 use iced::widget::{Space, column};
 use rtrust_control::observations::{
     FRESH_MS, Mode as ObservationMode, Observation, Outcome, Reason as ObservationReason, Snapshot,
+    Source,
 };
 
 // ---------------------------------------------------------------- language
@@ -139,6 +140,32 @@ const fn rgb(hex: u32) -> Color {
 const fn rgba(hex: u32, alpha: f32) -> Color {
     Color::from_rgba8((hex >> 16) as u8, (hex >> 8) as u8, hex as u8, alpha)
 }
+/// `fg` at `alpha` over an opaque `base`, as one opaque colour (see `frost`).
+fn over(fg: Color, alpha: f32, base: Color) -> Color {
+    let mix = |f: f32, b: f32| f * alpha + b * (1.0 - alpha);
+    Color::from_rgb(mix(fg.r, base.r), mix(fg.g, base.g), mix(fg.b, base.b))
+}
+const LIGHT_BG: u32 = 0xE8EDF5;
+/// Frosted fill of the light theme. Only macOS (wgpu, real glass) keeps the
+/// alpha: tiny-skia's partial redraws re-blend translucent quads over the
+/// previous frame, so elsewhere the colour is pre-composited over the background.
+#[cfg(target_os = "macos")]
+const fn frost(hex: u32, alpha: f32) -> Color {
+    rgba(hex, alpha)
+}
+#[cfg(not(target_os = "macos"))]
+const fn frost(hex: u32, alpha: f32) -> Color {
+    const fn mix(fg: u32, bg: u32, shift: u32, alpha: f32) -> u8 {
+        let fg = ((fg >> shift) & 0xFF) as f32;
+        let bg = ((bg >> shift) & 0xFF) as f32;
+        (fg * alpha + bg * (1.0 - alpha) + 0.5) as u8
+    }
+    Color::from_rgb8(
+        mix(hex, LIGHT_BG, 16, alpha),
+        mix(hex, LIGHT_BG, 8, alpha),
+        mix(hex, LIGHT_BG, 0, alpha),
+    )
+}
 /// Colours of Android variant 3 (Palette.java); light is the "frosted" look.
 #[derive(Clone, Copy)]
 pub(super) struct Tokens {
@@ -195,17 +222,21 @@ pub(super) const DARK_TOKENS: Tokens = Tokens {
 };
 pub(super) const LIGHT_TOKENS: Tokens = Tokens {
     dark: false,
-    bg: rgb(0xE8EDF5),
+    bg: rgb(LIGHT_BG),
     text: rgb(0x0E1726),
     muted: rgb(0x4A566B),
-    card: rgba(0xFFFFFF, 0.55),
+    card: frost(0xFFFFFF, 0.55),
+    #[cfg(target_os = "macos")]
     stroke: rgba(0xFFFFFF, 0.85),
-    chip: rgba(0xFFFFFF, 0.6),
-    field: rgba(0xFFFFFF, 0.8),
-    rule: rgba(0x0E1726, 0.08),
+    // Without glass and shadows the card edge itself has to carry the outline.
+    #[cfg(not(target_os = "macos"))]
+    stroke: rgb(0xD3DAE5),
+    chip: frost(0xFFFFFF, 0.6),
+    field: frost(0xFFFFFF, 0.8),
+    rule: frost(0x0E1726, 0.08),
     empty: rgb(0x8C97A8),
-    side: rgba(0xFFFFFF, 0.4),
-    nav_active: rgba(0xFFFFFF, 0.85),
+    side: frost(0xFFFFFF, 0.4),
+    nav_active: frost(0xFFFFFF, 0.85),
     link: rgb(0x1F6FE0),
     blue: rgb(0x1F6FE0),
     on_blue: rgb(0xFFFFFF),
@@ -215,9 +246,9 @@ pub(super) const LIGHT_TOKENS: Tokens = Tokens {
     orange: rgb(0x9A4A0C),
     orange_soft: rgb(0xFFE6D3),
     warn: rgb(0x8F6200),
-    warn_soft: rgba(0xE0A526, 0.18),
+    warn_soft: frost(0xE0A526, 0.18),
     danger: rgb(0xC2272D),
-    danger_soft: rgba(0xE5484D, 0.14),
+    danger_soft: frost(0xE5484D, 0.14),
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Hue {
@@ -425,12 +456,67 @@ impl Check {
         }
     }
 }
+/// The app's own system path check repeats every 30 s; its result stays fresh
+/// until shortly after the next run is due.
+pub(super) const PROBE_FRESH_MS: u64 = 40_000;
+/// Fold the app's own path check (one destination: route to the VPN interface,
+/// then HTTPS through it) into the service snapshot it was taken against.
+/// DNS and the guard are not inferred: a system lookup does not prove the DNS
+/// path and the check never tests the firewall.
+pub(super) fn apply_probe(snapshot: &mut Snapshot, report: &rtrust_desktop::diagnostics::Report) {
+    use rtrust_desktop::diagnostics::Fact;
+    if report.finished_at_ms == 0 || report.lifecycle.generation != snapshot.generation {
+        return;
+    }
+    let probe = |outcome| Observation {
+        outcome,
+        source: Source::SystemProbe,
+        observed_at_ms: Some(report.finished_at_ms),
+        valid_for_ms: PROBE_FRESH_MS,
+        mode: snapshot.transport.mode,
+        reason: ObservationReason::NotChecked,
+    };
+    // Service evidence wins; the probe only fills checks the service left open.
+    let open = |o: &Observation| {
+        o.source != Source::SystemProbe
+            && matches!(
+                o.outcome,
+                Outcome::Unknown | Outcome::Stale | Outcome::Configured
+            )
+    };
+    let route = match report.route {
+        Fact::Passed => Some(Outcome::Passed),
+        Fact::RouteMismatch => Some(Outcome::Failed),
+        _ => None,
+    };
+    if let Some(outcome) = route.filter(|_| open(&snapshot.route)) {
+        snapshot.route = probe(outcome);
+    }
+    // HTTPS is sent only after the route was confirmed, so any result is about the tunnel.
+    let connectivity = match report.https {
+        Fact::Passed => Some(Outcome::Passed),
+        Fact::Failed | Fact::Timeout | Fact::ConnectionFailed | Fact::TlsFailed => {
+            Some(Outcome::Failed)
+        }
+        _ => None,
+    };
+    if let Some(outcome) = connectivity.filter(|_| open(&snapshot.connectivity)) {
+        let generation = snapshot.generation;
+        let observation = probe(outcome);
+        snapshot.apply_connectivity(generation, observation);
+    }
+}
 /// Passed and configured results expire after their TTL (at most FRESH_MS),
 /// exactly as Android ObservationStatus normalises them.
 pub(super) fn normalized(observation: &Observation, now: u64) -> Outcome {
     match observation.outcome {
         Outcome::Passed | Outcome::Configured => {
-            let ttl = observation.valid_for_ms.min(FRESH_MS);
+            let cap = if observation.source == Source::SystemProbe {
+                PROBE_FRESH_MS
+            } else {
+                FRESH_MS
+            };
+            let ttl = observation.valid_for_ms.min(cap);
             match observation.observed_at_ms {
                 Some(time) if now >= time && now - time <= ttl => observation.outcome,
                 _ => Outcome::Stale,
@@ -649,8 +735,10 @@ fn card<'a>(
         })
 }
 /// Light theme cards float on a soft shadow; dark cards rely on their stroke.
+/// tiny-skia (Windows, Linux) leaves stale pixels of blurred shadows behind:
+/// its damage tracking covers only the quad, not the shadow around it.
 fn lift(tk: Tokens) -> iced::Shadow {
-    if tk.dark {
+    if tk.dark || cfg!(not(target_os = "macos")) {
         iced::Shadow::default()
     } else {
         iced::Shadow {
@@ -747,12 +835,7 @@ pub(super) fn pill_style(tk: Tokens, kind: Kind, status: buttons::Status) -> but
     };
     let disabled = matches!(status, buttons::Status::Disabled);
     let hovered = matches!(status, buttons::Status::Hovered | buttons::Status::Pressed);
-    let background = background.map(|mut c| {
-        if disabled {
-            c.a *= 0.5;
-        }
-        c
-    });
+    let background = background.map(|c| if disabled { over(c, 0.5, tk.bg) } else { c });
     let background = match (background, hovered) {
         (None, true) => Some(tk.chip),
         (b, _) => b,
@@ -773,7 +856,7 @@ pub(super) fn pill_style(tk: Tokens, kind: Kind, status: buttons::Status) -> but
             } else if tk.dark {
                 tk.stroke
             } else {
-                rgba(0x0E1726, 0.14)
+                over(tk.text, 0.14, tk.bg)
             },
             width: if matches!(kind, Kind::Chip) { 1.0 } else { 0.0 },
             radius: 22.0.into(),
@@ -892,7 +975,12 @@ impl App {
         }
         let now = rtrust_control::observations::now_ms();
         if let Some(session) = &self.session {
-            let snapshot = session.observations();
+            let mut snapshot = session.observations();
+            if let Some((epoch, report)) = &self.diagnostic_report
+                && *epoch == self.connection_epoch
+            {
+                apply_probe(&mut snapshot, report);
+            }
             return (tunnel_level(&snapshot, now), Some(snapshot));
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -1012,8 +1100,23 @@ impl App {
                                 }
                             })
                             .unwrap_or_default();
+                        let probe = t(
+                            "Системная проверка одного адреса.",
+                            "System check of one address.",
+                        );
                         match normalized(o, now) {
                             Outcome::Unknown => reason_text(o.reason).to_owned(),
+                            Outcome::Failed if o.source == Source::SystemProbe => format!(
+                                "{}{age}",
+                                t(
+                                    "Системная проверка одного адреса не прошла; подробности — в последней проверке пути.",
+                                    "The system check of one address failed; see the last path check.",
+                                )
+                            ),
+                            _ if o.source == Source::SystemProbe => format!(
+                                "{} {probe}{age}",
+                                check.meaning(s.transport.mode)
+                            ),
                             _ => format!(
                                 "{} {}{age}",
                                 check.meaning(s.transport.mode),
@@ -2244,10 +2347,7 @@ impl App {
             .unwrap_or_default();
         let header = row![
             soft(
-                Color {
-                    a: 0.15,
-                    ..hue.fill(tk.dark)
-                },
+                over(hue.fill(tk.dark), 0.15, tk.bg),
                 14.0,
                 row![
                     dot(
@@ -2355,7 +2455,7 @@ impl App {
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
-                muted(tk, t("Системное разрешение имени и один HEAD-запрос HTTPS:443, только если маршрут идёт на интерфейс RTrustTunnel. Без proxy среды, перенаправлений и прямого сравнения. Запускается при подключении TUN и повторяется каждые 30 секунд. Windows пока не поддерживается.", "System name resolution and one HTTPS:443 HEAD request, sent only if the route goes to the RTrustTunnel interface. No environment proxy, redirects or direct comparison. Runs when TUN connects and repeats every 30 seconds. Not supported on Windows yet.")),
+                muted(tk, t("Системное разрешение имени и один HEAD-запрос HTTPS:443, только если маршрут идёт на интерфейс RTrustTunnel. Без proxy среды, перенаправлений и прямого сравнения. Запускается при подключении TUN и повторяется каждые 30 секунд.", "System name resolution and one HTTPS:443 HEAD request, sent only if the route goes to the RTrustTunnel interface. No environment proxy, redirects or direct comparison. Runs when TUN connects and repeats every 30 seconds.")),
             ]
             .spacing(10),
         );
@@ -2600,7 +2700,7 @@ pub(super) fn native_window(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rtrust_control::observations::{Mode as ObsMode, Monitor, Source};
+    use rtrust_control::observations::{Mode as ObsMode, Monitor, Source, now_ms};
     fn passed(now: u64) -> Observation {
         Observation {
             outcome: Outcome::Passed,
@@ -2624,6 +2724,56 @@ mod tests {
             *o = passed(now);
         }
         s
+    }
+    #[test]
+    fn path_check_fills_route_and_connectivity_only_for_its_session() {
+        use rtrust_desktop::diagnostics::{Fact, Report};
+        let mut service = Snapshot::unknown(ObsMode::Split);
+        service.transport = Observation {
+            mode: ObsMode::Split,
+            ..passed(now_ms())
+        };
+        let mut report = Report::new(service.clone());
+        report.route = Fact::Passed;
+        report.https = Fact::Passed;
+        report.dns = Fact::Passed;
+        // Not finished yet: nothing to show.
+        let mut shown = service.clone();
+        apply_probe(&mut shown, &report);
+        assert_eq!(shown, service);
+        report.finished_at_ms = now_ms();
+        apply_probe(&mut shown, &report);
+        let now = now_ms();
+        assert_eq!(normalized(&shown.route, now), Outcome::Passed);
+        assert_eq!(normalized(&shown.connectivity, now), Outcome::Passed);
+        // A system lookup is not DNS-path evidence, and the guard is never probed.
+        assert_eq!(shown.dns.outcome, Outcome::Unknown);
+        assert_eq!(shown.guard.outcome, Outcome::Unknown);
+        // Probe results outlive the 6 s service TTL until the next 30 s run is overdue.
+        assert_eq!(normalized(&shown.route, now + 20_000), Outcome::Passed);
+        assert_eq!(
+            normalized(&shown.route, now + PROBE_FRESH_MS + 1),
+            Outcome::Stale
+        );
+        // A report from an earlier generation is ignored.
+        let mut later = service.clone();
+        later.generation += 1;
+        let before = later.clone();
+        apply_probe(&mut later, &report);
+        assert_eq!(later, before);
+        // A route outside the VPN is a failure; service evidence is never overwritten.
+        report.route = Fact::RouteMismatch;
+        report.https = Fact::NotChecked;
+        let mut shown = service.clone();
+        shown.connectivity = Observation {
+            outcome: Outcome::Failed,
+            source: Source::ServiceLifecycle,
+            ..shown.connectivity
+        };
+        apply_probe(&mut shown, &report);
+        assert_eq!(shown.route.outcome, Outcome::Failed);
+        assert_eq!(shown.connectivity.source, Source::ServiceLifecycle);
+        assert_eq!(tunnel_level(&shown, now), Level::Warning);
     }
     #[test]
     fn green_only_when_every_check_passed_and_is_fresh() {
