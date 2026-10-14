@@ -230,7 +230,7 @@
         <item quantity="other">%1$d more profiles</item>
     </plurals>
     <string name="v3_running_unchecked_desc">The tunnel is up, but the checks have not run yet. Open Checks to run them.</string>
-    <string name="v3_guard_off_note"> Blocking without VPN is off.</string>
+    <string name="v3_guard_off_note">Blocking without VPN is off.</string>
     <string name="v3_just_now">just now</string>
     <string name="v3_minutes_ago">%1$d min ago</string>
     <string name="v3_checking">checking…</string>

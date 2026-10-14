@@ -380,7 +380,7 @@ public class MainActivity extends Activity {
                 case S_ERROR: text = problemText; break;
                 default: text = name == null ? getString(R.string.v3_off_desc_none) : getString(R.string.v3_off_desc, name);
             }
-            if ((uiState == S_VERIFIED || uiState == S_WARNING) && verdict(GUARD) != PASSED) text += getString(R.string.v3_guard_off_note);
+            if ((uiState == S_VERIFIED || uiState == S_WARNING) && verdict(GUARD) != PASSED) text += " " + getString(R.string.v3_guard_off_note); // resources trim leading spaces
             if (backupIndex > 0 && (uiState == S_RUNNING || uiState == S_VERIFIED || uiState == S_WARNING))
                 text = getString(R.string.recovery_backup_active, backupIndex) + ". " + text;
             description.setText(text);
