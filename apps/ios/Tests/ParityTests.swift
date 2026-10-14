@@ -547,6 +547,25 @@ final class StateModelTests: XCTestCase {
         model.track(.connecting)
         XCTAssertFalse(model.homeTag(model.level).contains("SYNTHETIC"))
     }
+    @MainActor
+    func testRestartOutsideTheAppClearsTheRecordedProfile() {
+        let model = VPNModel()
+        model.vault = VaultData(profiles: [SavedProfile(id: "a", name: "Synthetic Office", hostname: "office.invalid", content: "")],
+                                selected: "a", defaultProfileID: "a")
+        let first = Date(timeIntervalSince1970: 1_000), second = Date(timeIntervalSince1970: 2_000)
+        model.track(.disconnected)
+        model.recordStart("a"); model.track(.connecting)
+        model.track(.connected, connectedDate: first)
+        XCTAssertEqual(model.runningProfile?.id, "a")
+        model.track(.connected, connectedDate: first)
+        XCTAssertEqual(model.runningProfile?.id, "a", "Same session keeps the name")
+        // Suspended app missed .disconnected; On Demand restarted with the default profile.
+        model.track(.connected, connectedDate: second)
+        XCTAssertNil(model.runningProfileID)
+        XCTAssertFalse(model.homeTag(model.level).contains("SYNTHETIC"))
+        model.recordStart("a"); model.track(.connected, connectedDate: first); model.track(.connected, connectedDate: nil)
+        XCTAssertNil(model.runningProfileID, "A missing connected date is not proof of the same session")
+    }
     func testLocalizationTablesHaveTheSameKeys() throws {
         let bundle = Bundle(for: VPNModel.self)
         let tables = try ["en", "ru"].map { language -> [String: String] in

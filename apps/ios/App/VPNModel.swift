@@ -24,7 +24,11 @@ final class VPNModel: ObservableObject {
     /// Profile this app passed to startTunnel in this session. nil when the tunnel was
     /// started elsewhere (widget, On Demand, an earlier app session): the provider then
     /// loads the default profile itself, so the UI names no profile.
-    @Published private(set) var runningProfileID: String?
+    @Published private(set) var runningProfileID: String? { didSet { if runningProfileID == nil { runningConnectedDate = nil } } }
+    /// connection.connectedDate of the session started with runningProfileID. A different
+    /// (or missing) date later means the tunnel restarted outside the app while it was
+    /// suspended, e.g. On Demand with the default profile.
+    private var runningConnectedDate: Date?
     var runningProfile: SavedProfile? {
         guard active, let id = runningProfileID else { return nil }
         return vault.profiles.first { $0.id == id }
@@ -172,7 +176,7 @@ final class VPNModel: ObservableObject {
         guard VPNController.supportsVPN else { WidgetState.update(.disconnected); return }
         do {
             manager = try await VPNController.manager()
-            track(manager?.connection.status ?? .disconnected)
+            track(manager?.connection.status ?? .disconnected, connectedDate: manager?.connection.connectedDate)
             onDemand = manager?.isOnDemandEnabled ?? false
             refreshObservations()
             WidgetState.update(state)
@@ -180,8 +184,12 @@ final class VPNModel: ObservableObject {
     }
     /// Records whether a connection attempt ended before the tunnel came up.
     /// Only status transitions are used; nothing is probed.
-    func track(_ next: NEVPNStatus) {
+    func track(_ next: NEVPNStatus, connectedDate: Date? = nil) {
         let wasUp = state == .connected || state == .reasserting
+        if next == .connected, runningProfileID != nil {
+            if let connectedDate, runningConnectedDate == nil { runningConnectedDate = connectedDate }
+            else if connectedDate == nil || connectedDate != runningConnectedDate { runningProfileID = nil }
+        }
         switch next {
         // Only a fresh attempt counts; reasserting after a connected session does not.
         case .connecting: if !wasUp && !VPNController.userStopped { attempting = true }
@@ -197,7 +205,7 @@ final class VPNModel: ObservableObject {
         state = next
     }
     /// Records the profile passed by this app to startTunnel (also used by tests).
-    func recordStart(_ profileID: String?) { runningProfileID = profileID }
+    func recordStart(_ profileID: String?) { runningProfileID = profileID; runningConnectedDate = nil }
     /// Status chip text; names a profile only if this app started it.
     func homeTag(_ level: TunnelLevel) -> String {
         if level == .off { return loc("v3.tag.off") }
