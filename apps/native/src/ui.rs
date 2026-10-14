@@ -128,6 +128,7 @@ static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(
 pub(super) fn remember_dark(dark: bool) {
     DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
 }
+#[cfg(target_os = "macos")]
 pub(super) fn dark_now() -> bool {
     DARK.load(std::sync::atomic::Ordering::Relaxed)
 }
