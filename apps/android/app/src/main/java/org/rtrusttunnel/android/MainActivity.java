@@ -424,7 +424,7 @@ public class MainActivity extends Activity {
         slider.set(text, knob, icon, ring, TunnelService.active, p.card, p.cardStroke, p.muted);
         slider.setContentDescription(getString(label));
     }
-    private float headlineMax = 44;
+    private float headlineMax = 36;
     /** The two-line headline shrinks until its longer line fits, from headlineMax down to 26 sp. */
     private void fitHeadline() {
         TextView view = headline;
@@ -479,7 +479,7 @@ public class MainActivity extends Activity {
         LinearLayout tagWrap = new LinearLayout(this); tagWrap.addView(tag); top.addView(tagWrap, tagParams);
         top.addView(circle(R.drawable.ic_settings, R.string.v3_settings, () -> show(ACTIONS)), new LinearLayout.LayoutParams(dp(44), dp(44)));
 
-        headlineMax = split ? 34 : 44;
+        headlineMax = split ? 30 : 36;
         headline = new TextView(this); headline.setTypeface(display()); headline.setTextSize(headlineMax); headline.setTextColor(p.text); headline.setLineSpacing(0, 0.95f); headline.setLetterSpacing(-0.02f);
         headline.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> { if (r - l != or - ol) v.post(this::fitHeadline); });
         description = text("", 14, p.muted, false); description.setLineSpacing(0, 1.2f); description.setPadding(0, dp(split ? 8 : 12), 0, dp(split ? 0 : 18));
@@ -493,6 +493,13 @@ public class MainActivity extends Activity {
         strip = column();
         slider = new SlideButton(this); slider.setAction(this::toggle);
         LinearLayout.LayoutParams sliderParams = new LinearLayout.LayoutParams(-1, dp(64)); sliderParams.topMargin = dp(12);
+        sliderParams.gravity = Gravity.CENTER_HORIZONTAL;
+        // 85% of the column, centred: the width follows the parent once it is laid out.
+        slider.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            View parent = (View) v.getParent(); if (parent == null) return;
+            int width = Math.round((parent.getWidth() - parent.getPaddingLeft() - parent.getPaddingRight()) * 0.85f);
+            if (width > 0 && v.getLayoutParams().width != width) { v.getLayoutParams().width = width; v.post(v::requestLayout); }
+        });
 
         if (!split) {
             root.addView(top);
