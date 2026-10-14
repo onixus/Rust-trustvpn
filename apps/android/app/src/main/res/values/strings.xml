@@ -58,7 +58,6 @@
     <string name="import_a_profile_to_get_started">"Import a profile to get started."</string>
     <string name="encrypted_profiles_could_not_be_opened">"Encrypted profiles could not be opened. Existing data has been preserved."</string>
     <string name="export">"Export…"</string>
-    <string name="delete">"Delete…"</string>
     <string name="delete_this_saved_profile">"Delete this saved profile?"</string>
     <string name="cancel">"Cancel"</string>
     <string name="delete_text">"Delete"</string>

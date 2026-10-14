@@ -58,7 +58,6 @@
     <string name="import_a_profile_to_get_started">"Импортируйте профиль для начала работы."</string>
     <string name="encrypted_profiles_could_not_be_opened">"Не удалось открыть зашифрованные профили. Данные сохранены."</string>
     <string name="export">"Экспорт…"</string>
-    <string name="delete">"Удалить…"</string>
     <string name="delete_this_saved_profile">"Удалить сохранённый профиль?"</string>
     <string name="cancel">"Отмена"</string>
     <string name="delete_text">"Удалить"</string>

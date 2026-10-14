@@ -30,6 +30,7 @@ public class MainActivity extends Activity {
     private int connectionColor;
     private String checksKey = "", connectedId;
     private JSONObject observations;
+    /** Connection state palette. Amber is reserved for real warnings. */
     static final int IDLE = Color.rgb(107, 122, 140), BUSY = Color.rgb(77, 163, 255), ON = Color.rgb(43, 184, 154),
         VERIFIED = Color.rgb(61, 214, 140), WARNING = Color.rgb(224, 165, 38), ERROR = Color.rgb(229, 72, 77);
     private ProfileVault vault;
@@ -183,7 +184,7 @@ public class MainActivity extends Activity {
         if (snapshot != null) for (int i = 0; i < ObservationStatus.KEYS.length; i++) {
             String outcome = ObservationStatus.outcome(snapshot.optJSONObject(ObservationStatus.KEYS[i]));
             String label = ObservationStatus.label(this, outcome);
-            if (label != null) sheet.status(ObservationStatus.color(this, outcome), getString(ObservationStatus.NAMES[i]), label);
+            if (label != null) sheet.status(ObservationStatus.color(outcome), getString(ObservationStatus.NAMES[i]), label);
         }
         sheet.item(R.drawable.ic_search, getString(R.string.diagnostics_title), TunnelService.active ? getString(R.string.diagnostics_detail) : getString(R.string.needs_connection), () -> live(DiagnosticsDialog::show))
             .footer(getString(R.string.checks_note)).show();
@@ -201,7 +202,7 @@ public class MainActivity extends Activity {
             String name = getString(ObservationStatus.NAMES[i]);
             LinearLayout chip = new LinearLayout(this); chip.setGravity(Gravity.CENTER_VERTICAL); chip.setPadding(dp(8), dp(4), dp(10), dp(4));
             chip.setBackground(card(color(R.color.surface_raised), dp(12)));
-            View dot = new View(this); GradientDrawable fill = new GradientDrawable(); fill.setShape(GradientDrawable.OVAL); fill.setColor(ObservationStatus.color(this, outcome)); dot.setBackground(fill);
+            View dot = new View(this); GradientDrawable fill = new GradientDrawable(); fill.setShape(GradientDrawable.OVAL); fill.setColor(ObservationStatus.color(outcome)); dot.setBackground(fill);
             LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(7), dp(7)); dotParams.setMarginEnd(dp(6)); chip.addView(dot, dotParams);
             TextView text = new TextView(this); text.setText(name); text.setTextSize(12); text.setTextColor(color(R.color.text)); chip.addView(text);
             chip.setContentDescription(name + ": " + label);

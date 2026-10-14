@@ -30,12 +30,13 @@ final class ObservationStatus {
         }
         return outcome;
     }
-    static int color(Context context, String outcome) {
+    /** Per-check dot colour, in MainActivity.connectionColor's palette. */
+    static int color(String outcome) {
         switch (outcome) {
-            case "passed": return context.getColor(R.color.state_verified);
-            case "failed": return context.getColor(R.color.state_error);
-            case "configured": return context.getColor(R.color.state_on);
-            default: return context.getColor(R.color.state_idle);
+            case "passed": return MainActivity.VERIFIED;
+            case "failed": return MainActivity.ERROR;
+            case "configured": return MainActivity.ON;
+            default: return MainActivity.IDLE;
         }
     }
     static int level(JSONObject snapshot) {
