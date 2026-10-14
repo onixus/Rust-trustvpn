@@ -100,6 +100,10 @@ cp target/aarch64-linux-android/release/librtrust_android.so /out/arm64-v8a/
     # Publish only product APK. Test APK is intentionally not a user download.
     shutil.copy2(ROOT / 'apps/android/app/build/outputs/apk/debug/app-debug.apk', dist / 'R-TrustTunnel-Android-debug.apk')
     shutil.copy2(ROOT / 'apps/android/app/build/outputs/apk/release/app-release-unsigned.apk', dist / 'R-TrustTunnel-Android-unsigned.apk')
+    # The lifecycle fixture changes applicationId and overwrites Gradle debug outputs.
+    # Product downloads above are immutable copies before the isolated test build.
+    run(['python3', 'ci/android_lifecycle_e2e.py', '--adb', str(sdk / 'platform-tools/adb'),
+         '--serial', args.serial, '--gradle', args.gradle], cwd=ROOT, env=env, timeout=1500)
 
 if __name__ == '__main__':
     main()
