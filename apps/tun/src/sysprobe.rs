@@ -17,8 +17,9 @@ use std::{
 
 /// Wait after Connected or an invalidation before the first run.
 const SETTLE: Duration = Duration::from_secs(2);
-/// Per external tool or query attempt.
-pub const STEP: Duration = Duration::from_secs(2);
+/// Per external tool.
+#[cfg(unix)]
+const STEP: Duration = Duration::from_secs(2);
 const ATTEMPT: Duration = Duration::from_millis(1_500);
 /// Neutral documentation destinations (RFC 5737/3849), discard port. Never
 /// an endpoint, DHCP or ND port, never multicast.
@@ -263,6 +264,7 @@ pub fn send(socket: &std::net::UdpSocket, target: SocketAddr) -> Result<(), i32>
         .map(drop)
         .map_err(|e| e.raw_os_error().unwrap_or(-1))
 }
+#[cfg(any(unix, test))]
 pub fn interface_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 15
@@ -547,6 +549,131 @@ pub mod macos {
             found.extend(servers.into_iter().map(|s| (s, scope.clone())));
         }
         seen.then_some(found)
+    }
+}
+
+/// The Windows full-tunnel WFP policy as data: the installer adds exactly
+/// these filters and the probe's audit reads them back; host-tested.
+#[cfg(any(target_os = "windows", test))]
+pub mod wfp {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum Layer {
+        ConnectV4,
+        ConnectV6,
+        PacketV4,
+        PacketV6,
+        ForwardV4,
+        ForwardV6,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum Condition {
+        Loopback,
+        LocalInterface(u64),
+        RemoteAddress(u32),
+        /// The service executable's own app id.
+        AppId,
+        Protocol(u8),
+        RemotePort(u16),
+        RemotePorts(u16, u16),
+        LocalPort(u16),
+        /// Read back but not part of this policy.
+        Other,
+    }
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct Spec {
+        pub layer: Layer,
+        pub boottime: bool,
+        pub permit: bool,
+        pub conditions: Vec<Condition>,
+    }
+    pub fn filter_specs(luid: u64, permits: &[crate::failover::Permit], boot: bool) -> Vec<Spec> {
+        use Condition::*;
+        let mut specs = Vec::new();
+        let mut add = |layer, permit, conditions: Vec<Condition>| {
+            specs.push(Spec {
+                layer,
+                boottime: false,
+                permit,
+                conditions,
+            })
+        };
+        // Packet filters cover existing flows and raw packets as well as new connects.
+        for (layer, v4, ale) in [
+            (Layer::ConnectV4, true, true),
+            (Layer::ConnectV6, false, true),
+            (Layer::PacketV4, true, false),
+            (Layer::PacketV6, false, false),
+        ] {
+            add(layer, true, vec![Loopback]);
+            if luid != 0 {
+                add(layer, true, vec![LocalInterface(luid)]);
+            }
+            if v4 {
+                for permit in permits {
+                    let mut conditions = vec![RemoteAddress(u32::from(*permit.address.ip()))];
+                    if ale {
+                        // QUIC (HTTP/3, Hysteria 2) and AmneziaWG use UDP.
+                        conditions.extend([AppId, Protocol(if permit.udp { 17 } else { 6 })]);
+                        if !permit.ports.is_empty() {
+                            for &(low, high) in &permit.ports {
+                                let mut ranged = conditions.clone();
+                                ranged.push(RemotePorts(low, high));
+                                add(layer, true, ranged);
+                            }
+                            continue;
+                        }
+                        conditions.push(RemotePort(permit.address.port()));
+                    }
+                    add(layer, true, conditions);
+                }
+                let mut dhcp = vec![RemoteAddress(u32::from(std::net::Ipv4Addr::BROADCAST))];
+                if ale {
+                    dhcp.extend([Protocol(17), LocalPort(68), RemotePort(67)]);
+                }
+                add(layer, true, dhcp);
+            }
+            add(layer, false, vec![]);
+        }
+        for layer in [Layer::ForwardV4, Layer::ForwardV6] {
+            add(layer, false, vec![]);
+        }
+        if boot {
+            // Separate flags on the SAME provider: WFP transitions atomically at BFE startup.
+            for layer in [
+                Layer::PacketV4,
+                Layer::PacketV6,
+                Layer::ForwardV4,
+                Layer::ForwardV6,
+            ] {
+                specs.push(Spec {
+                    layer,
+                    boottime: true,
+                    permit: false,
+                    conditions: vec![],
+                });
+            }
+        }
+        specs
+    }
+    /// Read-back multiset against the expected policy, conditions in any order.
+    pub fn audit(mut found: Vec<Spec>, mut expected: Vec<Spec>) -> super::Audit {
+        for spec in found.iter_mut().chain(expected.iter_mut()) {
+            spec.conditions.sort();
+        }
+        found.sort();
+        expected.sort();
+        if !expected.is_empty() && found == expected {
+            super::Audit::Match
+        } else {
+            super::Audit::Mismatch
+        }
+    }
+    /// `DNS_INTERFACE_SETTINGS.NameServer`: comma or space separated.
+    pub fn servers(text: &str) -> Vec<&str> {
+        text.split([',', ' '])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect()
     }
 }
 
@@ -1002,5 +1129,81 @@ mod tests {
             ])
         );
         assert_eq!(macos::resolvers("No DNS configuration available"), None);
+    }
+    #[test]
+    fn wfp_policy_specs_and_read_back() {
+        use wfp::{Condition::*, Layer, Spec, audit, filter_specs};
+        let permits = [
+            crate::failover::Permit {
+                address: "203.0.113.7:443".parse().unwrap(),
+                udp: false,
+                ports: vec![],
+            },
+            crate::failover::Permit {
+                address: "203.0.113.8:443".parse().unwrap(),
+                udp: true,
+                ports: vec![(443, 443), (20000, 20010)],
+            },
+        ];
+        let specs = filter_specs(42, &permits, false);
+        // Per v4 layer: loopback, LUID, 1 + 2 ranged endpoint permits (ALE) or
+        // 2 address permits (packet), DHCP, block; v6: loopback, LUID, block.
+        assert_eq!(specs.len(), (2 + 3 + 2) + 3 + (2 + 2 + 2) + 3 + 2);
+        let ale: Vec<_> = specs
+            .iter()
+            .filter(|s| s.layer == Layer::ConnectV4 && s.conditions.contains(&AppId))
+            .collect();
+        assert_eq!(ale.len(), 3);
+        assert!(
+            ale.iter()
+                .any(|s| s.conditions.contains(&RemotePorts(20000, 20010))
+                    && s.conditions.contains(&Protocol(17)))
+        );
+        assert!(ale.iter().any(
+            |s| s.conditions.contains(&RemotePort(443)) && s.conditions.contains(&Protocol(6))
+        ));
+        assert!(
+            !specs
+                .iter()
+                .any(|s| s.layer == Layer::PacketV4 && s.conditions.contains(&AppId))
+        );
+        assert_eq!(filter_specs(0, &permits, false).len(), specs.len() - 4);
+        assert_eq!(filter_specs(42, &permits, true).len(), specs.len() + 4);
+        let mut shuffled = specs.clone();
+        shuffled.reverse();
+        for spec in &mut shuffled {
+            spec.conditions.reverse();
+        }
+        assert_eq!(audit(shuffled.clone(), specs.clone()), Audit::Match);
+        let mut extra = shuffled.clone();
+        extra.push(Spec {
+            layer: Layer::ConnectV4,
+            boottime: false,
+            permit: true,
+            conditions: vec![RemoteAddress(1)],
+        });
+        assert_eq!(audit(extra, specs.clone()), Audit::Mismatch);
+        let mut missing = shuffled.clone();
+        missing.retain(|s| s.permit || s.layer != Layer::PacketV6);
+        assert_eq!(audit(missing, specs.clone()), Audit::Mismatch);
+        let mut stale = shuffled.clone();
+        for spec in &mut stale {
+            for c in &mut spec.conditions {
+                if *c == LocalInterface(42) {
+                    *c = LocalInterface(43);
+                }
+            }
+        }
+        assert_eq!(audit(stale, specs.clone()), Audit::Mismatch);
+        let mut foreign = shuffled;
+        foreign[0].conditions.push(Other);
+        assert_eq!(audit(foreign, specs.clone()), Audit::Mismatch);
+        assert_eq!(audit(vec![], vec![]), Audit::Mismatch);
+        assert_eq!(wfp::servers("198.51.100.53"), ["198.51.100.53"]);
+        assert_eq!(
+            wfp::servers("198.51.100.53, 192.0.2.53"),
+            ["198.51.100.53", "192.0.2.53"]
+        );
+        assert!(wfp::servers("").is_empty());
     }
 }
