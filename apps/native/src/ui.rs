@@ -727,49 +727,58 @@ pub(super) fn pill<'a>(
 ) -> buttons::Button<'a, Message> {
     buttons::Button::new(content)
         .padding([10, 16])
-        .style(move |_, status| {
-            let (background, text_color) = match kind {
-                Kind::Primary => (Some(tk.blue), tk.on_blue),
-                Kind::Chip => (Some(tk.chip), tk.text),
-                Kind::Danger => (Some(tk.danger_soft), tk.danger),
-                Kind::Ghost => (None, tk.muted),
-            };
-            let disabled = matches!(status, buttons::Status::Disabled);
-            let hovered = matches!(status, buttons::Status::Hovered | buttons::Status::Pressed);
-            let background = background.map(|mut c| {
-                if disabled {
-                    c.a *= 0.5;
-                }
-                c
-            });
-            let background = match (background, hovered) {
-                (None, true) => Some(tk.chip),
-                (b, _) => b,
-            };
-            buttons::Style {
-                background: background.map(Into::into),
-                text_color: if disabled {
-                    Color {
-                        a: 0.5,
-                        ..text_color
-                    }
-                } else {
-                    text_color
-                },
-                border: iced::Border {
-                    color: if !matches!(kind, Kind::Chip) {
-                        Color::TRANSPARENT
-                    } else if tk.dark {
-                        tk.stroke
-                    } else {
-                        rgba(0x0E1726, 0.14)
-                    },
-                    width: if matches!(kind, Kind::Chip) { 1.0 } else { 0.0 },
-                    radius: 22.0.into(),
-                },
-                ..Default::default()
+        .style(move |_, status| pill_style(tk, kind, status))
+}
+/// Tokens of the theme being drawn (built by `theme`), for widgets made without them.
+pub(super) fn tokens_of(theme: &Theme) -> Tokens {
+    if theme.palette().background == DARK_TOKENS.bg {
+        DARK_TOKENS
+    } else {
+        LIGHT_TOKENS
+    }
+}
+pub(super) fn pill_style(tk: Tokens, kind: Kind, status: buttons::Status) -> buttons::Style {
+    let (background, text_color) = match kind {
+        Kind::Primary => (Some(tk.blue), tk.on_blue),
+        Kind::Chip => (Some(tk.chip), tk.text),
+        Kind::Danger => (Some(tk.danger_soft), tk.danger),
+        Kind::Ghost => (None, tk.muted),
+    };
+    let disabled = matches!(status, buttons::Status::Disabled);
+    let hovered = matches!(status, buttons::Status::Hovered | buttons::Status::Pressed);
+    let background = background.map(|mut c| {
+        if disabled {
+            c.a *= 0.5;
+        }
+        c
+    });
+    let background = match (background, hovered) {
+        (None, true) => Some(tk.chip),
+        (b, _) => b,
+    };
+    buttons::Style {
+        background: background.map(Into::into),
+        text_color: if disabled {
+            Color {
+                a: 0.5,
+                ..text_color
             }
-        })
+        } else {
+            text_color
+        },
+        border: iced::Border {
+            color: if !matches!(kind, Kind::Chip) {
+                Color::TRANSPARENT
+            } else if tk.dark {
+                tk.stroke
+            } else {
+                rgba(0x0E1726, 0.14)
+            },
+            width: if matches!(kind, Kind::Chip) { 1.0 } else { 0.0 },
+            radius: 22.0.into(),
+        },
+        ..Default::default()
+    }
 }
 fn field_style(
     tk: Tokens,
@@ -900,7 +909,10 @@ impl App {
                 Some((rtrust_control::State::Error, snapshot)) => {
                     (Level::Error, Some(snapshot.clone()))
                 }
-                _ => (Level::Connecting, None),
+                // The service runs but holds no tunnel: not progress, so not "connecting".
+                Some((rtrust_control::State::Idle, _)) => (Level::Off, None),
+                // No reply yet since always-on was enabled.
+                None => (Level::Connecting, None),
             };
         }
         if self.last_error.is_some() {
@@ -1310,6 +1322,11 @@ impl App {
         let ru = ru();
         let subject = self.subject();
         match level {
+            Level::Off if self.always_on_active() => t(
+                "Постоянный VPN включён, но служба не держит туннель — трафик не защищён VPN.",
+                "Always-on is enabled, but the service holds no tunnel — traffic is not protected by the VPN.",
+            )
+            .into(),
             Level::Off => match &subject {
                 Some((name, _)) if ru => format!(
                     "Туннель не подключён — трафик не защищён VPN. Подключите профиль «{name}»."

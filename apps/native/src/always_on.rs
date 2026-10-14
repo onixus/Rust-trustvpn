@@ -329,6 +329,16 @@ mod tests {
         let _ = app.always_update(Action::Done(generation, Err("refused".into())));
         assert_eq!(app.level().0, crate::ui::Level::Unknown);
     }
+    #[test]
+    fn idle_always_on_service_is_off_not_connecting() {
+        let mut app = crate::tests::app();
+        let generation = app.always_on.generation;
+        let mut idle = rtrust_control::Response::new(rtrust_control::State::Idle, "idle");
+        idle.always_on = Some(true);
+        let _ = app.always_update(Action::Observed(generation, Ok(idle)));
+        assert!(app.always_on.enabled);
+        assert_eq!(app.level(), (crate::ui::Level::Off, None));
+    }
     fn profile(name: &str, address: &str) -> Profile {
         Profile::import(&format!("name='{name}'\nhostname='vpn.example'\naddresses=['{address}:443']\nusername='u'\npassword='p'\n")).unwrap()
     }

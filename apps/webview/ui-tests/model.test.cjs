@@ -46,6 +46,8 @@ assert.equal(M.derive({ ...base, connected: false, snapshot: null }), 'off');
 assert.equal(M.derive({ ...base, connected: false, error: 'boom', snapshot: null }), 'error');
 assert.equal(M.derive({ ...base, connected: false, phase: 'connecting', snapshot: null }), 'connecting');
 assert.equal(M.derive({ ...base, phase: 'disconnecting', snapshot: allPassed() }), 'disconnecting');
+// Same tone as native Level::Disconnecting and iOS TunnelLevel.disconnecting.
+assert.equal(M.TONE.disconnecting, 'blue');
 assert.equal(M.derive({ ...base, unavailable: true, snapshot: allPassed() }), 'error');
 assert.deepEqual(M.rows({ ...base, connected: false, snapshot: null }, 'off').map(r => r.value), ['off', 'unknown', 'unknown', 'unknown', 'unknown']);
 assert.deepEqual(M.rows({ ...base, connected: false, phase: 'connecting', snapshot: null }, 'connecting').map(r => r.value), ['connecting', 'unknown', 'unknown', 'unknown', 'unknown']);

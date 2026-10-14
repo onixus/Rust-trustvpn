@@ -254,7 +254,12 @@ struct HomeView: View {
     let add: () -> Void
     @Environment(\.colorScheme) private var scheme
     @ScaledMetric(relativeTo: .largeTitle) private var headlineSize: CGFloat = 44
+    /// Re-evaluated every second while the tunnel is active so expired results lose
+    /// their colour on time; the rest of the app is not invalidated by the clock.
     var body: some View {
+        TimelineView(.animation(minimumInterval: 1, paused: !model.active)) { _ in content }
+    }
+    @ViewBuilder private var content: some View {
         let palette = Palette(scheme)
         let level = model.level
         ZStack {
@@ -515,15 +520,17 @@ struct ProfilesView: View {
     }
     /// The tunnel state is shown only on the profile this app started.
     private func status(_ palette: Palette, running: Bool) -> some View {
-        let level = model.level
-        let tone: StateTone = running ? level.tone : .grey
-        let text = running ? loc("v3.tag." + level.rawValue).lowercased() : loc("v3.state.selected")
-        return HStack(spacing: 6) {
-            Circle().fill(palette.fill(tone)).frame(width: 7, height: 7)
-            Text(text).font(.caption.weight(.heavy)).foregroundStyle(palette.text(tone)).lineLimit(1)
+        TimelineView(.animation(minimumInterval: 1, paused: !(running && model.active))) { _ in
+            let level = model.level
+            let tone: StateTone = running ? level.tone : .grey
+            let text = running ? loc("v3.tag." + level.rawValue).lowercased() : loc("v3.state.selected")
+            HStack(spacing: 6) {
+                Circle().fill(palette.fill(tone)).frame(width: 7, height: 7)
+                Text(text).font(.caption.weight(.heavy)).foregroundStyle(palette.text(tone)).lineLimit(1)
+            }
+            .padding(.vertical, 6).padding(.horizontal, 10)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(tone == .grey ? palette.chip : palette.blueSoft))
         }
-        .padding(.vertical, 6).padding(.horizontal, 10)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(tone == .grey ? palette.chip : palette.blueSoft))
     }
 }
 
@@ -533,7 +540,12 @@ struct ChecksView: View {
     @ObservedObject var model: VPNModel
     @Environment(\.colorScheme) private var scheme
     @Environment(\.scenePhase) private var scenePhase
+    /// Re-evaluated every second while the tunnel is active so expired results lose
+    /// their colour on time; the rest of the app is not invalidated by the clock.
     var body: some View {
+        TimelineView(.animation(minimumInterval: 1, paused: !model.active)) { _ in content }
+    }
+    @ViewBuilder private var content: some View {
         let palette = Palette(scheme)
         let level = model.level
         let snapshot = model.snapshot

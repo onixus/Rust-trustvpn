@@ -46,9 +46,15 @@ enum VPNController {
     }
     static func isActive(_ status: NEVPNStatus) -> Bool { status != .disconnected && status != .invalid }
     private static var changing = false
-    /// Set when this app asks the tunnel to stop, so the resulting disconnect is not
-    /// shown as a failed connection attempt. Consumed by VPNModel.
-    static var userStopped = false
+    /// Set when the app or the widget intent asks the tunnel to stop, so the resulting
+    /// disconnect is not shown as a failed connection attempt. Kept in the app group so a
+    /// stop from another process is seen too, and it expires so a stop that never produced
+    /// a disconnect cannot hide a later failure. Consumed by VPNModel.
+    static var userStopped: Bool {
+        get { ((WidgetState.defaults ?? .standard).object(forKey: stopKey) as? Date).map { Date().timeIntervalSince($0) < 30 } ?? false }
+        set { (WidgetState.defaults ?? .standard).set(newValue ? Date() : nil, forKey: stopKey) }
+    }
+    private static let stopKey = "userStoppedAt"
     static func toggleExisting() async throws {
         guard supportsVPN else { throw NSError(domain: "RTrustVPN", code: 1, userInfo: [NSLocalizedDescriptionKey: "VPN requires a physical iPhone"] ) }
         guard !changing else { return }
@@ -85,8 +91,9 @@ enum TunnelLevel: String, CaseIterable {
     case off, connecting, disconnecting, running, verified, warning, error
     var tone: StateTone {
         switch self {
-        case .off, .disconnecting: return .grey
-        case .connecting, .running: return .blue
+        case .off: return .grey
+        // Same as desktop: a pending transition is blue, drawn outlined.
+        case .connecting, .disconnecting, .running: return .blue
         case .verified: return .green
         case .warning: return .yellow
         case .error: return .red

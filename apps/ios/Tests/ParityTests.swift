@@ -482,6 +482,8 @@ final class StateModelTests: XCTestCase {
         XCTAssertEqual(TunnelLevel.transport(nil), .off)
         XCTAssertEqual(TunnelLevel.verified.tone, .green)
         XCTAssertEqual(TunnelLevel.running.tone, .blue)
+        // Desktop (native Level::Disconnecting, WebView TONE) draws this blue too.
+        XCTAssertEqual(TunnelLevel.disconnecting.tone, .blue)
     }
     func testRowsShowNoDataInsteadOfPassed() {
         let off = ObservationStatus.rows(status: .disconnected, level: .off, snapshot: nil, nowMs: now)
@@ -513,6 +515,23 @@ final class StateModelTests: XCTestCase {
         XCTAssertFalse(VPNController.userStopped, "The stop flag is consumed")
         model.track(.connected); model.track(.disconnected)
         XCTAssertFalse(model.attemptFailed, "A tunnel that was up and ended is shown as off, not as a failed attempt")
+    }
+    @MainActor
+    func testStaleDisconnectedRightAfterStartIsNotAFailure() {
+        let model = VPNModel()
+        VPNController.userStopped = false
+        model.track(.disconnected); model.recordStart("a"); model.startReturned()
+        // The reload right after startTunnel can still read the pre-start status.
+        model.track(.disconnected)
+        XCTAssertFalse(model.attemptFailed)
+        XCTAssertEqual(model.level, .connecting)
+        XCTAssertEqual(model.runningProfileID, "a")
+        model.track(.connecting); model.track(.disconnected)
+        XCTAssertTrue(model.attemptFailed, "A start that reached .connecting and ended is a failure")
+        model.track(.connecting); model.track(.connected); model.track(.disconnected)
+        model.recordStart("a"); model.startReturned(deadline: .distantPast)
+        model.track(.disconnected)
+        XCTAssertTrue(model.attemptFailed, "No transition by the deadline is a failed start")
     }
     @MainActor
     func testReconnectThenExternalStopIsNotAFailedAttempt() {

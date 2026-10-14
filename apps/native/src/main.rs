@@ -2173,14 +2173,11 @@ impl App {
         self.shell()
     }
 }
-/// Secondary action used by the section views; follows the current theme.
+/// Secondary action used by the section views; styled from the theme being drawn.
 fn button<'a>(content: impl Into<Element<'a, Message>>) -> buttons::Button<'a, Message> {
-    let tokens = if ui::dark_now() {
-        ui::DARK_TOKENS
-    } else {
-        ui::LIGHT_TOKENS
-    };
-    ui::pill(tokens, ui::Kind::Chip, content).padding([8, 14])
+    buttons::Button::new(content)
+        .padding([8, 14])
+        .style(|theme, status| ui::pill_style(ui::tokens_of(theme), ui::Kind::Chip, status))
 }
 
 // Flatpak file forwarding supplies file: URIs (including escaped spaces), while

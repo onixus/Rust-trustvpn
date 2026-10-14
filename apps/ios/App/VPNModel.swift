@@ -21,6 +21,9 @@ final class VPNModel: ObservableObject {
     /// threw). Cleared by the next toggle or a connected state. Drives the red state only.
     @Published private(set) var attemptFailed = false
     private var attempting = false
+    /// Set when startTunnel returned. Until the system reports a transition (or the
+    /// deadline passes) a `.disconnected` reading is the pre-start status, not a failure.
+    @Published private var startPendingUntil: Date?
     /// Profile this app passed to startTunnel in this session. nil when the tunnel was
     /// started elsewhere (widget, On Demand, an earlier app session): the provider then
     /// loads the default profile itself, so the UI names no profile.
@@ -40,7 +43,8 @@ final class VPNModel: ObservableObject {
     }
     var snapshotReceived: Date? { snapshot == nil ? nil : observationReceived }
     var level: TunnelLevel {
-        state == .connected ? ObservationStatus.level(snapshot) : TunnelLevel.transport(state, attemptFailed: attemptFailed)
+        if state == .connected { return ObservationStatus.level(snapshot) }
+        return startPendingUntil != nil ? .connecting : TunnelLevel.transport(state, attemptFailed: attemptFailed)
     }
     private func refreshObservations() {
         observationEpoch &+= 1
@@ -154,14 +158,15 @@ final class VPNModel: ObservableObject {
         observer = NotificationCenter.default.addObserver(forName: .NEVPNStatusDidChange, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in await self?.refresh() }
         }
-        // Re-render every second so expired results lose their colour on time;
-        // ask the provider every third tick.
+        // Ask the provider every third second. Views that show freshness re-render on
+        // their own clock (TimelineView), so the whole model is not invalidated here.
         observationTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.observationTick &+= 1
                 if self.observationTick % 3 == 0 { self.refreshObservations(); self.refreshFlowCapture() }
-                if self.active { self.objectWillChange.send() }
+                // A start that never reported a transition is re-read once its deadline passes.
+                if let until = self.startPendingUntil, Date() >= until { await self.refresh() }
             }
         }
         Task { await refresh(); busy = false }
@@ -185,6 +190,11 @@ final class VPNModel: ObservableObject {
     /// Records whether a connection attempt ended before the tunnel came up.
     /// Only status transitions are used; nothing is probed.
     func track(_ next: NEVPNStatus, connectedDate: Date? = nil) {
+        if let until = startPendingUntil {
+            if next != .disconnected && next != .invalid { startPendingUntil = nil }
+            else if Date() < until { return }
+            else { startPendingUntil = nil }
+        }
         let wasUp = state == .connected || state == .reasserting
         if next == .connected, runningProfileID != nil {
             if let connectedDate, runningConnectedDate == nil { runningConnectedDate = connectedDate }
@@ -206,6 +216,9 @@ final class VPNModel: ObservableObject {
     }
     /// Records the profile passed by this app to startTunnel (also used by tests).
     func recordStart(_ profileID: String?) { runningProfileID = profileID; runningConnectedDate = nil }
+    /// startTunnel returned: the attempt counts even if it fails before `.connecting` is
+    /// observed, but a stale `.disconnected` read right after the call is not that failure.
+    func startReturned(deadline: Date = Date().addingTimeInterval(10)) { attempting = true; startPendingUntil = deadline }
     /// Status chip text; names a profile only if this app started it.
     func homeTag(_ level: TunnelLevel) -> String {
         if level == .off { return loc("v3.tag.off") }
@@ -288,13 +301,12 @@ final class VPNModel: ObservableObject {
                 current.onDemandRules = [rule]; current.isOnDemandEnabled = onDemand
                 recordStart(profileID)
                 try await VPNController.start(current, profileID: profileID)
-                // A start that fails before .connecting is observed still counts as an attempt.
-                attempting = true
+                startReturned()
                 manager = current
             }
             error = nil; await refresh()
         } catch {
-            if starting { attemptFailed = true; attempting = false; recordStart(nil) }
+            if starting { attemptFailed = true; attempting = false; startPendingUntil = nil; recordStart(nil) }
             report(error)
         }
     }
@@ -320,10 +332,14 @@ final class VPNModel: ObservableObject {
 /// Localized UI string from Resources/<lang>.lproj/Localizable.strings. The language is
 /// chosen by the same rule as `tr`, so new and existing strings never mix languages.
 func loc(_ key: String, _ arguments: CVarArg...) -> String {
-    let language = Locale.preferredLanguages.first?.hasPrefix("ru") == true ? "ru" : "en"
-    let bundle = Bundle.main.path(forResource: language, ofType: "lproj").flatMap(Bundle.init(path:)) ?? .main
-    let format = bundle.localizedString(forKey: key, value: key, table: nil)
-    return arguments.isEmpty ? format : String(format: format, locale: Locale(identifier: language), arguments: arguments)
+    let format = Localization.bundle.localizedString(forKey: key, value: key, table: nil)
+    return arguments.isEmpty ? format : String(format: format, locale: Localization.locale, arguments: arguments)
+}
+/// Resolved once per process: the preferred language does not change while the app runs.
+private enum Localization {
+    static let language = Locale.preferredLanguages.first?.hasPrefix("ru") == true ? "ru" : "en"
+    static let bundle = Bundle.main.path(forResource: language, ofType: "lproj").flatMap(Bundle.init(path:)) ?? .main
+    static let locale = Locale(identifier: language)
 }
 
 /// Rendering of the Rust core observation snapshot (schema 2), same rules as Android
@@ -399,7 +415,7 @@ extension ObservationStatus {
             } else if key == "transport" {
                 switch level {
                 case .connecting: (value, dot) = (loc("v3.value.connecting"), .ring(.blue))
-                case .disconnecting: (value, dot) = (loc("v3.value.disconnecting"), .ring(.grey))
+                case .disconnecting: (value, dot) = (loc("v3.value.disconnecting"), .ring(.blue))
                 case .error: (value, dot) = (loc("v3.value.error"), .filled(.red))
                 default: (value, dot) = (loc("v3.value.off"), .empty)
                 }

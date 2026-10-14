@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id),invoke=window.__TAURI__.core.invoke,M=window.RTModel;
 // The view model carries no credentials; Rust keeps vault, tokens and portal baselines.
-let state,notice='',noticeBase,noticeTimer=null,busy=false,selected=0,phase=null,connectError=null,unavailable=false,armedDelete=null,lastListKey='';
+let state,notice='',noticeBase,noticeTimer=null,busy=false,selected=0,phase=null,connectError=null,unavailable=false,armedDelete=null,lastListKey='',actionGen=0,polling=false;
 
 /* ---------- Copy (RU/EN by system language) ---------- */
 const LANG=String(navigator.language||'en').toLowerCase().startsWith('ru')?'ru':'en';
@@ -354,7 +354,7 @@ function applyDisabled(){
  renderDiagnostics();
 }
 async function run(action,opts={}){
- if(busy)return;busy=true;clearNotice();phase=opts.phase||null;document.body.classList.add('is-busy');setButtons(true);
+ if(busy)return;busy=true;actionGen++;clearNotice();phase=opts.phase||null;document.body.classList.add('is-busy');setButtons(true);
  $('status').textContent=t('working');renderStatus();
  try{
   await action();
@@ -402,16 +402,20 @@ function listKey(){return `${state?.connected}|${state?.connected_profile}|${sta
 setInterval(async()=>{
  if(!state)return;
  // While an action runs, do not fetch, but let results decay by the clock.
- if(busy){renderStatus();return;}
+ if(busy||polling){renderStatus();return;}
+ // A reply that was in flight when an action started is older than that action's refresh.
+ const gen=actionGen;polling=true;
  try{
   const next=await invoke('view',{russian:LANG==='ru'});
+  if(busy||gen!==actionGen)return;
   state.connected=next.connected;state.verified=next.verified;state.observations=next.observations;state.status=next.status;state.diagnostics=next.diagnostics;state.connected_profile=next.connected_profile;state.active_profile=next.active_profile;state.on_fallback=next.on_fallback;
   unavailable=false;if(state.connected)connectError=null;
   const line=M.statusLine({notice,noticeBase,status:state.status,connected:state.connected,connectError});
   if(line.keepNotice)noticeBase=line.noticeBase;else if(notice)clearNotice();
   $('status').textContent=line.text;
   const key=listKey();if(key!==lastListKey){lastListKey=key;renderHome();renderProfiles();}
- }catch{unavailable=true;}
+ }catch{if(busy||gen!==actionGen)return;unavailable=true;}
+ finally{polling=false;}
  renderStatus();applyDisabled();
 },2000);
 
