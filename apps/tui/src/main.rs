@@ -144,7 +144,12 @@ async fn run(
         }
     };
     let restore = std::panic::take_hook();
+    let ui = std::thread::current().id();
     std::panic::set_hook(Box::new(move |info| {
+        // An action's panic is caught and shown as an error; the screen stays.
+        if std::thread::current().id() != ui {
+            return;
+        }
         let _ = execute!(std::io::stdout(), DisableBracketedPaste);
         ratatui::restore();
         restore(info);
