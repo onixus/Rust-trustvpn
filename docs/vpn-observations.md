@@ -106,28 +106,88 @@ not durable across process restart. Observations are advisory and do not change 
 
 | Platform / mode | Transport | Route / DNS / guard | End-to-end connectivity | UI |
 | --- | --- | --- | --- | --- |
-| Linux selected / full / Always-on | Service worker lifecycle; failure/reconnect/gap; netlink network change, kernel-clock resume | Unknown; no live system probe | Unknown | Native and WebView share the Rust verdict |
-| Windows selected / full / Always-on | Service worker lifecycle; failure/reconnect/gap; polled adapter change, kernel-clock resume | Unknown; no live system probe | Unknown | Native and WebView share the Rust verdict |
-| macOS selected / full | Service worker lifecycle; failure/reconnect/gap; routing-socket network change, kernel-clock resume | Unknown; no live system probe | Unknown | Native and WebView share the Rust verdict |
+| Linux selected / full / Always-on | Service worker lifecycle; failure/reconnect/gap; netlink network change, kernel-clock resume; full: `passed` while a service DNS answer through the tunnel is fresh | Full: service probe (see below), route Unknown; selected: DNS/guard `unsupported` | Unknown | Native and WebView share the Rust verdict |
+| Windows selected / full / Always-on | Service worker lifecycle; failure/reconnect/gap; polled adapter change, kernel-clock resume; full: `passed` while a service DNS answer through the tunnel is fresh | Full: service probe (see below), route Unknown; selected: DNS/guard `unsupported` | Unknown | Native and WebView share the Rust verdict |
+| macOS selected / full | Service worker lifecycle; failure/reconnect/gap; routing-socket network change, kernel-clock resume; full: `passed` while a service DNS answer through the tunnel is fresh | Full: service probe (see below), route Unknown; selected: DNS/guard `unsupported` | Unknown | Native and WebView share the Rust verdict |
 | Desktop SOCKS | Proxy lifecycle only | Unsupported for the system path | Unknown | Explicit proxy scope |
 | Android | Shared mobile worker lifecycle; failure/recovery/gap; selected underlying Network/link-property changes; kernel deep-sleep clock evidence | Unknown; VpnService setup is not a live audit of DNS or lockdown | Unknown | JNI JSON, localized summary of checks that have a result, no green lifecycle badge |
 | iOS | Shared mobile worker lifecycle; failure/recovery/gap; provider path updates and native wake callback | Unknown; NetworkExtension status is not a live audit | Unknown | Redacted provider message; generation/age checked; localized summary |
 
-Capabilities explicitly advertise `system_probes=false`. The desktop GUI may
+Desktop services advertise `system_probes=true` (issue #81, see below);
+Android and iOS do not. The desktop GUI may
 fold its own path check of one user-chosen destination into the snapshot it
 displays, as `source: app_probe` for route and connectivity only; a service
-never sends that source, and it replaces only open or expired service results.
+never sends that source, and it replaces only open or expired service results,
+never a current `system_probe` row.
 The adapters retain
 existing platform differences; this change does not make unsupported checks
 available or constitute packet-level leak acceptance.
 
-Since 0.6.1 (#67) every client lists only checks that produced a result. Route,
-DNS, guard and connectivity have no runtime producer yet, so while they are
+Since 0.6.1 (#67) every client lists only checks that produced a result. Route
+and connectivity have no service producer, so while they are
 Unknown they are omitted instead of shown as "unchecked": a running transport
 reads "Transport: running" (iOS/Android widgets: "Transport running"). The amber
 colour still means that nothing is verified. Failed, stale and unsupported
 results are always shown. Desktop system-path diagnostics are reported separately;
 see [system diagnostics](system-diagnostics.md).
+
+## Service system probes (issue #81)
+
+In whole-computer mode the Linux, macOS and Windows services probe their own
+DNS, guard and transport, read-only, and publish `source: system_probe` rows.
+Wire shape is unchanged (IPC 6, schema 2): verdicts use existing enums,
+`passed`/`failed` with `configuration_applied`, an inconclusive or timed-out
+check `unknown` with `check_unavailable`.
+
+- **Schedule.** One run at a time per lease, on the lease loop's own timer:
+  2 s after Connected or any invalidation, then every 15 s
+  (`PROBE_INTERVAL_MS`). Status never starts a probe. Each run has a 5 s hard
+  deadline and each tool 2 s; a run is dropped (its sockets closed, children
+  killed) on reconnect, worker failure, network change, resume, sleep, access
+  expiry and Stop. A result is applied only to the running generation it
+  started in. Rows carry `valid_for_ms = PROBE_TTL_MS` (25 s); readers cap
+  `system_probe` rows at 25 s and every other service row at 6 s. Without a
+  repeat, green falls back to blue after 25 s. A probe failure expires with
+  its TTL; on a new generation every probe row is stale.
+- **Guard** is `passed` only if the service's own objects read back exactly as
+  the installer's generator produces them (Linux `nft -j list table inet
+  rtrust_full` against `guard_rules()`; macOS PF enabled, standard root, no
+  other non-empty `com.apple` anchor, our anchor equal to `pfctl -n` of
+  `policy()`; Windows every filter of our provider and sublayer equal to
+  `filter_specs()`), **and** one unmarked UDP datagram to `192.0.2.1:9` (and
+  `[2001:db8::1]:9` where that interface has an IPv6 default) bound to every
+  physical default-route interface is refused locally. Any missing/changed
+  rule or a datagram that leaves is `failed`; everything else is `unknown`.
+  The probe socket never carries the transport mark or an endpoint address.
+- **DNS** is `passed` only if the tunnel resolver configuration is the
+  service's own (Linux resolved link `rtrust0`: that server, `~.`,
+  default-route; macOS our SCDynamicStore entry, compared not installed, and
+  present in `scutil --dns`; Windows Wintun interface settings), the route to
+  the resolver uses the VPN interface, a `. IN NS` query bound to that
+  interface gets a matching NOERROR answer, and every other resolver the OS
+  may select (other links/adapters, IPv6, resolv.conf, NRPT, scoped
+  resolvers) is contained by a `passed` guard of the same run. A foreign
+  resolver with an unproven guard, a changed configuration or a resolver
+  route outside the tunnel is `failed`.
+- **Transport** becomes `passed` while a reply from the tunnel resolver over
+  the tunnel interface in the current generation is fresh, the worker runs
+  and no lifecycle gap occurred; otherwise lifecycle `configured` as before.
+- **Selected networks (split).** DNS and guard are `unsupported` from the
+  start: DNS bypasses the tunnel by design and there is no kill switch. UIs
+  show "not applicable" and "off"; the status stays blue. No probe runs.
+- **Privacy.** Results are enums and timestamps only. Tool output, argv,
+  addresses, resolvers and interface names are parsed in memory and dropped;
+  nothing is logged.
+
+Lab-unconfirmed (no installed-package run yet): the local refusal errno
+(Linux `EPERM` with the kernel's bound-interface on-link fallback, macOS
+`EHOSTUNREACH` from PF, Windows `WSAEACCES` at ALE); nft JSON rendering across
+nftables versions; `resolvectl` output format; `pfctl -sr` versus `pfctl -nv`
+rendering (a same-count, own-label difference is `unknown`, not `failed`);
+`scutil --dns` rendering of the supplemental entry; WFP enumeration of the
+conditions as installed. A mismatch in any of these reads as `unknown` or, for
+a changed rule set, `failed` (yellow) on a healthy host and needs a lab
+capture to correct.
 
 ## Validation and remaining acceptance
 
