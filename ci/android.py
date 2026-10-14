@@ -28,6 +28,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--gradle', default=os.environ.get('GRADLE', 'gradle'))
     p.add_argument('--serial', required=True)
+    p.add_argument('--lifecycle-only', action='store_true',
+                   help='Run JNI/APK/lint and isolated lifecycle acceptance only; does not satisfy the full Android gate')
     args = p.parse_args()
     if not args.serial.startswith('emulator-'):
         p.error('Only an explicitly selected emulator is accepted')
@@ -36,6 +38,7 @@ def main():
     if not (ndk / 'toolchains/llvm/prebuilt/linux-x86_64/bin').is_dir():
         p.error('Provision Android NDK 28.2.13676358 first')
     env = dict(os.environ, ANDROID_HOME=str(sdk))
+    target_volume = 'rtrust-android-lifecycle-target' if args.lifecycle_only else 'rtrust-android-target'
     run(['python3', str(ROOT / 'scripts/test-android-sleep-observer.py')], env=env, timeout=60)
     for name in ('SIGTERM', 'SIGINT'):
         signal.signal(getattr(signal, name), interrupt)
@@ -61,12 +64,19 @@ cp target/aarch64-linux-android/release/librtrust_android.so /out/arm64-v8a/
 '''
     try:
         run(['docker', 'run', '--rm', '--name', NAME, '-v', f'{ROOT}:/work:ro,z', '-v', f'{ndk}:/ndk:ro,z',
-             '-v', f'{libs}:/out:z', '-v', 'rtrust-android-target:/work/target', '-v', 'rtrust-android-cargo:/usr/local/cargo',
+             '-v', f'{libs}:/out:z', '-v', f'{target_volume}:/work/target', '-v', 'rtrust-android-cargo:/usr/local/cargo',
              '-w', '/work', IMAGE, 'sh', '-c', script], timeout=2400)
     finally:
         subprocess.run(['docker', 'rm', '-f', NAME], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
         run(['docker', 'run', '--rm', '--network', 'none', '-v', f'{libs}:/out:z', IMAGE, 'chown', '-hR', f'{os.getuid()}:{os.getgid()}', '/out'], timeout=60)
     run([args.gradle, '-p', str(ROOT / 'apps/android'), '--no-daemon', 'assembleDebug', 'assembleRelease', 'assembleDebugAndroidTest', 'lintDebug'], env=env, timeout=1200)
+    if args.lifecycle_only:
+        # Explicit isolated gate; never install the standard product package here.
+        # The caller provides a dedicated workspace for the JNI/APK build outputs.
+        run(['python3', 'ci/android_lifecycle_e2e.py', '--adb', str(sdk / 'platform-tools/adb'),
+             '--serial', args.serial, '--gradle', args.gradle], cwd=ROOT, env=env, timeout=1500)
+        print('PASS: isolated Android lifecycle gate; full Android network acceptance NOT RUN', flush=True)
+        return
     run(['python3', 'ci/android_smoke.py', '--adb', str(sdk / 'platform-tools/adb'), '--serial', args.serial], cwd=ROOT, env=env)
     for protocol in ('trusttunnel','http3','hysteria2','amneziawg'):
         print('Android network protocol:',protocol,flush=True)
@@ -100,6 +110,10 @@ cp target/aarch64-linux-android/release/librtrust_android.so /out/arm64-v8a/
     # Publish only product APK. Test APK is intentionally not a user download.
     shutil.copy2(ROOT / 'apps/android/app/build/outputs/apk/debug/app-debug.apk', dist / 'R-TrustTunnel-Android-debug.apk')
     shutil.copy2(ROOT / 'apps/android/app/build/outputs/apk/release/app-release-unsigned.apk', dist / 'R-TrustTunnel-Android-unsigned.apk')
+    # The lifecycle fixture changes applicationId and overwrites Gradle debug outputs.
+    # Product downloads above are immutable copies before the isolated test build.
+    run(['python3', 'ci/android_lifecycle_e2e.py', '--adb', str(sdk / 'platform-tools/adb'),
+         '--serial', args.serial, '--gradle', args.gradle], cwd=ROOT, env=env, timeout=1500)
 
 if __name__ == '__main__':
     main()

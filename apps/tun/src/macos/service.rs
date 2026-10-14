@@ -735,6 +735,7 @@ async fn start(
         reconnect: None,
     };
     let retry_guard = guard.clone();
+    let release_lease = held_lease.clone();
     connected(
         Control {
             commands,
@@ -748,9 +749,43 @@ async fn start(
         move |workers, profile, delay| {
             workers.retry(profile, delay, device.clone(), &retry_guard, &held_lease)
         },
-        move || guard.release(),
+        move || {
+            let _lease = release_lease;
+            guard.release()
+        },
     )
     .await
+}
+
+// An actor may be cancelled or unwind. Join the owned OS worker on Drop too,
+// rather than detach an already-started spawn_blocking task. The worker owns
+// its lease and has bounded system commands; dropping IPC never frees it early.
+struct CleanupThread(Option<std::thread::JoinHandle<()>>);
+impl Drop for CleanupThread {
+    fn drop(&mut self) {
+        if let Some(worker) = self.0.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+// Bounded Stop waiters share one cleanup. Status describes stopping without
+// claiming enforcement or restoration; no reconnect can start in this phase.
+fn stopping_reply(request: Envelope, waiters: &mut Vec<oneshot::Sender<Response>>) {
+    match request.command {
+        Command::Stop if waiters.len() < 16 => waiters.push(request.response),
+        Command::Status | Command::Stop => {
+            let _ = request.response.send(Response::new(
+                State::Blocked,
+                "Отключение VPN; восстановление состояния ОС",
+            ));
+        }
+        _ => {
+            let _ = request
+                .response
+                .send(Response::new(State::Error, "Invalid supervisor operation"));
+        }
+    }
 }
 
 // Keep all actor commands and worker completion events in one supervisor. In particular,
@@ -763,7 +798,7 @@ async fn connected(
     mut power: tokio::sync::watch::Receiver<power::State>,
     mut failover: crate::failover::Failover,
     mut retry: impl FnMut(&mut Workers, &rtrust_profile::Profile, &mut rtrust_control::recovery::Budget),
-    release: impl FnOnce() -> Result<(), String>,
+    release: impl FnOnce() -> Result<(), String> + Send + 'static,
 ) -> Result<(), String> {
     let Control {
         mut commands,
@@ -921,27 +956,79 @@ async fn connected(
             }
             Command::Stop => {
                 events::record("stop_requested");
-                workers.stop().await;
-                // Shutdown can arrive after Stop was admitted while route work
-                // is draining. Process termination must retain the guard.
+                monitor.transition(false, rtrust_control::observations::now_ms());
+                let mut waiters = vec![request.response];
+                {
+                    let stopping = workers.stop();
+                    tokio::pin!(stopping);
+                    loop {
+                        tokio::select! {
+                            _ = &mut stopping => break,
+                            request = commands.recv(), if !commands.is_closed() => {
+                                if let Some(request) = request { stopping_reply(request, &mut waiters); }
+                            }
+                        }
+                    }
+                }
+                // The retry closure retains the persistent utun Arc. Drop it
+                // after workers drain, before reporting successful restoration.
+                drop(retry);
                 if shutdown_requested(&shutdown) {
-                    let _ = request.response.send(Response::new(
-                        State::Blocked,
-                        "Служба остановлена; защита сохранена",
-                    ));
+                    for waiter in waiters {
+                        let _ = waiter.send(Response::new(
+                            State::Blocked,
+                            "Служба остановлена; защита сохранена",
+                        ));
+                    }
                     return Ok(());
                 }
-                let response = match release() {
-                    Ok(()) => {
+                // Join blocking release even on shutdown: abandoning OS
+                // mutations would allow a competing recovery. The production
+                // release closure retains the lease until this task completes.
+                let (complete, mut cleanup) = oneshot::channel();
+                let worker = std::thread::Builder::new()
+                    .name("rtrust-cleanup".into())
+                    .spawn(move || {
+                        let _ = complete.send(release());
+                    });
+                let worker = match worker {
+                    Ok(worker) => CleanupThread(Some(worker)),
+                    Err(_) => {
+                        for waiter in waiters {
+                            let _ = waiter.send(Response::new(
+                                State::Blocked,
+                                "Не удалось начать восстановление состояния ОС",
+                            ));
+                        }
+                        return Ok(());
+                    }
+                };
+                let result = loop {
+                    tokio::select! {
+                        result = &mut cleanup => break result,
+                        request = commands.recv(), if !commands.is_closed() => {
+                            if let Some(request) = request { stopping_reply(request, &mut waiters); }
+                        }
+                    }
+                };
+                drop(worker);
+                let response = match result {
+                    Ok(Ok(())) => {
                         monitor.stop(rtrust_control::observations::now_ms());
                         let mut response = Response::new(State::Idle, "Отключено");
                         response.observations =
                             monitor.sample(rtrust_control::observations::now_ms());
                         response
                     }
-                    Err(e) => Response::new(State::Blocked, &e),
+                    Ok(Err(e)) => Response::new(State::Blocked, &e),
+                    Err(_) => Response::new(
+                        State::Blocked,
+                        "Восстановление состояния ОС не подтверждено",
+                    ),
                 };
-                let _ = request.response.send(response);
+                for waiter in waiters {
+                    let _ = waiter.send(response.clone());
+                }
                 return Ok(());
             }
             _ => {
@@ -1471,6 +1558,7 @@ mod tests {
                 shutdown_signal.send_replace(true);
                 None
             } else {
+                let actor = actor.clone();
                 Some(tokio::spawn(
                     async move { ask(&actor, Command::Stop).await },
                 ))
@@ -1480,6 +1568,14 @@ mod tests {
                 stopping.as_ref().is_some_and(|task| task.is_finished()) || task.is_finished();
             let lease_before_drain = lease.try_lock().is_err();
             let released_before_drain = released.load(std::sync::atomic::Ordering::SeqCst);
+            let status = if !shutdown {
+                Some(
+                    tokio::time::timeout(Duration::from_millis(200), ask(&actor, Command::Status))
+                        .await,
+                )
+            } else {
+                None
+            };
             unblock.send(()).unwrap();
             let result = if let Some(stopping) = stopping {
                 Some(stopping.await.unwrap().unwrap())
@@ -1491,6 +1587,12 @@ mod tests {
             assert!(!ack_before_drain);
             assert!(lease_before_drain);
             assert!(!released_before_drain);
+            if let Some(status) = status {
+                assert_eq!(
+                    status.expect("Status blocked during drain").unwrap().state,
+                    State::Blocked
+                );
+            }
             if let Some(result) = result {
                 assert_eq!(result.state, State::Idle);
             }
@@ -1499,6 +1601,132 @@ mod tests {
                 !shutdown
             );
             assert!(lease.try_lock().is_ok());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopping_status_duplicate_stop_and_shutdown_join_delayed_release() {
+        for failure in [false, true] {
+            let lease = Arc::new(Mutex::new(()));
+            let held = lease.clone().lock_owned().await;
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let signal = entered.clone();
+            let (unblock, wait) = std::sync::mpsc::channel();
+            let (actor, commands) = mpsc::channel(16);
+            let (shutdown, shutdown_events) = tokio::sync::watch::channel(false);
+            let (initial, response) = oneshot::channel();
+            let (_power, receiver) = tokio::sync::watch::channel(power::State::default());
+            let device_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let retry_device = Dropped(device_dropped.clone());
+            let release_device = device_dropped.clone();
+            let task = tokio::spawn(super::connected(
+                Control {
+                    commands,
+                    initial: Some(initial),
+                    shutdown: shutdown_events,
+                },
+                Workers {
+                    tunnel: Some(tokio::spawn(std::future::pending())),
+                    reconnect: None,
+                },
+                false,
+                receiver,
+                failover().await,
+                move |_, _, _| {
+                    let _ = &retry_device;
+                    panic!("must not retry during Stop");
+                },
+                move || {
+                    let _lease = held;
+                    assert!(
+                        release_device.load(std::sync::atomic::Ordering::SeqCst),
+                        "device retained past drain"
+                    );
+                    signal.notify_one();
+                    wait.recv().unwrap();
+                    if failure {
+                        Err("synthetic restoration failure".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            ));
+            response.await.unwrap();
+            let first_actor = actor.clone();
+            let first = tokio::spawn(async move { ask(&first_actor, Command::Stop).await });
+            entered.notified().await;
+            let second_actor = actor.clone();
+            let second = tokio::spawn(async move { ask(&second_actor, Command::Stop).await });
+            let status =
+                tokio::time::timeout(Duration::from_millis(200), ask(&actor, Command::Status))
+                    .await;
+            shutdown.send_replace(true);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let held_during_release = lease.try_lock().is_err();
+            let finished_early = task.is_finished() || first.is_finished() || second.is_finished();
+            unblock.send(()).unwrap();
+            let expected = if failure { State::Blocked } else { State::Idle };
+            assert_eq!(first.await.unwrap().unwrap().state, expected);
+            assert_eq!(second.await.unwrap().unwrap().state, expected);
+            task.await.unwrap().unwrap();
+            assert_eq!(
+                status
+                    .expect("Status blocked during release")
+                    .unwrap()
+                    .state,
+                State::Blocked
+            );
+            assert!(held_during_release);
+            assert!(!finished_early);
+            assert!(lease.try_lock().is_ok());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actor_cancellation_joins_owned_cleanup_before_releasing_lease() {
+        let lease = Arc::new(Mutex::new(()));
+        let held = lease.clone().lock_owned().await;
+        let (unblock, wait) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _lease = held;
+            wait.recv().unwrap();
+        });
+        let (entered, ready) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _cleanup = CleanupThread(Some(worker));
+            let _ = entered.send(());
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        task.abort();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let held_during_cancel = lease.try_lock().is_err();
+        let completed_early = task.is_finished();
+        unblock.send(()).unwrap();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(held_during_cancel);
+        assert!(!completed_early);
+        assert!(lease.try_lock().is_ok());
+    }
+
+    #[test]
+    fn repeated_stop_waiters_are_bounded() {
+        let mut waiters = vec![];
+        let mut replies = vec![];
+        for _ in 0..32 {
+            let (response, reply) = oneshot::channel();
+            stopping_reply(
+                Envelope {
+                    command: Command::Stop,
+                    response,
+                },
+                &mut waiters,
+            );
+            replies.push(reply);
+        }
+        assert_eq!(waiters.len(), 16);
+        for reply in &mut replies[16..] {
+            assert_eq!(reply.try_recv().unwrap().state, State::Blocked);
         }
     }
 

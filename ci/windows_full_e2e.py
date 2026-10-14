@@ -2,6 +2,7 @@
 import json,os,pathlib,socket,ssl,subprocess,sys,time,urllib.request
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parent))
 import windows_service_e2e as fixture
+from windows_recovery import recover_after_crash
 ROOT=pathlib.Path(__file__).resolve().parent
 SERVICE=pathlib.Path(os.environ['ProgramFiles'])/'RTrustTunnel Service/rtrust-service.exe'
 pipe=None
@@ -127,20 +128,20 @@ def main():
     start();fixture.verify_traffic()
     print('PASS Stop while transport is down; no completed-task panic and exact route recovery',flush=True)
     # Abrupt GUI/IPC disconnect retains guard; only explicit recovery opens network.
-    pipe.close();pipe=None;time.sleep(2);blocked(host,control.port)
-    recovery=fixture.Pipe();response=recovery.request(dict(op='Recover'));recovery.close();assert response['state']=='Idle',response
+    pipe.close();pipe=None;blocked(host,control.port)
+    recover_after_crash(fixture.Pipe,lambda:blocked(host,control.port))
     with socket.create_connection((host,control.port),timeout=5):pass
     assert fixture.routes()==before,'Routes changed after crash recovery'
     print('PASS GUI crash retains guard; explicit recovery restores original routes',flush=True)
     start()
     fixture.ps("$p=(Get-CimInstance Win32_Service -Filter \"Name='RTrustTunnel'\").ProcessId; Stop-Process -Id $p -Force")
-    pipe.close();pipe=None;time.sleep(2);blocked(host,control.port)
+    pipe.close();pipe=None;blocked(host,control.port)
     deadline=time.monotonic()+20
     while fixture.ps('(Get-Service RTrustTunnel).Status')!='Running':
         assert time.monotonic()<deadline,'SCM did not automatically restart crashed service'
         time.sleep(.5)
     blocked(host,control.port)
-    recovery=fixture.Pipe();response=recovery.request(dict(op='Recover'));recovery.close();assert response['state']=='Idle',response
+    recover_after_crash(fixture.Pipe,lambda:blocked(host,control.port))
     assert fixture.routes()==before,'Routes changed after service crash recovery'
     print('PASS service SIGKILL/automatic SCM restart retains guard; explicit recovery restores routes',flush=True)
     start();assert pipe.request(dict(op='Stop'))['state']=='Idle';pipe.close();pipe=None
