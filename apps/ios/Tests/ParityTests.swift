@@ -436,3 +436,145 @@ extension ParityTests {
         }
     }
 }
+
+/// UI variant 3: the presentation must stay honest about what was observed.
+final class StateModelTests: XCTestCase {
+    private let now: Double = 1_000_000
+    private func check(_ outcome: String, age: Double = 1000, ttl: Double = 6000) -> [String: Any] {
+        ["outcome": outcome, "observed_at_ms": NSNumber(value: now - age), "valid_for_ms": NSNumber(value: ttl), "reason": "session_running"]
+    }
+    private func snapshot(_ outcomes: [String: [String: Any]]) -> [String: Any] {
+        var value: [String: Any] = ["schema": 2]
+        for (key, observation) in outcomes { value[key] = observation }
+        return value
+    }
+    func testGreenOnlyWhenEveryCheckPassedAndFresh() {
+        let all = Dictionary(uniqueKeysWithValues: ObservationStatus.keys.map { ($0, check("passed")) })
+        XCTAssertEqual(ObservationStatus.level(snapshot(all), nowMs: now), .verified)
+        var stale = all; stale["dns"] = check("passed", age: 7000)
+        XCTAssertEqual(ObservationStatus.level(snapshot(stale), nowMs: now), .running, "Expired pass is not green")
+        var shortTTL = all; shortTTL["route"] = check("passed", age: 2000, ttl: 1000)
+        XCTAssertEqual(ObservationStatus.level(snapshot(shortTTL), nowMs: now), .running, "TTL below 6 s is honoured")
+        var future = all; future["guard"] = check("passed", age: -5000)
+        XCTAssertEqual(ObservationStatus.level(snapshot(future), nowMs: now), .running, "Clock skew is not green")
+        var missing = all; missing.removeValue(forKey: "connectivity")
+        XCTAssertEqual(ObservationStatus.level(snapshot(missing), nowMs: now), .running, "Missing check is not passed")
+        var configured = all; configured["transport"] = check("configured")
+        XCTAssertEqual(ObservationStatus.level(snapshot(configured), nowMs: now), .running)
+        var wrongSchema = snapshot(all); wrongSchema["schema"] = 1
+        XCTAssertEqual(ObservationStatus.level(wrongSchema, nowMs: now), .running, "Unknown schema is ignored")
+        XCTAssertEqual(ObservationStatus.level(nil, nowMs: now), .running)
+    }
+    func testFailedCheckIsWarningAndNamed() {
+        let value = snapshot(["transport": check("configured"), "dns": check("failed"), "route": check("passed")])
+        XCTAssertEqual(ObservationStatus.level(value, nowMs: now), .warning)
+        XCTAssertEqual(ObservationStatus.firstFailed(value, nowMs: now), "dns")
+    }
+    func testTransportLevelNeverVerified() {
+        for status: NEVPNStatus in [.invalid, .disconnected, .connecting, .connected, .reasserting, .disconnecting] {
+            for failed in [false, true] {
+                let level = TunnelLevel.transport(status, attemptFailed: failed)
+                XCTAssertNotEqual(level, .verified); XCTAssertNotEqual(level, .warning)
+            }
+        }
+        XCTAssertEqual(TunnelLevel.transport(.connected), .running)
+        XCTAssertEqual(TunnelLevel.transport(.disconnected, attemptFailed: true), .error)
+        XCTAssertEqual(TunnelLevel.transport(nil), .off)
+        XCTAssertEqual(TunnelLevel.verified.tone, .green)
+        XCTAssertEqual(TunnelLevel.running.tone, .blue)
+    }
+    func testRowsShowNoDataInsteadOfPassed() {
+        let off = ObservationStatus.rows(status: .disconnected, level: .off, snapshot: nil, nowMs: now)
+        XCTAssertEqual(off.map(\.id), ObservationStatus.keys)
+        XCTAssertTrue(off.allSatisfy { $0.dot == .empty })
+        // A snapshot is never rendered unless connected.
+        let all = Dictionary(uniqueKeysWithValues: ObservationStatus.keys.map { ($0, check("passed")) })
+        let connecting = ObservationStatus.rows(status: .connecting, level: .connecting, snapshot: snapshot(all), nowMs: now)
+        XCTAssertEqual(connecting[0].dot, .ring(.blue))
+        XCTAssertTrue(connecting.dropFirst().allSatisfy { $0.dot == .empty })
+        let running = ObservationStatus.rows(status: .connected, level: .running,
+                                             snapshot: snapshot(["transport": check("configured"), "route": check("passed", age: 9000)]), nowMs: now)
+        XCTAssertEqual(running.map(\.dot), [.filled(.blue), .ring(.grey), .empty, .empty, .empty])
+        let error = ObservationStatus.rows(status: .disconnected, level: .error, snapshot: nil, nowMs: now)
+        XCTAssertEqual(error[0].dot, .filled(.red))
+    }
+    @MainActor
+    func testOnlyAnUnrequestedEndOfAttemptIsAnError() {
+        let model = VPNModel()
+        VPNController.userStopped = false
+        model.track(.connecting); model.track(.disconnected)
+        XCTAssertTrue(model.attemptFailed)
+        XCTAssertEqual(model.level, .error)
+        model.track(.connecting); model.track(.connected)
+        XCTAssertFalse(model.attemptFailed)
+        VPNController.userStopped = true
+        model.track(.disconnecting); model.track(.disconnected)
+        XCTAssertFalse(model.attemptFailed, "A requested stop is not a failure")
+        XCTAssertFalse(VPNController.userStopped, "The stop flag is consumed")
+        model.track(.connected); model.track(.disconnected)
+        XCTAssertFalse(model.attemptFailed, "A tunnel that was up and ended is shown as off, not as a failed attempt")
+    }
+    @MainActor
+    func testReconnectThenExternalStopIsNotAFailedAttempt() {
+        let model = VPNModel()
+        VPNController.userStopped = false
+        for status: NEVPNStatus in [.connecting, .connected, .reasserting, .disconnected] { model.track(status) }
+        XCTAssertFalse(model.attemptFailed)
+        XCTAssertEqual(model.level, .off)
+    }
+    @MainActor
+    func testNoProfileNamedUnlessThisAppStartedIt() {
+        let model = VPNModel()
+        let office = SavedProfile(id: "a", name: "Synthetic Office", hostname: "office.invalid", content: "")
+        let home = SavedProfile(id: "b", name: "Synthetic Home", hostname: "home.invalid", content: "")
+        model.vault = VaultData(profiles: [office, home], selected: "a", defaultProfileID: "b")
+        // Widget or On Demand start: no profile ID recorded by the app.
+        model.track(.disconnected); model.recordStart(nil)
+        for status: NEVPNStatus in [.connecting, .connected] {
+            model.track(status)
+            for text in [model.homeTag(model.level), model.homeDescription(model.level)] {
+                XCTAssertFalse(text.contains("Synthetic"), text); XCTAssertFalse(text.contains(".invalid"), text)
+            }
+            XCTAssertNil(model.runningProfile)
+        }
+        model.track(.disconnected)
+        // App start records the profile it passed; the name is shown and cleared on stop.
+        model.recordStart("a"); model.track(.connecting)
+        XCTAssertTrue(model.homeTag(model.level).contains("SYNTHETIC OFFICE"))
+        XCTAssertTrue(model.homeDescription(model.level).contains("office.invalid"))
+        model.track(.connected); model.track(.disconnected)
+        XCTAssertNil(model.runningProfileID)
+        model.track(.connecting)
+        XCTAssertFalse(model.homeTag(model.level).contains("SYNTHETIC"))
+    }
+    @MainActor
+    func testRestartOutsideTheAppClearsTheRecordedProfile() {
+        let model = VPNModel()
+        model.vault = VaultData(profiles: [SavedProfile(id: "a", name: "Synthetic Office", hostname: "office.invalid", content: "")],
+                                selected: "a", defaultProfileID: "a")
+        let first = Date(timeIntervalSince1970: 1_000), second = Date(timeIntervalSince1970: 2_000)
+        model.track(.disconnected)
+        model.recordStart("a"); model.track(.connecting)
+        model.track(.connected, connectedDate: first)
+        XCTAssertEqual(model.runningProfile?.id, "a")
+        model.track(.connected, connectedDate: first)
+        XCTAssertEqual(model.runningProfile?.id, "a", "Same session keeps the name")
+        // Suspended app missed .disconnected; On Demand restarted with the default profile.
+        model.track(.connected, connectedDate: second)
+        XCTAssertNil(model.runningProfileID)
+        XCTAssertFalse(model.homeTag(model.level).contains("SYNTHETIC"))
+        model.recordStart("a"); model.track(.connected, connectedDate: first); model.track(.connected, connectedDate: nil)
+        XCTAssertNil(model.runningProfileID, "A missing connected date is not proof of the same session")
+    }
+    func testLocalizationTablesHaveTheSameKeys() throws {
+        let bundle = Bundle(for: VPNModel.self)
+        let tables = try ["en", "ru"].map { language -> [String: String] in
+            let path = try XCTUnwrap(bundle.path(forResource: "Localizable", ofType: "strings", inDirectory: nil, forLocalization: language))
+            return try XCTUnwrap(NSDictionary(contentsOfFile: path) as? [String: String])
+        }
+        XCTAssertEqual(Set(tables[0].keys), Set(tables[1].keys))
+        for key in ["v3.value.nodata", "v3.slide.connect", "v3.desc.running", "v3.reason.not_checked", "v3.widget.last"] {
+            XCTAssertNotNil(tables[0][key]); XCTAssertNotNil(tables[1][key])
+        }
+    }
+}

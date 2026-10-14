@@ -29,6 +29,29 @@ widget opens the app for manual control. Add it through Home Screen editing →
 Add Widget → R-TrustTunnel. Status is labeled as the last observation and expires;
 WidgetKit refresh is not a real-time connection monitor.
 
+## Interface (variant 3)
+
+Home shows a status chip, a two-line state headline, a checks card, the selected
+profile and On Demand cards, and a slide-to-act control (left→right connects,
+right→left disconnects or cancels; a tap only nudges; VoiceOver activation acts
+directly). Profiles (search, select, swipe export/delete, menu for widget default
+and rename), Add profile (camera QR, QR from Photos, Files, link/text, portal
+enrollment; preview and explicit confirmation unchanged), Checks (per-check
+result, meaning and core reason code, plus local flow decisions) and Settings
+(theme: system/dark/light frosted glass, On Demand, portal) are reached from Home.
+System fonts only.
+
+State colours follow the shared honest model: grey off, blue connecting/running,
+green only when all five checks in the provider's schema-2 observation snapshot
+passed within min(6 s, `valid_for_ms`), yellow when any check failed, red when a
+connection attempt ended before the tunnel came up. The iOS provider currently
+reports transport only; route, DNS, guard and connectivity show "no data", so the
+app shows blue while connected. The widget shows only the last recorded transport
+status with its age and never shows green. The UI names the running profile only
+when this app started it; a tunnel started by the widget or On Demand (the provider
+loads the default profile) is shown without a profile name. The privacy cover is
+applied to the root view and to app sheets; system alerts and pickers are not covered.
+
 ## Security and platform boundaries
 
 Profiles and portal tokens live in one validated Keychain vault shared only by
