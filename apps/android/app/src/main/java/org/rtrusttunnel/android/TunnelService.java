@@ -255,13 +255,12 @@ public final class TunnelService extends VpnService {
     /** Public API only: stacked (CLAT) links are hidden, so NAT64 prefix (API 30+) stands in for them. */
     private static LinkChange.State linkState(LinkProperties p){
         if(p==null)return null;
-        java.util.List<String> addresses=new java.util.ArrayList<>(),unusable=new java.util.ArrayList<>(),routes=new java.util.ArrayList<>(),restrictive=new java.util.ArrayList<>();
-        for(LinkAddress link:p.getLinkAddresses()){String address=link.getAddress().getHostAddress()+"/"+link.getPrefixLength();addresses.add(address);
-            if((link.getFlags() & (android.system.OsConstants.IFA_F_DEPRECATED|android.system.OsConstants.IFA_F_DADFAILED))!=0)unusable.add(address);}
-        for(RouteInfo route:p.getRoutes()){int type=Build.VERSION.SDK_INT>=33?route.getType():-1;String key=route.getDestination()+" "+route.getGateway()+" "+route.getInterface()+" "+type;routes.add(key);
-            if(type!=-1 && type!=RouteInfo.RTN_UNICAST)restrictive.add(key);}
         IpPrefix nat64=Build.VERSION.SDK_INT>=30?p.getNat64Prefix():null;
-        return new LinkChange.State(p.getInterfaceName(),addresses,unusable,routes,restrictive,p.getMtu(),nat64==null?null:nat64.toString());
+        LinkChange.Builder state=new LinkChange.Builder(p.getInterfaceName(),p.getMtu(),nat64==null?null:nat64.toString(),
+            android.system.OsConstants.IFA_F_TEMPORARY,android.system.OsConstants.IFA_F_DEPRECATED,android.system.OsConstants.IFA_F_DADFAILED,RouteInfo.RTN_UNICAST);
+        for(LinkAddress link:p.getLinkAddresses())state.address(link.getAddress().getHostAddress()+"/"+link.getPrefixLength(),link.getFlags());
+        for(RouteInfo route:p.getRoutes())state.route(route.getDestination()+" "+route.getGateway()+" "+route.getInterface(),Build.VERSION.SDK_INT>=33?route.getType():-1);
+        return state.build();
     }
     private JSONArray localPrefixes(Network network)throws Exception {
         LinkProperties properties=network==null?null:connectivity.getLinkProperties(network);if(properties==null)return null;

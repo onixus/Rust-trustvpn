@@ -112,15 +112,26 @@ publish real profiles to create documentation.
   IPv4 address, the interface or an existing address/route changes or is
   removed; IPv6 address and route additions (SLAAC after Wi-Fi returns) keep the
   established session and its in-flight flows (#75). The comparison starts from
-  the link properties read at connect. It also reconnects when the link MTU or
-  the NAT64 prefix changes (Android 11+), when an address becomes deprecated or
-  fails DAD, and when an unreachable/throw route appears or a route type changes
-  (route types are visible on Android 13+). Removing any address still
-  reconnects, including an unused RFC 4941 temporary IPv6 address, because the
-  app cannot tell which source address the session uses. CLAT stacked links are
-  not public API, so CLAT is seen only through the NAT64 prefix (Android 11+); a
-  CLAT start or stop without another visible change keeps the session, which
-  then relies on its health check.
+  the link properties read at connect. It also reconnects when:
+  - the link MTU changes, including from unknown (0) to a value. Whether Android
+    reports such an update right after connect still has to be confirmed on an
+    emulator;
+  - the NAT64 prefix changes on an IPv6-only link (Android 11+). On a link with
+    an IPv4 address the prefix is ignored, so a PREF64 that arrives in a later
+    router advertisement does not reconnect a dual-stack session;
+  - an address fails DAD, or a non-temporary address becomes deprecated. An RFC
+    4941 temporary address that becomes deprecated is tolerated while another
+    preferred global address of the same family remains;
+  - an unreachable/throw route appears or a route type changes (route types are
+    visible on Android 13+).
+
+  Removing any address still reconnects, because the app cannot tell which
+  source address the session uses. This includes an unused temporary IPv6
+  address when it expires: about 7 days after it was created by default, or daily
+  when the device expires temporary addresses daily. CLAT stacked links are
+  not public API, so CLAT is seen only through the NAT64 prefix; a CLAT start or
+  stop without another visible change keeps the session, which then relies on
+  its health check.
 - A session switched to Always-on in system Settings while the app is in the
   background is recorded, so the app can reconnect it if it dies.
 - A session that carries no traffic fails its health check and reconnects. A
