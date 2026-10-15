@@ -1,5 +1,5 @@
 //! Persistent, transactionally installed WFP policy. Only our provider is removed.
-use crate::sysprobe::wfp::{Condition, Layer, Spec};
+use crate::sysprobe::wfp::{self, Condition, Layer, Spec};
 use std::{net::SocketAddrV4, ptr};
 use windows_sys::{
     Win32::{Foundation::HANDLE, NetworkManagement::WindowsFilteringPlatform::*},
@@ -451,8 +451,9 @@ fn read_condition(c: &FWPM_FILTER_CONDITION0, app: &[u8]) -> Condition {
         }
     }
 }
-/// Read-only: every filter of the full-tunnel provider, as policy data.
-/// None when the provider or its sublayer is gone.
+/// Read-only: every filter of the full-tunnel provider and every filter of
+/// any provider in its sublayer, as policy data. None when the provider or
+/// its sublayer is gone. Filters the service may not enumerate are not seen.
 pub fn read_back(app: &[u8]) -> Result<Option<Vec<Spec>>, String> {
     if !active()? {
         return Ok(None);
@@ -465,7 +466,10 @@ pub fn read_back(app: &[u8]) -> Result<Option<Vec<Spec>>, String> {
     }
     check(code)?;
     unsafe { FwpmFreeMemory0((&mut sublayer as *mut *mut FWPM_SUBLAYER0).cast()) };
-    let mut provider = PROVIDER;
+    // Bounds on what one read-back walks and keeps; beyond them it is Unknown.
+    const SCANNED: usize = 1 << 16;
+    const KEPT: usize = 4096;
+    let mut scanned = 0usize;
     let mut specs = Vec::new();
     for layer in [
         Layer::ConnectV4,
@@ -477,7 +481,7 @@ pub fn read_back(app: &[u8]) -> Result<Option<Vec<Spec>>, String> {
     ] {
         let template = FWPM_FILTER_ENUM_TEMPLATE0 {
             layerKey: layer_key(layer),
-            providerKey: &mut provider,
+            // All providers: a template cannot select a sublayer.
             actionMask: u32::MAX,
             flags: FWP_FILTER_ENUM_FLAG_INCLUDE_BOOTTIME | FWP_FILTER_ENUM_FLAG_INCLUDE_DISABLED,
             ..Default::default()
@@ -491,9 +495,20 @@ pub fn read_back(app: &[u8]) -> Result<Option<Vec<Spec>>, String> {
                 check(unsafe {
                     FwpmFilterEnum0(engine.0, enumeration, 256, &mut entries, &mut count)
                 })?;
+                scanned += count as usize;
                 if count > 0 {
                     for filter in unsafe { std::slice::from_raw_parts(entries, count as usize) } {
                         let filter = unsafe { &**filter };
+                        let permit = filter.action.r#type == FWP_ACTION_PERMIT;
+                        let read = wfp::classify(
+                            !filter.providerKey.is_null()
+                                && same(unsafe { &*filter.providerKey }, &PROVIDER),
+                            same(&filter.subLayerKey, &SUBLAYER),
+                            permit || filter.action.r#type == FWP_ACTION_BLOCK,
+                        );
+                        if read == wfp::Read::Skip {
+                            continue;
+                        }
                         let mut conditions: Vec<_> = if filter.numFilterConditions == 0 {
                             vec![]
                         } else {
@@ -507,10 +522,7 @@ pub fn read_back(app: &[u8]) -> Result<Option<Vec<Spec>>, String> {
                             .map(|c| read_condition(c, app))
                             .collect()
                         };
-                        let permit = filter.action.r#type == FWP_ACTION_PERMIT;
-                        if !same(&filter.subLayerKey, &SUBLAYER)
-                            || !(permit || filter.action.r#type == FWP_ACTION_BLOCK)
-                        {
+                        if read == wfp::Read::Foreign {
                             conditions.push(Condition::Other);
                         }
                         specs.push(Spec {
@@ -526,7 +538,10 @@ pub fn read_back(app: &[u8]) -> Result<Option<Vec<Spec>>, String> {
                         FwpmFreeMemory0((&mut entries as *mut *mut *mut FWPM_FILTER0).cast())
                     };
                 }
-                if count == 0 || specs.len() > 4096 {
+                if scanned > SCANNED || specs.len() > KEPT {
+                    return Err("WFP read-back too large".into());
+                }
+                if count == 0 {
                     break;
                 }
             }

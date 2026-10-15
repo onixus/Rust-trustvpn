@@ -7,10 +7,15 @@
  // Same cap as the Rust core FRESH_MS and Android ObservationStatus.
  const MAX_TTL_MS = 6000;
  // The service's own repeated probes: Rust observations::PROBE_TTL_MS.
- const PROBE_TTL_MS = 25000;
+ const PROBE_TTL_MS = 30000;
  function ttlCap(o) { return o && o.source === 'system_probe' ? PROBE_TTL_MS : MAX_TTL_MS; }
 
  function snapshot(s) { return s && s.schema === 2 ? s : null; }
+ /** Seconds shown as "results expire after": a range once service probe rows are present. */
+ function ttlLabel(s) {
+  const probed = !!s && KEYS.some(k => s[k] && s[k].source === 'system_probe');
+  return probed ? `${MAX_TTL_MS / 1000}–${PROBE_TTL_MS / 1000}` : String(MAX_TTL_MS / 1000);
+ }
 
  /** Normalised outcome: passed/configured become stale after their TTL. */
  function outcome(o, now) {
@@ -82,7 +87,7 @@
   const split = s && s.transport && s.transport.mode === 'split';
   return KEYS.map(name => {
    let value = live ? o[name] : 'unknown';
-   // Split DNS bypasses the tunnel by design; split TUN has no kill switch.
+   // Split DNS is not probed (it may or may not use the VPN); split TUN has no kill switch.
    if (split && value === 'unsupported' && name === 'dns') value = 'na';
    if (split && value === 'unsupported' && name === 'guard') value = 'guard_off';
    if (!live && name === 'transport') {
@@ -114,7 +119,7 @@
   return { text: fallback, keepNotice: false, noticeBase: undefined };
  }
 
- const api = { KEYS, MAX_TTL_MS, PROBE_TTL_MS, snapshot, outcome, outcomes, level, failed, pending, derive, statusLine, rows, TONE, ROW_TONE };
+ const api = { KEYS, MAX_TTL_MS, PROBE_TTL_MS, ttlLabel, snapshot, outcome, outcomes, level, failed, pending, derive, statusLine, rows, TONE, ROW_TONE };
  if (typeof module !== 'undefined' && module.exports) module.exports = api;
  else root.RTModel = Object.freeze(api);
 })(typeof window !== 'undefined' ? window : globalThis);

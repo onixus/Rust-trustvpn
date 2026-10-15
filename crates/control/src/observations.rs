@@ -5,11 +5,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const SCHEMA: u32 = 2;
 pub const MAX_EVENTS: usize = 64;
 pub const FRESH_MS: u64 = 6_000;
-/// The service's own DNS/guard/transport probes: one run per interval, each
-/// bounded by the deadline; a result outlives the next overdue run by 5 s.
+/// The service's own DNS/guard/transport probes: one run per interval after
+/// the previous one ended, each bounded by the deadline. Evidence is stamped
+/// with its run start, so the next result can arrive up to interval plus two
+/// deadlines later; the TTL keeps 5 s on top of that.
 pub const PROBE_INTERVAL_MS: u64 = 15_000;
 pub const PROBE_DEADLINE_MS: u64 = 5_000;
-pub const PROBE_TTL_MS: u64 = PROBE_INTERVAL_MS + PROBE_DEADLINE_MS + 5_000;
+pub const PROBE_TTL_MS: u64 = PROBE_INTERVAL_MS + 2 * PROBE_DEADLINE_MS + 5_000;
 /// Longest TTL a reader may honour for a source; longer claims are capped.
 pub fn ttl_cap(source: Source) -> u64 {
     if source == Source::SystemProbe {
@@ -283,7 +285,8 @@ impl Monitor {
                 o.reason = Reason::CheckUnavailable;
             }
         }
-        // Split DNS leaves the tunnel by design and there is no kill switch.
+        // Split mode has no kill switch, and system DNS is not probed there:
+        // a selection may or may not carry the resolver. Never Passed.
         if mode == Mode::Split {
             for o in [&mut snapshot.dns, &mut snapshot.guard] {
                 o.outcome = Outcome::Unsupported;

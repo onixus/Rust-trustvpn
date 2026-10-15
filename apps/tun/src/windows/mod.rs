@@ -618,6 +618,8 @@ async fn lease_loop(
                         // Permits are re-read: the audit compares against the current candidates.
                         if let (Some(plan), Ok(permits)) = (plan.clone(), failover.permits()) {
                             probes.start(monitor.generation(), probe::collect(plan, permits));
+                        } else {
+                            probes.defer();
                         }
                     },
                     crate::sysprobe::Tick::Done(generation, result) => {

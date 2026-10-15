@@ -22,7 +22,11 @@ pub(super) struct Plan {
 }
 pub(super) async fn collect(plan: Plan) -> SystemProbe {
     sysprobe::evidence(async {
-        let (audit, attempts, dns) = tokio::join!(audit(&plan), attempts(&plan), dns(&plan));
+        let (audit, attempts, dns) = tokio::join!(
+            sysprobe::part(Audit::Unknown, audit(&plan)),
+            sysprobe::part(vec![Attempt::Unknown], attempts(&plan)),
+            sysprobe::part(Dns::UNKNOWN, dns(&plan)),
+        );
         (dns, audit, attempts)
     })
     .await
@@ -182,9 +186,13 @@ async fn dns(plan: &Plan) -> Dns {
     let route_args = ["-n", "get", "-inet", &address];
     let (entry, route, config, reply) = tokio::join!(
         async {
-            // configd can stall; never stack a second blocked lookup.
+            // configd can stall; never stack a second blocked lookup, and
+            // never let it cost the tunnel reply gathered beside it.
             match LANE.spawn(move || dns::matches(uid, server)) {
-                Some(lookup) => lookup.await.ok(),
+                Some(lookup) => tokio::time::timeout(sysprobe::PART / 2, lookup)
+                    .await
+                    .ok()
+                    .and_then(Result::ok),
                 None => None,
             }
         },
