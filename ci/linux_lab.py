@@ -36,6 +36,12 @@ LANES = [('service', ['scripts/service-interop.py']), ('h2', ['scripts/full-tunn
 # Per-lane deadlines; recovery waits through real backoff, hysteresis and handoff.
 LANE_TIMEOUT = 420
 LANE_TIMEOUTS = {'recovery': 720}
+# Tool image (600 s) + build (900 s) + kill waits, cleanup and transfers (220 s).
+SSH_OVERHEAD = 1720
+
+
+def ssh_budget():
+    return SSH_OVERHEAD + sum(LANE_TIMEOUTS.get(label, LANE_TIMEOUT) for label, _ in LANES)
 
 
 def digest(path):
@@ -285,7 +291,7 @@ def main():
     try:
         checked(['scp', '-q', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', str(archive), str(output / 'request.json'), str(Path(__file__).resolve()), args.host + ':' + remote + '/'], timeout=120)
         command = 'exec python3 ' + shlex.quote(remote + '/linux_lab.py') + ' --worker ' + shlex.quote(remote) + ' --endpoint-archive ' + shlex.quote(args.endpoint_archive)
-        result = subprocess.run([*ssh, command], timeout=3400 + LANE_TIMEOUTS['recovery'])
+        result = subprocess.run([*ssh, command], timeout=ssh_budget())
         checked(['scp', '-q', '-o', 'BatchMode=yes', args.host + ':' + remote + '/evidence.tar.gz', str(output / 'evidence.tar.gz')], timeout=120)
         print('Evidence: ' + str(output / 'evidence.tar.gz'), flush=True)
         if result.returncode:
