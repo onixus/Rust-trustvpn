@@ -237,13 +237,21 @@ public final class TunnelService extends VpnService {
             @Override public void onAvailable(Network n){if(!java.util.Objects.equals(underlying,availableNetwork()))changed();}
             @Override public void onLost(Network n){if(n.equals(underlying))changed(n);}
             @Override public void onCapabilitiesChanged(Network n,NetworkCapabilities caps){if(!java.util.Objects.equals(underlying,availableNetwork()))changed();}
-            @Override public void onLinkPropertiesChanged(Network n,LinkProperties next){if(n.equals(underlying) && !java.util.Objects.equals(properties,next))changed();}
+            // IPv6 SLAAC additions after a handoff must not tear down the just-connected session.
+            // Compared with the latest state: changed() stores it, so a queued older callback must not read as a removal.
+            @Override public void onLinkPropertiesChanged(Network n,LinkProperties next){LinkProperties latest=connectivity.getLinkProperties(n);if(latest==null)latest=next;if(!n.equals(underlying) || java.util.Objects.equals(properties,latest))return;
+                if(LinkChange.requiresRebuild(linkInterface(properties),linkAddresses(properties),linkRoutes(properties),linkInterface(latest),linkAddresses(latest),linkRoutes(latest)))changed();
+                else synchronized(networkEvents){if(callback==this && !stopping && n.equals(underlying))properties=latest;}}
         };
         connectivity.registerNetworkCallback(new NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).addCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND).build(),callback);
         underlying=availableNetwork();
         rebuild(networkEpoch);
         synchronized(networkEvents){if(callback!=null && !stopping)sleepObserver.start(callback);}
     }
+    private static String linkInterface(LinkProperties p){return p==null?null:p.getInterfaceName();}
+    private static java.util.List<String> linkAddresses(LinkProperties p){if(p==null)return null;java.util.List<String> result=new java.util.ArrayList<>();for(LinkAddress link:p.getLinkAddresses())result.add(link.getAddress().getHostAddress()+"/"+link.getPrefixLength());return result;}
+    /** Destination, gateway and interface only: MTU and other route attributes are not session-relevant. */
+    private static java.util.List<String> linkRoutes(LinkProperties p){if(p==null)return null;java.util.List<String> result=new java.util.ArrayList<>();for(RouteInfo route:p.getRoutes())result.add(route.getDestination()+" "+route.getGateway()+" "+route.getInterface());return result;}
     private JSONArray localPrefixes(Network network)throws Exception {
         LinkProperties properties=network==null?null:connectivity.getLinkProperties(network);if(properties==null)return null;
         JSONArray result=new JSONArray();for(LinkAddress link:properties.getLinkAddresses())if(link.getAddress() instanceof Inet4Address){if(link.getPrefixLength()==0)return null;result.put(link.getAddress().getHostAddress()+"/"+link.getPrefixLength());if(result.length()>64)throw new IllegalArgumentException("Local prefix limit");}return result;
