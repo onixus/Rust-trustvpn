@@ -120,8 +120,9 @@ publish real profiles to create documentation.
     an IPv4 address the prefix is ignored, so a PREF64 that arrives in a later
     router advertisement does not reconnect a dual-stack session;
   - an address fails DAD, or a non-temporary address becomes deprecated. An RFC
-    4941 temporary address that becomes deprecated is tolerated while another
-    preferred global address of the same family remains;
+    4941 temporary IPv6 address that becomes deprecated is tolerated while
+    another preferred global IPv6 address (not link-local or ULA) remains. IPv4
+    addresses get no such exception;
   - an unreachable/throw route appears or a route type changes (route types are
     visible on Android 13+).
 

@@ -69,12 +69,13 @@ final class LinkChange {
         // IPv4 link addresses feed managed-routing local prefixes; IPv6 additions (SLAAC) do not.
         for(String address:after.addresses){if(address==null)return true;if(!before.addresses.contains(address) && !isIpv6(address))return true;}
         for(String address:after.failed)if(address==null || !before.failed.contains(address))return true;
-        // An address that stops being preferred may be the session's source. A deprecated RFC 4941 temporary
-        // address is routine rotation and is tolerated while another preferred global address of its family remains.
+        // An address that stops being preferred may be the session's source. A deprecated RFC 4941 temporary IPv6
+        // address is routine rotation and is tolerated while another preferred global IPv6 address remains.
+        // IPv4 never qualifies: IFA_F_TEMPORARY shares its value with IFA_F_SECONDARY.
         for(String address:after.deprecated){
             if(address==null)return true;
             if(before.deprecated.contains(address))continue;
-            if(!after.temporary.contains(address) || !hasPreferredGlobal(after,isIpv6(address)))return true;
+            if(!isIpv6(address) || !after.temporary.contains(address) || !hasPreferredGlobalIpv6(after))return true;
         }
         // A new unreachable/throw route can blackhole the endpoint even though nothing was removed.
         for(String route:after.restrictive)if(route==null || !before.restrictive.contains(route))return true;
@@ -82,16 +83,19 @@ final class LinkChange {
     }
     private static boolean isIpv6(String address){return address.split("/",2)[0].indexOf(':')>=0;}
     private static boolean hasIpv4(State state){for(String address:state.addresses)if(address!=null && !isIpv6(address))return true;return false;}
-    private static boolean hasPreferredGlobal(State state,boolean ipv6){
+    private static boolean hasPreferredGlobalIpv6(State state){
         for(String address:state.addresses)
-            if(address!=null && isIpv6(address)==ipv6 && !state.deprecated.contains(address) && !state.failed.contains(address) && isGlobal(address))return true;
+            if(address!=null && isIpv6(address) && !state.deprecated.contains(address) && !state.failed.contains(address) && isGlobalIpv6(address))return true;
         return false;
     }
-    /** Literal parsing only (no DNS): the host part is a numeric address taken from LinkAddress. */
-    private static boolean isGlobal(String address){
+    private static final java.util.regex.Pattern IPV6_LITERAL=java.util.regex.Pattern.compile("[0-9A-Fa-f:.]+(%[\\w.-]+)?");
+    /** Global unicast IPv6 only: not link-local, loopback, unspecified, multicast or ULA (fc00::/7). Never resolves names. */
+    static boolean isGlobalIpv6(String address){
         String host=address.split("/",2)[0];
-        if(host.indexOf(':')<0 && !host.matches("[0-9]+(\\.[0-9]+){3}"))return false;
-        try{InetAddress ip=InetAddress.getByName(host);return !(ip.isLinkLocalAddress() || ip.isLoopbackAddress() || ip.isAnyLocalAddress() || ip.isMulticastAddress());}
+        if(host.indexOf(':')<0 || !IPV6_LITERAL.matcher(host).matches())return false;
+        try{InetAddress ip=InetAddress.getByName(host);
+            return ip instanceof java.net.Inet6Address && (ip.getAddress()[0] & 0xfe)!=0xfc
+                && !(ip.isLinkLocalAddress() || ip.isLoopbackAddress() || ip.isAnyLocalAddress() || ip.isMulticastAddress());}
         catch(Exception error){return false;}
     }
 }

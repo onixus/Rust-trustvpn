@@ -72,8 +72,25 @@ public final class LinkChangeTest {
             .routes.equals(list("x -1")), "mapping any negative type is unknown");
     }
 
+    private static void globalIpv6() {
+        check(LinkChange.isGlobalIpv6("2001:db8::1/64"), "global unicast IPv6 is global");
+        check(!LinkChange.isGlobalIpv6("fd00::1/64"), "ULA fd00::/8 is not global");
+        check(!LinkChange.isGlobalIpv6("fc00::1/64"), "ULA fc00::/8 is not global");
+        check(!LinkChange.isGlobalIpv6("fe80::1/64"), "link-local is not global");
+        check(!LinkChange.isGlobalIpv6("fe80::1%1/64"), "scoped link-local is not global");
+        check(!LinkChange.isGlobalIpv6("::1/128"), "loopback is not global");
+        check(!LinkChange.isGlobalIpv6("::/0"), "unspecified is not global");
+        check(!LinkChange.isGlobalIpv6("ff02::1/128"), "multicast is not global");
+        check(!LinkChange.isGlobalIpv6("::ffff:192.0.2.1/128"), "IPv4-mapped is not global IPv6");
+        check(!LinkChange.isGlobalIpv6("192.0.2.1/24"), "IPv4 is not global IPv6");
+        check(!LinkChange.isGlobalIpv6("example.com:443"), "host name is rejected before any resolver");
+        check(!LinkChange.isGlobalIpv6("localhost/0"), "plain name is rejected before any resolver");
+        check(!LinkChange.isGlobalIpv6("2001:db8::1%a b/64"), "scope with illegal characters is rejected");
+        check(!LinkChange.isGlobalIpv6("beef:cafe/64"), "malformed hex literal is not global");
+    }
     public static void main(String[] args) {
         mapping();
+        globalIpv6();
         Link base = dualStack();
         check(!rebuild(base, base.copy()), "identical properties keep session");
 
@@ -111,6 +128,13 @@ public final class LinkChangeTest {
             "temporary deprecated while the other global IPv6 failed DAD rebuilds");
         check(rebuild(withTemporary, withTemporary.copy().address("2001:db8::abcd/64", TEMPORARY | DADFAILED)),
             "temporary address failing DAD rebuilds");
+        Link ulaOnly = new Link().address("192.0.2.10/24", PERMANENT).address("fe80::1/64", PERMANENT).address("fd00::10/64", 0)
+            .address("2001:db8::abcd/64", TEMPORARY);
+        check(rebuild(ulaOnly, ulaOnly.copy().address("2001:db8::abcd/64", TEMPORARY | DEPRECATED)),
+            "temporary deprecated with only a ULA left rebuilds: ULA is not global");
+        Link ipv4Secondary = new Link().address("192.0.2.10/24", PERMANENT).address("192.0.2.20/24", TEMPORARY).address("2001:db8::10/64", 0);
+        check(rebuild(ipv4Secondary, ipv4Secondary.copy().address("192.0.2.20/24", TEMPORARY | DEPRECATED)),
+            "IPv4 with IFA_F_SECONDARY (= TEMPORARY) deprecated rebuilds");
         check(rebuild(base, base.copy().address("2001:db8:2::10/64", DEPRECATED)), "address added already deprecated rebuilds");
         check(rebuild(base, base.copy().address("2001:db8:2::10/64", DADFAILED)), "address added DAD-failed rebuilds");
         Link deprecated = base.copy().address("2001:db8::10/64", DEPRECATED);
