@@ -591,8 +591,8 @@ pub(super) fn running_text(snapshot: &Snapshot, now: u64, proxy_port: &str) -> S
     if snapshot.transport.mode == ObservationMode::Split {
         parts.push(
             t(
-                "Через VPN идут только выбранные сети; остальной трафик и системный DNS — вне VPN.",
-                "Only the selected networks use the VPN; other traffic and system DNS bypass it.",
+                "Через VPN идут только выбранные сети; остальной трафик идёт вне VPN. Системный DNS в этом режиме не проверяется.",
+                "Only the selected networks use the VPN; other traffic bypasses it. System DNS is not checked in this mode.",
             )
             .to_owned(),
         );
@@ -622,8 +622,8 @@ pub(super) fn running_text(snapshot: &Snapshot, now: u64, proxy_port: &str) -> S
     }
     parts.join(" ")
 }
-/// Split DNS bypasses the tunnel by design and split TUN has no kill switch:
-/// neither is a missing feature nor a result.
+/// Split DNS is not probed (a selection may or may not carry the resolver)
+/// and split TUN has no kill switch: neither is a missing feature nor a result.
 pub(super) fn check_value(
     check: Check,
     mode: ObservationMode,
@@ -631,7 +631,7 @@ pub(super) fn check_value(
 ) -> (&'static str, Option<Hue>) {
     match (mode, check, outcome) {
         (ObservationMode::Split, Check::Dns, Outcome::Unsupported) => {
-            (t("не применимо", "not applicable"), None)
+            (t("не проверяется", "not checked"), None)
         }
         (ObservationMode::Split, Check::Guard, Outcome::Unsupported) => {
             (t("не включена", "off"), None)
@@ -3328,7 +3328,7 @@ mod tests {
         assert_eq!(tunnel_level(&split, now), Level::Running);
         let dns = check_value(Check::Dns, ObsMode::Split, normalized(&split.dns, now));
         let guard = check_value(Check::Guard, ObsMode::Split, normalized(&split.guard, now));
-        assert_eq!(dns, (t("не применимо", "not applicable"), None));
+        assert_eq!(dns, (t("не проверяется", "not checked"), None));
         assert_eq!(guard, (t("не включена", "off"), None));
         assert_eq!(
             check_value(Check::Guard, ObsMode::Full, Outcome::Unsupported),

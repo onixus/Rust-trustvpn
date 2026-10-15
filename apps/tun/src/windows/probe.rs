@@ -26,21 +26,17 @@ pub(super) async fn collect(plan: Plan, permits: Vec<crate::failover::Permit>) -
     let server = SocketAddr::new(plan.dns.into(), 53);
     let index = plan.index;
     sysprobe::evidence(async move {
-        let blocking = LANE.spawn(move || {
-            let luid = luid(plan.index);
-            (
-                luid.map_or(Audit::Unknown, |luid| audit(luid, &permits)),
-                attempts(&plan),
-                dns(&plan, luid),
-            )
-        });
+        // Dropped with this run (cancel, Stop, EOF, deadline): the detached
+        // thread then sends nothing, also after the guard has been removed.
+        let (_fence, live) = sysprobe::fence();
+        let blocking = LANE.spawn(move || gather(&plan, &permits, &live));
         let (facts, reply) = tokio::join!(
-            async {
+            sysprobe::part(None, async {
                 match blocking {
                     Some(work) => work.await.ok(),
                     None => None,
                 }
-            },
+            }),
             async {
                 match socket(false, index) {
                     Some(socket) => sysprobe::exchange(socket, server).await,
@@ -53,6 +49,20 @@ pub(super) async fn collect(plan: Plan, permits: Vec<crate::failover::Permit>) -
         (Dns { reply, ..dns }, audit, attempts)
     })
     .await
+}
+/// Blocking part of a run; nothing after a dropped run sends or reads on.
+fn gather(
+    plan: &Plan,
+    permits: &[crate::failover::Permit],
+    live: &sysprobe::Live,
+) -> (Audit, Vec<Attempt>, Dns) {
+    let luid = luid(plan.index);
+    let audit = luid.map_or(Audit::Unknown, |luid| audit(luid, permits));
+    let attempts = attempts(plan, live);
+    if !live.get() {
+        return (audit, attempts, Dns::UNKNOWN);
+    }
+    (audit, attempts, dns(plan, luid))
 }
 fn luid(index: u32) -> Option<u64> {
     let mut luid = NET_LUID_LH::default();
@@ -123,8 +133,8 @@ fn defaults(family: ADDRESS_FAMILY, wintun: u32) -> Option<Vec<u32>> {
 /// Each physical default-route interface refuses an unmarked datagram at
 /// ALE (WSAEACCES). Windows Firewall or another WFP vendor would refuse the
 /// same way; the read-back of our own filters is required as well.
-fn attempts(plan: &Plan) -> Vec<Attempt> {
-    if sysprobe::collides(&plan.endpoints) {
+fn attempts(plan: &Plan, live: &sysprobe::Live) -> Vec<Attempt> {
+    if sysprobe::collides(&plan.endpoints) || !live.get() {
         return vec![Attempt::Unknown];
     }
     let Some(v4) = defaults(AF_INET, plan.index) else {
@@ -135,6 +145,10 @@ fn attempts(plan: &Plan) -> Vec<Attempt> {
     };
     let mut attempts = Vec::new();
     for index in v4 {
+        // The run may have been dropped while IP Helper was read.
+        if !live.get() {
+            return vec![Attempt::Unknown];
+        }
         attempts.push(match socket(false, index) {
             Some(socket) => sysprobe::attempt(
                 sysprobe::send(&socket, sysprobe::TARGET_V4),
@@ -143,6 +157,9 @@ fn attempts(plan: &Plan) -> Vec<Attempt> {
             ),
             None => Attempt::Unknown,
         });
+        if !live.get() {
+            return vec![Attempt::Unknown];
+        }
         attempts.push(sysprobe::v6_attempt(
             v6.contains(&index),
             socket(true, index).map(|socket| sysprobe::send(&socket, sysprobe::TARGET_V6)),

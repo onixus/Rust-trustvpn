@@ -1,12 +1,13 @@
 //! The service's own read-only DNS, guard and transport probes (issue #81).
 //!
-//! One run at a time per lease, on the lease loop's own timer, never on
-//! Status. Each run is tagged with the snapshot generation it started in and
+//! One run at a time per lease, on the lease loop's own timer, and only while
+//! a client reads observations: Status marks a read, it never runs a probe
+//! itself. Each run is tagged with the snapshot generation it started in and
 //! bounded by a hard deadline; dropping it cancels it and kills its children.
 //! Nothing here changes routes, DNS, marks or firewall rules. Facts are reduced
 //! to the enums below at once: no address, interface or tool output survives.
 use rtrust_control::observations::{
-    Mode, Observation, Outcome, PROBE_DEADLINE_MS, PROBE_INTERVAL_MS, SystemProbe, now_ms,
+    FRESH_MS, Mode, Observation, Outcome, PROBE_DEADLINE_MS, PROBE_INTERVAL_MS, SystemProbe, now_ms,
 };
 use std::{
     future::Future,
@@ -17,6 +18,13 @@ use std::{
 
 /// Wait after Connected or an invalidation before the first run.
 const SETTLE: Duration = Duration::from_secs(2);
+/// A reader that has not polled for this long gets its next snapshot
+/// invalidated as a lifecycle gap (`Monitor::sample`), so a run without a
+/// read inside this window can never be shown.
+const READER: Duration = Duration::from_millis(FRESH_MS);
+/// Each part of a run (own rules, bypass attempts, DNS) has its own budget
+/// inside the run deadline: a slow part loses only its own facts.
+pub const PART: Duration = Duration::from_millis(PROBE_DEADLINE_MS - 1_000);
 /// Per external tool.
 #[cfg(unix)]
 const STEP: Duration = Duration::from_secs(2);
@@ -35,15 +43,26 @@ pub enum Tick {
     Done(u64, SystemProbe),
 }
 /// Single flight, no queue: a due tick while a run is pending cannot exist.
+///
+/// `next` is re-created by every `select!` iteration of the lease loop, so a
+/// read, a cancel or a state change is seen without a wake-up of its own.
+/// Without a recent read, or after a due tick the caller did not use, the
+/// runner sleeps instead of re-arming a short timer.
 pub struct Runner {
     task: Option<(u64, Task)>,
     due: Pin<Box<tokio::time::Sleep>>,
+    /// False after a due tick the caller did not use; `cancel` (every
+    /// lifecycle change) or `defer` re-arms it.
+    armed: bool,
+    read: Option<tokio::time::Instant>,
 }
 impl Default for Runner {
     fn default() -> Self {
         Self {
             task: None,
             due: Box::pin(tokio::time::sleep(SETTLE)),
+            armed: true,
+            read: None,
         }
     }
 }
@@ -70,10 +89,26 @@ impl Runner {
             }),
         ));
     }
+    /// A client read observations. A run that fell due while nobody read
+    /// starts on the next `next`; until it finishes the rows stay unproven.
+    pub fn read(&mut self) {
+        self.read = Some(tokio::time::Instant::now());
+    }
+    fn wanted(&self) -> bool {
+        self.read.is_some_and(|at| at.elapsed() <= READER)
+    }
     /// Drop a pending run (its sockets and children go with it) and settle.
     pub fn cancel(&mut self) {
         self.task = None;
+        self.armed = true;
         self.reschedule(SETTLE);
+    }
+    /// A due run could not start now (its inputs are unavailable): retry
+    /// after a full interval rather than on every loop iteration.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn defer(&mut self) {
+        self.armed = true;
+        self.reschedule(Duration::from_millis(PROBE_INTERVAL_MS));
     }
     fn reschedule(&mut self, after: Duration) {
         self.due.as_mut().reset(tokio::time::Instant::now() + after);
@@ -84,14 +119,53 @@ impl Runner {
             let probe = task.await;
             let generation = *generation;
             self.task = None;
+            self.armed = true;
             self.reschedule(Duration::from_millis(PROBE_INTERVAL_MS));
             return Tick::Done(generation, probe);
         }
-        self.due.as_mut().await;
-        // A due tick the caller does not use must not fire again at once.
-        self.reschedule(SETTLE);
-        Tick::Due
+        if self.armed && self.wanted() {
+            self.due.as_mut().await;
+            // The reader may have gone while the timer ran.
+            if self.wanted() {
+                // A due tick the caller does not use must not fire again.
+                self.armed = false;
+                return Tick::Due;
+            }
+        }
+        std::future::pending().await
     }
+}
+
+/// Blocking work outlives a dropped run. The run holds the `Fence`; its drop
+/// (cancel, Stop, EOF, deadline) clears `Live`, which detached blocking work
+/// checks before anything that sends. Teardown happens after the drop, so
+/// no datagram starts once the guard may be gone; one already inside the
+/// send call when the run is dropped can still complete.
+#[cfg(any(target_os = "windows", test))]
+pub struct Fence(std::sync::Arc<std::sync::atomic::AtomicBool>);
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone)]
+pub struct Live(std::sync::Arc<std::sync::atomic::AtomicBool>);
+#[cfg(any(target_os = "windows", test))]
+pub fn fence() -> (Fence, Live) {
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    (Fence(flag.clone()), Live(flag))
+}
+#[cfg(any(target_os = "windows", test))]
+impl Drop for Fence {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+#[cfg(any(target_os = "windows", test))]
+impl Live {
+    pub fn get(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+/// Bound one part of a run; a part over its budget reports `fallback`.
+pub async fn part<T>(fallback: T, work: impl Future<Output = T>) -> T {
+    tokio::time::timeout(PART, work).await.unwrap_or(fallback)
 }
 
 /// Blocking OS calls cannot be cancelled: a dropped run detaches them. One
@@ -174,7 +248,6 @@ pub struct Dns {
     pub foreign: Foreign,
 }
 impl Dns {
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub const UNKNOWN: Self = Self {
         config: Audit::Unknown,
         path: Path::Unknown,
@@ -743,6 +816,26 @@ pub mod wfp {
         }
         specs
     }
+    /// How the read-back treats one enumerated filter.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Read {
+        /// Neither our provider nor our sublayer.
+        Skip,
+        /// Ours: our provider, our sublayer, a plain permit or block.
+        Own,
+        /// Our provider elsewhere, another provider (or none) inside our
+        /// sublayer, or another action: read, but never equal to a spec.
+        Foreign,
+    }
+    /// Every filter of our provider and every filter in our sublayer is read:
+    /// a foreign permit placed in our sublayer is arbitrated with our block.
+    pub fn classify(our_provider: bool, our_sublayer: bool, plain_action: bool) -> Read {
+        match (our_provider, our_sublayer, plain_action) {
+            (false, false, _) => Read::Skip,
+            (true, true, true) => Read::Own,
+            _ => Read::Foreign,
+        }
+    }
     /// Read-back multiset against the expected policy, conditions in any order.
     pub fn audit(mut found: Vec<Spec>, mut expected: Vec<Spec>) -> super::Audit {
         for spec in found.iter_mut().chain(expected.iter_mut()) {
@@ -942,7 +1035,7 @@ mod tests {
     async fn runner_is_single_flight_bounded_and_cancellable() {
         let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut runner = Runner::default();
-        assert!(matches!(runner.next().await, Tick::Due));
+        assert!(matches!(polled(&mut runner).await, Tick::Due));
         for _ in 0..3 {
             let started = started.clone();
             runner.start(4, async move {
@@ -962,7 +1055,7 @@ mod tests {
         assert!(!runner.busy());
         // The next run waits a full interval; nothing queued meanwhile.
         let before = tokio::time::Instant::now();
-        assert!(matches!(runner.next().await, Tick::Due));
+        assert!(matches!(polled(&mut runner).await, Tick::Due));
         assert!(before.elapsed() >= Duration::from_millis(PROBE_INTERVAL_MS));
         // Cancel drops the run and its result.
         struct Flag(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -980,7 +1073,147 @@ mod tests {
         });
         runner.cancel();
         assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(matches!(polled(&mut runner).await, Tick::Due));
+    }
+    /// The lease loop as clients drive it: a Status read every 2 s.
+    async fn polled(runner: &mut Runner) -> Tick {
+        loop {
+            runner.read();
+            tokio::select! {
+                tick = runner.next() => return tick,
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            }
+        }
+    }
+    /// The lease loop without any client read.
+    async fn unread(runner: &mut Runner, wait: Duration) -> Option<Tick> {
+        tokio::time::timeout(wait, runner.next()).await.ok()
+    }
+    #[tokio::test(start_paused = true)]
+    async fn nothing_runs_while_no_client_reads_and_a_new_read_starts_a_run_at_once() {
+        let mut runner = Runner::default();
+        // Connected, but nobody reads: no due tick however long it waits.
+        assert!(
+            unread(&mut runner, Duration::from_secs(600))
+                .await
+                .is_none()
+        );
+        // The first read after the silence starts a run without a new settle.
+        runner.read();
+        let before = tokio::time::Instant::now();
         assert!(matches!(runner.next().await, Tick::Due));
+        assert!(before.elapsed() < SETTLE);
+        runner.start(3, async { passing(now_ms()) });
+        assert!(matches!(runner.next().await, Tick::Done(3, _)));
+        // While a reader polls, runs follow one interval apart.
+        assert!(matches!(polled(&mut runner).await, Tick::Due));
+        runner.start(4, async { passing(now_ms()) });
+        assert!(matches!(runner.next().await, Tick::Done(4, _)));
+        // The reader goes away while the interval runs: the due run never starts.
+        runner.read();
+        assert!(
+            unread(&mut runner, Duration::from_secs(600))
+                .await
+                .is_none()
+        );
+        // Nor after a read older than the window.
+        runner.read();
+        tokio::time::advance(READER + Duration::from_millis(1)).await;
+        assert!(
+            unread(&mut runner, Duration::from_secs(600))
+                .await
+                .is_none()
+        );
+        // It comes back: the overdue run starts at once.
+        runner.read();
+        let before = tokio::time::Instant::now();
+        assert!(matches!(runner.next().await, Tick::Due));
+        assert_eq!(before.elapsed(), Duration::ZERO);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn an_unused_due_tick_waits_for_a_lifecycle_change_not_a_short_timer() {
+        let mut runner = Runner::default();
+        // Not connected: the caller ignores the tick.
+        assert!(matches!(polled(&mut runner).await, Tick::Due));
+        let polls = tokio::time::timeout(Duration::from_secs(120), polled(&mut runner)).await;
+        assert!(polls.is_err(), "an ignored due tick must not re-fire");
+        // Reconnected (every lifecycle change cancels): due after the settle.
+        runner.cancel();
+        let before = tokio::time::Instant::now();
+        assert!(matches!(polled(&mut runner).await, Tick::Due));
+        assert!(before.elapsed() >= SETTLE);
+        // Inputs unavailable: deferred by a full interval, not 2 s.
+        runner.defer();
+        let before = tokio::time::Instant::now();
+        assert!(matches!(polled(&mut runner).await, Tick::Due));
+        assert!(before.elapsed() >= Duration::from_millis(PROBE_INTERVAL_MS));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_run_stops_its_detached_blocking_work_before_any_send() {
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        // Shaped like the Windows collector: rules read, then sends, in one
+        // blocking call that a dropped run cannot stop.
+        let lane: &'static Lane = Box::leak(Box::new(Lane::new()));
+        let sends = Arc::new(AtomicUsize::new(0));
+        let reached = Arc::new(AtomicBool::new(false));
+        let collect = |release: std::sync::mpsc::Receiver<()>| {
+            let (sends, reached) = (sends.clone(), reached.clone());
+            let release = Mutex::new(release);
+            async move {
+                let (_fence, live) = fence();
+                let work = lane.spawn(move || {
+                    reached.store(true, Ordering::SeqCst);
+                    let _ = release.lock().unwrap().recv();
+                    for _ in 0..4 {
+                        if !live.get() {
+                            return;
+                        }
+                        sends.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+                if let Some(work) = work {
+                    let _ = work.await;
+                }
+                passing(now_ms())
+            }
+        };
+        let wait_free = || async {
+            while lane.busy() {
+                tokio::task::yield_now().await;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        // Cancelled (Stop, EOF, network change) while the rules were read.
+        let (release, wait) = std::sync::mpsc::channel();
+        let mut runner = Runner::default();
+        runner.start(1, collect(wait));
+        while !reached.load(Ordering::SeqCst) {
+            tokio::select! {
+                _ = runner.next() => panic!("a stalled run cannot finish"),
+                _ = tokio::task::yield_now() => {}
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        runner.cancel();
+        // The guard is torn down here; the detached call then resumes.
+        release.send(()).unwrap();
+        wait_free().await;
+        assert_eq!(
+            sends.load(Ordering::SeqCst),
+            0,
+            "sent after the run was dropped"
+        );
+        // Control: a live run does send.
+        reached.store(false, Ordering::SeqCst);
+        let (release, wait) = std::sync::mpsc::channel();
+        release.send(()).unwrap();
+        runner.start(2, collect(wait));
+        assert!(matches!(runner.next().await, Tick::Done(2, _)));
+        assert_eq!(sends.load(Ordering::SeqCst), 4);
+        wait_free().await;
     }
     #[tokio::test(start_paused = true)]
     async fn a_late_result_after_invalidation_is_rejected() {
@@ -1322,6 +1555,34 @@ mod tests {
     ];
     const ALL_AUDITS: [Audit; 3] = [Audit::Match, Audit::Mismatch, Audit::Unknown];
     #[test]
+    fn a_foreign_filter_in_our_sublayer_is_a_mismatch() {
+        use wfp::{Read, classify};
+        assert_eq!(classify(false, false, true), Read::Skip);
+        assert_eq!(classify(true, true, true), Read::Own);
+        // Another vendor's (or provider-less) filter inside our sublayer.
+        assert_eq!(classify(false, true, true), Read::Foreign);
+        // Ours outside our sublayer, or with another action.
+        assert_eq!(classify(true, false, true), Read::Foreign);
+        assert_eq!(classify(true, true, false), Read::Foreign);
+        let expected = wfp::filter_specs(7, &[], false);
+        // A foreign permit is read back with an Other condition, as read_back does.
+        let mut found = expected.clone();
+        found.push(wfp::Spec {
+            layer: wfp::Layer::ConnectV4,
+            boottime: false,
+            permit: true,
+            conditions: vec![wfp::Condition::Other],
+        });
+        assert_eq!(wfp::audit(found, expected.clone()), Audit::Mismatch);
+        // Even one that copies one of our permits exactly.
+        let mut copy = expected[0].clone();
+        copy.conditions.push(wfp::Condition::Other);
+        let mut found = expected.clone();
+        found.push(copy);
+        assert_eq!(wfp::audit(found, expected.clone()), Audit::Mismatch);
+        assert_eq!(wfp::audit(expected.clone(), expected), Audit::Match);
+    }
+    #[test]
     fn tester_guard_verdict_invariants_over_every_combination() {
         let mut sets: Vec<Vec<Attempt>> = vec![vec![]];
         for _ in 0..3 {
@@ -1634,14 +1895,15 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn tester_runner_due_ticks_do_not_queue_and_drop_aborts() {
         let mut runner = Runner::default();
-        // A long silence (no one polling) yields one due tick, not a burst.
+        // A long wait before the first read yields one due tick, not a burst.
         tokio::time::advance(Duration::from_secs(120)).await;
-        assert!(matches!(runner.next().await, Tick::Due));
-        let before = tokio::time::Instant::now();
-        assert!(matches!(runner.next().await, Tick::Due));
+        assert!(matches!(polled(&mut runner).await, Tick::Due));
+        // An unused due tick does not refire while the state is unchanged.
         assert!(
-            before.elapsed() >= SETTLE,
-            "an unused due tick must not refire at once"
+            tokio::time::timeout(Duration::from_secs(60), polled(&mut runner))
+                .await
+                .is_err(),
+            "an unused due tick must not refire"
         );
         // Dropping the runner (lease EOF/Stop) drops the pending run.
         struct Flag(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -1663,7 +1925,7 @@ mod tests {
         let mut runner = Runner::default();
         runner.start(1, async { passing(1) });
         runner.cancel();
-        assert!(matches!(runner.next().await, Tick::Due));
+        assert!(matches!(polled(&mut runner).await, Tick::Due));
     }
     #[test]
     fn tester_nft_audit_fail_closed_table() {
@@ -1984,7 +2246,7 @@ mod tests {
         // Cancel detaches the blocking call; the next due run must not stack another.
         runner.cancel();
         tokio::time::advance(SETTLE).await;
-        assert!(matches!(runner.next().await, Tick::Due));
+        assert!(matches!(polled(&mut runner).await, Tick::Due));
         runner.start(2, collect(starts.clone(), wait.clone()));
         let Tick::Done(generation, probe) = runner.next().await else {
             panic!("expected a finished run");

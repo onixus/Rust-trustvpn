@@ -7,7 +7,7 @@
  // Same cap as the Rust core FRESH_MS and Android ObservationStatus.
  const MAX_TTL_MS = 6000;
  // The service's own repeated probes: Rust observations::PROBE_TTL_MS.
- const PROBE_TTL_MS = 25000;
+ const PROBE_TTL_MS = 30000;
  function ttlCap(o) { return o && o.source === 'system_probe' ? PROBE_TTL_MS : MAX_TTL_MS; }
 
  function snapshot(s) { return s && s.schema === 2 ? s : null; }
@@ -82,7 +82,7 @@
   const split = s && s.transport && s.transport.mode === 'split';
   return KEYS.map(name => {
    let value = live ? o[name] : 'unknown';
-   // Split DNS bypasses the tunnel by design; split TUN has no kill switch.
+   // Split DNS is not probed (it may or may not use the VPN); split TUN has no kill switch.
    if (split && value === 'unsupported' && name === 'dns') value = 'na';
    if (split && value === 'unsupported' && name === 'guard') value = 'guard_off';
    if (!live && name === 'transport') {

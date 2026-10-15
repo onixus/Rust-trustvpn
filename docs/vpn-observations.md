@@ -140,24 +140,42 @@ Wire shape is unchanged (IPC 6, schema 2): verdicts use existing enums,
 check `unknown` with `check_unavailable`.
 
 - **Schedule.** One run at a time per lease, on the lease loop's own timer:
-  2 s after Connected or any invalidation, then every 15 s
-  (`PROBE_INTERVAL_MS`). Status never starts a probe. Each run has a 5 s hard
-  deadline and each tool 2 s; a run is dropped (its sockets closed, children
-  killed) on reconnect, worker failure, network change, resume, sleep, access
-  expiry and Stop. A result is applied only to the running generation it
-  started in and is stamped with the run's start, not its completion.
-  Blocking OS calls (Windows IP Helper/WFP/registry, macOS SCDynamicStore)
-  cannot be cancelled; at most one stays alive per backend, and while it is
-  stuck later runs report those checks `unknown` instead of stacking threads. Rows carry `valid_for_ms = PROBE_TTL_MS` (25 s); readers cap
-  `system_probe` rows at 25 s and every other service row at 6 s. Without a
-  repeat, green falls back to blue after 25 s. A probe failure expires with
-  its TTL; on a new generation every probe row is stale.
+  2 s after Connected or any invalidation, then 15 s after the previous run
+  ended (`PROBE_INTERVAL_MS`), and only while a client reads: a run starts
+  only if a Status request arrived within the last 6 s (`FRESH_MS`; a reader
+  silent for longer gets its next snapshot invalidated as a lifecycle gap
+  anyway). Status only marks the read; it never runs a probe itself. Without
+  a reader the loop sleeps; the first Status after the silence starts the
+  overdue run at once, and until it finishes the rows stay `unknown`/`stale`.
+  Outside Connected a due tick is not re-armed on a short timer: the next
+  lifecycle change (reconnect, network change, resume) re-arms it; Windows
+  defers a run whose permit list is unavailable by a full interval.
+  Each run has a 5 s hard deadline; its parts (own rules, bypass attempts,
+  DNS) each have 4 s (`PART`), so a slow part (e.g. `pfctl`) reports only its
+  own checks `unknown` and keeps the tunnel DNS reply gathered beside it; each
+  tool has 2 s. A run is dropped (its sockets closed, children killed) on
+  reconnect, worker failure, network change, resume, sleep, access expiry and
+  Stop. A result is applied only to the running generation it started in and
+  is stamped with the run's start, not its completion. Blocking OS calls
+  (Windows IP Helper/WFP/registry, macOS SCDynamicStore) cannot be
+  cancelled; at most one stays alive per backend, and while it is stuck later
+  runs report those checks `unknown` instead of stacking threads. On Windows
+  the rules read, the bypass datagrams and the DNS read share one blocking
+  call; it checks a flag cleared when its run is dropped before every
+  datagram and before the DNS read, so after Stop (the run is dropped before
+  WFP teardown) it sends nothing. Rows carry `valid_for_ms = PROBE_TTL_MS`
+  (30 s: interval plus two deadlines plus 5 s, since evidence is stamped with
+  its run start); readers cap `system_probe` rows at 30 s and every other
+  service row at 6 s. Without a repeat, green falls back to blue after 30 s.
+  A probe failure expires with its TTL; on a new generation every probe row
+  is stale.
 - **Guard** is `passed` only if the service's own objects read back exactly as
   the installer's generator produces them (Linux `nft -j list table inet
   rtrust_full` against `guard_rules()`; macOS PF enabled, standard root, no
   other non-empty `com.apple` anchor, our anchor equal to `pfctl -n` of
-  `policy()`; Windows every filter of our provider and sublayer equal to
-  `filter_specs()`), **and** one unmarked UDP datagram to `192.0.2.1:9` and
+  `policy()`; Windows every filter of our provider and every filter of any
+  provider in our sublayer, read per layer, equal to `filter_specs()`: a
+  foreign filter placed in our sublayer is a mismatch, `failed`), **and** one unmarked UDP datagram to `192.0.2.1:9` and
   one to `[2001:db8::1]:9`, bound to every physical default-route interface,
   are refused locally. Where the interface has an IPv6 default route, the IPv6
   datagram must be refused too (an unreachable errno or socket setup failure
@@ -180,11 +198,41 @@ check `unknown` with `check_unavailable`.
   resume, only such a reply from a run started after it restores transport;
   lifecycle `configured` still waits for a worker transition.
 - **Selected networks (split).** DNS and guard are `unsupported` from the
-  start: DNS bypasses the tunnel by design and there is no kill switch. UIs
-  show "not applicable" and "off"; the status stays blue. No probe runs.
+  start and never `passed`: there is no kill switch, and system DNS is not
+  probed. A selection that carries the resolver gets the VPN resolver (and on
+  Windows a DNS lock), one that does not keeps the system resolver; neither is
+  verified. UIs show "not checked" and "off" without claiming a leak; the
+  status stays blue. No probe runs.
 - **Privacy.** Results are enums and timestamps only. Tool output, argv,
   addresses, resolvers and interface names are parsed in memory and dropped;
   nothing is logged.
+
+Known limitations of the probes (accepted, fail-closed: each reads as
+`unknown`, never `passed`):
+
+- **Demand is per Status request.** The desktop client's lease connection
+  polls Status every 2 s and the always-on supervisor every 1 s as a
+  keepalive, whether or not a window shows the rows. While either holds the
+  lease the service sees a reader and keeps probing every interval; only a
+  lease without such polling stops. Telling UI reads from keepalive polls
+  needs an IPC change (a capability-gated read flag) and is not done.
+- **Large macOS route tables.** `netstat -rn` output over 64 KiB, or more than
+  eight physical default-route interfaces, makes the bypass check
+  `unknown`; such hosts never reach a `passed` guard.
+- **Refusal errnos are unverified.** `EPERM` (Linux), `EHOSTUNREACH` (macOS
+  PF) and `WSAEACCES` (Windows ALE) are the expected local refusals but have
+  no installed-package capture yet (lab gate below). Another errno is
+  `unknown`.
+- **A send already in progress.** On Windows a datagram whose send call had
+  started when its run was dropped can still complete; every later one is
+  suppressed. Other platforms run no send outside the polled run.
+- **WFP enumeration rights.** The read-back sees only filters the service may
+  enumerate; a filter hidden by its security descriptor is not compared.
+  More than 65 536 enumerated or 4 096 kept filters reads `unknown`.
+- **Defensive-branch tests.** Some unit tests cover branches no production
+  input reaches (an empty expected rule set, an endpoint equal to a
+  documentation probe target). They pin the parser and classifier contracts,
+  not runtime behaviour, and are no evidence for an installed package.
 
 Lab-unconfirmed (no installed-package run yet): the local refusal errno
 (Linux `EPERM` with the kernel's bound-interface on-link fallback; for IPv6

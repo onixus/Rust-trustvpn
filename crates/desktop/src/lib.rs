@@ -279,12 +279,13 @@ pub fn observation_summary(
         ])
         .enumerate()
         .filter_map(|(index, (name, o))| {
-            // Split DNS bypasses the tunnel by design and split has no kill switch.
+            // Split DNS is not probed (the selection may or may not carry the
+            // resolver) and split has no kill switch: neither claims a leak.
             let split = o.mode == rtrust_control::observations::Mode::Split
                 && o.outcome == Outcome::Unsupported;
             let value = match (split, index, russian) {
-                (true, 2, true) => "не применимо",
-                (true, 2, false) => "not applicable",
+                (true, 2, true) => "не проверяется",
+                (true, 2, false) => "not checked",
                 (true, 3, true) => "не включена",
                 (true, 3, false) => "off",
                 _ => label(o.outcome, russian)?,
@@ -346,11 +347,11 @@ mod tests {
         let split = Monitor::new(Mode::Split, Source::ServiceLifecycle, now).sample(now);
         assert_eq!(
             observation_summary(&split, true),
-            "Транспорт: запущен · DNS: не применимо · защита: не включена"
+            "Транспорт: запущен · DNS: не проверяется · защита: не включена"
         );
         assert_eq!(
             observation_summary(&split, false),
-            "Transport: running · DNS: not applicable · guard: off"
+            "Transport: running · DNS: not checked · guard: off"
         );
     }
     #[test]

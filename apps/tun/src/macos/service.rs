@@ -943,7 +943,8 @@ async fn connected(
                     if let Some(request) = request { break request; }
                     return Err("Service supervisor stopped".into());
                 },
-                // Started only by this timer while awake and connected; Status never probes.
+                // Started only by this timer while awake, connected and read by
+                // a client; Status marks the read, it never probes.
                 tick = probes.next(), if plan.is_some() => match tick {
                     crate::sysprobe::Tick::Due => if awake && state == State::Connected {
                         probes.start(monitor.generation(), super::probe::collect(plan.clone().unwrap()));
@@ -960,6 +961,7 @@ async fn connected(
         }
         match request.command {
             Command::Status => {
+                probes.read();
                 let mut response = Response::new(
                     state.clone(),
                     if state == State::Connected {

@@ -19,7 +19,11 @@ pub(super) struct Plan {
 }
 pub(super) async fn collect(plan: Plan) -> SystemProbe {
     sysprobe::evidence(async {
-        let (audit, attempts, dns) = tokio::join!(audit(), attempts(&plan), dns(plan.dns));
+        let (audit, attempts, dns) = tokio::join!(
+            sysprobe::part(Audit::Unknown, audit()),
+            sysprobe::part(vec![Attempt::Unknown], attempts(&plan)),
+            sysprobe::part(Dns::UNKNOWN, dns(plan.dns)),
+        );
         (dns, audit, attempts)
     })
     .await

@@ -54,7 +54,7 @@ assert.deepEqual(M.rows({ ...base, connected: false, phase: 'connecting', snapsh
 assert.deepEqual(M.rows({ ...base, connected: false, error: 'x', snapshot: null }, 'error').map(r => r.value), ['error', 'unknown', 'unknown', 'unknown', 'unknown']);
 assert.deepEqual(M.rows({ ...base, unavailable: true, snapshot: allPassed() }, 'error').map(r => r.value), ['unknown', 'unknown', 'unknown', 'unknown', 'unknown']);
 // Service probes (issue #81): their own TTL cap, failure expiry and split labels.
-const sys = (outcome, age = 1000, ttl = 25000) => ({ ...obs(outcome, age, ttl), source: 'system_probe', reason: 'configuration_applied' });
+const sys = (outcome, age = 1000, ttl = 30000) => ({ ...obs(outcome, age, ttl), source: 'system_probe', reason: 'configuration_applied' });
 const probed = allPassed(); probed.transport = sys('passed'); probed.dns = sys('passed'); probed.guard = sys('passed');
 probed.route = obs('passed', 1000, 6000); probed.connectivity = obs('passed', 1000, 6000);
 assert.equal(M.outcome(probed.dns, now + 10000), 'passed');
@@ -84,7 +84,7 @@ assert.equal(M.statusLine({ notice: '', status: '', connected: false, connectErr
 assert.equal(M.statusLine({ notice: '', status: '', connected: true, connectError: 'refused' }).text, '');
 // tester (issue #81): green only with five fresh passes; probe TTL boundaries.
 {
- const sysAt = (outcome, age, ttl = 25000) => ({ outcome, source: 'system_probe', observed_at_ms: now - age, valid_for_ms: ttl, mode: 'full', reason: 'configuration_applied' });
+ const sysAt = (outcome, age, ttl = 30000) => ({ outcome, source: 'system_probe', observed_at_ms: now - age, valid_for_ms: ttl, mode: 'full', reason: 'configuration_applied' });
  const green = () => { const s = allPassed(); s.transport = sysAt('passed', 1000); s.dns = sysAt('passed', 1000); s.guard = sysAt('passed', 1000); return s; };
  assert.equal(M.derive({ ...base, snapshot: green() }), 'verified');
  for (const key of M.KEYS) {
@@ -95,9 +95,9 @@ assert.equal(M.statusLine({ notice: '', status: '', connected: true, connectErro
   const s = green(); s[key] = { ...s[key], observed_at_ms: null };
   assert.equal(M.derive({ ...base, snapshot: s }), 'running', `${key} untimed`);
  }
- // Probe rows: passed up to exactly 25 s, stale one millisecond later; future never trusted.
- assert.equal(M.outcome(sysAt('passed', 25000), now), 'passed');
- assert.equal(M.outcome(sysAt('passed', 25001), now), 'stale');
+ // Probe rows: passed up to exactly 30 s, stale one millisecond later; future never trusted.
+ assert.equal(M.outcome(sysAt('passed', 30000), now), 'passed');
+ assert.equal(M.outcome(sysAt('passed', 30001), now), 'stale');
  assert.equal(M.outcome(sysAt('passed', -1), now), 'stale');
  assert.equal(M.outcome(sysAt('passed', 1000, 0), now), 'stale');
  assert.equal(M.outcome(sysAt('passed', 1000, 'x'), now), 'stale');
@@ -106,7 +106,7 @@ assert.equal(M.statusLine({ notice: '', status: '', connected: true, connectErro
  // A probe failure is yellow while current and no longer counts after its TTL (yellow -> blue).
  const failing = green(); failing.dns = sysAt('failed', 1000);
  assert.equal(M.derive({ ...base, snapshot: failing }), 'warning');
- assert.equal(M.derive({ ...base, snapshot: failing, now: now + 25000 }), 'running');
+ assert.equal(M.derive({ ...base, snapshot: failing, now: now + 30000 }), 'running');
  assert.equal(M.outcome(sysAt('failed', 1000, 25000), now), 'failed');
  assert.equal(M.outcome({ ...sysAt('failed', 0), observed_at_ms: null }, now), 'stale');
  // Green -> blue after the TTL without a new fetch.
