@@ -111,7 +111,16 @@ publish real profiles to create documentation.
 - Link-property updates on the same underlying network reconnect only when an
   IPv4 address, the interface or an existing address/route changes or is
   removed; IPv6 address and route additions (SLAAC after Wi-Fi returns) keep the
-  established session and its in-flight flows (#75).
+  established session and its in-flight flows (#75). The comparison starts from
+  the link properties read at connect. It also reconnects when the link MTU or
+  the NAT64 prefix changes (Android 11+), when an address becomes deprecated or
+  fails DAD, and when an unreachable/throw route appears or a route type changes
+  (route types are visible on Android 13+). Removing any address still
+  reconnects, including an unused RFC 4941 temporary IPv6 address, because the
+  app cannot tell which source address the session uses. CLAT stacked links are
+  not public API, so CLAT is seen only through the NAT64 prefix (Android 11+); a
+  CLAT start or stop without another visible change keeps the session, which
+  then relies on its health check.
 - A session switched to Always-on in system Settings while the app is in the
   background is recorded, so the app can reconnect it if it dies.
 - A session that carries no traffic fails its health check and reconnects. A

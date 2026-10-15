@@ -22,6 +22,8 @@ public final class TunnelService extends VpnService {
     private static final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final TunnelLifecycle lifecycle = new TunnelLifecycle();
     private volatile Network underlying;
+    /** LinkProperties of {@link #underlying} the session was last checked against; guarded by networkEvents. */
+    private LinkProperties linkProperties;
     private ParcelFileDescriptor tun;
     private ConnectivityManager connectivity;
     private final Object networkEvents = new Object();
@@ -228,9 +230,8 @@ public final class TunnelService extends VpnService {
     private void connect(String profileId)throws Exception {
         requestedId=profileId;boot=OfflineLease.boot(this);meteringInherited=inheritMetering(this);
         callback=new ConnectivityManager.NetworkCallback(){
-            private LinkProperties properties;
             private void changed(){changed(null);}
-            private void changed(Network lost){synchronized(networkEvents){if(callback!=this || stopping)return;underlying=availableNetwork(lost);properties=underlying==null?null:connectivity.getLinkProperties(underlying);
+            private void changed(Network lost){synchronized(networkEvents){if(callback!=this || stopping)return;trackUnderlying(availableNetwork(lost));
                 // A retained TUN keeps the network declared at establish. Redeclare at once:
                 // the rebuild may wait for the old session to stop. Before establish this is a no-op.
                 setUnderlyingNetworks(underlyingNetworks());networkEpoch++;transitioning=true;NativeCore.INSTANCE.networkChanged();requestRefresh();}}
@@ -239,19 +240,29 @@ public final class TunnelService extends VpnService {
             @Override public void onCapabilitiesChanged(Network n,NetworkCapabilities caps){if(!java.util.Objects.equals(underlying,availableNetwork()))changed();}
             // IPv6 SLAAC additions after a handoff must not tear down the just-connected session.
             // Compared with the latest state: changed() stores it, so a queued older callback must not read as a removal.
-            @Override public void onLinkPropertiesChanged(Network n,LinkProperties next){LinkProperties latest=connectivity.getLinkProperties(n);if(latest==null)latest=next;if(!n.equals(underlying) || java.util.Objects.equals(properties,latest))return;
-                if(LinkChange.requiresRebuild(linkInterface(properties),linkAddresses(properties),linkRoutes(properties),linkInterface(latest),linkAddresses(latest),linkRoutes(latest)))changed();
-                else synchronized(networkEvents){if(callback==this && !stopping && n.equals(underlying))properties=latest;}}
+            @Override public void onLinkPropertiesChanged(Network n,LinkProperties next){synchronized(networkEvents){if(callback!=this || stopping || !n.equals(underlying))return;
+                LinkProperties latest=connectivity.getLinkProperties(n);if(latest==null)latest=next;if(java.util.Objects.equals(linkProperties,latest))return;
+                if(LinkChange.requiresRebuild(linkState(linkProperties),linkState(latest)))changed();else linkProperties=latest;}}
         };
         connectivity.registerNetworkCallback(new NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).addCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND).build(),callback);
-        underlying=availableNetwork();
+        // Baseline for onLinkPropertiesChanged: without it the first update after connect reads as unknown and rebuilds.
+        synchronized(networkEvents){trackUnderlying(availableNetwork());}
         rebuild(networkEpoch);
         synchronized(networkEvents){if(callback!=null && !stopping)sleepObserver.start(callback);}
     }
-    private static String linkInterface(LinkProperties p){return p==null?null:p.getInterfaceName();}
-    private static java.util.List<String> linkAddresses(LinkProperties p){if(p==null)return null;java.util.List<String> result=new java.util.ArrayList<>();for(LinkAddress link:p.getLinkAddresses())result.add(link.getAddress().getHostAddress()+"/"+link.getPrefixLength());return result;}
-    /** Destination, gateway and interface only: MTU and other route attributes are not session-relevant. */
-    private static java.util.List<String> linkRoutes(LinkProperties p){if(p==null)return null;java.util.List<String> result=new java.util.ArrayList<>();for(RouteInfo route:p.getRoutes())result.add(route.getDestination()+" "+route.getGateway()+" "+route.getInterface());return result;}
+    /** Caller holds networkEvents: underlying and its baseline LinkProperties change together. */
+    private void trackUnderlying(Network network){underlying=network;linkProperties=network==null?null:connectivity.getLinkProperties(network);}
+    /** Public API only: stacked (CLAT) links are hidden, so NAT64 prefix (API 30+) stands in for them. */
+    private static LinkChange.State linkState(LinkProperties p){
+        if(p==null)return null;
+        java.util.List<String> addresses=new java.util.ArrayList<>(),unusable=new java.util.ArrayList<>(),routes=new java.util.ArrayList<>(),restrictive=new java.util.ArrayList<>();
+        for(LinkAddress link:p.getLinkAddresses()){String address=link.getAddress().getHostAddress()+"/"+link.getPrefixLength();addresses.add(address);
+            if((link.getFlags() & (android.system.OsConstants.IFA_F_DEPRECATED|android.system.OsConstants.IFA_F_DADFAILED))!=0)unusable.add(address);}
+        for(RouteInfo route:p.getRoutes()){int type=Build.VERSION.SDK_INT>=33?route.getType():-1;String key=route.getDestination()+" "+route.getGateway()+" "+route.getInterface()+" "+type;routes.add(key);
+            if(type!=-1 && type!=RouteInfo.RTN_UNICAST)restrictive.add(key);}
+        IpPrefix nat64=Build.VERSION.SDK_INT>=30?p.getNat64Prefix():null;
+        return new LinkChange.State(p.getInterfaceName(),addresses,unusable,routes,restrictive,p.getMtu(),nat64==null?null:nat64.toString());
+    }
     private JSONArray localPrefixes(Network network)throws Exception {
         LinkProperties properties=network==null?null:connectivity.getLinkProperties(network);if(properties==null)return null;
         JSONArray result=new JSONArray();for(LinkAddress link:properties.getLinkAddresses())if(link.getAddress() instanceof Inet4Address){if(link.getPrefixLength()==0)return null;result.put(link.getAddress().getHostAddress()+"/"+link.getPrefixLength());if(result.length()>64)throw new IllegalArgumentException("Local prefix limit");}return result;
@@ -333,7 +344,7 @@ public final class TunnelService extends VpnService {
         } catch (IllegalArgumentException ignored) { /* Registration failed or was already removed; token is revoked. */ }
         NativeCore.INSTANCE.stop();
         if (tun != null) { try { tun.close(); } catch (Exception ignored) {} tun = null; }
-        candidates=java.util.Collections.emptyList(); underlying = null;
+        candidates=java.util.Collections.emptyList(); synchronized (networkEvents) { underlying = null; linkProperties = null; }
         if (running == this) { active = false; VpnWidget.refresh(this, true); }
     }
     private void finishFailure() {
