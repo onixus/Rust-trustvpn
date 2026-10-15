@@ -56,21 +56,55 @@ LAG = 3
 LEAKS = ("stray4", "port4", "icmp4", "dns4", "dns6", "any6",
          "app_direct", "mark_stray4", "mark6")
 BENIGN = ("endpoint4", "dhcp4", "ndp6", "dhcp6", "marked")
-# NDP (133-137) and MLD (130-132, 143) control traffic.
-NDP_TYPES = "130, 131, 132, 133, 134, 135, 136, 137, 143"
+# Exactly the IPv6 link control the full/boot guard lets out
+# (apps/tun/src/service/full.rs guard_script): hop limit 255 router
+# solicitation, neighbor solicitation/advertisement. Anything else, MLD
+# included, is counted as any6 and is a leak while the guard is installed.
+NDP_TYPES = "133, 135, 136"
+# A session shorter than this counts as a failed attempt (apps/tun/src/failover.rs STABLE).
+STABLE = 30
+# Minimum reconnect delays of crates/control/src/recovery.rs Budget from its
+# reset state, without jitter: 2, 4, 8, 16, then 30 s for the rest of an
+# eight-attempt burst, then a pause of at least 300 s. Every later state only
+# waits longer, so this bounds how many attempts can fit in a window.
+BURST = 8
+BURST_PAUSE = 300
 
 
-def host_chain(name, device, pinned):
+def budget_delays():
+    delays = [min(2 << exponent, BACKOFF_MAX) for exponent in range(BURST)]
+    return delays + [BURST_PAUSE]
+
+
+def max_attempts(seconds):
+    """Upper bound on reconnect attempts within `seconds` of a session ending."""
+    elapsed, attempts = 0, 0
+    for delay in budget_delays():
+        elapsed += delay
+        if elapsed > seconds:
+            break
+        attempts += 1
+    return attempts
+
+
+# Per pinned endpoint: SYNs of the service's marked transport sockets, one per
+# connection attempt (a refused attempt gets an RST, no retransmission).
+SYN_COUNTERS = {}
+
+
+def host_chain(name, device, pinned, own_endpoint_counter=None):
     endpoints = ", ".join(pinned)
+    own = (f"    meta protocol ip ip daddr {{ {endpoints} }} meta l4proto tcp th dport {PORT} counter name {own_endpoint_counter}\n"
+           if own_endpoint_counter else "")
     return f"""  chain {name} {{
     type filter hook ingress device "{device}" priority -500; policy accept;
-    meta protocol ip ip daddr {{ {endpoints} }} meta l4proto tcp th dport {PORT} counter name endpoint4 accept
+{own}    meta protocol ip ip daddr {{ {endpoints} }} meta l4proto tcp th dport {PORT} counter name endpoint4 accept
     meta protocol ip ip daddr 255.255.255.255 meta l4proto udp th sport 68 th dport 67 counter name dhcp4 accept
     meta protocol ip meta l4proto {{ tcp, udp }} th dport {{ 53, 853 }} counter name dns4 accept
     meta protocol ip meta l4proto icmp counter name icmp4 accept
     meta protocol ip ip daddr {{ {endpoints} }} counter name port4 accept
     meta protocol ip counter name stray4 accept
-    meta protocol ip6 meta l4proto ipv6-icmp icmpv6 type {{ {NDP_TYPES} }} counter name ndp6 accept
+    meta protocol ip6 ip6 hoplimit 255 meta l4proto ipv6-icmp icmpv6 type {{ {NDP_TYPES} }} counter name ndp6 accept
     meta protocol ip6 ip6 daddr ff02::1:2 meta l4proto udp th sport 546 th dport 547 counter name dhcp6 accept
     meta protocol ip6 meta l4proto {{ tcp, udp }} th dport {{ 53, 853 }} counter name dns6 accept
     meta protocol ip6 counter name any6 accept
@@ -90,15 +124,21 @@ def install_watch(pinned, device="rtrust-host"):
     # that leave through a non-tunnel interface. The service marks its own
     # transport sockets; an unmarked packet to a pinned endpoint is an
     # application using the union endpoint exception as a direct bypass.
+    SYN_COUNTERS.clear()
+    SYN_COUNTERS.update({address: f"syn{index}" for index, address in enumerate(pinned)})
+    syn_counters = "".join(f"  counter {name} {{}}\n" for name in SYN_COUNTERS.values())
+    syn_rules = "".join(
+        f"    meta mark {MARK:#x} ip daddr {address} tcp dport {PORT} tcp flags & (syn | ack) == syn counter name {name}\n"
+        for address, name in SYN_COUNTERS.items())
     client = f"""table inet rtrust_appwatch {{
-  counter app_direct {{}}
+{syn_counters}  counter app_direct {{}}
   counter mark_stray4 {{}}
   counter mark6 {{}}
   counter marked {{}}
   chain egress {{
     type filter hook postrouting priority 300; policy accept;
     oifname {{ "lo", "rtrust0" }} accept
-    meta mark {MARK:#x} meta nfproto ipv4 ip daddr != {{ {endpoints} }} counter name mark_stray4 accept
+{syn_rules}    meta mark {MARK:#x} meta nfproto ipv4 ip daddr != {{ {endpoints} }} counter name mark_stray4 accept
     meta mark {MARK:#x} meta nfproto ipv6 counter name mark6 accept
     meta mark {MARK:#x} counter name marked accept
     meta nfproto ipv4 ip daddr {{ {endpoints} }} counter name app_direct accept
@@ -109,12 +149,29 @@ def install_watch(pinned, device="rtrust-host"):
 
 
 def watch_device(name, device, pinned):
-    rules = "table netdev rtrust_leakwatch {\n" + host_chain(name, device, pinned) + "}\n"
+    """Watch another client link. `<name>_endpoint4` counts endpoint transport
+    seen on this link only, a positive control that the chain is live."""
+    rules = (f"table netdev rtrust_leakwatch {{\n  counter {name}_endpoint4 {{}}\n"
+             + host_chain(name, device, pinned, f"{name}_endpoint4") + "}\n")
     subprocess.run(["nft", "-f", "-"], input=rules.encode(), check=True, timeout=10)
 
 
 def unwatch_device(name):
-    s.command("nft", "delete", "chain", "netdev", "rtrust_leakwatch", name)
+    # Call after deleting the link: some kernels drop a netdev chain together
+    # with its device, others keep it unbound. Named counters stay either way.
+    subprocess.run(["nft", "delete", "chain", "netdev", "rtrust_leakwatch", name], capture_output=True, timeout=10)
+
+
+def reset_syns():
+    for name in SYN_COUNTERS.values():
+        s.ns("nft", "reset", "counter", "inet", "rtrust_appwatch", name)
+
+
+def syns(address=None):
+    values = counters()
+    if address is not None:
+        return values[SYN_COUNTERS[address]]
+    return sum(values[name] for name in SYN_COUNTERS.values())
 
 
 def counters():
@@ -447,7 +504,7 @@ def main():
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             processes.append(client)
             lines, timeline = reader(client)
-            wait(lines, "connected", 40)
+            connected_at = wait(lines, "connected", 40)
             fetch("198.18.0.1")
             fetch6(HOST6)
             assert established(PRIMARY) and not established(BACKUP)
@@ -461,24 +518,41 @@ def main():
             reset_counters()
             load.start()
             limits = dict(failures_before_switch=FAILURES_BEFORE_SWITCH, cooldown_s=COOLDOWN, backoff_min_s=BACKOFF_MIN,
-                          backoff_max_s=BACKOFF_MAX, jitter_factor=JITTER, budget_s=BUDGET, observation_lag_s=LAG)
+                          backoff_max_s=BACKOFF_MAX, jitter_factor=JITTER, budget_s=BUDGET, observation_lag_s=LAG,
+                          stable_s=STABLE, burst_attempts=BURST, burst_pause_s=BURST_PAUSE)
 
+            def retried_before_switch(address, session_start, lost_at):
+                """Packet-level proof of the switch threshold: the lost session
+                is one failure only if it lasted less than STABLE; every
+                further failure needs a reconnect attempt, i.e. one marked
+                SYN to that endpoint, before the switch. The observed connect
+                time lags the real one, so the real session lasted at least
+                lost_at - session_start."""
+                needed = FAILURES_BEFORE_SWITCH - (0 if lost_at - session_start >= STABLE else 1)
+                seen = syns(address)
+                assert seen >= needed, f"{seen} reconnect SYNs to {address} before the switch, need {needed}"
+                return dict(syns_before_switch=seen, required=needed)
+
+            # SYN-only counters: closing packets of the dying session never count.
+            reset_syns()
             s.stop(primary)
             lost = time.monotonic()
             wait(lines, "blocked")
             switched = wait(lines, "active 1")
+            # After the switch attempts go to the backup; nothing more can
+            # reach the primary's counter until the backup fails.
+            retries = retried_before_switch(PRIMARY, connected_at, lost)
             recovered = wait(lines, "connected")
             fetch("198.18.0.1")
             fetch6(HOST6)
             assert established(BACKUP), "backup endpoint carries the session"
             values = assert_no_leaks("requested endpoint lost")
-            # At least one retry of the requested profile precedes the switch,
-            # and the switch plus the backup handshake fit the startup budget.
-            assert BACKOFF_MIN - .5 <= switched - lost <= BUDGET, f"switch after {switched - lost:.1f}s"
+            # The switch plus the backup handshake fit the startup budget.
+            assert switched - lost <= BUDGET, f"switch after {switched - lost:.1f}s"
             assert recovered - switched <= BUDGET, f"backup connected {recovered - switched:.1f}s after switch"
             assert len(switches(timeline, lost, recovered)) == 1, switches(timeline, lost, recovered)
             evidence(scenario="primary-lost", lost_to_switch_s=round(switched - lost, 2),
-                     switch_to_connected_s=round(recovered - switched, 2), switches=1,
+                     switch_to_connected_s=round(recovered - switched, 2), switches=1, retries=retries,
                      app_attempts=load.attempts, counters=values, limits=limits)
             print(f"PASS requested endpoint lost: switched to the allowed backup after {switched - lost:.1f}s, "
                   f"connected after {recovered - lost:.1f}s; {load.attempts} app attempts, no leaks", flush=True)
@@ -487,11 +561,13 @@ def main():
             # and with both endpoints down the host stays blocked without leaks.
             reset_counters()
             primary = endpoint("primary", PRIMARY)
+            reset_syns()
             s.stop(backup)
             backup_lost = time.monotonic()
             wait(lines, "blocked")
             back_limit = COOLDOWN + JITTER * BACKOFF_MAX + 2 * LAG
             back = wait(lines, "active 0", back_limit + 10)
+            retries = retried_before_switch(BACKUP, recovered, backup_lost)
             back_connected = wait(lines, "connected", JITTER * BACKOFF_MAX + BUDGET)
             fetch("198.18.0.1")
             fetch6(HOST6)
@@ -501,12 +577,14 @@ def main():
             assert len(switches(timeline, backup_lost, back_connected)) == 1, switches(timeline, backup_lost, back_connected)
             evidence(scenario="backup-lost", previous_switch_to_switch_s=round(back - switched, 2),
                      lost_to_switch_s=round(back - backup_lost, 2), switch_to_connected_s=round(back_connected - back, 2),
-                     switches=1, counters=values, limits=limits)
+                     switches=1, retries=retries, counters=values, limits=limits)
             print(f"PASS backup lost: returned to the requested profile {back - switched:.1f}s after the previous "
                   f"switch (cooldown {COOLDOWN}s); no leaks", flush=True)
 
-            # Both endpoints down. The window covers the cooldown plus the
-            # longest jittered backoff, so retries must reach the endpoints.
+            # Both endpoints down. The leak window starts before the session
+            # closes; retries are proven by marked SYNs only, never by the
+            # closing packets of the dead session. The window covers the
+            # cooldown plus the longest jittered backoff.
             reset_counters()
             s.stop(primary)
             outage = time.monotonic()
@@ -515,28 +593,44 @@ def main():
             time.sleep(max(0, outage + window - time.monotonic()))
             s.app(1000, "curl", "--noproxy", "*", "-sSf", "--max-time", "2", url, success=False)
             s.app(1000, "curl", "--noproxy", "*", "-sSf", "--max-time", "2", url6, success=False)
-            values = assert_no_leaks("no usable endpoint")
+            values = assert_no_leaks("no usable endpoint", service_traffic=False)
+            elapsed = time.monotonic() - outage
             during = switches(timeline, outage, time.monotonic())
-            assert len(during) <= int(window // COOLDOWN) + 1, f"{len(during)} switches in {window:.0f}s"
+            attempts = syns()
+            # Budget: no more attempts than its shortest delays allow. Each
+            # switch consumes two failures: the lost session plus attempts.
+            attempt_limit = max_attempts(elapsed)
+            switch_limit = min((1 + attempts) // FAILURES_BEFORE_SWITCH, int(elapsed // COOLDOWN) + 1)
+            assert 1 <= attempts <= attempt_limit, f"{attempts} reconnect SYNs in {elapsed:.0f}s, Budget allows <= {attempt_limit}"
+            assert len(during) <= switch_limit, f"{len(during)} switches in {elapsed:.0f}s, limit {switch_limit}"
             load.stop()
             every = switches(timeline)
             gaps = [round(b - a, 2) for a, b in zip(every, every[1:])]
             assert all(gap >= COOLDOWN - LAG for gap in gaps), f"switches closer than the cooldown: {gaps}"
-            evidence(scenario="all-endpoints-down", window_s=window, switches=len(during),
+            evidence(scenario="all-endpoints-down", window_s=round(elapsed, 2), switches=len(during),
+                     switch_limit=switch_limit, reconnect_syns=attempts, reconnect_syn_limit=attempt_limit,
                      switch_gaps_s=gaps, counters=values, app_attempts=load.attempts, limits=limits)
-            print(f"PASS no usable endpoint: blocked for {window:.0f}s, {values['endpoint4']} retry packets to "
-                  f"pinned endpoints, {len(during)} switches, no leaks", flush=True)
+            print(f"PASS no usable endpoint: blocked for {elapsed:.0f}s, {attempts} reconnect attempts "
+                  f"(<= {attempt_limit}), {len(during)} switches (<= {switch_limit}), no leaks", flush=True)
 
             client.terminate()
             client.wait(timeout=30)
             assert client.returncode == 0, client.stderr.read()[-2000:]
             assert_baseline(baseline, "after Stop")
             assert "synthetic" not in (d / "daemon.log").read_text()
-            # Stop cancels pending attempts: a returning endpoint cannot revive it.
+            # Stop cancels pending attempts: a returning endpoint cannot revive
+            # it. Watch longer than the longest pending jittered backoff; the
+            # burst pause is cancelled the same way. No service SYN may follow.
+            reset_counters()
             backup = endpoint("backup", BACKUP)
-            time.sleep(35)
+            after_stop = JITTER * BACKOFF_MAX + 2 * LAG + 1
+            time.sleep(after_stop)
             s.ns("ip", "link", "show", "rtrust0", success=False)
             assert not established(BACKUP)
+            values = counters()
+            assert syns() == 0 and values["marked"] == 0 and values["endpoint4"] == 0, \
+                f"service traffic after Stop: syns {syns()}, marked {values['marked']}, endpoint4 {values['endpoint4']}"
+            evidence(scenario="after-stop", watched_s=after_stop, counters=values)
             fetch("10.99.0.2")
             assert_baseline(baseline, "after returning endpoint")
             print("PASS Stop restores routes/firewall; a returning backup cannot resurrect the tunnel", flush=True)

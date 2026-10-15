@@ -339,17 +339,19 @@ def main():
             fetch(HOST6, url6)
             # While Connected, an application flow to an endpoint address is
             # routed into rtrust0 like any other destination; what must never
-            # happen is the same flow leaving outside the tunnel (app_direct).
-            tunneled = {}
+            # happen is the same flow leaving outside the tunnel. The proof is
+            # app_direct == 0 (client egress) and zero host leak counters. The
+            # handshake result is context only: it says nothing about the path.
+            handshake = {}
             for name, address in (("primary", PRIMARY), ("backup", BACKUP)):
                 probe = f"import socket; socket.create_connection(('{address}',8443),timeout=1)"
-                tunneled[name] = subprocess.run(["ip", "netns", "exec", s.NS, "setpriv", "--reuid=1000", "--regid=1000",
+                handshake[name] = subprocess.run(["ip", "netns", "exec", s.NS, "setpriv", "--reuid=1000", "--regid=1000",
                                                  "--clear-groups", "python3", "-c", probe],
                                                 capture_output=True, timeout=35).returncode == 0
             assert boot_guard() and ("inet", "foreign_test") in fo.tables()
             values = fo.assert_no_leaks("(a) recovery through backup")
             fo.evidence(scenario="recovery-primary-down", enable_to_connected_s=round(connected - started, 2),
-                        recovery=recovery, counters=values, app_to_endpoint_connected_via_tunnel=tunneled)
+                        recovery=recovery, counters=values, app_probe_handshake_completed=handshake)
             print(f"PASS (a) requested endpoint down: Connected through backup index 1 after "
                   f"{connected - started:.1f}s, no direct endpoint bypass, no leaks", flush=True)
 
@@ -419,14 +421,19 @@ def main():
             assert boot_guard()
             assert status["recovery"]["selected_index"] == 1 and not status["recovery"]["exhausted"], status["recovery"]
             values = fo.assert_no_leaks("(f) handoff")
+            # Positive control for the new link's observer: the reconnected
+            # transport was seen on the alt chain itself.
+            assert values["alt_endpoint4"] > 0, f"alt link observer saw no endpoint transport: {values}"
             s.ns("ip", "addr", "add", "10.99.0.2/30", "dev", "rtrust-client")
             s.ns("ip", "-6", "addr", "add", "fd00:99::2/64", "dev", "rtrust-client", "nodad")
             s.ns("ip", "link", "set", "rtrust-client", "up")
             s.ns("ip", "route", "replace", "default", "via", "10.99.0.1", "dev", "rtrust-client")
             fo.dad_settled()
-            fo.assert_no_leaks("(f) return before alt link removal", service_traffic=False)
-            fo.unwatch_device("alt")
+            # Remove the link while its observer is still attached, so no
+            # packet can leave through an unwatched alt link; the counters of
+            # this window (not reset) are checked after traffic returns.
             s.ns("ip", "link", "delete", "rtrust-alt")
+            fo.unwatch_device("alt")
             fo.dad_settled()
             status = traffic_returns("(f) return")
             assert boot_guard()

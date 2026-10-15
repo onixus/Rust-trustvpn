@@ -83,8 +83,12 @@ backups to a service that does not advertise the capability.
 - A captive portal does not trigger a bypass: with every candidate failing, the
   host stays blocked.
 - Each switch costs one connection attempt per backoff step. With every
-  endpoint down the service makes at most eight attempts per burst (about
-  150 s of backoff plus jitter), then waits 300–330 s before the next burst.
+  endpoint down the first burst makes at most eight attempts over about 150 s
+  of backoff (2+4+8+16+4×30 s, plus up to 25% jitter), then waits 300–330 s.
+  Later bursts without a stable session do not restart at 2 s: one attempt
+  after that pause, then seven at 30 s intervals (about 210 s plus jitter),
+  then the next pause (`Budget::next_delay`). A session stable for 30 s that
+  delivered traffic restores the first-burst schedule.
 
 ## Validation
 
@@ -104,15 +108,20 @@ application keeps sending HTTP and DNS:
 Leak counters sit on the host's netdev ingress hook of the client veth, so
 they see every client packet whatever its destination, and on the client's
 postrouting hook. They must stay at zero for IPv4 to anything but a pinned
-endpoint port, DNS 53/853, ICMP, any IPv6 except NDP/MLD and DHCPv6 (counted
-separately, never as leaks), unmarked application packets to a pinned endpoint,
+endpoint port, DNS 53/853, ICMP, any IPv6 except the hop-limit-255 router/neighbor
+solicitations and advertisements and DHCPv6 that the guard itself lets out
+(counted separately, never as leaks; MLD therefore counts as a leak), unmarked application packets to a pinned endpoint,
 and service-marked (0x5254) packets to any other address. Every leak counter
 first counts the same flow without the VPN (positive control); the application
-load includes IPv6 TCP and AAAA/IPv6 DNS. Switch times are asserted against
-the limits above (at least one retry before a switch, first switch and backup
-handshake within the 30 s budget, switches at least the cooldown apart, a
-bounded number of switches per outage window) and written as `EVIDENCE` JSON
-lines. Observed times lag the service by up to 3 s (inspect tick plus status
+load includes IPv6 TCP and AAAA/IPv6 DNS. Per-endpoint counters of the service's marked
+TCP SYNs prove the switch threshold at packet level: before each switch at
+least one reconnect attempt reached the failed endpoint (two when the lost
+session had lasted 30 s). With every endpoint down, reconnect SYNs must be
+present and no more than the `Budget` delays allow, and switches are bounded
+by both the failures they consume and the cooldown. After Stop no marked SYN
+may follow for longer than the largest jittered backoff. Switch times (first
+switch and backup handshake within the 30 s budget, switches at least the
+cooldown apart) are written as `EVIDENCE` JSON lines. Observed times lag the service by up to 3 s (inspect tick plus status
 refresh).
 
 `scripts/recovery-interop.py` covers the always-on `EnableRecovery` path
