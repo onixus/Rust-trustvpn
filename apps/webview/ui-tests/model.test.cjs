@@ -120,4 +120,8 @@ assert.equal(M.statusLine({ notice: '', status: '', connected: true, connectErro
  assert.equal(M.derive({ ...base, full: false, snapshot: split }), 'running');
  assert.notEqual(M.ROW_TONE.na, 'green'); assert.notEqual(M.ROW_TONE.guard_off, 'yellow');
 }
+// The expiry hint names the probe TTL only when probe rows are present.
+assert.equal(M.ttlLabel(null), '6');
+assert.equal(M.ttlLabel(allPassed()), '6');
+assert.equal(M.ttlLabel(probed), '6–30');
 console.log('PASS webview state model');

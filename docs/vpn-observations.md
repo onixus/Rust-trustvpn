@@ -141,12 +141,10 @@ check `unknown` with `check_unavailable`.
 
 - **Schedule.** One run at a time per lease, on the lease loop's own timer:
   2 s after Connected or any invalidation, then 15 s after the previous run
-  ended (`PROBE_INTERVAL_MS`), and only while a client reads: a run starts
-  only if a Status request arrived within the last 6 s (`FRESH_MS`; a reader
-  silent for longer gets its next snapshot invalidated as a lifecycle gap
-  anyway). Status only marks the read; it never runs a probe itself. Without
-  a reader the loop sleeps; the first Status after the silence starts the
-  overdue run at once, and until it finishes the rows stay `unknown`/`stale`.
+  ended (`PROBE_INTERVAL_MS`), for as long as the session is Connected.
+  Status never starts a probe; but the client holding the lease polls Status
+  as a keepalive (see known limitations), so in practice probes run every
+  15 s throughout a Connected session whether or not a window shows them.
   Outside Connected a due tick is not re-armed on a short timer: the next
   lifecycle change (reconnect, network change, resume) re-arms it; Windows
   defers a run whose permit list is unavailable by a full interval.
@@ -210,12 +208,17 @@ check `unknown` with `check_unavailable`.
 Known limitations of the probes (accepted, fail-closed: each reads as
 `unknown`, never `passed`):
 
-- **Demand is per Status request.** The desktop client's lease connection
+- **Probes run without a reader.** The desktop client's lease connection
   polls Status every 2 s and the always-on supervisor every 1 s as a
-  keepalive, whether or not a window shows the rows. While either holds the
-  lease the service sees a reader and keeps probing every interval; only a
-  lease without such polling stops. Telling UI reads from keepalive polls
-  needs an IPC change (a capability-gated read flag) and is not done.
+  keepalive, whether or not a window shows the rows, so the service cannot
+  tell a reader from a keepalive. It probes every 15 s for the whole
+  Connected session (on macOS about a dozen short-lived tool processes and
+  one DNS query through the tunnel per run). A result is shown only if a
+  later read finds it fresh in the same generation; internal paths also
+  sample the monitor, so an unread result is not guaranteed to be discarded.
+  Reducing this needs an IPC flag meaning
+  "a UI is reading" (capability-gated, sent only by clients whose UI polls);
+  that is a follow-up, not done here.
 - **Large macOS route tables.** `netstat -rn` output over 64 KiB, or more than
   eight physical default-route interfaces, makes the bypass check
   `unknown`; such hosts never reach a `passed` guard.

@@ -612,8 +612,7 @@ async fn lease_loop(
                         },
                     }
                 },
-                // Started only by this timer while connected in full mode and
-                // read by a client; Status marks the read, it never probes.
+                // Started only by this timer while connected in full mode; Status never probes.
                 tick = probes.next(), if plan.is_some() => match tick {
                     crate::sysprobe::Tick::Due => if state == State::Connected && !access_expired {
                         // Permits are re-read: the audit compares against the current candidates.
@@ -635,7 +634,6 @@ async fn lease_loop(
         }
         match request.command {
             Command::Status => {
-                probes.read();
                 reply_observed(
                     pipe,
                     state.clone(),

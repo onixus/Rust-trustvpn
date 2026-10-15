@@ -11,6 +11,11 @@
  function ttlCap(o) { return o && o.source === 'system_probe' ? PROBE_TTL_MS : MAX_TTL_MS; }
 
  function snapshot(s) { return s && s.schema === 2 ? s : null; }
+ /** Seconds shown as "results expire after": a range once service probe rows are present. */
+ function ttlLabel(s) {
+  const probed = !!s && KEYS.some(k => s[k] && s[k].source === 'system_probe');
+  return probed ? `${MAX_TTL_MS / 1000}–${PROBE_TTL_MS / 1000}` : String(MAX_TTL_MS / 1000);
+ }
 
  /** Normalised outcome: passed/configured become stale after their TTL. */
  function outcome(o, now) {
@@ -114,7 +119,7 @@
   return { text: fallback, keepNotice: false, noticeBase: undefined };
  }
 
- const api = { KEYS, MAX_TTL_MS, PROBE_TTL_MS, snapshot, outcome, outcomes, level, failed, pending, derive, statusLine, rows, TONE, ROW_TONE };
+ const api = { KEYS, MAX_TTL_MS, PROBE_TTL_MS, ttlLabel, snapshot, outcome, outcomes, level, failed, pending, derive, statusLine, rows, TONE, ROW_TONE };
  if (typeof module !== 'undefined' && module.exports) module.exports = api;
  else root.RTModel = Object.freeze(api);
 })(typeof window !== 'undefined' ? window : globalThis);

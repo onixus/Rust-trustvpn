@@ -211,7 +211,7 @@ function renderStatus(){
  const connected=!!state?.connected;
  $('connect-label').textContent=key==='connecting'?t(reconnecting?'action.reconnecting':'action.connecting'):key==='disconnecting'?t('action.disconnecting'):connected?t('action.disconnect'):!profiles.length?t('action.add'):key==='error'?t('action.retry'):t('action.connect',{name});
  $('connect').classList.toggle('is-connected',connected);
- $('checks-sub').textContent=!connected?t('checks.sub_none'):host?t('checks.sub',{name,host,ttl:M.MAX_TTL_MS/1000}):t('checks.sub_nohost',{name,ttl:M.MAX_TTL_MS/1000});
+ $('checks-sub').textContent=!connected?t('checks.sub_none'):host?t('checks.sub',{name,host,ttl:M.ttlLabel(input.snapshot)}):t('checks.sub_nohost',{name,ttl:M.ttlLabel(input.snapshot)});
  renderChecks(input,key);
 }
 function checkValue(value){return t('val.'+value);}

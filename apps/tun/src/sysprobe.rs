@@ -1,13 +1,12 @@
 //! The service's own read-only DNS, guard and transport probes (issue #81).
 //!
-//! One run at a time per lease, on the lease loop's own timer, and only while
-//! a client reads observations: Status marks a read, it never runs a probe
-//! itself. Each run is tagged with the snapshot generation it started in and
+//! One run at a time per lease, on the lease loop's own timer, never on
+//! Status. Each run is tagged with the snapshot generation it started in and
 //! bounded by a hard deadline; dropping it cancels it and kills its children.
 //! Nothing here changes routes, DNS, marks or firewall rules. Facts are reduced
 //! to the enums below at once: no address, interface or tool output survives.
 use rtrust_control::observations::{
-    FRESH_MS, Mode, Observation, Outcome, PROBE_DEADLINE_MS, PROBE_INTERVAL_MS, SystemProbe, now_ms,
+    Mode, Observation, Outcome, PROBE_DEADLINE_MS, PROBE_INTERVAL_MS, SystemProbe, now_ms,
 };
 use std::{
     future::Future,
@@ -18,10 +17,6 @@ use std::{
 
 /// Wait after Connected or an invalidation before the first run.
 const SETTLE: Duration = Duration::from_secs(2);
-/// A reader that has not polled for this long gets its next snapshot
-/// invalidated as a lifecycle gap (`Monitor::sample`), so a run without a
-/// read inside this window can never be shown.
-const READER: Duration = Duration::from_millis(FRESH_MS);
 /// Each part of a run (own rules, bypass attempts, DNS) has its own budget
 /// inside the run deadline: a slow part loses only its own facts.
 pub const PART: Duration = Duration::from_millis(PROBE_DEADLINE_MS - 1_000);
@@ -44,17 +39,15 @@ pub enum Tick {
 }
 /// Single flight, no queue: a due tick while a run is pending cannot exist.
 ///
-/// `next` is re-created by every `select!` iteration of the lease loop, so a
-/// read, a cancel or a state change is seen without a wake-up of its own.
-/// Without a recent read, or after a due tick the caller did not use, the
-/// runner sleeps instead of re-arming a short timer.
+/// After a due tick the caller did not use (not Connected), the runner sleeps
+/// instead of re-arming a short timer; `next` is re-created by every
+/// `select!` iteration, so a later `cancel`/`defer` is seen at once.
 pub struct Runner {
     task: Option<(u64, Task)>,
     due: Pin<Box<tokio::time::Sleep>>,
     /// False after a due tick the caller did not use; `cancel` (every
     /// lifecycle change) or `defer` re-arms it.
     armed: bool,
-    read: Option<tokio::time::Instant>,
 }
 impl Default for Runner {
     fn default() -> Self {
@@ -62,7 +55,6 @@ impl Default for Runner {
             task: None,
             due: Box::pin(tokio::time::sleep(SETTLE)),
             armed: true,
-            read: None,
         }
     }
 }
@@ -88,14 +80,6 @@ impl Runner {
                     .unwrap_or_else(|_| SystemProbe::unknown(now_ms()))
             }),
         ));
-    }
-    /// A client read observations. A run that fell due while nobody read
-    /// starts on the next `next`; until it finishes the rows stay unproven.
-    pub fn read(&mut self) {
-        self.read = Some(tokio::time::Instant::now());
-    }
-    fn wanted(&self) -> bool {
-        self.read.is_some_and(|at| at.elapsed() <= READER)
     }
     /// Drop a pending run (its sockets and children go with it) and settle.
     pub fn cancel(&mut self) {
@@ -123,14 +107,11 @@ impl Runner {
             self.reschedule(Duration::from_millis(PROBE_INTERVAL_MS));
             return Tick::Done(generation, probe);
         }
-        if self.armed && self.wanted() {
+        if self.armed {
             self.due.as_mut().await;
-            // The reader may have gone while the timer ran.
-            if self.wanted() {
-                // A due tick the caller does not use must not fire again.
-                self.armed = false;
-                return Tick::Due;
-            }
+            // A due tick the caller does not use must not fire again.
+            self.armed = false;
+            return Tick::Due;
         }
         std::future::pending().await
     }
@@ -1035,7 +1016,7 @@ mod tests {
     async fn runner_is_single_flight_bounded_and_cancellable() {
         let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut runner = Runner::default();
-        assert!(matches!(polled(&mut runner).await, Tick::Due));
+        assert!(matches!(runner.next().await, Tick::Due));
         for _ in 0..3 {
             let started = started.clone();
             runner.start(4, async move {
@@ -1055,7 +1036,7 @@ mod tests {
         assert!(!runner.busy());
         // The next run waits a full interval; nothing queued meanwhile.
         let before = tokio::time::Instant::now();
-        assert!(matches!(polled(&mut runner).await, Tick::Due));
+        assert!(matches!(runner.next().await, Tick::Due));
         assert!(before.elapsed() >= Duration::from_millis(PROBE_INTERVAL_MS));
         // Cancel drops the run and its result.
         struct Flag(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -1073,79 +1054,24 @@ mod tests {
         });
         runner.cancel();
         assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(matches!(polled(&mut runner).await, Tick::Due));
-    }
-    /// The lease loop as clients drive it: a Status read every 2 s.
-    async fn polled(runner: &mut Runner) -> Tick {
-        loop {
-            runner.read();
-            tokio::select! {
-                tick = runner.next() => return tick,
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
-            }
-        }
-    }
-    /// The lease loop without any client read.
-    async fn unread(runner: &mut Runner, wait: Duration) -> Option<Tick> {
-        tokio::time::timeout(wait, runner.next()).await.ok()
-    }
-    #[tokio::test(start_paused = true)]
-    async fn nothing_runs_while_no_client_reads_and_a_new_read_starts_a_run_at_once() {
-        let mut runner = Runner::default();
-        // Connected, but nobody reads: no due tick however long it waits.
-        assert!(
-            unread(&mut runner, Duration::from_secs(600))
-                .await
-                .is_none()
-        );
-        // The first read after the silence starts a run without a new settle.
-        runner.read();
-        let before = tokio::time::Instant::now();
         assert!(matches!(runner.next().await, Tick::Due));
-        assert!(before.elapsed() < SETTLE);
-        runner.start(3, async { passing(now_ms()) });
-        assert!(matches!(runner.next().await, Tick::Done(3, _)));
-        // While a reader polls, runs follow one interval apart.
-        assert!(matches!(polled(&mut runner).await, Tick::Due));
-        runner.start(4, async { passing(now_ms()) });
-        assert!(matches!(runner.next().await, Tick::Done(4, _)));
-        // The reader goes away while the interval runs: the due run never starts.
-        runner.read();
-        assert!(
-            unread(&mut runner, Duration::from_secs(600))
-                .await
-                .is_none()
-        );
-        // Nor after a read older than the window.
-        runner.read();
-        tokio::time::advance(READER + Duration::from_millis(1)).await;
-        assert!(
-            unread(&mut runner, Duration::from_secs(600))
-                .await
-                .is_none()
-        );
-        // It comes back: the overdue run starts at once.
-        runner.read();
-        let before = tokio::time::Instant::now();
-        assert!(matches!(runner.next().await, Tick::Due));
-        assert_eq!(before.elapsed(), Duration::ZERO);
     }
     #[tokio::test(start_paused = true)]
     async fn an_unused_due_tick_waits_for_a_lifecycle_change_not_a_short_timer() {
         let mut runner = Runner::default();
         // Not connected: the caller ignores the tick.
-        assert!(matches!(polled(&mut runner).await, Tick::Due));
-        let polls = tokio::time::timeout(Duration::from_secs(120), polled(&mut runner)).await;
-        assert!(polls.is_err(), "an ignored due tick must not re-fire");
+        assert!(matches!(runner.next().await, Tick::Due));
+        let again = tokio::time::timeout(Duration::from_secs(120), runner.next()).await;
+        assert!(again.is_err(), "an ignored due tick must not re-fire");
         // Reconnected (every lifecycle change cancels): due after the settle.
         runner.cancel();
         let before = tokio::time::Instant::now();
-        assert!(matches!(polled(&mut runner).await, Tick::Due));
+        assert!(matches!(runner.next().await, Tick::Due));
         assert!(before.elapsed() >= SETTLE);
         // Inputs unavailable: deferred by a full interval, not 2 s.
         runner.defer();
         let before = tokio::time::Instant::now();
-        assert!(matches!(polled(&mut runner).await, Tick::Due));
+        assert!(matches!(runner.next().await, Tick::Due));
         assert!(before.elapsed() >= Duration::from_millis(PROBE_INTERVAL_MS));
     }
     #[tokio::test(start_paused = true)]
@@ -1895,12 +1821,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn tester_runner_due_ticks_do_not_queue_and_drop_aborts() {
         let mut runner = Runner::default();
-        // A long wait before the first read yields one due tick, not a burst.
+        // A long silence yields one due tick, not a burst.
         tokio::time::advance(Duration::from_secs(120)).await;
-        assert!(matches!(polled(&mut runner).await, Tick::Due));
+        assert!(matches!(runner.next().await, Tick::Due));
         // An unused due tick does not refire while the state is unchanged.
         assert!(
-            tokio::time::timeout(Duration::from_secs(60), polled(&mut runner))
+            tokio::time::timeout(Duration::from_secs(60), runner.next())
                 .await
                 .is_err(),
             "an unused due tick must not refire"
@@ -1925,7 +1851,7 @@ mod tests {
         let mut runner = Runner::default();
         runner.start(1, async { passing(1) });
         runner.cancel();
-        assert!(matches!(polled(&mut runner).await, Tick::Due));
+        assert!(matches!(runner.next().await, Tick::Due));
     }
     #[test]
     fn tester_nft_audit_fail_closed_table() {
@@ -2246,7 +2172,7 @@ mod tests {
         // Cancel detaches the blocking call; the next due run must not stack another.
         runner.cancel();
         tokio::time::advance(SETTLE).await;
-        assert!(matches!(polled(&mut runner).await, Tick::Due));
+        assert!(matches!(runner.next().await, Tick::Due));
         runner.start(2, collect(starts.clone(), wait.clone()));
         let Tick::Done(generation, probe) = runner.next().await else {
             panic!("expected a finished run");
