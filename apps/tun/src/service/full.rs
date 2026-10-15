@@ -9,7 +9,7 @@ use std::{
 };
 const JOURNAL: &str = "/run/rtrust/full.json";
 const TABLE: &str = "51830";
-const NFT: &str = "rtrust_full";
+pub(super) const NFT: &str = "rtrust_full";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,19 +59,45 @@ pub(super) fn nft(script: &str) -> Result<(), String> {
     )?;
     Ok(())
 }
+/// Each guard rule with its canonical read-back form: the installer and the
+/// probe's audit share this one list.
+pub(super) fn guard_rules() -> [(String, String); 6] {
+    [
+        (r#"oifname "lo" accept"#.into(), "meta.oifname==lo accept".into()),
+        ("meta mark 0x5254 accept".into(), "meta.mark==21076 accept".into()),
+        (
+            format!(r#"oifname "{DEVICE}" accept"#),
+            format!("meta.oifname=={DEVICE} accept"),
+        ),
+        (
+            "ip daddr 255.255.255.255 udp sport 68 udp dport 67 accept".into(),
+            "ip.daddr==255.255.255.255 udp.sport==68 udp.dport==67 accept".into(),
+        ),
+        (
+            "ip6 hoplimit 255 icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept".into(),
+            "ip6.hoplimit==255 icmpv6.type==nd-neighbor-advert,nd-neighbor-solicit,nd-router-solicit accept".into(),
+        ),
+        (
+            "ip6 daddr ff02::1:2 udp sport 546 udp dport 547 accept".into(),
+            "ip6.daddr==ff02::1:2 udp.sport==546 udp.dport==547 accept".into(),
+        ),
+    ]
+}
+pub(super) const GUARD_CHAINS: [&str; 2] = [
+    "chain output filter output -10 drop",
+    "chain forward filter forward -10 drop",
+];
 pub(super) fn guard_script() -> String {
     // No established/related exemption: pre-existing physical connections must
     // not bypass protection. Forwarded/container traffic is blocked in this mode.
+    let rules: String = guard_rules()
+        .iter()
+        .map(|(rule, _)| format!("add rule inet {NFT} output {rule}\n"))
+        .collect();
     format!(
         r#"add table inet {NFT}
 add chain inet {NFT} output {{ type filter hook output priority -10; policy drop; }}
-add rule inet {NFT} output oifname "lo" accept
-add rule inet {NFT} output meta mark 0x5254 accept
-add rule inet {NFT} output oifname "{DEVICE}" accept
-add rule inet {NFT} output ip daddr 255.255.255.255 udp sport 68 udp dport 67 accept
-add rule inet {NFT} output ip6 hoplimit 255 icmpv6 type {{ nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert }} accept
-add rule inet {NFT} output ip6 daddr ff02::1:2 udp sport 546 udp dport 547 accept
-add chain inet {NFT} forward {{ type filter hook forward priority -10; policy drop; }}
+{rules}add chain inet {NFT} forward {{ type filter hook forward priority -10; policy drop; }}
 "#
     )
 }
@@ -314,5 +340,25 @@ impl Drop for FullRoutes {
         if self.active && self.rollback_on_drop {
             let _ = self.release();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn guard_script_is_unchanged_by_the_shared_rule_list() {
+        assert_eq!(
+            super::guard_script(),
+            r#"add table inet rtrust_full
+add chain inet rtrust_full output { type filter hook output priority -10; policy drop; }
+add rule inet rtrust_full output oifname "lo" accept
+add rule inet rtrust_full output meta mark 0x5254 accept
+add rule inet rtrust_full output oifname "rtrust0" accept
+add rule inet rtrust_full output ip daddr 255.255.255.255 udp sport 68 udp dport 67 accept
+add rule inet rtrust_full output ip6 hoplimit 255 icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept
+add rule inet rtrust_full output ip6 daddr ff02::1:2 udp sport 546 udp dport 547 accept
+add chain inet rtrust_full forward { type filter hook forward priority -10; policy drop; }
+"#
+        );
     }
 }

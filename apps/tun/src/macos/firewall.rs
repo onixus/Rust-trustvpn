@@ -1,11 +1,11 @@
 //! A private PF anchor. Never flush the root ruleset, foreign states or tables.
 use super::{command, device::DEVICE};
 use std::{io::Write, path::Path};
-const ANCHOR: &str = "com.apple/zz-rtrust";
+pub(super) const ANCHOR: &str = "com.apple/zz-rtrust";
 fn pf(args: &[&str]) -> Result<String, String> {
     command::run("/sbin/pfctl", args)
 }
-fn standard_root(lines: &[&str]) -> bool {
+pub(super) fn standard_root(lines: &[&str]) -> bool {
     lines == ["anchor \"com.apple/*\" all"]
         || lines
             == [
@@ -31,17 +31,8 @@ pub(super) fn preflight() -> Result<(), String> {
         if anchor.is_empty() {
             continue;
         }
-        if !anchor
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'))
-            || anchor.len() > 128
-        {
+        let Some(path) = anchor_path(anchor) else {
             return Err("Unsupported PF anchor name".into());
-        }
-        let path = if anchor.starts_with("com.apple/") {
-            anchor.to_owned()
-        } else {
-            format!("com.apple/{anchor}")
         };
         if path != ANCHOR && !pf(&["-a", &path, "-sr"])?.trim().is_empty() {
             return Err("Other active PF rules prevent a reliable VPN guard; existing rules are left unchanged".into());
@@ -53,6 +44,20 @@ pub(super) fn preflight() -> Result<(), String> {
         return Err("Existing PF states prevent a reliable VPN guard; other firewall connections must stop first".into());
     }
     Ok(())
+}
+pub(super) fn anchor_path(anchor: &str) -> Option<String> {
+    if !anchor
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'))
+        || anchor.len() > 128
+    {
+        return None;
+    }
+    Some(if anchor.starts_with("com.apple/") {
+        anchor.to_owned()
+    } else {
+        format!("com.apple/{anchor}")
+    })
 }
 pub(super) fn policy(
     uid: u32,
