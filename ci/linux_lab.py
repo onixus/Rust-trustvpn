@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exact-commit H2/H3/failover evidence in disposable Docker namespaces.
+"""Exact-commit H2/H3/failover/route-explain evidence in disposable Docker namespaces.
 
 Run locally with --sha, --host and --endpoint-archive. Never installs a service,
 uses host networking, or runs packet harnesses outside a disposable container.
@@ -32,10 +32,12 @@ RUN apt-get -o Acquire::http::Timeout=20 update -qq && apt-get install -y -qq --
 LANES = [('service', ['scripts/service-interop.py']), ('h2', ['scripts/full-tunnel-interop.py']),
          ('h3', ['scripts/full-tunnel-interop.py', '--http3']),
          ('failover', ['scripts/failover-interop.py']),
-         ('recovery', ['scripts/recovery-interop.py'])]
-# Per-lane deadlines; recovery waits through real backoff, hysteresis and handoff.
+         ('recovery', ['scripts/recovery-interop.py']),
+         ('explain', ['scripts/route-explain-interop.py'])]
+# Per-lane deadlines; recovery waits through real backoff, hysteresis and
+# handoff, route explain runs one desktop service and two mobile flow sessions.
 LANE_TIMEOUT = 420
-LANE_TIMEOUTS = {'recovery': 720}
+LANE_TIMEOUTS = {'recovery': 720, 'explain': 600}
 # Tool image (600 s) + build (900 s) + kill waits, cleanup and transfers (220 s).
 SSH_OVERHEAD = 1720
 
@@ -166,7 +168,7 @@ def worker(run_dir, endpoint_archive):
         manifest['script_sha256'] = {str(path.relative_to(source)): digest(path) for path in
                                      [archived_runner, source / 'scripts/full-tunnel-interop.py',
                                       source / 'scripts/failover-interop.py', source / 'scripts/recovery-interop.py',
-                                      source / 'scripts/service-interop.py']}
+                                      source / 'scripts/service-interop.py', source / 'scripts/route-explain-interop.py']}
         fixture = run_dir / 'fixture'
         fixture.mkdir()
         endpoint_archive = Path(endpoint_archive)
@@ -210,10 +212,11 @@ def worker(run_dir, endpoint_archive):
         manifest['build_target_volume'] = target_volume
         build = '''set -eu
 rustc --version; cargo --version; cargo clippy --version; dpkg-query -W
-cargo test --locked --offline -p rtrust-tun -p rtrust-control --quiet
+cargo test --locked --offline -p rtrust-tun -p rtrust-control -p rtrust-inspect --quiet
 cargo clippy --locked --offline -p rtrust-tun -p rtrust-control --all-targets -- -D warnings
 cargo build --locked --offline -p rtrust-tun -p rtrust-inspect
-cp target/debug/rtrust-service target/debug/rtrust-tun target/debug/rtrust-inspect /out/bin/
+cargo build --locked --offline -p rtrust-tun --example flow-lab
+cp target/debug/rtrust-service target/debug/rtrust-tun target/debug/rtrust-inspect target/debug/examples/flow-lab /out/bin/
 chmod 755 /out/bin/*
 '''
         logged('build', ['docker', 'run', '--rm', '--name', names[0], '--network', 'none',

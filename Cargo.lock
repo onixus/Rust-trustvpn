@@ -5770,6 +5770,7 @@ dependencies = [
  "rand 0.9.5",
  "rtrust-control",
  "rtrust-engine",
+ "rtrust-mobile",
  "rtrust-profile",
  "rtrust-store",
  "serde",

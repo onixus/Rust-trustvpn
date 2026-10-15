@@ -43,3 +43,8 @@ zbus = { version = "5.19", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+# Only the Linux laboratory example (examples/flow-lab.rs) uses the mobile
+# adapter; rtrust-mobile does not depend on rtrust-tun, so there is no cycle.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rtrust-mobile = { path = "../../crates/mobile" }
