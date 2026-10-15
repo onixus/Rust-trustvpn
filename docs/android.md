@@ -98,7 +98,11 @@ publish real profiles to create documentation.
   `has_ipv6=true`; otherwise Android blocks that family without direct bypass.
   An IPv6 DNS server is rejected for an IPv4-only endpoint. Every endpoint socket is protected
   and bound to the underlying non-VPN network before connect; protection failure
-  rejects the attempt. A blocking TUN is established before endpoint DNS resolution. Startup waits for an underlying network and retries unavailable DNS, including offline startup.
+  rejects the attempt. For a portal-enrolled profile a blocking TUN is
+  established before endpoint DNS resolution; a profile imported without the
+  portal resolves its endpoint hostname on the underlying network before the
+  first TUN exists. Startup waits for an underlying network and retries
+  unavailable DNS, including offline startup.
 - The underlying network follows Android's own choice: candidates are ranked
   validated, then unmetered, then not cellular, so the tunnel does not run over
   mobile data that stays up next to Wi-Fi. After a handoff the lost network is
@@ -245,7 +249,8 @@ App Disconnect is disabled while Always-on is active; change that system setting
 first. Excluded apps have no Internet under lockdown. Credentials remain in
 credential-encrypted storage; no plaintext direct-boot copy is created. Before
 first unlock the system policy, rather than an established tunnel, must provide
-blocking. Android may exempt some system traffic from VPN policy.
+blocking. Android may exempt some system traffic from VPN policy (see the
+process-death gap below).
 
 A profile whose policy sets `kill_switch = "always_on"` connects only under system
 Always-on with Block connections without VPN; otherwise it reports that the VPN
@@ -280,8 +285,14 @@ this:
   Always-on setting changes, and when the app package is replaced. It does not
   start it when the process dies. MIUI autostart does not change this.
 
-Lockdown keeps blocking all traffic meanwhile, and nothing falls back to a
-direct path. The app records that its last session was the system Always-on VPN.
+Lockdown keeps blocking app sockets meanwhile, and the app has no direct
+fallback. The block is enforced by Android, not by the dead app, and it is not
+complete: on an Android 16 emulator (October 15, 2026, issue #75) the system
+resolver can still send other apps' DNS queries to the network's DNS server
+during this gap, and privileged Google Play services traffic went direct. No
+such egress was seen while the app's TUN was up, including app STOP/START under
+Always-on, which keeps the same TUN. The app records that its last session was
+the system Always-on VPN.
 When the app is opened while no tunnel is running, it starts the service in
 recovery mode. Android reports `isAlwaysOn()` only for an established VPN.
 Recovery therefore establishes the blocking TUN first and then checks. If this
