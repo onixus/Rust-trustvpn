@@ -252,12 +252,14 @@ public final class TunnelService extends VpnService {
     }
     /** Caller holds networkEvents: underlying and its baseline LinkProperties change together. */
     private void trackUnderlying(Network network){underlying=network;linkProperties=network==null?null:connectivity.getLinkProperties(network);}
+    /** Linux RTN_UNICAST, the value of RouteInfo.RTN_UNICAST (public only from API 33; types are read only there). */
+    private static final int RTN_UNICAST=1;
     /** Public API only: stacked (CLAT) links are hidden, so NAT64 prefix (API 30+) stands in for them. */
     private static LinkChange.State linkState(LinkProperties p){
         if(p==null)return null;
         IpPrefix nat64=Build.VERSION.SDK_INT>=30?p.getNat64Prefix():null;
         LinkChange.Builder state=new LinkChange.Builder(p.getInterfaceName(),p.getMtu(),nat64==null?null:nat64.toString(),
-            android.system.OsConstants.IFA_F_TEMPORARY,android.system.OsConstants.IFA_F_DEPRECATED,android.system.OsConstants.IFA_F_DADFAILED,RouteInfo.RTN_UNICAST);
+            android.system.OsConstants.IFA_F_TEMPORARY,android.system.OsConstants.IFA_F_DEPRECATED,android.system.OsConstants.IFA_F_DADFAILED,RTN_UNICAST);
         for(LinkAddress link:p.getLinkAddresses())state.address(link.getAddress().getHostAddress()+"/"+link.getPrefixLength(),link.getFlags());
         for(RouteInfo route:p.getRoutes())state.route(route.getDestination()+" "+route.getGateway()+" "+route.getInterface(),Build.VERSION.SDK_INT>=33?route.getType():-1);
         return state.build();
