@@ -2,7 +2,7 @@
 //! routes and two kinds of datagrams. Read-only; every socket is unmarked.
 use super::{full, routes::DEVICE};
 use crate::sysprobe::{self, Attempt, Audit, Dns, Foreign, Path, linux};
-use rtrust_control::observations::{SystemProbe, now_ms};
+use rtrust_control::observations::SystemProbe;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     os::fd::AsRawFd,
@@ -18,8 +18,11 @@ pub(super) struct Plan {
     pub endpoints: Vec<IpAddr>,
 }
 pub(super) async fn collect(plan: Plan) -> SystemProbe {
-    let (audit, attempts, dns) = tokio::join!(audit(), attempts(&plan), dns(plan.dns));
-    sysprobe::result(dns, audit, &attempts, now_ms())
+    sysprobe::evidence(async {
+        let (audit, attempts, dns) = tokio::join!(audit(), attempts(&plan), dns(plan.dns));
+        (dns, audit, attempts)
+    })
+    .await
 }
 async fn audit() -> Audit {
     match sysprobe::run(NFT, &["-j", "list", "tables"], MAX)
@@ -82,32 +85,34 @@ async fn attempts(plan: &Plan) -> Vec<Attempt> {
     if sysprobe::collides(&plan.endpoints) {
         return vec![Attempt::Unknown];
     }
-    let Some(devices) = sysprobe::run(
-        IP,
-        &["-j", "-4", "route", "show", "table", "main", "default"],
-        MAX,
-    )
-    .await
-    .and_then(|bytes| linux::default_devices(&bytes, DEVICE)) else {
+    let defaults = |family: &'static str| async move {
+        sysprobe::run(
+            IP,
+            &["-j", family, "route", "show", "table", "main", "default"],
+            MAX,
+        )
+        .await
+        .and_then(|bytes| linux::default_devices(&bytes, DEVICE))
+    };
+    let (Some(v4), Some(v6)) = tokio::join!(defaults("-4"), defaults("-6")) else {
         return vec![Attempt::Unknown];
     };
     let mut attempts = Vec::new();
-    for device in devices {
-        for (target, absent) in [
-            (sysprobe::TARGET_V4, &[][..]),
-            (
-                sysprobe::TARGET_V6,
-                &[libc::ENETUNREACH, libc::EHOSTUNREACH, libc::EADDRNOTAVAIL][..],
+    for device in v4 {
+        attempts.push(match socket(false, &device) {
+            Some(socket) => sysprobe::attempt(
+                sysprobe::send(&socket, sysprobe::TARGET_V4),
+                &[libc::EPERM],
+                &[],
             ),
-        ] {
-            attempts.push(match socket(target.is_ipv6(), &device) {
-                Some(socket) => {
-                    sysprobe::attempt(sysprobe::send(&socket, target), &[libc::EPERM], absent)
-                }
-                None if target.is_ipv6() => Attempt::Absent,
-                None => Attempt::Unknown,
-            });
-        }
+            None => Attempt::Unknown,
+        });
+        attempts.push(sysprobe::v6_attempt(
+            v6.contains(&device),
+            socket(true, &device).map(|socket| sysprobe::send(&socket, sysprobe::TARGET_V6)),
+            &[libc::EPERM],
+            &[libc::ENETUNREACH, libc::EHOSTUNREACH, libc::EADDRNOTAVAIL],
+        ));
     }
     attempts
 }
@@ -176,6 +181,7 @@ async fn dns(server: Ipv4Addr) -> Dns {
 mod tester_tests {
     // tester (issue #81): Linux-only checks; nothing here sends a datagram.
     use super::*;
+    use rtrust_control::observations::now_ms;
     #[test]
     fn probe_sockets_are_never_marked_and_unknown_devices_fail_closed() {
         assert!(socket(false, "rtcanary0").is_none());

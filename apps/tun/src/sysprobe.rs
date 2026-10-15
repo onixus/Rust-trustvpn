@@ -94,6 +94,43 @@ impl Runner {
     }
 }
 
+/// Blocking OS calls cannot be cancelled: a dropped run detaches them. One
+/// lane per backend keeps at most one alive across runs; while it is busy a
+/// new run reports those checks Unknown instead of stacking threads/handles.
+/// Linux probes have no blocking calls: tools are async children, sockets
+/// are non-blocking.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+pub struct Lane(std::sync::atomic::AtomicBool);
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+impl Lane {
+    pub const fn new() -> Self {
+        Self(std::sync::atomic::AtomicBool::new(false))
+    }
+    pub fn spawn<T: Send + 'static>(
+        &'static self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<tokio::task::JoinHandle<T>> {
+        use std::sync::atomic::Ordering;
+        if self.0.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        struct Free(&'static Lane);
+        impl Drop for Free {
+            fn drop(&mut self) {
+                self.0.0.store(false, Ordering::Release);
+            }
+        }
+        let free = Free(self);
+        Some(tokio::task::spawn_blocking(move || {
+            let _free = free;
+            work()
+        }))
+    }
+    #[cfg(test)]
+    fn busy(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Audit {
     Match,
@@ -136,9 +173,9 @@ pub struct Dns {
     pub reply: Reply,
     pub foreign: Foreign,
 }
-#[cfg(test)]
 impl Dns {
-    const UNKNOWN: Self = Self {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub const UNKNOWN: Self = Self {
         config: Audit::Unknown,
         path: Path::Unknown,
         reply: Reply::None,
@@ -152,6 +189,21 @@ pub fn attempt(sent: Result<(), i32>, blocked: &[i32], absent: &[i32]) -> Attemp
         Err(code) if blocked.contains(&code) => Attempt::Blocked,
         Err(code) if absent.contains(&code) => Attempt::Absent,
         Err(_) => Attempt::Unknown,
+    }
+}
+/// IPv6 proves nothing either way only where the interface has no IPv6
+/// default route; with one, a failed setup or an unreachable errno is Unknown.
+pub fn v6_attempt(
+    default: bool,
+    sent: Option<Result<(), i32>>,
+    blocked: &[i32],
+    absent: &[i32],
+) -> Attempt {
+    match (sent, default) {
+        (None, true) => Attempt::Unknown,
+        (None, false) => Attempt::Absent,
+        (Some(sent), true) => attempt(sent, blocked, &[]),
+        (Some(sent), false) => attempt(sent, blocked, absent),
     }
 }
 /// Passed needs the exact own rule set and a local refusal on every probed
@@ -198,6 +250,12 @@ pub fn result(facts: Dns, audit: Audit, attempts: &[Attempt], at: u64) -> System
         guard: Observation::system(guard, Mode::Full, at),
     }
 }
+/// Stamp a run with its start: evidence is as old as the run, not its end.
+pub async fn evidence(facts: impl Future<Output = (Dns, Audit, Vec<Attempt>)>) -> SystemProbe {
+    let started = now_ms();
+    let (dns, audit, attempts) = facts.await;
+    result(dns, audit, &attempts, started)
+}
 /// A probe target that is also an endpoint would test an exemption.
 pub fn collides(endpoints: &[IpAddr]) -> bool {
     endpoints
@@ -220,11 +278,39 @@ pub fn reply(id: u16, bytes: &[u8]) -> Reply {
     {
         return Reply::None;
     }
-    if bytes[3] & 0x0f == 0 && bytes[6..8] != [0, 0] {
+    if bytes[3] & 0x0f != 0 || bytes[6..8] == [0, 0] {
+        return Reply::Responded;
+    }
+    // ANCOUNT alone is not an answer: the first record must be well formed.
+    if answer_record(bytes, 17) {
         Reply::Answered
     } else {
-        Reply::Responded
+        Reply::None
     }
+}
+fn answer_record(bytes: &[u8], mut at: usize) -> bool {
+    for _ in 0..128 {
+        let Some(&len) = bytes.get(at) else {
+            return false;
+        };
+        match len & 0xc0 {
+            0 if len == 0 => {
+                at += 1;
+                break;
+            }
+            0 => at += 1 + usize::from(len),
+            0xc0 if at + 1 < bytes.len() => {
+                at += 2;
+                break;
+            }
+            _ => return false,
+        }
+    }
+    let Some(header) = bytes.get(at..at + 10) else {
+        return false;
+    };
+    let data = usize::from(u16::from_be_bytes([header[8], header[9]]));
+    at + 10 + data <= bytes.len()
 }
 /// Two attempts with fresh IDs over a socket the caller bound to the tunnel.
 pub async fn exchange(socket: std::net::UdpSocket, server: SocketAddr) -> Reply {
@@ -408,7 +494,9 @@ pub mod linux {
         let mut expected = expected.to_vec();
         actual.sort();
         expected.sort();
-        if actual == expected {
+        if expected.is_empty() {
+            Audit::Unknown
+        } else if actual == expected {
             Audit::Match
         } else {
             Audit::Mismatch
@@ -798,8 +886,26 @@ mod tests {
         r[2] |= 0x80;
         assert_eq!(reply(0xbeef, &r), Reply::Responded);
         r[7] = 1;
+        // ANCOUNT without a record is not an answer.
+        assert_eq!(reply(0xbeef, &r), Reply::None);
+        let record = [0xc0, 0x0c, 0, 2, 0, 1, 0, 0, 0x0e, 0x10, 0, 2, 0xc0, 0x0c];
+        let header_only = r.clone();
+        r.extend(record);
         assert_eq!(reply(0xbeef, &r), Reply::Answered);
         assert_eq!(reply(0xbeee, &r), Reply::None);
+        // Uncompressed owner name, then a record whose data overruns the datagram.
+        let mut plain = header_only.clone();
+        plain.extend([0, 0, 2, 0, 1, 0, 0, 0, 1, 0, 1, 7]);
+        assert_eq!(reply(0xbeef, &plain), Reply::Answered);
+        let mut overrun = header_only.clone();
+        overrun.extend([0xc0, 0x0c, 0, 2, 0, 1, 0, 0, 0, 1, 0, 9, 1]);
+        assert_eq!(reply(0xbeef, &overrun), Reply::None);
+        let mut label = header_only.clone();
+        label.extend([0x3f, 1, 2]);
+        assert_eq!(reply(0xbeef, &label), Reply::None);
+        let mut reserved = header_only;
+        reserved.extend([0x80, 0, 0, 2, 0, 1, 0, 0, 0, 1, 0, 0]);
+        assert_eq!(reply(0xbeef, &reserved), Reply::None);
         let mut servfail = r.clone();
         servfail[3] |= 2;
         assert_eq!(reply(0xbeef, &servfail), Reply::Responded);
@@ -1388,12 +1494,20 @@ mod tests {
         r
     }
     const ROOT_NS_IN: [u8; 5] = [0, 0, 2, 0, 1];
+    /// `.` NS answer: compressed owner, TTL 3600, two bytes of data.
+    const TESTER_RECORD: [u8; 14] = [0xc0, 0x0c, 0, 2, 0, 1, 0, 0, 0x0e, 0x10, 0, 2, 0xc0, 0x0c];
     #[test]
     fn tester_dns_reply_matching_table() {
         let id = 0x5a5a;
-        let ok = tester_reply(id, [0x81, 0x80], [1, 1, 0, 0], &ROOT_NS_IN);
+        let mut ok = tester_reply(id, [0x81, 0x80], [1, 1, 0, 0], &ROOT_NS_IN);
+        ok.extend(TESTER_RECORD);
         assert_eq!(reply(id, &ok), Reply::Answered);
-        let cases: [(&str, Vec<u8>, Reply); 12] = [
+        let cases: [(&str, Vec<u8>, Reply); 13] = [
+            (
+                "answer count without a record (F1)",
+                tester_reply(id, [0x81, 0x80], [1, 1, 0, 0], &ROOT_NS_IN),
+                Reply::None,
+            ),
             (
                 "wrong id",
                 tester_reply(id ^ 1, [0x81, 0x80], [1, 1, 0, 0], &ROOT_NS_IN),
@@ -1484,7 +1598,8 @@ mod tests {
             let id = u16::from_be_bytes([buffer[0], buffer[1]]);
             // A full answer from the wrong source port, then a wrong ID, then
             // the real (empty) reply: only the last may count.
-            let full = tester_reply(id, [0x81, 0x80], [1, 1, 0, 0], &ROOT_NS_IN);
+            let mut full = tester_reply(id, [0x81, 0x80], [1, 1, 0, 0], &ROOT_NS_IN);
+            full.extend(TESTER_RECORD);
             spoof.send_to(&full, from).await.unwrap();
             let wrong = tester_reply(id ^ 0xffff, [0x81, 0x80], [1, 1, 0, 0], &ROOT_NS_IN);
             server.send_to(&wrong, from).await.unwrap();
@@ -1787,6 +1902,130 @@ mod tests {
                 assert!(Instant::now() < deadline, "child {pid} still {state}");
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
+        }
+    }
+    #[test]
+    fn an_empty_expected_nft_set_is_never_a_match() {
+        assert_eq!(linux::audit(br#"{"nftables":[]}"#, &[]), Audit::Unknown);
+        assert_eq!(
+            linux::audit(br#"{"nftables":[{"metainfo":{}}]}"#, &[]),
+            Audit::Unknown
+        );
+    }
+    #[test]
+    fn ipv6_is_absent_only_without_an_ipv6_default_route() {
+        const BLOCKED: i32 = 1;
+        const UNREACHABLE: i32 = 101;
+        let absent = &[UNREACHABLE];
+        // With an IPv6 default the family must be proven.
+        assert_eq!(
+            v6_attempt(true, Some(Err(UNREACHABLE)), &[BLOCKED], absent),
+            Attempt::Unknown
+        );
+        assert_eq!(v6_attempt(true, None, &[BLOCKED], absent), Attempt::Unknown);
+        assert_eq!(
+            v6_attempt(true, Some(Err(BLOCKED)), &[BLOCKED], absent),
+            Attempt::Blocked
+        );
+        assert_eq!(
+            v6_attempt(true, Some(Ok(())), &[BLOCKED], absent),
+            Attempt::Leaked
+        );
+        // Without one it proves nothing either way, but a leak is still a leak.
+        assert_eq!(
+            v6_attempt(false, Some(Err(UNREACHABLE)), &[BLOCKED], absent),
+            Attempt::Absent
+        );
+        assert_eq!(v6_attempt(false, None, &[BLOCKED], absent), Attempt::Absent);
+        assert_eq!(
+            v6_attempt(false, Some(Ok(())), &[BLOCKED], absent),
+            Attempt::Leaked
+        );
+        assert_eq!(
+            v6_attempt(false, Some(Err(-1)), &[BLOCKED], absent),
+            Attempt::Unknown
+        );
+        // Dual stack: IPv4 refused but IPv6 unproven is not a pass.
+        let v6 = v6_attempt(true, Some(Err(UNREACHABLE)), &[BLOCKED], absent);
+        assert_eq!(
+            guard(Audit::Match, &[Attempt::Blocked, v6]),
+            Outcome::Unknown
+        );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_blocking_collector_is_never_started_twice() {
+        use std::sync::{Arc, Mutex, atomic::AtomicUsize, atomic::Ordering};
+        let lane: &'static Lane = Box::leak(Box::new(Lane::new()));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let wait = Arc::new(Mutex::new(wait));
+        let collect = |starts: Arc<AtomicUsize>,
+                       wait: Arc<Mutex<std::sync::mpsc::Receiver<()>>>| async move {
+            match lane.spawn(move || {
+                let _ = wait.lock().unwrap().recv();
+            }) {
+                Some(work) => {
+                    starts.fetch_add(1, Ordering::SeqCst);
+                    let _ = work.await;
+                    passing(now_ms())
+                }
+                None => SystemProbe::unknown(now_ms()),
+            }
+        };
+        let mut runner = Runner::default();
+        runner.start(1, collect(starts.clone(), wait.clone()));
+        // Drive the run until its blocking part has been spawned.
+        tokio::select! {
+            _ = runner.next() => panic!("a stalled run cannot finish"),
+            _ = tokio::task::yield_now() => {}
+        }
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert!(lane.busy());
+        // Cancel detaches the blocking call; the next due run must not stack another.
+        runner.cancel();
+        tokio::time::advance(SETTLE).await;
+        assert!(matches!(runner.next().await, Tick::Due));
+        runner.start(2, collect(starts.clone(), wait.clone()));
+        let Tick::Done(generation, probe) = runner.next().await else {
+            panic!("expected a finished run");
+        };
+        assert_eq!(generation, 2);
+        assert_eq!(starts.load(Ordering::SeqCst), 1, "second blocking start");
+        assert_eq!(probe.guard.outcome, Outcome::Unknown);
+        assert_eq!(probe.transport_proven_at, None);
+        // Once the stalled call returns the lane is free again.
+        release.send(()).unwrap();
+        while lane.busy() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let free = lane.spawn(|| 7).expect("lane free");
+        assert_eq!(free.await.unwrap(), 7);
+    }
+    #[tokio::test]
+    async fn evidence_is_stamped_with_the_run_start() {
+        let before = now_ms();
+        let probe = evidence(async {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            (
+                Dns {
+                    config: Audit::Match,
+                    path: Path::Tunnel,
+                    reply: Reply::Answered,
+                    foreign: Foreign::None,
+                },
+                Audit::Match,
+                vec![Attempt::Blocked],
+            )
+        })
+        .await;
+        let after = now_ms();
+        for at in [
+            probe.transport_proven_at,
+            probe.dns.observed_at_ms,
+            probe.guard.observed_at_ms,
+        ] {
+            let at = at.unwrap();
+            assert!(at >= before && at + 40 <= after, "{before} {at} {after}");
         }
     }
 }

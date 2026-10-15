@@ -3,7 +3,7 @@
 //! kinds of datagrams. Read-only; no PowerShell or netsh.
 use super::firewall;
 use crate::sysprobe::{self, Attempt, Audit, Dns, Foreign, Path, wfp};
-use rtrust_control::observations::{SystemProbe, now_ms};
+use rtrust_control::observations::SystemProbe;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     os::windows::io::AsRawSocket,
@@ -20,31 +20,39 @@ pub(super) struct Plan {
     pub dns: Ipv4Addr,
     pub endpoints: Vec<IpAddr>,
 }
+/// IP Helper, BFE and the registry can stall; never stack a second blocked read.
+static LANE: sysprobe::Lane = sysprobe::Lane::new();
 pub(super) async fn collect(plan: Plan, permits: Vec<crate::failover::Permit>) -> SystemProbe {
     let server = SocketAddr::new(plan.dns.into(), 53);
     let index = plan.index;
-    let (facts, reply) = tokio::join!(
-        tokio::task::spawn_blocking(move || {
+    sysprobe::evidence(async move {
+        let blocking = LANE.spawn(move || {
             let luid = luid(plan.index);
             (
                 luid.map_or(Audit::Unknown, |luid| audit(luid, &permits)),
                 attempts(&plan),
                 dns(&plan, luid),
             )
-        }),
-        async {
-            match socket(false, index) {
-                Some(socket) => sysprobe::exchange(socket, server).await,
-                None => sysprobe::Reply::None,
-            }
-        },
-    );
-    match facts {
-        Ok((audit, attempts, dns)) => {
-            sysprobe::result(Dns { reply, ..dns }, audit, &attempts, now_ms())
-        }
-        Err(_) => SystemProbe::unknown(now_ms()),
-    }
+        });
+        let (facts, reply) = tokio::join!(
+            async {
+                match blocking {
+                    Some(work) => work.await.ok(),
+                    None => None,
+                }
+            },
+            async {
+                match socket(false, index) {
+                    Some(socket) => sysprobe::exchange(socket, server).await,
+                    None => sysprobe::Reply::None,
+                }
+            },
+        );
+        let (audit, attempts, dns) =
+            facts.unwrap_or((Audit::Unknown, vec![Attempt::Unknown], Dns::UNKNOWN));
+        (Dns { reply, ..dns }, audit, attempts)
+    })
+    .await
 }
 fn luid(index: u32) -> Option<u64> {
     let mut luid = NET_LUID_LH::default();
@@ -122,7 +130,9 @@ fn attempts(plan: &Plan) -> Vec<Attempt> {
     let Some(v4) = defaults(AF_INET, plan.index) else {
         return vec![Attempt::Unknown];
     };
-    let v6 = defaults(AF_INET6, plan.index).unwrap_or_default();
+    let Some(v6) = defaults(AF_INET6, plan.index) else {
+        return vec![Attempt::Unknown];
+    };
     let mut attempts = Vec::new();
     for index in v4 {
         attempts.push(match socket(false, index) {
@@ -133,19 +143,12 @@ fn attempts(plan: &Plan) -> Vec<Attempt> {
             ),
             None => Attempt::Unknown,
         });
-        attempts.push(match socket(true, index) {
-            Some(socket) if v6.contains(&index) => sysprobe::attempt(
-                sysprobe::send(&socket, sysprobe::TARGET_V6),
-                &[WSAEACCES],
-                &[],
-            ),
-            Some(socket) => sysprobe::attempt(
-                sysprobe::send(&socket, sysprobe::TARGET_V6),
-                &[WSAEACCES],
-                &[WSAENETUNREACH, WSAEHOSTUNREACH, WSAEADDRNOTAVAIL],
-            ),
-            None => Attempt::Absent,
-        });
+        attempts.push(sysprobe::v6_attempt(
+            v6.contains(&index),
+            socket(true, index).map(|socket| sysprobe::send(&socket, sysprobe::TARGET_V6)),
+            &[WSAEACCES],
+            &[WSAENETUNREACH, WSAEHOSTUNREACH, WSAEADDRNOTAVAIL],
+        ));
     }
     attempts
 }
@@ -252,12 +255,7 @@ fn nrpt() -> Option<bool> {
 }
 fn dns(plan: &Plan, luid: Option<u64>) -> Dns {
     let Some(luid) = luid else {
-        return Dns {
-            config: Audit::Unknown,
-            path: Path::Unknown,
-            reply: sysprobe::Reply::None,
-            foreign: Foreign::Unknown,
-        };
+        return Dns::UNKNOWN;
     };
     let address = plan.dns.to_string();
     let config = match interface_servers(luid) {

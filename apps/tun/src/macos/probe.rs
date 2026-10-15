@@ -3,7 +3,7 @@
 //! (`-n`), the DNS entry is compared, never installed.
 use super::{device::DEVICE, dns, firewall, route_table, state::DIRECTORY};
 use crate::sysprobe::{self, Attempt, Audit, Dns, Foreign, Path, macos};
-use rtrust_control::observations::{SystemProbe, now_ms};
+use rtrust_control::observations::SystemProbe;
 use std::{
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -11,6 +11,7 @@ use std::{
 };
 const PFCTL: &str = "/sbin/pfctl";
 const MAX: usize = 64 * 1024;
+static LANE: sysprobe::Lane = sysprobe::Lane::new();
 
 #[derive(Clone)]
 pub(super) struct Plan {
@@ -20,8 +21,11 @@ pub(super) struct Plan {
     pub endpoints: Vec<IpAddr>,
 }
 pub(super) async fn collect(plan: Plan) -> SystemProbe {
-    let (audit, attempts, dns) = tokio::join!(audit(&plan), attempts(&plan), dns(&plan));
-    sysprobe::result(dns, audit, &attempts, now_ms())
+    sysprobe::evidence(async {
+        let (audit, attempts, dns) = tokio::join!(audit(&plan), attempts(&plan), dns(&plan));
+        (dns, audit, attempts)
+    })
+    .await
 }
 async fn text(path: &'static str, args: &[&str]) -> Option<String> {
     String::from_utf8(sysprobe::run(path, args, MAX).await?).ok()
@@ -147,7 +151,7 @@ async fn attempts(plan: &Plan) -> Vec<Attempt> {
     if sysprobe::collides(&plan.endpoints) {
         return vec![Attempt::Unknown];
     }
-    let (Some(v4), v6) = tokio::join!(defaults(false), defaults(true)) else {
+    let (Some(v4), Some(v6)) = tokio::join!(defaults(false), defaults(true)) else {
         return vec![Attempt::Unknown];
     };
     let mut attempts = Vec::new();
@@ -160,20 +164,15 @@ async fn attempts(plan: &Plan) -> Vec<Attempt> {
             ),
             None => Attempt::Unknown,
         });
-        let scoped = v6.as_ref().is_some_and(|v6| v6.contains(&interface));
-        attempts.push(match socket(true, &interface) {
-            Some(socket) if scoped => sysprobe::attempt(
-                sysprobe::send(&socket, sysprobe::TARGET_V6),
-                &[libc::EHOSTUNREACH],
-                &[],
-            ),
-            Some(socket) => sysprobe::attempt(
-                sysprobe::send(&socket, sysprobe::TARGET_V6),
-                &[],
-                &[libc::EHOSTUNREACH, libc::ENETUNREACH, libc::EADDRNOTAVAIL],
-            ),
-            None => Attempt::Absent,
-        });
+        // EHOSTUNREACH is a PF refusal only with a scoped default present.
+        let scoped = v6.contains(&interface);
+        let blocked: &[i32] = if scoped { &[libc::EHOSTUNREACH] } else { &[] };
+        attempts.push(sysprobe::v6_attempt(
+            scoped,
+            socket(true, &interface).map(|socket| sysprobe::send(&socket, sysprobe::TARGET_V6)),
+            blocked,
+            &[libc::EHOSTUNREACH, libc::ENETUNREACH, libc::EADDRNOTAVAIL],
+        ));
     }
     attempts
 }
@@ -182,7 +181,13 @@ async fn dns(plan: &Plan) -> Dns {
     let address = server.to_string();
     let route_args = ["-n", "get", "-inet", &address];
     let (entry, route, config, reply) = tokio::join!(
-        tokio::task::spawn_blocking(move || dns::matches(uid, server)),
+        async {
+            // configd can stall; never stack a second blocked lookup.
+            match LANE.spawn(move || dns::matches(uid, server)) {
+                Some(lookup) => lookup.await.ok(),
+                None => None,
+            }
+        },
         text("/sbin/route", &route_args),
         text("/usr/sbin/scutil", &["--dns"]),
         async {
@@ -197,9 +202,9 @@ async fn dns(plan: &Plan) -> Dns {
     let resolvers = config.as_deref().and_then(macos::resolvers);
     Dns {
         config: match (entry, &resolvers) {
-            (Ok(Ok(false)), _) => Audit::Mismatch,
+            (Some(Ok(false)), _) => Audit::Mismatch,
             (_, Some(found)) if !found.iter().any(|(s, _)| *s == address) => Audit::Mismatch,
-            (Ok(Ok(true)), Some(_)) => Audit::Match,
+            (Some(Ok(true)), Some(_)) => Audit::Match,
             _ => Audit::Unknown,
         },
         path: match route.as_deref().and_then(macos::route_interface) {
