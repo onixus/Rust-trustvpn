@@ -138,10 +138,23 @@ final class DiagnosticsDialog {
         } catch (JSONException ignored) { }
         return result;
     }
+    /** Snapshot when the dialog opens; the native status carries no endpoint or address. */
+    private static String recoveryLine() {
+        boolean ru = java.util.Locale.getDefault().getLanguage().equals("ru");
+        try {
+            JSONObject status = new JSONObject(NativeCore.INSTANCE.status());
+            JSONObject recovery = status.optJSONObject("recovery"), last = status.optJSONObject("last_end");
+            return RecoveryStatus.line(recovery == null ? -1 : recovery.optInt("attempts"), recovery == null ? 0 : recovery.optInt("limit"),
+                last == null ? null : last.optString("reason"), last == null ? 0 : last.optLong("age_s"), ru);
+        } catch (Exception unavailable) {
+            return RecoveryStatus.line(-1, 0, null, 0, ru);
+        }
+    }
     static AlertDialog show(Activity activity) {
         Handler handler = new Handler(Looper.getMainLooper());
         LinearLayout panel = new LinearLayout(activity); panel.setOrientation(LinearLayout.VERTICAL); panel.setPadding(24,16,24,16);
         TextView help = new TextView(activity); help.setText(text("System DNS and one HTTPS HEAD through this app's VPN Network. No direct fallback or upload. Android 12+ is required to verify network ownership.", "Системный DNS и один HTTPS HEAD через VPN-сеть приложения. Без прямого обхода и отправки отчёта. Для проверки владельца сети нужен Android 12+.")); panel.addView(help);
+        TextView recovery = new TextView(activity); recovery.setText(recoveryLine()); panel.addView(recovery);
         EditText target = new EditText(activity); target.setSingleLine(true); target.setText("example.com"); panel.addView(target);
         TextView output = new TextView(activity); panel.addView(output);
         EditText preview = new EditText(activity); preview.setMinLines(4); preview.setMaxLines(8); panel.addView(preview);

@@ -35,12 +35,15 @@ impl Planner {
     pub fn selected(&self) -> usize {
         self.selected
     }
-    /// A degraded exit after a stable session that delivered traffic is not a
-    /// failed attempt: refund it, so such exits over days cannot exhaust the
-    /// finite budget. Unproven or short sessions still count.
-    pub fn degraded(&mut self, proven: bool, connected: Duration) {
-        if proven && connected >= rtrust_control::recovery::STABLE_CONNECTION {
-            self.attempts = self.attempts.saturating_sub(1);
+    /// A connected session ended: lost transport, degraded, or replaced on a
+    /// network change. After the stable period the budget starts afresh, as on
+    /// desktop (`rtrust_control::recovery::Budget::disconnected`); otherwise
+    /// sleep/wake and network changes over days would exhaust it and block the
+    /// VPN for good. Short sessions keep counting, so flapping stays bounded.
+    /// `unproven`: ended degraded without ever delivering data, however long.
+    pub fn ended(&mut self, connected: Duration, unproven: bool) {
+        if !unproven && connected >= rtrust_control::recovery::STABLE_CONNECTION {
+            self.attempts = 0;
         }
     }
     pub fn failed(&mut self, fatal: bool, connected: Duration, jitter: u64) -> Duration {
@@ -82,23 +85,40 @@ mod tests {
         assert!(fixed.begin().is_none());
     }
     #[test]
-    fn only_proven_stable_degraded_exits_are_refunded() {
+    fn stable_sessions_restore_budget_over_days_of_sleep_and_network_changes() {
         use rtrust_control::recovery::STABLE_CONNECTION;
         let mut p = Planner::new(1).unwrap();
         for _ in 0..10 * LIMIT {
             assert!(p.begin().is_some());
-            p.degraded(true, STABLE_CONNECTION);
-            p.failed(false, STABLE_CONNECTION, 0);
+            p.ended(STABLE_CONNECTION, false);
         }
         assert_eq!(p.attempts(), 0);
-        for (proven, connected) in [
-            (false, Duration::from_secs(3600)),
-            (true, STABLE_CONNECTION - Duration::from_secs(1)),
+        // Sleep killed the transport after a long session that followed
+        // several failed attempts: the next delay is the base, not 48 s.
+        let mut p = Planner::new(1).unwrap();
+        for _ in 0..6 {
+            p.begin();
+            p.failed(false, Duration::ZERO, 0);
+        }
+        p.begin();
+        p.ended(Duration::from_secs(3600), false);
+        assert_eq!(
+            p.failed(false, Duration::from_secs(3600), 0),
+            Duration::from_secs(3)
+        );
+        assert_eq!(p.attempts(), 0);
+    }
+    #[test]
+    fn unproven_or_short_sessions_still_exhaust_budget() {
+        use rtrust_control::recovery::STABLE_CONNECTION;
+        for (unproven, connected) in [
+            (true, Duration::from_secs(3600)),
+            (false, STABLE_CONNECTION - Duration::from_secs(1)),
         ] {
             let mut p = Planner::new(1).unwrap();
             for _ in 0..LIMIT {
                 assert!(p.begin().is_some());
-                p.degraded(proven, connected);
+                p.ended(connected, unproven);
                 p.failed(false, connected, 0);
             }
             assert!(p.begin().is_none());

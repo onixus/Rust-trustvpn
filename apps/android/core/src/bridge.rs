@@ -30,6 +30,27 @@ static STATE: AtomicU8 = AtomicU8::new(0);
 static MESSAGE: Mutex<String> = Mutex::new(String::new());
 static OBSERVATIONS: std::sync::LazyLock<Mutex<rtrust_mobile::Observations>> =
     std::sync::LazyLock::new(|| Mutex::new(rtrust_mobile::Observations::default()));
+static WAKES: std::sync::LazyLock<rtrust_mobile::resume::Wakes> =
+    std::sync::LazyLock::new(Default::default);
+/// Coarse cause of the last connection end and its CLOCK_BOOTTIME stamp, for
+/// on-device diagnostics only: no endpoint, address or error text.
+static LAST_END: Mutex<Option<(&'static str, std::time::Duration)>> = Mutex::new(None);
+/// Real time since boot, suspend included. Instant and tokio timers use
+/// CLOCK_MONOTONIC, which stops while the device sleeps.
+fn boottime() -> std::time::Duration {
+    let mut value = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // Always available on Android; zero only stalls diagnostics ages.
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut value) } != 0 || value.tv_sec < 0 {
+        return std::time::Duration::ZERO;
+    }
+    std::time::Duration::new(value.tv_sec as u64, value.tv_nsec as u32)
+}
+fn connection_ended(reason: &'static str) {
+    *LAST_END.lock().unwrap_or_else(|p| p.into_inner()) = Some((reason, boottime()));
+}
 fn state(value: u8, message: &str) {
     OBSERVATIONS
         .lock()
@@ -458,6 +479,7 @@ fn stop_runner(end_session: bool) {
             .unwrap_or_else(|p| p.into_inner())
             .clear();
         *RECOVERY.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *LAST_END.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
     state(0, "");
 }
@@ -476,6 +498,7 @@ fn resumed(_env: &mut Env<'_>, _this: JObject<'_>) -> jni::errors::Result<()> {
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .resumed();
+    WAKES.notify();
     Ok(())
 }
 const _: jni::NativeMethod = native_method! {java_type="org.rtrusttunnel.android.NativeCore",name="flowCapture",extern fn flow_capture(session:jlong,capture:jlong,operation:jint)->JString,};
@@ -516,7 +539,7 @@ fn status<'a>(env: &mut Env<'a>, _this: JObject<'a>) -> jni::errors::Result<JStr
     let message = MESSAGE.lock().unwrap_or_else(|p| p.into_inner());
     JString::new(
         env,
-        serde_json::json!({"state":STATE.load(Ordering::SeqCst),"message":&*message,"recovery":RECOVERY.lock().unwrap_or_else(|p|p.into_inner()).as_ref().map(|(_,_,p)|{let p=p.lock().unwrap_or_else(|p|p.into_inner());serde_json::json!({"selected_index":p.selected(),"attempts":p.attempts(),"limit":rtrust_mobile::reserves::LIMIT})}),"observations":OBSERVATIONS.lock().unwrap_or_else(|p| p.into_inner()).snapshot()}).to_string(),
+        serde_json::json!({"state":STATE.load(Ordering::SeqCst),"message":&*message,"recovery":RECOVERY.lock().unwrap_or_else(|p|p.into_inner()).as_ref().map(|(_,_,p)|{let p=p.lock().unwrap_or_else(|p|p.into_inner());serde_json::json!({"selected_index":p.selected(),"attempts":p.attempts(),"limit":rtrust_mobile::reserves::LIMIT})}),"last_end":LAST_END.lock().unwrap_or_else(|p|p.into_inner()).map(|(reason,at)|serde_json::json!({"reason":reason,"age_s":boottime().saturating_sub(at).as_secs()})),"observations":OBSERVATIONS.lock().unwrap_or_else(|p| p.into_inner()).snapshot()}).to_string(),
     )
 }
 
@@ -713,24 +736,41 @@ async fn run(
                         "Transport connected · IPv4 configured; check system DNS/HTTPS"
                     },
                 );
-                let started = std::time::Instant::now();
+                // Real time, sleep included: a session that lasted the night is
+                // stable even if the device was awake only briefly meanwhile.
+                let started = boottime();
+                let probe = &session.clone();
+                let mut woke = false;
                 let ended = tokio::select! {
                     biased;
-                    _=cancel.changed()=>break,
+                    _=cancel.changed()=>{
+                        // Replaced, usually on a network change: the next runner
+                        // reuses this budget, so account for the session here.
+                        budget.lock().unwrap_or_else(|p| p.into_inner()).ended(boottime().saturating_sub(started), false);
+                        connection_ended("replaced");
+                        break;
+                    },
                     _=async{loop{if !valid(){break;}tokio::time::sleep(std::time::Duration::from_millis(100)).await;}}=>{state(4,"Access refresh required; traffic blocked");let _=cancel.changed().await;break;},
                     ended=rtrust_tun::run_with_policy(session,tunnel,device.clone(),"169.254.254.2".parse().unwrap(),dns.clone(),routing.clone(),Some(&mut policy))=>ended,
+                    error=rtrust_mobile::resume::watch(&WAKES,rtrust_mobile::resume::CHECK_TIMEOUT,||probe.health(),||rtrust_engine::Error::Timeout)=>{woke=true;Err(error.into())},
                 };
                 FLOWS
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .transport_lost(runner_session);
-                connected_for = started.elapsed();
-                if let Some(proven) = rtrust_tun::degraded(&ended) {
-                    budget
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .degraded(proven, connected_for);
-                }
+                connected_for = boottime().saturating_sub(started);
+                let degraded = rtrust_tun::degraded(&ended);
+                budget
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .ended(connected_for, degraded == Some(false));
+                connection_ended(if woke {
+                    "wake_check_failed"
+                } else if degraded.is_some() {
+                    "degraded"
+                } else {
+                    "transport_lost"
+                });
                 state(3, "Connection lost; traffic blocked while reconnecting");
             }
             Err(error) => {
@@ -738,6 +778,7 @@ async fn run(
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .transport_lost(runner_session);
+                connection_ended("connect_failed");
                 state(3, &error.to_string());
                 fatal = matches!(
                     error,
@@ -754,7 +795,7 @@ async fn run(
             connected_for,
             rand::random(),
         );
-        tokio::select! {_=cancel.changed()=>break,_=tokio::time::sleep(delay)=>{}}
+        tokio::select! {_=cancel.changed()=>break,_=rtrust_mobile::resume::sleep_real(&WAKES,delay,boottime)=>{}}
     }
     Ok(())
 }
