@@ -238,9 +238,10 @@ public final class TunnelService extends VpnService {
             @Override public void onLost(Network n){if(n.equals(underlying))changed(n);}
             @Override public void onCapabilitiesChanged(Network n,NetworkCapabilities caps){if(!java.util.Objects.equals(underlying,availableNetwork()))changed();}
             // IPv6 SLAAC additions after a handoff must not tear down the just-connected session.
-            @Override public void onLinkPropertiesChanged(Network n,LinkProperties next){if(!n.equals(underlying) || java.util.Objects.equals(properties,next))return;
-                if(LinkChange.requiresRebuild(linkInterface(properties),linkAddresses(properties),linkRoutes(properties),linkInterface(next),linkAddresses(next),linkRoutes(next)))changed();
-                else synchronized(networkEvents){if(callback==this && !stopping && n.equals(underlying))properties=next;}}
+            // Compared with the latest state: changed() stores it, so a queued older callback must not read as a removal.
+            @Override public void onLinkPropertiesChanged(Network n,LinkProperties next){LinkProperties latest=connectivity.getLinkProperties(n);if(latest==null)latest=next;if(!n.equals(underlying) || java.util.Objects.equals(properties,latest))return;
+                if(LinkChange.requiresRebuild(linkInterface(properties),linkAddresses(properties),linkRoutes(properties),linkInterface(latest),linkAddresses(latest),linkRoutes(latest)))changed();
+                else synchronized(networkEvents){if(callback==this && !stopping && n.equals(underlying))properties=latest;}}
         };
         connectivity.registerNetworkCallback(new NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).addCapability(NetworkCapabilities.NET_CAPABILITY_FOREGROUND).build(),callback);
         underlying=availableNetwork();
