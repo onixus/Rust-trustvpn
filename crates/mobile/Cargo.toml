@@ -13,3 +13,6 @@ serde_json.workspace = true
 ipnet = "2"
 tokio.workspace = true
 sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

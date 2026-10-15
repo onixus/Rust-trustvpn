@@ -74,9 +74,10 @@ The exit carries `proven`: whether the session ever delivered an inbound byte.
   reaches the normal blocked cooldown instead of a fast loop
   (`crates/control/src/recovery.rs`). A proven session connected for at least
   30 s restores it as before.
-- Android: a proven, stable degraded exit refunds its attempt in the finite
-  per-session budget (`crates/mobile/src/reserves.rs`), so such exits over days
-  cannot block the VPN permanently. Unproven or short exits still count.
+- Android: any session that ended after 30 s of real time restores the
+  finite per-session budget unless it ended degraded without delivering data
+  (`crates/mobile/src/reserves.rs`), so exits over days cannot block the VPN
+  permanently. Unproven or short exits still count.
 - macOS records `transport_degraded proven=<bool>` in the service event log.
 
 Liveness keeps only in-memory counters and a per-session keyed 64-bit host-hash

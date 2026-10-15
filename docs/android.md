@@ -135,11 +135,20 @@ publish real profiles to create documentation.
   its health check.
 - A session switched to Always-on in system Settings while the app is in the
   background is recorded, so the app can reconnect it if it dies.
-- A session that carries no traffic fails its health check and reconnects. A
-  degraded exit after a stable session (≥30 s) that delivered traffic refunds its
-  attempt in the finite per-session budget, so such exits over days cannot block
-  the VPN permanently; see [dead-session detection](http3.md#dead-session-detection)
-  (main after 0.6.1).
+- A session that carries no traffic fails its health check and reconnects. Any
+  session that ended after the stable period (≥30 s of real time, sleep
+  included) restores the finite per-session reconnect budget, as on desktop:
+  lost transport, degraded exit with delivered traffic, or replacement on a
+  network change. Sleep/wake and roaming over days therefore cannot block the
+  VPN permanently, and the next delay starts from the base backoff. Short
+  sessions, and degraded ones that never delivered data, still count; see
+  [dead-session detection](http3.md#dead-session-detection) (main after 0.6.1).
+- Waking from deep sleep checks the connected transport at once (6 s bound) and
+  reconnects if it does not answer. Retry delays and the stable period run on
+  `CLOCK_BOOTTIME`: monotonic timers stop while the device sleeps, so a backoff
+  begun before sleep ends at wake instead of running on afterwards.
+- Diagnostics shows reconnect attempts of the budget and the coarse cause and
+  age of the last connection end (no endpoint, address or error text).
 - Rust duplicates the TUN FD, cancels/joins its worker before closing the duplicate,
   and retains TUN while reconnecting. The Java service owns the original FD.
   Stop/revoke closes both. Temporary handshake EOF/reset remains retryable;
