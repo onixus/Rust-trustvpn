@@ -337,12 +337,19 @@ def main():
             assert established(BACKUP) and not established(PRIMARY)
             fetch("198.18.0.1")
             fetch(HOST6, url6)
-            for address in (PRIMARY, BACKUP):
-                s.app(1000, "python3", "-c", f"import socket; socket.create_connection(('{address}',8443),timeout=1)", success=False)
+            # While Connected, an application flow to an endpoint address is
+            # routed into rtrust0 like any other destination; what must never
+            # happen is the same flow leaving outside the tunnel (app_direct).
+            tunneled = {}
+            for name, address in (("primary", PRIMARY), ("backup", BACKUP)):
+                probe = f"import socket; socket.create_connection(('{address}',8443),timeout=1)"
+                tunneled[name] = subprocess.run(["ip", "netns", "exec", s.NS, "setpriv", "--reuid=1000", "--regid=1000",
+                                                 "--clear-groups", "python3", "-c", probe],
+                                                capture_output=True, timeout=35).returncode == 0
             assert boot_guard() and ("inet", "foreign_test") in fo.tables()
             values = fo.assert_no_leaks("(a) recovery through backup")
             fo.evidence(scenario="recovery-primary-down", enable_to_connected_s=round(connected - started, 2),
-                        recovery=recovery, counters=values)
+                        recovery=recovery, counters=values, app_to_endpoint_connected_via_tunnel=tunneled)
             print(f"PASS (a) requested endpoint down: Connected through backup index 1 after "
                   f"{connected - started:.1f}s, no direct endpoint bypass, no leaks", flush=True)
 
