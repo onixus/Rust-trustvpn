@@ -24,8 +24,8 @@ extracting a new fixture binary. The runner uses the existing
 `rtrust-linux-cargo` registry cache and a private Docker build volume for each run;
 `cargo build --locked --offline` fails explicitly if a dependency is absent.
 Only `rtrust-tun`, `rtrust-inspect` and the unpackaged Linux `flow-lab`
-example of `rtrust-tun` are built. Unit tests and strict all-target Clippy check `rtrust-tun` and
-`rtrust-control`. The disposable extracted source receives fresh regular-file
+example of `rtrust-tun` are built. Unit tests cover `rtrust-tun`, `rtrust-control` and `rtrust-inspect`; strict
+all-target Clippy checks `rtrust-tun` and `rtrust-control`. The disposable extracted source receives fresh regular-file
 timestamps before the build. Parallel runs never share build outputs, so another
 commit cannot replace binaries between compilation and evidence collection. Source contents remain the archived
 bytes. Test binaries are copied and

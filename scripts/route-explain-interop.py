@@ -43,16 +43,18 @@ DNS_SERVER = "198.18.10.53"  # inside a numeric exclusion: DNS is still tunneled
 SECRETS = ["198.18.1.1", "198.18.2.1", "10.99.0.1", "10.98.0.1", "203.0.113.1", "169.254.1.1",
            "198.18.0.7", "198.18.10.1", "198.18.10.7", "198.18.10.53", "198.18.11.1", "198.18.12.1",
            "198.18.20.1", "198.18.21.1", "198.18.22.1", "198.18.23.1", "198.18.24.1", "198.18.25.1",
-           "198.18.26.1", "fd00:18::1", "fd00:18:0:1::1", "direct.lab", "short.lab", "edge.lab",
+           "198.18.26.1", "198.18.27.1", "fd00:18::1", "fd00:18:0:1::1", "direct.lab", "short.lab", "edge.lab",
            "alias.lab", "cdn.lab", "ruled.lab", "other.lab", "num.lab", "num-pair.lab", "nodns.lab", "slow.lab",
-           "keep.lab", "late.lab"]
+           "fence.lab", "keep.lab", "late.lab"]
 POLICY_A = {"networks": ["198.18.0.0/16", "10.0.0.0/8"], "exclude": ["198.18.2.0/24"], "exclude_lan": True}
 # 0.0.0.0/0 must exclude the client's own subnet: the service preflight rejects
 # a selection containing a local address when LAN exclusion is off.
 POLICY_B = {"networks": ["0.0.0.0/0"], "exclude": ["198.18.0.0/24", "10.99.0.0/30"], "exclude_lan": False}
+# Documented gap: explain does not model that preflight; the service refuses it.
+POLICY_RAW = {"networks": ["0.0.0.0/0"], "exclude": [], "exclude_lan": False}
 NUMERIC = ["198.18.10.0/24", "198.18.11.1:8080", "fd00:18:0:1::/64"]
 DOMAINS = ["198.18.10.0/24", "direct.lab", "short.lab", "*.cdn.lab", "ruled.lab", "num.lab",
-           "nodns.lab", "slow.lab", "keep.lab"]
+           "nodns.lab", "slow.lab", "fence.lab", "keep.lab"]
 REVISED = DOMAINS + ["late.lab"]
 PROTECTIVE = {"unknown_name_protected", "shared_ip_conflict_protected", "endpoint_unresolved",
               "local_networks_unobserved", "unsupported_family"}
@@ -61,18 +63,22 @@ processes = []  # stopped on every exit path
 
 
 # --- synthetic DNS behind the endpoint ------------------------------------
+TTL = 5  # direct within the first half of the window, expired >= 1 s after its end
+LATE = 4  # seconds before a slow answer; the client resolver gives up after 2
 RECORDS = {
-    "direct.lab": [("A", "direct.lab", "198.18.20.1", 3)],
-    "short.lab": [("CNAME", "short.lab", "edge.lab", 2), ("A", "edge.lab", "198.18.21.1", 300)],
+    "direct.lab": [("A", "direct.lab", "198.18.20.1", TTL)],
+    "short.lab": [("CNAME", "short.lab", "edge.lab", TTL), ("A", "edge.lab", "198.18.21.1", 300)],
     "alias.lab": [("CNAME", "alias.lab", "node.cdn.lab", 300), ("A", "node.cdn.lab", "198.18.22.1", 300)],
     "ruled.lab": [("A", "ruled.lab", "198.18.23.1", 300)],
     "other.lab": [("A", "other.lab", "198.18.23.1", 300)],
     "num.lab": [("A", "num.lab", "198.18.10.7", 300)],
     "other.num-pair.lab": [("A", "other.num-pair.lab", "198.18.10.7", 300)],
     "keep.lab": [("A", "keep.lab", "198.18.26.1", 300)],
+    # Answered LATE seconds after receipt: the positive control and the fence.
     "slow.lab": [("A", "slow.lab", "198.18.25.1", 300)],
+    "fence.lab": [("A", "fence.lab", "198.18.27.1", 300)],
 }
-dns_seen = {"slow_received": 0, "slow_answered": 0}
+dns_seen = {name: {"received": 0, "answered": 0} for name in ("slow.lab", "fence.lab")}
 
 
 def encode(name):
@@ -102,11 +108,13 @@ class DNS(socketserver.BaseRequestHandler):
                 count += 1
         rcode = 3 if records is None else 0
         response = data[:2] + struct.pack("!HHHHH", 0x8180 | rcode, 1, count, 0, 0) + question + answers
-        if name == "slow.lab" and kind == 1:
-            dns_seen["slow_received"] += 1
-            time.sleep(3)  # a late answer of the policy revision that issued it
-            dns_seen["slow_answered"] += 1
+        late = name in dns_seen and kind == 1
+        if late:
+            dns_seen[name]["received"] += 1
+            time.sleep(LATE)
         sock.sendto(response, self.client_address)
+        if late:
+            dns_seen[name]["answered"] += 1
 
 
 class HTTP6(http.server.ThreadingHTTPServer):
@@ -162,14 +170,16 @@ def fetch(destination, port, uid=1000):
     return result.returncode == 0, peer, counters_read()
 
 
-def path_of(ok, peer, counters, client):
-    if counters.get("phys", 0) > 0 and counters.get("tun", 0) == 0:
-        assert not ok or peer == client, ("direct path answered by an unexpected peer", ok)
-        return "direct"
-    if counters.get("tun", 0) > 0 and counters.get("phys", 0) == 0:
+def path_of(ok, peer, counters, client, mobile=False):
+    tun, phys = counters.get("tun", 0), counters.get("phys", 0)
+    if tun > 0 and phys == 0:
         assert not ok or peer != client, "tunnel path reached the server from the client veth"
         return "tunnel"
-    if counters.get("tun", 0) > 0 and counters.get("phys", 0) > 0:
+    if not mobile and phys > 0 and tun == 0:
+        # Desktop direct: the application's packets never touch rtrust0.
+        assert not ok or peer == client, ("direct path answered by an unexpected peer", ok)
+        return "direct"
+    if mobile and tun > 0 and phys > 0:
         # Mobile direct: the app writes to the TUN, flow-lab's protected socket
         # leaves through the veth. The server must see the veth address.
         assert ok and peer == client, ("mobile direct without a direct peer", ok)
@@ -260,6 +270,16 @@ class Lease:
         line = self.p.stdout.readline()
         assert line and json.loads(line)["state"] == "Connected", self.p.stderr.read()[-800:]
 
+    @staticmethod
+    def rejected(policy, profile):
+        """Start that the service must refuse without installing anything."""
+        p = subprocess.Popen(["ip", "netns", "exec", s.NS, "setpriv", "--reuid=1000", "--regid=1000",
+                              "--clear-groups", "python3", "-c", START, json.dumps(policy), str(profile)],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        processes.append(p)
+        out, _ = p.communicate(timeout=60)
+        assert p.returncode == 1 and json.loads(out.splitlines()[0])["state"] == "Error", "raw 0.0.0.0/0 was accepted"
+
     def stop(self):
         self.p.stdin.write("\n")
         self.p.stdin.flush()
@@ -312,8 +332,21 @@ def desktop(profile):
     rules, table, present = installed()
     assert not rules and not present, "policy A remained after Stop"
 
+    # Explain predicts tunnel for a raw 0.0.0.0/0 without LAN exclusion, but the
+    # Linux preflight rejects a selection containing a local address.
+    decision, routes = explain_selected("198.18.1.1", POLICY_RAW, None)
+    record(decision, "P2 raw-default prediction")
+    assert decision["action"] == "tunnel" and routes, decision
+    Lease.rejected(POLICY_RAW, profile)
+    rules, table, present = installed()
+    assert not rules and not present, "rejected Start left UID rules or table 51830"
+    s.ns("ip", "link", "show", "rtrust0", success=False)
+    print("PASS P2 documented gap: explain predicts tunnel for raw 0.0.0.0/0, the service refuses Start "
+          "(local address inside the selection) and installs nothing", flush=True)
+
     lease = Lease(POLICY_B, profile)
     b = {}
+    evidence = []
     for label, destination, expected in [("reserved", "169.254.1.1", "direct"), ("excluded", "198.18.0.7", "direct"),
                                          ("previously-excluded", "198.18.2.1", "tunnel"),
                                          ("previously-outside", "203.0.113.1", "tunnel")]:
@@ -325,13 +358,16 @@ def desktop(profile):
         assert path_of(ok, peer, counters, CLIENT4) == expected, (label, counters)
         if expected == "direct" or destination != "203.0.113.1":
             assert ok, (label, "HTTP failed")
+        evidence.append(f"{label}: {expected} by counters" + (" and X-Peer" if ok else
+                        ", HTTP through the endpoint failed (packet counter is the only proof)"))
         expected_routes = set(routes)
     assert b["reserved"]["reason"] == "reserved_address"
     assert b["reserved"]["context"]["revision"] != revision_a, "policy B kept revision A"
     rules, table, _ = installed()
     assert rules == expected_routes == table, "policy B installation differs from Selection::routes"
     assert not any(ipaddress.ip_network(r).overlaps(ipaddress.ip_network("169.254.0.0/16")) for r in rules)
-    print("PASS P2 Stop/Start B: new revision, reserved stays direct, only B's prefixes installed", flush=True)
+    print("PASS P2 Stop/Start B: new revision, reserved stays direct, only B's prefixes installed; "
+          + "; ".join(evidence), flush=True)
     lease.stop()
     rules, table, present = installed()
     assert not rules and not present, "table 51830 remained after Stop"
@@ -417,7 +453,7 @@ def mobile_probe(lab, profile, label, destination, port, expected, proto="tcp"):
     else:
         client = CLIENT6 if ":" in destination else CLIENT4
         ok, peer, counters = fetch(destination, port)
-        actual = path_of(ok, peer, counters, client)
+        actual = path_of(ok, peer, counters, client, mobile=True)
         assert ok, (label, "HTTP failed")
     assert actual == expected, (label, actual, counters)
     events = lab.events()
@@ -435,17 +471,28 @@ assert s.recvfrom(4096)[0][:2]==q[:2]
 '''
 
 
-def domain_probe(lab, label, destination, expected, reason, by_name=None, revision=None):
-    """One HTTP flow after optional DNS; compares the observed TCP selection."""
+def domain_probe(lab, label, destination, expected, reason, by_name=None, revision=None, within=None):
+    """One HTTP flow after optional DNS; compares the observed TCP selection.
+
+    Returns (query_sent, answered). DNS evidence is learned in between, so it
+    lives at least until query_sent + TTL and ends by answered + TTL. With
+    `within`, the flow must be selected before query_sent + within.
+    """
     assert lab.send("observe on")["observe"] is True
+    query_sent = answered = None
     if by_name:
         counters_arm(DNS_SERVER, 53, 1000, "udp")
+        query_sent = time.monotonic()
         resolved = as_user(1000, "getent", "ahostsv4", by_name)
+        answered = time.monotonic()
         assert resolved.returncode == 0 and destination.encode() in resolved.stdout, (label, "DNS")
         dns = counters_read()
         assert dns.get("phys", 0) == 0 and dns.get("tun", 0) > 0, (label, "DNS left the veth", dns)
     ok, peer, counters = fetch(destination, 8081)
-    actual = path_of(ok, peer, counters, CLIENT4)
+    if within is not None:
+        elapsed = time.monotonic() - query_sent
+        assert elapsed < within, (label, f"flow finished {elapsed:.2f}s after the query", within)
+    actual = path_of(ok, peer, counters, CLIENT4, mobile=True)
     assert ok and actual == expected, (label, actual, counters)
     flows = [e for e in lab.events() if e["decision"]["reason"] != "dns_always_tunneled"]
     assert flows, (label, "no observed flow decision")
@@ -456,7 +503,31 @@ def domain_probe(lab, label, destination, expected, reason, by_name=None, revisi
         if revision:
             assert got["context"]["revision"] == revision, (label, "revision")
     print(f"PASS {label}: observed {expected}/{reason}, packets {actual}", flush=True)
-    return flows
+    return query_sent, answered
+
+
+def slow_query(name):
+    """Start a query whose answer arrives LATE s after the client resolver gave up."""
+    seen = dns_seen[name]
+    before = dict(seen)
+    pending = subprocess.Popen(["ip", "netns", "exec", s.NS, "setpriv", "--reuid=1000", "--regid=1000",
+                                "--clear-groups", "getent", "ahostsv4", name],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    processes.append(pending)
+    deadline = time.monotonic() + 8
+    while seen["received"] == before["received"] and time.monotonic() < deadline:
+        time.sleep(.05)
+    assert seen["received"] == before["received"] + 1, "slow query did not reach the DNS server once"
+    return pending, before["answered"]
+
+
+def late_answer_sent(name, pending, answered):
+    assert pending.wait(timeout=15) != 0, "resolver should time out before the late answer"
+    deadline = time.monotonic() + LATE + 4
+    while dns_seen[name]["answered"] == answered and time.monotonic() < deadline:
+        time.sleep(.05)
+    assert dns_seen[name]["answered"] == answered + 1, "the late answer was never sent"
+    time.sleep(.5)  # let the endpoint relay it back to the dataplane
 
 
 def write_profile(d, name, base, exclusions, ipv6):
@@ -476,7 +547,8 @@ def mobile(d, base, log):
     try:
         # Without a subscriber nothing is recorded, so nothing is replayed later.
         assert lab.send("observe off")["observe"] is False
-        fetch("198.18.12.1", 8081)
+        ok, _, counters = fetch("198.18.12.1", 8081)
+        assert ok and counters.get("tun", 0) > 0, ("no-subscriber flow did not reach the dataplane", counters)
         assert lab.send("observe on")["observe"] is True
         assert lab.events() == [], "observations recorded without a subscriber"
         print("PASS no subscriber: real flows produced no retrospective events", flush=True)
@@ -511,14 +583,17 @@ def mobile(d, base, log):
     lab = FlowLab(domains, log)
     try:
         assert lab.version["revision"] == old and lab.version["epoch"] == 1
-        domain_probe(lab, "P4 domain ttl", "198.18.20.1", "direct", "matched_rule", "direct.lab", old)
-        time.sleep(4)
+        # TTL windows are anchored to the query: direct must be seen in the first
+        # half, and the expiry check waits until 1 s after the latest possible end.
+        _, answered = domain_probe(lab, "P4 domain ttl", "198.18.20.1", "direct", "matched_rule",
+                                   "direct.lab", old, within=TTL / 2)
+        time.sleep(max(0.0, answered + TTL + 1 - time.monotonic()))
         domain_probe(lab, "P4 domain ttl expired", "198.18.20.1", "tunnel", "unknown_name_protected")
-        started = time.monotonic()
-        domain_probe(lab, "P4 cname ttl", "198.18.21.1", "direct", "matched_rule", "short.lab")
-        assert time.monotonic() - started < 2
-        time.sleep(max(0, 2.5 - (time.monotonic() - started)))
-        domain_probe(lab, "P4 cname ttl expired", "198.18.21.1", "tunnel", "unknown_name_protected")
+        _, answered = domain_probe(lab, "P4 cname ttl", "198.18.21.1", "direct", "matched_rule",
+                                   "short.lab", within=TTL / 2)
+        time.sleep(max(0.0, answered + TTL + 1 - time.monotonic()))
+        domain_probe(lab, "P4 cname ttl expired (chain ttl, not the 300 s address ttl)", "198.18.21.1",
+                     "tunnel", "unknown_name_protected")
         domain_probe(lab, "P4 cname target under rule", "198.18.22.1", "tunnel", "default_tunnel", "alias.lab")
         domain_probe(lab, "P4 single name", "198.18.23.1", "direct", "matched_rule", "ruled.lab")
         assert as_user(1000, "getent", "ahostsv4", "other.lab").returncode == 0
@@ -529,23 +604,19 @@ def mobile(d, base, log):
 
         # P5: hot local revision while an old-revision DNS answer is pending.
         domain_probe(lab, "P5 cached before revision", "198.18.26.1", "direct", "matched_rule", "keep.lab", old)
-        pending = subprocess.Popen(["ip", "netns", "exec", s.NS, "setpriv", "--reuid=1000", "--regid=1000",
-                                    "--clear-groups", "getent", "ahostsv4", "slow.lab"],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        deadline = time.monotonic() + 8
-        while dns_seen["slow_received"] == 0 and time.monotonic() < deadline:
-            time.sleep(.05)
-        assert dns_seen["slow_received"] >= 1, "slow query never reached the DNS server"
+        # Positive control: without a revision change a late answer IS evidence.
+        pending, answered = slow_query("slow.lab")
+        late_answer_sent("slow.lab", pending, answered)
+        domain_probe(lab, "P5 control: late answer of the current revision applies", "198.18.25.1",
+                     "direct", "matched_rule", revision=old)
+        # Fence: the same late answer, but a revision commits while it is pending.
+        pending, answered = slow_query("fence.lab")
         applied = lab.send("apply-local " + json.dumps({"mode": "general", "exclusions": REVISED}), 20)["applied"]
+        assert dns_seen["fence.lab"]["answered"] == answered, "answer arrived before the commit; fence unproven"
         assert applied["revision"] == new != old and applied["epoch"] == 2, applied
-        pending.wait(timeout=15)
-        deadline = time.monotonic() + 8
-        while dns_seen["slow_answered"] == 0 and time.monotonic() < deadline:
-            time.sleep(.05)
-        assert dns_seen["slow_answered"] >= 1, "the late answer was never sent"
-        time.sleep(.5)
+        late_answer_sent("fence.lab", pending, answered)
         domain_probe(lab, "P5 cache cleared", "198.18.26.1", "tunnel", "unknown_name_protected", revision=new)
-        domain_probe(lab, "P5 late answer of old revision ignored", "198.18.25.1", "tunnel",
+        domain_probe(lab, "P5 late answer of old revision ignored", "198.18.27.1", "tunnel",
                      "unknown_name_protected", revision=new)
         domain_probe(lab, "P5 new revision learns again", "198.18.26.1", "direct", "matched_rule", "keep.lab", new)
         print("PASS P5 hot revision: new revision/epoch, cache cleared, late old-revision DNS answer not applied", flush=True)

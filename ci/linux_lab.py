@@ -212,7 +212,7 @@ def worker(run_dir, endpoint_archive):
         manifest['build_target_volume'] = target_volume
         build = '''set -eu
 rustc --version; cargo --version; cargo clippy --version; dpkg-query -W
-cargo test --locked --offline -p rtrust-tun -p rtrust-control --quiet
+cargo test --locked --offline -p rtrust-tun -p rtrust-control -p rtrust-inspect --quiet
 cargo clippy --locked --offline -p rtrust-tun -p rtrust-control --all-targets -- -D warnings
 cargo build --locked --offline -p rtrust-tun -p rtrust-inspect
 cargo build --locked --offline -p rtrust-tun --example flow-lab

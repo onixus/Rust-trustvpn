@@ -139,6 +139,10 @@ Documented differences between explain and the dataplane:
 - Desktop selected mode ignores ports: DNS to an included resolver is tunneled,
   to an excluded or non-included one it is direct. Only the mobile flow policy
   always tunnels port 53.
+- `Selection::explain` validates the prefix set but not the Linux service
+  preflight (`Routes::preflight_common`): a selection that contains a local
+  interface address without LAN exclusion (for example raw `0.0.0.0/0`) is
+  predicted as tunnel, while the service refuses `Start` and installs nothing.
 - Linux selected mode scopes rules to the desktop UID: other local users and the
   root service are not routed by it, which explain does not model.
 
@@ -160,7 +164,9 @@ destination, port and UID).
 - **P2** `Stop`, then `Start` with include `0.0.0.0/0` (the client subnet is
   excluded because preflight rejects a selection containing a local address):
   new revision, reserved space direct, only the new prefix set installed, and no
-  table 51830 or UID rule after `Stop`.
+  table 51830 or UID rule after `Stop`. A raw `0.0.0.0/0` without LAN exclusion
+  is predicted tunnel but refused by the service with nothing installed (the
+  documented preflight gap above).
 - **P3/P6** `apps/tun/examples/flow-lab.rs` runs `rtrust_mobile::prepare`, the
   Android dataplane `run_with_policy` with SO_BINDTODEVICE socket protection and
   `flows::Capture`. Excluded CIDR and `IP:port` are direct, other ports and
@@ -169,11 +175,12 @@ destination, port and UID).
   SHA-256 of the CLI revision) and packets agree. IPv6 runs when the container
   provides IPv6 addressing, otherwise the lane prints `BLOCKED`.
 - **P4** A synthetic DNS server behind the endpoint: TTL expiry, CNAME-chain
-  TTL, CNAME into a wildcard rule (matched by the queried name only), shared-IP
+  TTL (checked within the first half of a 5 s window and 1 s after its end), CNAME into a wildcard rule (matched by the queried name only), shared-IP
   conflict, the same with a numeric rule, and a rule address without a query.
 - **P5** `apply-local` through `policy::Controller`: new revision and epoch,
   DNS evidence cleared, and a DNS answer of the old revision that arrives after
-  the commit is not applied.
+  the commit (asserted unsent at commit time) is not applied. A positive control
+  shows that the same late answer is applied when no revision intervenes.
 
 Every run asserts that unknown, unobserved and conflict decisions are never
 direct, that decision/event JSON contains none of the tested addresses or names,
@@ -196,5 +203,8 @@ Android/iOS offer [explicit local flow capture](mobile-flow-observations.md)
 from their active router; desktop explain remains a prediction. Android's
 `flowPolicy` bridge invokes the hot revision API; iOS does not. Capture is
 bounded, session-fenced and has no address correlation or packet-delivery proof.
-Full hot OS-route/guard cutover and explicit managed administrator provenance
-remain separate work. Existing vault conflict handling remains in force.
+Established and pending flows are outside the atomic decision-publication
+boundary of `apply_local` itself; only the `policy::Controller` path drains them
+before commit. Full hot OS-route/guard cutover, explicit managed administrator
+provenance and installed package/packet-level device acceptance remain separate
+work. Existing vault conflict handling remains in force.
