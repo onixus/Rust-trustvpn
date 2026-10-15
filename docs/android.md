@@ -308,9 +308,12 @@ Always-on, which keeps the same TUN. The app records that its last session was
 the system Always-on VPN.
 When the app is opened while no tunnel is running, it starts the service in
 recovery mode. Android reports `isAlwaysOn()` only for an established VPN.
-Recovery therefore establishes the blocking TUN first and then checks. If this
-app is no longer the Always-on VPN, it closes the TUN immediately and stays
-disconnected. Recovery needs the app to be opened. A reboot, toggling Always-on
+Recovery therefore establishes the TUN first and then checks. For a
+portal-enrolled profile the blocking TUN is established before endpoint DNS
+resolution. A profile imported without the portal resolves its endpoint on the
+underlying network first; its TUN is established only after that, right before
+the check. If this app is no longer the Always-on VPN, it closes the TUN
+immediately and stays disconnected. Recovery needs the app to be opened. A reboot, toggling Always-on
 or an app update also restarts the VPN through the system. A background
 watchdog is not implemented.
 
