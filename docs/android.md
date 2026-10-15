@@ -111,7 +111,28 @@ publish real profiles to create documentation.
 - Link-property updates on the same underlying network reconnect only when an
   IPv4 address, the interface or an existing address/route changes or is
   removed; IPv6 address and route additions (SLAAC after Wi-Fi returns) keep the
-  established session and its in-flight flows (#75).
+  established session and its in-flight flows (#75). The comparison starts from
+  the link properties read at connect. It also reconnects when:
+  - the link MTU changes, including from unknown (0) to a value. Whether Android
+    reports such an update right after connect still has to be confirmed on an
+    emulator;
+  - the NAT64 prefix changes on an IPv6-only link (Android 11+). On a link with
+    an IPv4 address the prefix is ignored, so a PREF64 that arrives in a later
+    router advertisement does not reconnect a dual-stack session;
+  - an address fails DAD, or a non-temporary address becomes deprecated. An RFC
+    4941 temporary IPv6 address that becomes deprecated is tolerated while
+    another preferred global IPv6 address (not link-local or ULA) remains. IPv4
+    addresses get no such exception;
+  - an unreachable/throw route appears or a route type changes (route types are
+    visible on Android 13+).
+
+  Removing any address still reconnects, because the app cannot tell which
+  source address the session uses. This includes an unused temporary IPv6
+  address when it expires: about 7 days after it was created by default, or daily
+  when the device expires temporary addresses daily. CLAT stacked links are
+  not public API, so CLAT is seen only through the NAT64 prefix; a CLAT start or
+  stop without another visible change keeps the session, which then relies on
+  its health check.
 - A session switched to Always-on in system Settings while the app is in the
   background is recorded, so the app can reconnect it if it dies.
 - A session that carries no traffic fails its health check and reconnects. A
@@ -299,9 +320,12 @@ Always-on, which keeps the same TUN. The app records that its last session was
 the system Always-on VPN.
 When the app is opened while no tunnel is running, it starts the service in
 recovery mode. Android reports `isAlwaysOn()` only for an established VPN.
-Recovery therefore establishes the blocking TUN first and then checks. If this
-app is no longer the Always-on VPN, it closes the TUN immediately and stays
-disconnected. Recovery needs the app to be opened. A reboot, toggling Always-on
+Recovery therefore establishes the TUN first and then checks. For a
+portal-enrolled profile the blocking TUN is established before endpoint DNS
+resolution. A profile imported without the portal resolves its endpoint on the
+underlying network first; its TUN is established only after that, right before
+the check. If this app is no longer the Always-on VPN, it closes the TUN
+immediately and stays disconnected. Recovery needs the app to be opened. A reboot, toggling Always-on
 or an app update also restarts the VPN through the system. A background
 watchdog is not implemented.
 
