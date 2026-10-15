@@ -1,7 +1,8 @@
 # Exact-commit Linux laboratory evidence
 
 `ci/linux_lab.py` runs the existing service IPC, full-tunnel HTTP/2, HTTP/3, permitted
-failover and always-on automatic recovery (`scripts/recovery-interop.py`)
+failover, always-on automatic recovery (`scripts/recovery-interop.py`) and route-explain
+(`explain`, [issue #32](route-explain.md#validation))
 scenarios against an immutable source archive. This checks synthetic
 traffic in disposable Docker and nested Linux network namespaces. It does not
 establish installed-package, physical-device, signing or update acceptance.
@@ -22,7 +23,8 @@ cached on an x86_64 Linux Docker VM. The archive checksum is checked before
 extracting a new fixture binary. The runner uses the existing
 `rtrust-linux-cargo` registry cache and a private Docker build volume for each run;
 `cargo build --locked --offline` fails explicitly if a dependency is absent.
-Only `rtrust-tun` and `rtrust-inspect` are built. Unit tests and strict all-target Clippy check `rtrust-tun` and
+Only `rtrust-tun`, `rtrust-inspect` and the unpackaged Linux `flow-lab`
+example of `rtrust-tun` are built. Unit tests and strict all-target Clippy check `rtrust-tun` and
 `rtrust-control`. The disposable extracted source receives fresh regular-file
 timestamps before the build. Parallel runs never share build outputs, so another
 commit cannot replace binaries between compilation and evidence collection. Source contents remain the archived
@@ -60,7 +62,7 @@ Evidence is saved under `dist/lab/SHA-RUN_ID/` (or `--output NEW_DIRECTORY`):
 - `evidence.tar.gz`, containing the source archive, manifest, Dockerfile and
   per-step stdout/stderr logs, including compiler and package versions.
 - Manifest hashes for the runner, all imported packet harnesses, endpoint
-  archive/binary, tool image and all three built binaries.
+  archive/binary, tool image and all four built binaries.
 - `artifact_sha256.json` binding the retained evidence files. Build binaries are
   discarded after recording their hashes.
 

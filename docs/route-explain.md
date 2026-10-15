@@ -88,33 +88,113 @@ It uses `rtrust_mobile::prepare` to preserve the existing strict policy adapter.
 This evaluates `flow_policy` only for packets delivered to the mobile core; it
 is not an OS inclusion/per-app/guard audit. Unsupported mobile profile fields
 are rejected by the same adapter used at runtime. The decision JSON contains
-rule references and a policy revision, never the visited address/name.
+rule references and a policy revision, never the visited address/name. It does
+not apply an Android managed prefix selection (`with_prefix_selection`) and has
+no DNS cache, so an address covered only by a domain rule is explained as the
+protective `tunnel`/`unknown_name_protected`, never as direct.
 
-## Capability matrix and remaining acceptance
+The desktop selected-IPv4 prediction is available without a profile:
 
-| Path | IP / port | Domain | Per-app | Evidence boundary |
-| --- | --- | --- | --- | --- |
-| Desktop selected IPv4 | IPv4 CIDRs; port ignored by this backend | Unsupported | Unsupported | Offline prediction; actual LAN/endpoint inputs required |
-| Desktop full system | Actual OS rules remain authoritative | No offline claim | Unsupported | Unknown without system observation |
-| Desktop SOCKS | Proxy requests are a separate scope | No system-route claim | Apps must opt into proxy | Unknown for system route |
-| Android/iOS delivered mobile flows | IPv4/IPv6, CIDRs and ports | Correlated VPN DNS, bounded CNAME/TTL; missing provenance protected | No universal per-app claim | Flow policy evaluation, not packet capture |
-| Android OS excluded apps | Existing VpnService capability | Not this evaluator | Existing platform exclusion | No cross-platform guarantee |
+```
+rtrust-inspect --explain-selected 192.0.2.1 --include 192.0.2.0/24 \
+  [--exclude CIDRS] [--exclude-lan | --lan CIDRS] [--endpoints IPS]
+```
+
+It calls `Selection::explain` and prints two lines: the decision JSON and
+`{"routes": [...]}`, the prefix set `Selection::routes` would install, or `null`
+when a runtime input is unknown. `--lan` supplies observed local networks (the
+Linux service reads them from the main table and interface subnets before
+Start); `--exclude-lan` alone requests LAN exclusion without that observation,
+so included addresses are `unknown`/`local_networks_unobserved`. Endpoints
+default to an empty set on Linux, as in Native, and are unknown elsewhere unless
+given. Nothing is resolved, connected or installed, and the destination is not
+printed.
+
+## Capability matrix by operating system
+
+Derived from the current code; “explain” is the offline prediction above.
+
+| Path | Linux | macOS | Windows | Android | iOS |
+| --- | --- | --- | --- | --- | --- |
+| Selected IPv4 prefixes | UID-scoped `ip rule … uidrange` to table 51830; endpoint needs no exception; LAN from main table + interface subnets | Endpoint exceptions required | Endpoint exceptions required | Managed groups only, applied as `with_prefix_selection` before the flow policy | Not offered |
+| Selected IPv6 | Not routed by this backend (system path); explain `unknown`/`unsupported_family` | Same | Same | Managed prefix scope; IPv6 outside it is blocked when not selected | — |
+| Ports in selected mode | Ignored; port 53 follows the prefixes | Same | Same | — | — |
+| Flow policy (IP/CIDR/port) | Lab harness only (`flow-lab`) | — | — | Dataplane `route_flow` | Dataplane `route_flow` |
+| Domain rules | Lab harness only | — | — | VPN-DNS provenance, CNAME/TTL bound, conflicts protected | Same |
+| Hot local revision | Lab harness only | — | — | `flowPolicy` native call → `policy::Controller` (prepare, drain, commit) | Not wired |
+| Observed decisions | Lab harness only | — | — | Explicit capture (`flows::Capture`) | Explicit capture |
+| Full system / SOCKS | Explain `unknown` (system path / proxy scope) | Same | Same | — | — |
+| Per-app | Unsupported | Unsupported | Unsupported | VpnService exclusions, outside this evaluator | Unsupported |
+
+Documented differences between explain and the dataplane:
+
+- Native Diagnostics passes `local = None` (`apps/native/src/main.rs`,
+  `Message::ExplainRoute`), so with “LAN directly” enabled every included address is
+  explained as `unknown`/`local_networks_unobserved`, although the connected
+  service subtracts the observed LAN. The CLI accepts `--lan` for that input.
+- `--explain-mobile-flow` neither applies an Android managed prefix selection
+  nor has the runtime DNS cache: domain-covered addresses stay protective
+  `tunnel`/`unknown_name_protected` offline while the dataplane may choose
+  direct after a correlated VPN DNS answer.
+- Desktop selected mode ignores ports: DNS to an included resolver is tunneled,
+  to an excluded or non-included one it is direct. Only the mobile flow policy
+  always tunnels port 53.
+- Linux selected mode scopes rules to the desktop UID: other local users and the
+  root service are not routed by it, which explain does not model.
+
+## Validation
+
+`scripts/route-explain-interop.py` (lane `explain` of
+[`ci/linux_lab.py`](linux-lab.md)) compares explain with packets in a disposable
+Docker network namespace. The oracle is the `X-Peer` reported by an HTTP server
+behind the endpoint (the client veth address means direct) and nftables output
+counters in the client namespace (`oifname rtrust0` versus the veth, per
+destination, port and UID).
+
+- **P1** Desktop selected via raw IPC `Start` (include `198.18.0.0/16`,
+  `10.0.0.0/8`, exclude `198.18.2.0/24`, LAN on): selected, excluded, LAN,
+  second included prefix and outside addresses match on ports 80 and 8081;
+  UID 1001 stays direct; IPv6 is explained `unknown` and leaves the veth; the
+  CLI `routes` equal the installed UID rules and table 51830 routes. Without
+  `--lan` the prediction is `unknown`.
+- **P2** `Stop`, then `Start` with include `0.0.0.0/0` (the client subnet is
+  excluded because preflight rejects a selection containing a local address):
+  new revision, reserved space direct, only the new prefix set installed, and no
+  table 51830 or UID rule after `Stop`.
+- **P3/P6** `apps/tun/examples/flow-lab.rs` runs `rtrust_mobile::prepare`, the
+  Android dataplane `run_with_policy` with SO_BINDTODEVICE socket protection and
+  `flows::Capture`. Excluded CIDR and `IP:port` are direct, other ports and
+  addresses tunnel, UDP 53 to an excluded resolver tunnels with zero port-53
+  packets on the veth. Offline decision, observed event (`prediction=false`,
+  SHA-256 of the CLI revision) and packets agree. IPv6 runs when the container
+  provides IPv6 addressing, otherwise the lane prints `BLOCKED`.
+- **P4** A synthetic DNS server behind the endpoint: TTL expiry, CNAME-chain
+  TTL, CNAME into a wildcard rule (matched by the queried name only), shared-IP
+  conflict, the same with a numeric rule, and a rule address without a query.
+- **P5** `apply-local` through `policy::Controller`: new revision and epoch,
+  DNS evidence cleared, and a DNS answer of the old revision that arrives after
+  the commit is not applied.
+
+Every run asserts that unknown, unobserved and conflict decisions are never
+direct, that decision/event JSON contains none of the tested addresses or names,
+and that no events are recorded without a subscriber. This is laboratory
+evidence in Linux namespaces, not installed-package, Android/iOS device or
+macOS/Windows acceptance; flow-lab is not shipped. Admin/managed provenance,
+established-flow behaviour across an OS-route change and actual-system
+corroboration (#33) remain open.
 
 No history is transmitted, no policy is changed by explain, and no direct
 comparison request is made. The native editor and CLI remain offline previews.
-The shared core now also provides conditional atomic local policy revision/
+The shared core also provides conditional atomic local policy revision/
 rollback and explicitly subscribed, bounded redacted observations of actual
 flow-policy selections; see [runtime routing revisions](routing-policy.md).
 Admin/managed/unknown-source policies reject local mutation. Neither the source
 label nor a flow-policy selection establishes administrator authentication,
 packet delivery or OS guard/route enforcement.
 
-Android/iOS now offer [explicit local flow capture](mobile-flow-observations.md)
-from their active router; desktop explain remains a prediction. No adapter
-invokes the new hot revision API. Capture is bounded, session-fenced and has no
-address correlation or packet-delivery proof. Established and pending flows are outside the
-atomic decision-publication boundary; full hot OS-route/guard cutover, explicit
-managed administrator provenance and installed package/packet-level acceptance
+Android/iOS offer [explicit local flow capture](mobile-flow-observations.md)
+from their active router; desktop explain remains a prediction. Android's
+`flowPolicy` bridge invokes the hot revision API; iOS does not. Capture is
+bounded, session-fenced and has no address correlation or packet-delivery proof.
+Full hot OS-route/guard cutover and explicit managed administrator provenance
 remain separate work. Existing vault conflict handling remains in force.
-Issue #32 stays open for these acceptance items and actual-system corroboration
-in #33.
