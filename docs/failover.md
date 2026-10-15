@@ -98,9 +98,27 @@ application keeps sending HTTP and DNS:
 - Stop restores the baseline routes and firewall, and a returning endpoint
   cannot revive the tunnel.
 
-Host-side nftables counters must stay at zero for every client packet sent to
-anything other than an endpoint port, IPv6 included. The script records
-switch and recovery times.
+Leak counters sit on the host's netdev ingress hook of the client veth, so
+they see every client packet whatever its destination, and on the client's
+postrouting hook. They must stay at zero for IPv4 to anything but a pinned
+endpoint port, DNS 53/853, ICMP, any IPv6 except NDP/MLD and DHCPv6 (counted
+separately, never as leaks), unmarked application packets to a pinned endpoint,
+and service-marked (0x5254) packets to any other address. Every leak counter
+first counts the same flow without the VPN (positive control); the application
+load includes IPv6 TCP and AAAA/IPv6 DNS. Switch times are asserted against
+the limits above (at least one retry before a switch, first switch and backup
+handshake within the 30 s budget, switches at least the cooldown apart, a
+bounded number of switches per outage window) and written as `EVIDENCE` JSON
+lines. Observed times lag the service by up to 3 s (inspect tick plus status
+refresh).
+
+`scripts/recovery-interop.py` covers the always-on `EnableRecovery` path
+([recovery.md](recovery.md)): every endpoint down (Blocked, backoff 3/6/12 s
+plus jitter, candidates alternate), `DisableAlwaysOn` during the cooldown and
+endpoints returning afterwards, a stale or missing generation, recovery through
+backup index 1, SIGKILL of the service in the backoff window, and a physical
+interface handoff, all with the same counters and baseline route/firewall
+diffs.
 
 Unit tests cover the selection policy (fixed profile, threshold, cooldown,
 flapping, wrap-around), pinning (a backup is dropped, the requested profile is

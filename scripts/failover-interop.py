@@ -2,16 +2,20 @@
 """Opt-in backup profiles on a real whole-host Linux VPN (issue #34).
 
 Two endpoints on different addresses. The requested endpoint dies while an
-application keeps sending traffic; the service must move to the allowed backup
-without one packet leaving the client namespace except to an endpoint, then
-respect the switch cooldown when the backup dies too. Disposable Docker only.
+application keeps sending IPv4 and IPv6 traffic; the service must move to the
+allowed backup without one packet leaving the client namespace except to a
+pinned endpoint port, then respect the switch cooldown when the backup dies
+too. Disposable Docker only.
 Usage: python3 scripts/failover-interop.py /path/to/trusttunnel_endpoint
+
+The helpers above main() are shared with scripts/recovery-interop.py.
 """
 import importlib.util
 import json
 import os
 import pathlib
 import socket
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -27,41 +31,295 @@ f = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(f)
 s.NS = f.s.NS = "rtrust-failover-test"
 PRIMARY, BACKUP = "10.99.0.1", "10.99.1.1"
+PORT = 8443
+MARK = 0x5254
+HOST6 = "fd00:99::1"
+
+# docs/failover.md and apps/tun/src/failover.rs: two consecutive failures
+# before a switch, switches at least 20 s apart, reconnect backoff 2 -> 30 s
+# (+ up to 25 % jitter, crates/control/src/recovery.rs Budget), one shared
+# 30 s handshake budget.
+FAILURES_BEFORE_SWITCH = 2
 COOLDOWN = 20
+BACKOFF_MIN = 2
+BACKOFF_MAX = 30
+JITTER = 1.25
+BUDGET = 30
+# rtrust-inspect reports a switch on a 1 s tick from a status the IPC client
+# refreshes every 2 s: observed times lag the service by up to 3 s.
+LAG = 3
+
+# Host-side ingress counters (everything the client namespace emits on the
+# veth, whatever the destination) and client-side egress counters. Leaks must
+# stay zero while the VPN owns the host; the rest is expected link/transport
+# traffic, reported separately and never mixed with leaks.
+LEAKS = ("stray4", "port4", "icmp4", "dns4", "dns6", "any6",
+         "app_direct", "mark_stray4", "mark6")
+BENIGN = ("endpoint4", "dhcp4", "ndp6", "dhcp6", "marked")
+# NDP (133-137) and MLD (130-132, 143) control traffic.
+NDP_TYPES = "130, 131, 132, 133, 134, 135, 136, 137, 143"
 
 
-def leak_counters():
-    """Host-side count of client packets to anything but an endpoint port."""
-    rules = f"""
-table inet rtrust_leakwatch {{
-  counter stray4 {{}}
-  counter port4 {{}}
-  counter icmp4 {{}}
-  counter any6 {{}}
-  chain input {{
-    type filter hook input priority -300; policy accept;
-    ip saddr 10.99.0.2 ip daddr != {{ {PRIMARY}, {BACKUP} }} counter name stray4
-    ip saddr 10.99.0.2 meta l4proto {{ tcp, udp }} th dport != 8443 counter name port4
-    ip saddr 10.99.0.2 meta l4proto icmp counter name icmp4
-    ip6 saddr fd00:99::2 counter name any6
+def host_chain(name, device, pinned):
+    endpoints = ", ".join(pinned)
+    return f"""  chain {name} {{
+    type filter hook ingress device "{device}" priority -500; policy accept;
+    meta protocol ip ip daddr {{ {endpoints} }} meta l4proto tcp th dport {PORT} counter name endpoint4 accept
+    meta protocol ip ip daddr 255.255.255.255 meta l4proto udp th sport 68 th dport 67 counter name dhcp4 accept
+    meta protocol ip meta l4proto {{ tcp, udp }} th dport {{ 53, 853 }} counter name dns4 accept
+    meta protocol ip meta l4proto icmp counter name icmp4 accept
+    meta protocol ip ip daddr {{ {endpoints} }} counter name port4 accept
+    meta protocol ip counter name stray4 accept
+    meta protocol ip6 meta l4proto ipv6-icmp icmpv6 type {{ {NDP_TYPES} }} counter name ndp6 accept
+    meta protocol ip6 ip6 daddr ff02::1:2 meta l4proto udp th sport 546 th dport 547 counter name dhcp6 accept
+    meta protocol ip6 meta l4proto {{ tcp, udp }} th dport {{ 53, 853 }} counter name dns6 accept
+    meta protocol ip6 counter name any6 accept
+  }}
+"""
+
+
+def install_watch(pinned, device="rtrust-host"):
+    """Install host ingress and client egress observers (not enforcement)."""
+    host = "table netdev rtrust_leakwatch {\n"
+    host += "".join(f"  counter {name} {{}}\n" for name in
+                    ("endpoint4", "dhcp4", "dns4", "icmp4", "port4", "stray4", "ndp6", "dhcp6", "dns6", "any6"))
+    host += host_chain("host", device, pinned) + "}\n"
+    subprocess.run(["nft", "-f", "-"], input=host.encode(), check=True, timeout=10)
+    endpoints = ", ".join(pinned)
+    # Last hook in the client namespace: only packets the guard accepted and
+    # that leave through a non-tunnel interface. The service marks its own
+    # transport sockets; an unmarked packet to a pinned endpoint is an
+    # application using the union endpoint exception as a direct bypass.
+    client = f"""table inet rtrust_appwatch {{
+  counter app_direct {{}}
+  counter mark_stray4 {{}}
+  counter mark6 {{}}
+  counter marked {{}}
+  chain egress {{
+    type filter hook postrouting priority 300; policy accept;
+    oifname {{ "lo", "rtrust0" }} accept
+    meta mark {MARK:#x} meta nfproto ipv4 ip daddr != {{ {endpoints} }} counter name mark_stray4 accept
+    meta mark {MARK:#x} meta nfproto ipv6 counter name mark6 accept
+    meta mark {MARK:#x} counter name marked accept
+    meta nfproto ipv4 ip daddr {{ {endpoints} }} counter name app_direct accept
   }}
 }}
 """
+    subprocess.run(["ip", "netns", "exec", s.NS, "nft", "-f", "-"], input=client.encode(), check=True, timeout=10)
+
+
+def watch_device(name, device, pinned):
+    rules = "table netdev rtrust_leakwatch {\n" + host_chain(name, device, pinned) + "}\n"
     subprocess.run(["nft", "-f", "-"], input=rules.encode(), check=True, timeout=10)
 
 
-def leaks():
-    data = json.loads(s.command("nft", "-j", "list", "counters", "table", "inet", "rtrust_leakwatch"))
-    return {c["counter"]["name"]: c["counter"]["packets"] for c in data["nftables"] if "counter" in c}
+def unwatch_device(name):
+    s.command("nft", "delete", "chain", "netdev", "rtrust_leakwatch", name)
 
 
-def reset_leaks():
-    s.command("nft", "reset", "counters", "table", "inet", "rtrust_leakwatch")
+def counters():
+    values = {}
+    for listing in (s.command("nft", "-j", "list", "counters", "table", "netdev", "rtrust_leakwatch"),
+                    s.ns("nft", "-j", "list", "counters", "table", "inet", "rtrust_appwatch")):
+        for item in json.loads(listing)["nftables"]:
+            if "counter" in item:
+                values[item["counter"]["name"]] = item["counter"]["packets"]
+    return values
 
 
-def established(address):
-    out = s.command("ss", "-Htn", "state", "established", "src", f"{address}:8443")
-    return bool(out.strip())
+def reset_counters():
+    s.command("nft", "reset", "counters", "table", "netdev", "rtrust_leakwatch")
+    s.ns("nft", "reset", "counters", "table", "inet", "rtrust_appwatch")
+
+
+def leaked(values):
+    return {name: values[name] for name in LEAKS if values.get(name)}
+
+
+def assert_no_leaks(label, service_traffic=True):
+    """Zero leak counters; with service_traffic, the observers must also have
+    seen the service's own marked endpoint transport (a live positive control)."""
+    values = counters()
+    assert not leaked(values), f"{label}: leak counters {leaked(values)}"
+    if service_traffic:
+        assert values["endpoint4"] > 0 and values["marked"] > 0, f"{label}: observers saw no service transport {values}"
+    return values
+
+
+def evidence(**values):
+    print("EVIDENCE " + json.dumps(values, sort_keys=True), flush=True)
+
+
+APP_CONTROL = """import socket,sys
+query=bytes.fromhex('abcd01000001000000000000017804746573740000010001')
+def tcp(family,address,port):
+    s=socket.socket(family);s.settimeout(1)
+    try:s.connect((address,port))
+    except OSError:pass
+    s.close()
+def udp(family,address,port):
+    s=socket.socket(family,socket.SOCK_DGRAM)
+    try:s.sendto(query,(address,port))
+    except OSError:pass
+    s.close()
+tcp(socket.AF_INET,sys.argv[1],9)
+tcp(socket.AF_INET,sys.argv[1],8443)
+udp(socket.AF_INET,'198.18.0.1',53);tcp(socket.AF_INET,'198.18.0.1',853)
+udp(socket.AF_INET6,'fd00:99::1',53);tcp(socket.AF_INET6,'fd00:99::1',853)
+"""
+ROOT_CONTROL = """import socket,sys
+def marked(family,kind,address,port):
+    s=socket.socket(family,kind);s.setsockopt(socket.SOL_SOCKET,36,0x5254);s.settimeout(1)
+    try:
+        if kind==socket.SOCK_STREAM:s.connect((address,port))
+        else:s.sendto(b'x',(address,port))
+    except OSError:pass
+    s.close()
+marked(socket.AF_INET,socket.SOCK_STREAM,'198.18.0.1',9)
+marked(socket.AF_INET6,socket.SOCK_DGRAM,'fd00:99::1',9)
+d=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+d.setsockopt(socket.SOL_SOCKET,socket.SO_BROADCAST,1);d.setsockopt(socket.SOL_SOCKET,25,sys.argv[1].encode())
+d.bind(('0.0.0.0',68));d.sendto(b'\\x01'+bytes(239),('255.255.255.255',67));d.close()
+v=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM);v.bind(('::',546))
+v.sendto(b'\\x01\\x00\\x00\\x01',('ff02::1:2',547,0,socket.if_nametoindex(sys.argv[1])));v.close()
+"""
+DNS6_QUERY = """import os,socket,struct,sys
+name=b''.join(bytes([len(p)])+p for p in sys.argv[1].encode().split(b'.'))+b'\\0'
+q=os.urandom(2)+bytes.fromhex('01000001000000000000')+name+struct.pack('!HH',28,1)
+s=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM);s.settimeout(1)
+s.sendto(q,('fd00:99::1',53))
+try:s.recv(512)
+except OSError:pass
+"""
+APP_ENDPOINTS = """import socket,sys
+for address in sys.argv[1:]:
+    s=socket.socket();s.settimeout(.5)
+    try:s.connect((address,8443))
+    except OSError:pass
+    s.close()
+"""
+
+
+class DNS6(socketserver.ThreadingUDPServer):
+    address_family = socket.AF_INET6
+
+
+class Load:
+    """Applications keep sending IPv4/IPv6 HTTP, A/AAAA DNS and direct
+    attempts at the pinned endpoints throughout every transition."""
+
+    def __init__(self, url, url6, pinned):
+        self.url, self.url6, self.pinned = url, url6, pinned
+        self.attempts = 0
+        self.stopped = threading.Event()
+        self.thread = None
+
+    def commands(self):
+        name = f"t{time.time_ns()}.rtrust.test"
+        return (["curl", "--noproxy", "*", "-s", "--max-time", "1", "-o", "/dev/null", self.url],
+                ["curl", "--noproxy", "*", "-s", "--max-time", "1", "-o", "/dev/null", self.url6],
+                ["getent", "ahostsv4", name],
+                ["getent", "ahostsv6", "v6" + name],
+                ["python3", "-c", DNS6_QUERY, "raw" + name],
+                ["python3", "-c", APP_ENDPOINTS, *self.pinned])
+
+    def once(self):
+        for cmd in self.commands():
+            try:
+                subprocess.run(["ip", "netns", "exec", s.NS, "setpriv", "--reuid=1000", "--regid=1000",
+                                "--clear-groups", *cmd], capture_output=True, timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            self.attempts += 1
+
+    def start(self):
+        def run():
+            while not self.stopped.is_set():
+                self.once()
+                self.stopped.wait(.2)
+        self.thread = threading.Thread(target=run, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.stopped.set()
+        if self.thread:
+            self.thread.join(timeout=60)
+
+
+def positive_controls(load, endpoint_address, device="rtrust-client"):
+    """Every leak counter must count the same kind of flow without the VPN;
+    otherwise zero counters later would prove nothing."""
+    s.ns("ip", "-6", "neigh", "flush", "dev", device)
+    reset_counters()
+    load.once()
+    generated = counters()
+    for name in ("stray4", "dns4", "any6", "dns6", "app_direct", "ndp6"):
+        assert generated[name] > 0, f"application load not observed without VPN: {name} {generated}"
+    s.app(1000, "python3", "-c", APP_CONTROL, endpoint_address)
+    s.ns("python3", "-c", ROOT_CONTROL, device)
+    s.ns("ping", "-c", "1", "-W", "1", "198.18.0.1")
+    s.ns("ping", "-6", "-c", "1", "-W", "1", HOST6)
+    values = counters()
+    missing = [name for name in LEAKS + ("endpoint4", "dhcp4", "ndp6", "dhcp6") if not values.get(name)]
+    assert not missing, f"positive control missing {missing}: {values}"
+    reset_counters()
+    evidence(scenario="positive-control", load=generated, synthetic=values)
+
+
+def dad_settled(device="rtrust-client"):
+    # Link-local DAD can finish after interface-up and legitimately add a
+    # kernel local route. Freeze or compare only after it completes.
+    for _ in range(100):
+        addresses = json.loads(s.ns("ip", "-j", "-6", "address", "show", "dev", device))
+        if not any(a.get("tentative", False) or "tentative" in a.get("flags", [])
+                   for entry in addresses for a in entry.get("addr_info", [])):
+            return
+        time.sleep(.05)
+    raise AssertionError("Fixture IPv6 DAD did not complete")
+
+
+def tables():
+    return {(t["table"]["family"], t["table"]["name"]) for t in
+            json.loads(s.ns("nft", "-j", "list", "tables"))["nftables"] if "table" in t}
+
+
+def snapshot():
+    return dict(rules4=s.ns("ip", "-j", "-4", "rule", "show"),
+                routes4=s.ns("ip", "-j", "-4", "route", "show", "table", "all"),
+                rules6=s.ns("ip", "-j", "-6", "rule", "show"),
+                routes6=s.ns("ip", "-j", "-6", "route", "show", "table", "all"),
+                nft=s.ns("nft", "-j", "list", "tables"))
+
+
+def assert_baseline(baseline, label):
+    """Routes, rules and firewall tables exactly as before the VPN; the foreign
+    table and the observers survive. Reports only which part differs."""
+    dad_settled()
+    current = snapshot()
+    present = tables()
+    assert ("inet", "foreign_test") in present, f"{label}: foreign nft table removed"
+    differs = sorted(key for key in baseline if baseline[key] != current[key])
+    extra = sorted(present - {(t["table"]["family"], t["table"]["name"]) for t in
+                              json.loads(baseline["nft"])["nftables"] if "table" in t})
+    assert not differs, f"{label}: differs from baseline in {differs}; extra tables {extra}"
+
+
+def reader(process):
+    """Timestamped SERVICE lines: a queue for waiting, a list for the timeline."""
+    lines, timeline = s.queue.Queue(), []
+
+    def run():
+        for raw in process.stdout:
+            item = (time.monotonic(), raw.strip())
+            timeline.append(item)
+            lines.put(item)
+        lines.put((time.monotonic(), None))
+    threading.Thread(target=run, daemon=True).start()
+    return lines, timeline
+
+
+def switches(timeline, start=0, end=float("inf")):
+    return [t for t, line in timeline if line.startswith("SERVICE active ") and start <= t <= end]
 
 
 def main():
@@ -76,7 +334,7 @@ def main():
         s.command("ip", "link", "set", "rtrust-client", "netns", s.NS)
         s.command("ip", "addr", "add", "10.99.0.1/30", "dev", "rtrust-host")
         s.command("ip", "addr", "add", f"{BACKUP}/32", "dev", "rtrust-host")
-        s.command("ip", "-6", "addr", "add", "fd00:99::1/64", "dev", "rtrust-host", "nodad")
+        s.command("ip", "-6", "addr", "add", f"{HOST6}/64", "dev", "rtrust-host", "nodad")
         s.command("ip", "link", "set", "rtrust-host", "up")
         s.ns("ip", "addr", "add", "10.99.0.2/30", "dev", "rtrust-client")
         s.ns("ip", "-6", "addr", "add", "fd00:99::2/64", "dev", "rtrust-client", "nodad")
@@ -85,14 +343,22 @@ def main():
         s.ns("ip", "route", "add", "default", "via", "10.99.0.1")
         s.command("ip", "addr", "add", "198.18.0.1/32", "dev", "lo")
         http = s.http.server.ThreadingHTTPServer(("198.18.0.1", 0), s.HTTP)
+        http6 = f.HTTP6((HOST6, 0), s.HTTP)
         dns = f.socketserver.ThreadingUDPServer(("198.18.0.1", 53), f.DNS)
-        servers.extend([http, dns])
+        dns6 = DNS6((HOST6, 53), f.DNS)
+        servers.extend([http, http6, dns, dns6])
         for server in servers:
             threading.Thread(target=server.serve_forever, daemon=True).start()
         url = f"http://198.18.0.1:{http.server_port}/"
+        url6 = f"http://[{HOST6}]:{http6.server_port}/"
 
         def fetch(peer):
             result = s.app(1000, "curl", "--noproxy", "*", "-sSf", "--max-time", "8", "-D", "-", url)
+            headers, body = result.split(b"\r\n\r\n", 1)
+            assert body == s.BODY and f"X-Peer: {peer}".encode() in headers
+
+        def fetch6(peer):
+            result = s.app(1000, "curl", "--noproxy", "*", "-sSf", "--max-time", "8", "-D", "-", url6)
             headers, body = result.split(b"\r\n\r\n", 1)
             assert body == s.BODY and f"X-Peer: {peer}".encode() in headers
 
@@ -121,9 +387,11 @@ def main():
             pathlib.Path("/etc/resolv.conf").write_text("nameserver 127.0.0.53\noptions timeout:1 attempts:1\n")
             s.ns("resolvectl", "dns", "rtrust-client", "198.18.0.1")
             s.ns("resolvectl", "domain", "rtrust-client", "~.")
-            baseline_rules = s.ns("ip", "-j", "-4", "rule", "show")
-            baseline_routes = s.ns("ip", "-j", "-4", "route", "show", "table", "all")
-            baseline_nft = s.ns("nft", "-j", "list", "tables")
+            install_watch([PRIMARY, BACKUP])
+            # An unrelated table must survive every Start/Stop.
+            s.ns("nft", "add", "table", "inet", "foreign_test")
+            dad_settled()
+            baseline = snapshot()
             s.command("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost",
                       "-addext", "subjectAltName=DNS:localhost", "-addext", "basicConstraints=critical,CA:FALSE",
                       "-keyout", str(d / "key.pem"), "-out", str(d / "cert.pem"))
@@ -154,37 +422,23 @@ def main():
             backup = endpoint("backup", BACKUP)
             spawn([str(s.ROOT / "target/debug/rtrust-service"), "1000"], "daemon.log", True)
             time.sleep(.3)
-            leak_counters()
-            # Positive control: a direct request before the VPN must be counted,
-            # otherwise zero counters below would prove nothing.
+            load = Load(url, url6, [PRIMARY, BACKUP])
+            # Positive controls: the same flows without the VPN are counted.
             fetch("10.99.0.2")
-            assert leaks()["stray4"] > 0, leaks()
-            reset_leaks()
+            fetch6("fd00:99::2")
+            positive_controls(load, PRIMARY)
 
             def wait(lines, expected, timeout=60):
                 deadline = time.monotonic() + timeout
                 while time.monotonic() < deadline:
                     try:
-                        line = lines.get(timeout=max(.1, deadline - time.monotonic()))
-                    except Exception:
+                        at, line = lines.get(timeout=max(.1, deadline - time.monotonic()))
+                    except s.queue.Empty:
                         break
                     assert line is not None, "client exited"
                     if line == "SERVICE " + expected:
-                        return time.monotonic()
+                        return at
                 raise AssertionError(f"missing: {expected}\n" + (d / "daemon.log").read_text()[-4000:])
-
-            # Applications keep sending HTTP and DNS throughout every transition.
-            stop_traffic = threading.Event()
-            attempts = [0]
-
-            def traffic():
-                while not stop_traffic.is_set():
-                    for cmd in (["curl", "--noproxy", "*", "-s", "--max-time", "1", "-o", "/dev/null", url],
-                                ["getent", "ahostsv4", f"t{time.time_ns()}.rtrust.test"]):
-                        subprocess.run(["ip", "netns", "exec", s.NS, "setpriv", "--reuid=1000", "--regid=1000",
-                                        "--clear-groups", *cmd], capture_output=True, timeout=5)
-                        attempts[0] += 1
-                    stop_traffic.wait(.2)
 
             client = subprocess.Popen(
                 ["ip", "netns", "exec", s.NS, "setpriv", "--reuid=1000", "--regid=1000", "--clear-groups",
@@ -192,17 +446,22 @@ def main():
                  "--fallback", str(profiles["backup"])],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             processes.append(client)
-            lines = s.queue.Queue()
-            threading.Thread(target=lambda: ([lines.put(l.strip()) for l in client.stdout], lines.put(None)), daemon=True).start()
+            lines, timeline = reader(client)
             wait(lines, "connected", 40)
             fetch("198.18.0.1")
+            fetch6(HOST6)
             assert established(PRIMARY) and not established(BACKUP)
             # A backup endpoint exception never becomes an application bypass.
+            reset_counters()
             for address in (PRIMARY, BACKUP):
                 s.app(1000, "python3", "-c", f"import socket; socket.create_connection(('{address}',8443),timeout=1)", success=False)
-            reset_leaks()
-            worker = threading.Thread(target=traffic, daemon=True)
-            worker.start()
+            fetch("198.18.0.1")
+            assert_no_leaks("direct endpoint attempts")
+            assert ("inet", "foreign_test") in tables()
+            reset_counters()
+            load.start()
+            limits = dict(failures_before_switch=FAILURES_BEFORE_SWITCH, cooldown_s=COOLDOWN, backoff_min_s=BACKOFF_MIN,
+                          backoff_max_s=BACKOFF_MAX, jitter_factor=JITTER, budget_s=BUDGET, observation_lag_s=LAG)
 
             s.stop(primary)
             lost = time.monotonic()
@@ -210,49 +469,76 @@ def main():
             switched = wait(lines, "active 1")
             recovered = wait(lines, "connected")
             fetch("198.18.0.1")
+            fetch6(HOST6)
             assert established(BACKUP), "backup endpoint carries the session"
-            counters = leaks()
-            assert not any(counters.values()), counters
+            values = assert_no_leaks("requested endpoint lost")
+            # At least one retry of the requested profile precedes the switch,
+            # and the switch plus the backup handshake fit the startup budget.
+            assert BACKOFF_MIN - .5 <= switched - lost <= BUDGET, f"switch after {switched - lost:.1f}s"
+            assert recovered - switched <= BUDGET, f"backup connected {recovered - switched:.1f}s after switch"
+            assert len(switches(timeline, lost, recovered)) == 1, switches(timeline, lost, recovered)
+            evidence(scenario="primary-lost", lost_to_switch_s=round(switched - lost, 2),
+                     switch_to_connected_s=round(recovered - switched, 2), switches=1,
+                     app_attempts=load.attempts, counters=values, limits=limits)
             print(f"PASS requested endpoint lost: switched to the allowed backup after {switched - lost:.1f}s, "
-                  f"connected after {recovered - lost:.1f}s; {attempts[0]} app attempts, leak counters {counters}", flush=True)
+                  f"connected after {recovered - lost:.1f}s; {load.attempts} app attempts, no leaks", flush=True)
 
             # The backup dies right away: the next switch waits for the cooldown,
             # and with both endpoints down the host stays blocked without leaks.
+            reset_counters()
             primary = endpoint("primary", PRIMARY)
             s.stop(backup)
+            backup_lost = time.monotonic()
             wait(lines, "blocked")
-            back = wait(lines, "active 0", COOLDOWN + 40)
-            assert back - switched >= COOLDOWN - 1, f"switched again after {back - switched:.1f}s"
-            wait(lines, "connected")
+            back_limit = COOLDOWN + JITTER * BACKOFF_MAX + 2 * LAG
+            back = wait(lines, "active 0", back_limit + 10)
+            back_connected = wait(lines, "connected", JITTER * BACKOFF_MAX + BUDGET)
             fetch("198.18.0.1")
+            fetch6(HOST6)
             assert established(PRIMARY)
-            counters = leaks()
-            assert not any(counters.values()), counters
+            values = assert_no_leaks("backup lost")
+            assert COOLDOWN - 1 <= back - switched <= back_limit, f"switched again after {back - switched:.1f}s"
+            assert len(switches(timeline, backup_lost, back_connected)) == 1, switches(timeline, backup_lost, back_connected)
+            evidence(scenario="backup-lost", previous_switch_to_switch_s=round(back - switched, 2),
+                     lost_to_switch_s=round(back - backup_lost, 2), switch_to_connected_s=round(back_connected - back, 2),
+                     switches=1, counters=values, limits=limits)
             print(f"PASS backup lost: returned to the requested profile {back - switched:.1f}s after the previous "
-                  f"switch (cooldown {COOLDOWN}s); leak counters {counters}", flush=True)
+                  f"switch (cooldown {COOLDOWN}s); no leaks", flush=True)
 
+            # Both endpoints down. The window covers the cooldown plus the
+            # longest jittered backoff, so retries must reach the endpoints.
+            reset_counters()
             s.stop(primary)
+            outage = time.monotonic()
             wait(lines, "blocked")
-            time.sleep(COOLDOWN + 10)
+            window = COOLDOWN + JITTER * BACKOFF_MAX + 5
+            time.sleep(max(0, outage + window - time.monotonic()))
             s.app(1000, "curl", "--noproxy", "*", "-sSf", "--max-time", "2", url, success=False)
-            counters = leaks()
-            assert not any(counters.values()), counters
-            stop_traffic.set()
-            worker.join()
-            print(f"PASS no usable endpoint: blocked for {COOLDOWN + 10}s, candidates retried, leak counters {counters}", flush=True)
+            s.app(1000, "curl", "--noproxy", "*", "-sSf", "--max-time", "2", url6, success=False)
+            values = assert_no_leaks("no usable endpoint")
+            during = switches(timeline, outage, time.monotonic())
+            assert len(during) <= int(window // COOLDOWN) + 1, f"{len(during)} switches in {window:.0f}s"
+            load.stop()
+            every = switches(timeline)
+            gaps = [round(b - a, 2) for a, b in zip(every, every[1:])]
+            assert all(gap >= COOLDOWN - LAG for gap in gaps), f"switches closer than the cooldown: {gaps}"
+            evidence(scenario="all-endpoints-down", window_s=window, switches=len(during),
+                     switch_gaps_s=gaps, counters=values, app_attempts=load.attempts, limits=limits)
+            print(f"PASS no usable endpoint: blocked for {window:.0f}s, {values['endpoint4']} retry packets to "
+                  f"pinned endpoints, {len(during)} switches, no leaks", flush=True)
 
             client.terminate()
             client.wait(timeout=30)
             assert client.returncode == 0, client.stderr.read()[-2000:]
-            assert s.ns("ip", "-j", "-4", "rule", "show") == baseline_rules
-            assert s.ns("ip", "-j", "-4", "route", "show", "table", "all") == baseline_routes
-            assert s.ns("nft", "-j", "list", "tables") == baseline_nft
+            assert_baseline(baseline, "after Stop")
             assert "synthetic" not in (d / "daemon.log").read_text()
             # Stop cancels pending attempts: a returning endpoint cannot revive it.
             backup = endpoint("backup", BACKUP)
             time.sleep(35)
             s.ns("ip", "link", "show", "rtrust0", success=False)
+            assert not established(BACKUP)
             fetch("10.99.0.2")
+            assert_baseline(baseline, "after returning endpoint")
             print("PASS Stop restores routes/firewall; a returning backup cannot resurrect the tunnel", flush=True)
 
             # Cold start with the primary already down and the first backup
@@ -270,21 +556,19 @@ def main():
                  "--fallback", str(skipped), "--fallback", str(profiles["backup"])],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             processes.append(restarted)
-            startup_lines = s.queue.Queue()
-            threading.Thread(target=lambda: ([startup_lines.put(l.strip()) for l in restarted.stdout], startup_lines.put(None)), daemon=True).start()
+            startup_lines, _ = reader(restarted)
             wait(startup_lines, "active 2", 45)
             wait(startup_lines, "connected", 5)
             assert established(BACKUP) and not established(PRIMARY)
-            reset_leaks()
+            reset_counters()
             fetch("198.18.0.1")
+            fetch6(HOST6)
             s.app(1000, "python3", "-c", f"import socket; socket.create_connection(('{BACKUP}',8443),timeout=1)", success=False)
-            assert not any(leaks().values()), leaks()
+            assert_no_leaks("cold start")
             restarted.terminate()
             restarted.wait(timeout=30)
             assert restarted.returncode == 0, restarted.stderr.read()[-2000:]
-            assert s.ns("ip", "-j", "-4", "rule", "show") == baseline_rules
-            assert s.ns("ip", "-j", "-4", "route", "show", "table", "all") == baseline_routes
-            assert s.ns("nft", "-j", "list", "tables") == baseline_nft
+            assert_baseline(baseline, "after cold-start Stop")
             print("PASS cold start: failed primary, skipped DNS backup, active original index 2; no bypass; clean Stop", flush=True)
 
     except BaseException:
@@ -298,10 +582,15 @@ def main():
         for server in servers:
             server.shutdown()
             server.server_close()
-        subprocess.run(["nft", "delete", "table", "inet", "rtrust_leakwatch"], capture_output=True)
+        subprocess.run(["nft", "delete", "table", "netdev", "rtrust_leakwatch"], capture_output=True)
         s.command("ip", "netns", "delete", s.NS)
         subprocess.run(["ip", "link", "delete", "rtrust-host"], capture_output=True)
         subprocess.run(["ip", "addr", "del", "198.18.0.1/32", "dev", "lo"], capture_output=True)
+
+
+def established(address):
+    out = s.command("ss", "-Htn", "state", "established", "src", f"{address}:8443")
+    return bool(out.strip())
 
 
 if __name__ == "__main__":

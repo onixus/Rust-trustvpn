@@ -1,7 +1,8 @@
 # Exact-commit Linux laboratory evidence
 
-`ci/linux_lab.py` runs the existing service IPC, full-tunnel HTTP/2, HTTP/3 and permitted
-failover scenarios against an immutable source archive. This checks synthetic
+`ci/linux_lab.py` runs the existing service IPC, full-tunnel HTTP/2, HTTP/3, permitted
+failover and always-on automatic recovery (`scripts/recovery-interop.py`, 720 s
+deadline; other lanes 420 s) scenarios against an immutable source archive. This checks synthetic
 traffic in disposable Docker and nested Linux network namespaces. It does not
 establish installed-package, physical-device, signing or update acceptance.
 
