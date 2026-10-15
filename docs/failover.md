@@ -50,8 +50,11 @@ backups to a service that does not advertise the capability.
    within 30 s of connecting, so a flapping endpoint is not mistaken for a
    working one. After **two** consecutive failures the next allowed candidate
    is tried, wrapping around to the requested profile. Switches are at least
-   **20 s** apart. Backoff (2→30 s) is unchanged except that it restarts at
-   2 s after a switch. The service does not move back to the requested profile
+   **20 s** apart. The reconnect backoff (2, 4, 8, 16, then 30 s, each plus up
+   to 25% jitter) is shared by all candidates and does not restart on a
+   switch. After eight attempts without a stable session the service pauses
+   for 300 s plus up to 30 s before the next burst
+   (`rtrust_control::recovery::Budget`). The service does not move back to the requested profile
    while a backup works; it returns on the backup's failure or on the user's
    reconnect.
    Separately, the reconnect retry budget is restored only by a session that
@@ -79,9 +82,13 @@ backups to a service that does not advertise the capability.
   is still "working"; destination diagnostics (#33) show that case.
 - A captive portal does not trigger a bypass: with every candidate failing, the
   host stays blocked.
-- Each switch costs one connection attempt per backoff step; with every
-  endpoint down the service attempts at most one connection per 30 s once the
-  backoff is at its cap.
+- Each switch costs one connection attempt per backoff step. With every
+  endpoint down the first burst makes at most eight attempts over about 150 s
+  of backoff (2+4+8+16+4×30 s, plus up to 25% jitter), then waits 300–330 s.
+  Later bursts without a stable session do not restart at 2 s: one attempt
+  after that pause, then seven at 30 s intervals (about 210 s plus jitter),
+  then the next pause (`Budget::next_delay`). A session stable for 30 s that
+  delivered traffic restores the first-burst schedule.
 
 ## Validation
 
@@ -98,9 +105,32 @@ application keeps sending HTTP and DNS:
 - Stop restores the baseline routes and firewall, and a returning endpoint
   cannot revive the tunnel.
 
-Host-side nftables counters must stay at zero for every client packet sent to
-anything other than an endpoint port, IPv6 included. The script records
-switch and recovery times.
+Leak counters sit on the host's netdev ingress hook of the client veth, so
+they see every client packet whatever its destination, and on the client's
+postrouting hook. They must stay at zero for IPv4 to anything but a pinned
+endpoint port, DNS 53/853, ICMP, any IPv6 except the hop-limit-255 router/neighbor
+solicitations and advertisements and DHCPv6 that the guard itself lets out
+(counted separately, never as leaks; MLD therefore counts as a leak), unmarked application packets to a pinned endpoint,
+and service-marked (0x5254) packets to any other address. Every leak counter
+first counts the same flow without the VPN (positive control); the application
+load includes IPv6 TCP and AAAA/IPv6 DNS. Per-endpoint counters of the service's marked
+TCP SYNs prove the switch threshold at packet level: before each switch at
+least one reconnect attempt reached the failed endpoint (two when the lost
+session had lasted 30 s). With every endpoint down, reconnect SYNs must be
+present and no more than the `Budget` delays allow, and switches are bounded
+by both the failures they consume and the cooldown. After Stop no marked SYN
+may follow for longer than the largest jittered backoff. Switch times (first
+switch and backup handshake within the 30 s budget, switches at least the
+cooldown apart) are written as `EVIDENCE` JSON lines. Observed times lag the service by up to 3 s (inspect tick plus status
+refresh).
+
+`scripts/recovery-interop.py` covers the always-on `EnableRecovery` path
+([recovery.md](recovery.md)): every endpoint down (Blocked, backoff 3/6/12 s
+plus jitter, candidates alternate), `DisableAlwaysOn` during the cooldown and
+endpoints returning afterwards, a stale or missing generation, recovery through
+backup index 1, SIGKILL of the service in the backoff window, and a physical
+interface handoff, all with the same counters and baseline route/firewall
+diffs.
 
 Unit tests cover the selection policy (fixed profile, threshold, cooldown,
 flapping, wrap-around), pinning (a backup is dropped, the requested profile is

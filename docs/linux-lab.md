@@ -1,7 +1,8 @@
 # Exact-commit Linux laboratory evidence
 
-`ci/linux_lab.py` runs the existing service IPC, full-tunnel HTTP/2, HTTP/3 and permitted
-failover scenarios against an immutable source archive. This checks synthetic
+`ci/linux_lab.py` runs the existing service IPC, full-tunnel HTTP/2, HTTP/3, permitted
+failover and always-on automatic recovery (`scripts/recovery-interop.py`)
+scenarios against an immutable source archive. This checks synthetic
 traffic in disposable Docker and nested Linux network namespaces. It does not
 establish installed-package, physical-device, signing or update acceptance.
 
@@ -43,7 +44,10 @@ No host network, host PID namespace, Docker socket, host service directory or
 host resolver configuration is mounted. The runner never installs a system
 service or changes host routes/firewall.
 
-Build/image/scenario steps have independent deadlines. Interrupts and failures
+Build/image/scenario steps have independent deadlines. Each lane uses
+`LANE_TIMEOUTS` (default 420 s; longer for lanes that wait through real backoff),
+and the SSH deadline is derived from the image and build limits plus the sum of
+all lane deadlines, so adding a lane cannot silently shorten another. Interrupts and failures
 remove only this run's explicitly named containers, build volume and image. If SSH is lost,
 the local cleanup path stops only the recorded worker whose process command
 still matches this run's temporary directory, then removes its containers.
