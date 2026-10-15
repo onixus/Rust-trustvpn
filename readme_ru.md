@@ -6,17 +6,17 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 
 Клиент реализует транспорт самостоятельно и **не является оболочкой** над официальными CLI TrustTunnel или Hysteria.
 
-> **Статус проекта: development preview, 14 октября 2026 года.**
+> **Статус проекта: development preview, 15 октября 2026 года.**
 >
-> Workspace — **0.6.1**, update sequence 11. [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) опубликован 13 октября из `db8796a`. H3 health, Linux TUI и UI вариант 3 вошли в main после тега и отсутствуют в опубликованных пакетах 0.6.1. Публикация не доказывает приёмку установленного пакета или production-ready статус. См. [текущее состояние и открытые gates](docs/project-status.md). [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0), опубликованный в тот же день, — самый новый релиз с Linux-пакетами.
+> Workspace — **0.6.1**, update sequence 11. [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) опубликован 13 октября из `db8796a`. Изменения, перечисленные [ниже](#изменения-main-после-v061), вошли в main после тега и отсутствуют в опубликованных пакетах 0.6.1. Публикация не доказывает приёмку установленного пакета или production-ready статус. См. [текущее состояние и открытые gates](docs/project-status.md). [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0), опубликованный в тот же день, — самый новый релиз с Linux-пакетами; архивы iOS есть только в [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0).
 
 ## Скачать
 
 | Платформа | Последний опубликованный набор | Ограничения |
 | --- | --- | --- |
-| Windows x64 | Installer из [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) | Наличие артефакта проверено; Authenticode и update/rollback точного пакета в этой актуализации не проверялись. |
-| macOS Apple Silicon | UI Choices, preview, bundled/system candidate DMG/PKG из v0.6.1 | Пакеты остаются кандидатами; публикация не подтверждает Developer ID/notarization или system-VPN acceptance. |
-| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` из v0.6.1 | Версия исходников 0.6.1-preview.1 / 60101; ключ релиза введён в 0.6.0. Для старых 0.5.x нужен reinstall. Сертификат артефакта здесь повторно не проверялся. |
+| Windows x64 | Installer из [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) | Без Authenticode-подписи. Update/rollback именно этого пакета не принят; лабораторная репетиция 9 → 10 с откатом относится к 0.6.0. |
+| macOS Apple Silicon | UI Choices, preview, bundled/system candidate DMG/PKG из v0.6.1 | Ad-hoc sealed, без Developer ID и notarization. Приёмка системного VPN не завершена, автоматическое обновление не промотировано. |
+| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` из v0.6.1 | Версия исходников 0.6.1-preview.1 / 60101; ключ релиза введён в 0.6.0. 0.6.0 обновляется поверх; 0.5.x и старше нужно переустановить, локальные профили при этом удаляются. |
 | Linux x86_64, Wayland | Native / WebView / Both Flatpak и `rtrust-host-0.6.0-7` из v0.6.0 | В v0.6.1 Linux-пакетов нет. Системному VPN нужен отдельный host package. |
 | iOS arm64 / Simulator | Архивы из [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0) | В v0.6.1 нет iOS assets. Device archive требует Apple signing и не является готовым IPA. |
 
@@ -24,9 +24,14 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 
 ## Изменения main после v0.6.1
 
-- H3 data-plane liveness и ограниченное восстановление degraded-сессии ([#69](https://github.com/onixus/Rust-trustvpn/pull/69)); macOS sleep/roam acceptance остаётся в #62.
-- [Консольный клиент Linux](docs/tui.md) поверх общего desktop controller (#72).
-- Android UI вариант 3 с route/DNS/HTTPS checks через собственную VPN network (#73); Native/WebView/iOS UI вариант 3 (#74). Desktop/iOS ещё не имеют непрерывных producers route/DNS/guard/connectivity; работающий транспорт остаётся синим.
+Пока не вошли ни в один опубликованный пакет:
+
+- **Проверки на стороне desktop-службы** ([#84](https://github.com/onixus/Rust-trustvpn/pull/84), [#91](https://github.com/onixus/Rust-trustvpn/pull/91)). В режиме «весь компьютер» службы Linux, macOS и Windows каждые 15 секунд, пока VPN подключён, только читая состояние, проверяют свою защиту (kill switch) и DNS туннеля. Транспорт подтверждается ответом DNS через туннель. Результаты действуют 30 секунд: без свежих доказательств зелёный статус возвращается к синему. В режиме выбранных сетей DNS и защита помечаются как неподдерживаемые, статус остаётся синим. См. [наблюдения VPN](docs/vpn-observations.md#service-system-probes-issue-81).
+- **Обнаружение мёртвой сессии** ([#69](https://github.com/onixus/Rust-trustvpn/pull/69)). Сессия, которая не пропускает трафик, проваливает health check и переподключается защищённым путём; см. [HTTP/3](docs/http3.md#dead-session-detection). Приёмка sleep/roam на установленном macOS остаётся открытой в #62.
+- **UI вариант 3** на Android ([#73](https://github.com/onixus/Rust-trustvpn/pull/73), с проверками маршрута, DNS и HTTPS через сеть VPN) и в Native, WebView и iOS ([#74](https://github.com/onixus/Rust-trustvpn/pull/74)).
+- **[Консольный клиент Linux](docs/tui.md)** `rtrust-tui` поверх общего desktop controller ([#72](https://github.com/onixus/Rust-trustvpn/pull/72)).
+- **Смена сети на Android** ([#86](https://github.com/onixus/Rust-trustvpn/pull/86), [#89](https://github.com/onixus/Rust-trustvpn/pull/89)). Появление IPv6-адреса или маршрута после возврата Wi-Fi больше не пересоздаёт сессию и не рвёт открытые соединения. Пересоздание остаётся, когда действительно меняются интерфейс, MTU, нужный адрес или маршрут.
+- **Приёмка в Linux-лаборатории** со счётчиками утечек на уровне пакетов для failover и восстановления Always-on ([#87](https://github.com/onixus/Rust-trustvpn/pull/87)) и сверкой объяснения маршрута с dataplane ([#88](https://github.com/onixus/Rust-trustvpn/pull/88)). Это прогоны в контейнерах, не на установленных пакетах.
 
 ## Что нового в 0.6.0 и 0.6.1
 
@@ -41,13 +46,14 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 - **Управляемые профили.** Сохраняют происхождение, назначенную маршрутизацию и офлайн-квитанции. Ответы панели о лимите профилей объясняются на desktop, Android и iOS. См. [managed devices](docs/managed-devices.md).
 
 Route groups относятся только к desktop. Android/iOS используют routing policy внутри профиля.
+
 ## Возможности
 
 ### Клиент и профили
 
-- Нативный desktop-интерфейс на Rust/iced и дополнительный Tauri WebView.
+- Нативный desktop-интерфейс на Rust/iced, дополнительный Tauri WebView и, в main, консольный клиент для Linux.
 - Нативное Android-приложение на VpnService с общим Rust-ядром.
-- Импорт endpoint TOML, полного client TOML, R-TrustTunnel JSON, tt://, hy2:// и hysteria2://.
+- Импорт endpoint TOML, полного client TOML, R-TrustTunnel JSON, Hysteria YAML/JSON, файлов AmneziaWG `awg-quick`, tt://, hy2:// и hysteria2://.
 - Предпросмотр и проверка перед заменой профиля.
 - Автоматическое зашифрованное хранение профилей. На desktop ключ хранится в системном credential store, на Android — в Android Keystore. Plaintext fallback отсутствует.
 - Системный трей, запуск при входе, опциональный autoconnect, диагностика и явные сценарии восстановления.
@@ -87,7 +93,7 @@ Route groups относятся только к desktop. Android/iOS испол�
 | Windows x64 | Native UI, Wintun/SCM-служба и WFP guard. Production full-tunnel проверки прошли для TrustTunnel и Hysteria 2. Реальный 30-минутный S3 sleep/wake с Hysteria прошёл reconnect и traffic checks; Always-on также оставался заблокированным до автоматического восстановления. | Cold boot, более широкий набор sleep/network сценариев, выпуск свежего публичного установщика и подпись. |
 | Linux x86_64 / ARM64 | Wayland-only desktop, TUN host service, nftables и systemd-resolved. Есть Native/WebView/Both packaging, физический KDE/Wayland smoke, подписанный Flatpak flow, TrustTunnel/Hysteria full-tunnel и network handoff. | Больше физических reboot/sleep проверок и финальная полировка установки на разных дистрибутивах. |
 | macOS Apple Silicon | Native/WebView/Both preview, root LaunchDaemon и системный туннель через utun. Для TrustTunnel пройдены live IPv4/IPv6 TCP/UDP/ICMP, DNS, reconnect и восстановление после падения службы. | Boot Always-on, sleep/network handoff, clean install на другом Mac, подписанное auto update/rollback, Developer ID/notarization. Installed macOS Hysteria full-tunnel всё ещё не закрыт полноценной приёмкой. |
-| Android arm64 / x86_64 | Native VpnService, encrypted vault, file/text/QR import, выбор приложений, portal sync, Always-on/lockdown и TrustTunnel/Hysteria. Физические POCO и Huawei проверены на реальном трафике и восстановлении; POCO прошёл 30 минут forced deep Doze. | Дополнительные OEM, прежде всего Pixel/Samsung, reboot-before-first-unlock и overnight/long soak. На MIUI force-stop может оставить lockdown активным без автоматического рестарта VPN-службы. |
+| Android arm64 / x86_64 | Native VpnService, encrypted vault, file/text/QR import, выбор приложений, portal sync, Always-on/lockdown и TrustTunnel/Hysteria. Физические POCO и Huawei проверены на реальном трафике и восстановлении; POCO прошёл 30 минут forced deep Doze. | Дополнительные OEM, прежде всего Pixel/Samsung, reboot-before-first-unlock и overnight/long soak. На MIUI force-stop может оставить lockdown активным без автоматического рестарта VPN-службы. Пока процесс VPN мёртв, lockdown неполный: на эмуляторе Android 16 системный resolver отправлял DNS других приложений напрямую, трафик Google Play services тоже шёл напрямую. Профиль, импортированный без портала, резолвит endpoint до появления блокирующего TUN. |
 
 Про Native/WebView/Both: [варианты UI](docs/ui-choices.md). Linux поддерживает только Wayland.
 
@@ -132,7 +138,7 @@ Workspace требует **Rust 1.89+**. Текущий CI использует 
 
 - [Windows service](docs/windows-service.md)
 - [Linux service](docs/linux-service.md)
-- [Terminal client (TUI)](docs/tui.md)
+- [Консольный клиент (TUI)](docs/tui.md)
 - [macOS system VPN](docs/macos-system.md)
 - [Android](docs/android.md)
 - [Jenkins / CI](docs/jenkins.md)
@@ -143,7 +149,7 @@ Desktop GUI следует запускать от обычного пользо
 
 ### Desktop
 
-1. Импортируйте файл профиля либо откройте/вставьте ссылку tt://, hy2:// или hysteria2://.
+1. Импортируйте файл профиля (TrustTunnel TOML, Hysteria YAML, AmneziaWG `.conf`, JSON) либо откройте/вставьте ссылку tt://, hy2:// или hysteria2://.
 2. Проверьте результат разбора и добавьте либо замените профиль.
 3. Выберите профиль по умолчанию и режим подключения.
 4. Для системного VPN предварительно установите соответствующую платформенную службу.
@@ -183,7 +189,8 @@ SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS
 - физические Android-проверки TrustTunnel/Hysteria на POCO X3 и Huawei;
 - 30 минут forced deep Doze на POCO с сохранением VPN egress;
 - macOS live TrustTunnel IPv4/IPv6, DNS, reconnect и crash recovery;
-- Linux system-service, Wayland, Flatpak и network-handoff проверки.
+- Linux system-service, Wayland, Flatpak и network-handoff проверки;
+- Linux-лаборатория (контейнеры): в main есть прогоны failover, восстановления Always-on и объяснения маршрута с проверкой на уровне пакетов.
 
 Успешный тест конкретной платформы или протокола не означает, что все опубликованные пакеты уже пересобраны с последним main. Точная граница доказательств и открытых задач находится в платформенных документах.
 
@@ -197,12 +204,13 @@ SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS
 | apps/android | Android VpnService и JNI/Rust интеграция |
 | apps/ios | iOS Swift/Network Extension preview и общее Rust-ядро |
 | apps/macos | macOS application/system integration |
+| apps/tui | Консольный клиент для Linux |
 | apps/inspect, apps/codec | Диагностика и инструменты профилей |
 | crates | Общая логика профилей, транспорта, storage, control, desktop, mobile, portal client и updates |
 | deploy | Клиентские service/update deployment assets |
 | packaging, scripts | Упаковка и interop helpers |
 | ci, Jenkinsfile* | Build, security и runtime проверки |
-| vendor/h2 | Патченная HTTP/2 зависимость |
+| vendor/h2, vendor/h3 | Патченные зависимости HTTP/2 и HTTP/3 |
 | docs | Архитектура, статусы платформ, релизы и acceptance evidence |
 
 Серверная реализация, administration UI и server deployment относятся к [onixus/tunnel](https://github.com/onixus/tunnel). Здесь находятся VPN-клиенты, клиентская portal integration и [контракт API панели](docs/profile-api.md).
@@ -211,7 +219,7 @@ SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS
 
 Обзор:
 
-- [Состояние реализации](docs/implementation.md) · [Архитектура](docs/architecture.md) · [Delivery и критерии приёмки](docs/delivery.md) · [Technical debt](docs/technical-debt.md)
+- [Состояние проекта и открытые issue](docs/project-status.md) · [Состояние реализации](docs/implementation.md) · [Архитектура](docs/architecture.md) · [Delivery и критерии приёмки](docs/delivery.md) · [Technical debt](docs/technical-debt.md)
 - [Записи релизов](docs/releases/) · [Приёмка пакетов](docs/package-acceptance.md) · [Secure updates](docs/secure-updates.md) · [Evidence](docs/evidence.md)
 
 Протоколы: [HTTP/3](docs/http3.md) · [Hysteria 2](docs/hysteria2.md) · [AmneziaWG](docs/amneziawg.md)
@@ -220,7 +228,7 @@ SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS
 
 Платформы:
 
-- Desktop: [Desktop-приложения](docs/desktop-apps.md) · [Выбор UI](docs/ui-choices.md) · [Служба Windows](docs/windows-service.md) · [Системный VPN macOS](docs/macos-system.md) · [Служба Linux](docs/linux-service.md) · [Linux full tunnel](docs/linux-full-tunnel.md)
+- Desktop: [Desktop-приложения](docs/desktop-apps.md) · [Выбор UI](docs/ui-choices.md) · [Консольный клиент](docs/tui.md) · [Служба Windows](docs/windows-service.md) · [Системный VPN macOS](docs/macos-system.md) · [Служба Linux](docs/linux-service.md) · [Linux full tunnel](docs/linux-full-tunnel.md)
 - Mobile: [Android](docs/android.md) · [iOS](docs/ios.md) · [Mobile flow observations](docs/mobile-flow-observations.md)
 
 Панель и управляемые профили: [Обмен профилями](docs/portal.md) · [Profile API](docs/profile-api.md) · [Managed devices](docs/managed-devices.md) · [Access scope validation](docs/access-scope-validation.md)
