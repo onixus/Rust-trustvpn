@@ -104,6 +104,10 @@ publish real profiles to create documentation.
   mobile data that stays up next to Wi-Fi. After a handoff the lost network is
   skipped and every network change redeclares the underlying network at once, so
   the VPN reports the current network's transports (0.6.0-preview.2, #63).
+- Link-property updates on the same underlying network reconnect only when an
+  IPv4 address, the interface or an existing address/route changes or is
+  removed; IPv6 address and route additions (SLAAC after Wi-Fi returns) keep the
+  established session and its in-flight flows (#75).
 - A session switched to Always-on in system Settings while the app is in the
   background is recorded, so the app can reconnect it if it dies.
 - A session that carries no traffic fails its health check and reconnects. A
