@@ -13,7 +13,7 @@ def tool(name):
     return str(JDK_BIN / name) if JDK_BIN else name
 
 with tempfile.TemporaryDirectory(prefix="rtrust-lifecycle-test-") as output:
-    subprocess.run([tool("javac"), "-d", output,
+    subprocess.run([tool("javac"), "-encoding", "UTF-8", "-d", output,
         str(JAVA_ROOT / "main/java/org/rtrusttunnel/android/TunnelLifecycle.java"),
         str(JAVA_ROOT / "test/java/org/rtrusttunnel/android/TunnelLifecycleTest.java"),
         str(JAVA_ROOT / "main/java/org/rtrusttunnel/android/LinkChange.java"),
