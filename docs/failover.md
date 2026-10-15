@@ -50,8 +50,11 @@ backups to a service that does not advertise the capability.
    within 30 s of connecting, so a flapping endpoint is not mistaken for a
    working one. After **two** consecutive failures the next allowed candidate
    is tried, wrapping around to the requested profile. Switches are at least
-   **20 s** apart. Backoff (2→30 s) is unchanged except that it restarts at
-   2 s after a switch. The service does not move back to the requested profile
+   **20 s** apart. The reconnect backoff (2, 4, 8, 16, then 30 s, each plus up
+   to 25% jitter) is shared by all candidates and does not restart on a
+   switch. After eight attempts without a stable session the service pauses
+   for 300 s plus up to 30 s before the next burst
+   (`rtrust_control::recovery::Budget`). The service does not move back to the requested profile
    while a backup works; it returns on the backup's failure or on the user's
    reconnect.
    Separately, the reconnect retry budget is restored only by a session that
@@ -79,9 +82,9 @@ backups to a service that does not advertise the capability.
   is still "working"; destination diagnostics (#33) show that case.
 - A captive portal does not trigger a bypass: with every candidate failing, the
   host stays blocked.
-- Each switch costs one connection attempt per backoff step; with every
-  endpoint down the service attempts at most one connection per 30 s once the
-  backoff is at its cap.
+- Each switch costs one connection attempt per backoff step. With every
+  endpoint down the service makes at most eight attempts per burst (about
+  150 s of backoff plus jitter), then waits 300–330 s before the next burst.
 
 ## Validation
 
