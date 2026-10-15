@@ -145,7 +145,10 @@ check `unknown` with `check_unavailable`.
   deadline and each tool 2 s; a run is dropped (its sockets closed, children
   killed) on reconnect, worker failure, network change, resume, sleep, access
   expiry and Stop. A result is applied only to the running generation it
-  started in. Rows carry `valid_for_ms = PROBE_TTL_MS` (25 s); readers cap
+  started in and is stamped with the run's start, not its completion.
+  Blocking OS calls (Windows IP Helper/WFP/registry, macOS SCDynamicStore)
+  cannot be cancelled; at most one stays alive per backend, and while it is
+  stuck later runs report those checks `unknown` instead of stacking threads. Rows carry `valid_for_ms = PROBE_TTL_MS` (25 s); readers cap
   `system_probe` rows at 25 s and every other service row at 6 s. Without a
   repeat, green falls back to blue after 25 s. A probe failure expires with
   its TTL; on a new generation every probe row is stale.
@@ -154,9 +157,11 @@ check `unknown` with `check_unavailable`.
   rtrust_full` against `guard_rules()`; macOS PF enabled, standard root, no
   other non-empty `com.apple` anchor, our anchor equal to `pfctl -n` of
   `policy()`; Windows every filter of our provider and sublayer equal to
-  `filter_specs()`), **and** one unmarked UDP datagram to `192.0.2.1:9` (and
-  `[2001:db8::1]:9` where that interface has an IPv6 default) bound to every
-  physical default-route interface is refused locally. Any missing/changed
+  `filter_specs()`), **and** one unmarked UDP datagram to `192.0.2.1:9` and
+  one to `[2001:db8::1]:9`, bound to every physical default-route interface,
+  are refused locally. Where the interface has an IPv6 default route, the IPv6
+  datagram must be refused too (an unreachable errno or socket setup failure
+  is `unknown`); only without one does IPv6 count as absent. Any missing/changed
   rule or a datagram that leaves is `failed`; everything else is `unknown`.
   The probe socket never carries the transport mark or an endpoint address.
 - **DNS** is `passed` only if the tunnel resolver configuration is the
@@ -164,14 +169,16 @@ check `unknown` with `check_unavailable`.
   default-route; macOS our SCDynamicStore entry, compared not installed, and
   present in `scutil --dns`; Windows Wintun interface settings), the route to
   the resolver uses the VPN interface, a `. IN NS` query bound to that
-  interface gets a matching NOERROR answer, and every other resolver the OS
+  interface gets a matching NOERROR reply with a well-formed answer record, and every other resolver the OS
   may select (other links/adapters, IPv6, resolv.conf, NRPT, scoped
   resolvers) is contained by a `passed` guard of the same run. A foreign
   resolver with an unproven guard, a changed configuration or a resolver
   route outside the tunnel is `failed`.
 - **Transport** becomes `passed` while a reply from the tunnel resolver over
-  the tunnel interface in the current generation is fresh, the worker runs
-  and no lifecycle gap occurred; otherwise lifecycle `configured` as before.
+  the tunnel interface in the current generation is fresh and the worker
+  runs; otherwise lifecycle `configured` as before. After a polling gap or
+  resume, only such a reply from a run started after it restores transport;
+  lifecycle `configured` still waits for a worker transition.
 - **Selected networks (split).** DNS and guard are `unsupported` from the
   start: DNS bypasses the tunnel by design and there is no kill switch. UIs
   show "not applicable" and "off"; the status stays blue. No probe runs.
@@ -180,7 +187,9 @@ check `unknown` with `check_unavailable`.
   nothing is logged.
 
 Lab-unconfirmed (no installed-package run yet): the local refusal errno
-(Linux `EPERM` with the kernel's bound-interface on-link fallback, macOS
+(Linux `EPERM` with the kernel's bound-interface on-link fallback; for IPv6
+the unreachable policy route may answer first, which would keep dual-stack
+Linux guard `unknown`; macOS
 `EHOSTUNREACH` from PF, Windows `WSAEACCES` at ALE); nft JSON rendering across
 nftables versions; `resolvectl` output format; `pfctl -sr` versus `pfctl -nv`
 rendering (a same-count, own-label difference is `unknown`, not `failed`);
