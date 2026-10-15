@@ -324,6 +324,7 @@ def desktop(profile):
         print("PASS P1 ipv6: explain unknown/unsupported_family (no tunnel claim); packets left the veth, not rtrust0", flush=True)
     else:
         print("BLOCKED P1 ipv6 packet path: IPv6 addressing unavailable in this container; explain is unknown, not tunnel", flush=True)
+        BLOCKED.append("P1 ipv6")
     rules, table, _ = installed()
     assert rules == expected_routes == table, ("installed prefix set differs from Selection::routes",
                                                len(rules), len(expected_routes), len(table))
@@ -563,6 +564,7 @@ def mobile(d, base, log):
         else:
             print("BLOCKED P6 mobile IPv6: " + ("container IPv6 addressing unavailable" if not IPV6
                                                else "session reports no endpoint IPv6"), flush=True)
+            BLOCKED.append("P6 mobile IPv6")
     finally:
         lab.close()
     s.ns("ip", "link", "show", "rtrust0", success=False)
@@ -740,6 +742,11 @@ def main():
 
 
 IPV6 = False
+# An unavailable gate is not a pass: the lane fails after cleanup and names it.
+BLOCKED = []
 
 if __name__ == "__main__":
     main()
+    if BLOCKED:
+        print("FAIL blocked gates: " + ", ".join(BLOCKED), flush=True)
+        sys.exit(3)

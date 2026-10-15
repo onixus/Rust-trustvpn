@@ -173,7 +173,8 @@ destination, port and UID).
   addresses tunnel, UDP 53 to an excluded resolver tunnels with zero port-53
   packets on the veth. Offline decision, observed event (`prediction=false`,
   SHA-256 of the CLI revision) and packets agree. IPv6 runs when the container
-  provides IPv6 addressing, otherwise the lane prints `BLOCKED`.
+  provides IPv6 addressing and the endpoint session reports IPv6. Otherwise the
+  lane prints `BLOCKED` with the reason and fails: an unavailable gate is not a pass.
 - **P4** A synthetic DNS server behind the endpoint: TTL expiry, CNAME-chain
   TTL (checked within the first half of a 5 s window and 1 s after its end), CNAME into a wildcard rule (matched by the queried name only), shared-IP
   conflict, the same with a numeric rule, and a rule address without a query.
