@@ -132,7 +132,8 @@ data plane discards packets queued on the device before the session started
 (one awaited read bounded by `dataplane::PRIME_WAIT`, then a non-blocking sweep
 bounded by `dataplane::BACKLOG_LIMIT`), so TCP and DNS retransmit instead of
 opening upstream streams for sockets that are already gone. The sweep is
-best-effort and Unix-only (`try_recv`; Windows discards nothing); correctness
+best-effort and Unix-only (`try_recv`; Windows and iOS discard at most the one
+packet the awaited read consumed); correctness
 after wake rests on the stack changes, the discard only spares the fresh
 session a burst of upstream opens.
 

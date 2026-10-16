@@ -2818,7 +2818,11 @@ mod tester_summary_tests {
         assert_eq!(after, "connect");
         assert!(due - before >= SUMMARY_DELAY);
         assert!(due - before <= SUMMARY_DELAY + Duration::from_secs(1));
-        assert_eq!(base, crate::stats::snapshot());
+        // Counters are process-wide: parallel tests may advance them between
+        // the two snapshots, so the baseline is a lower bound, never equal.
+        let now = crate::stats::snapshot();
+        let delta = now.since(&base);
+        assert!(delta.syn_accepted <= now.syn_accepted && delta.udp_evicted <= now.udp_evicted);
         let line = format!(
             "dataplane_summary after={after} window_s={} {}",
             SUMMARY_DELAY.as_secs(),

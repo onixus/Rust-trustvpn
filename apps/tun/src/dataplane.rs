@@ -602,8 +602,7 @@ mod tester_backlog_tests {
         assert_eq!(discard_backlog(&device), 1);
         let mut buffer = [0; 65536];
         assert_eq!(device.recv(&mut buffer).await.unwrap(), 40);
-        // Empty device: one probe, zero discarded, nothing counted.
-        let before = crate::stats::snapshot();
+        // Empty device: one probe, zero discarded.
         let empty = Shared::with(vec![]);
         let started = Instant::now();
         assert_eq!(discard_backlog(&empty), 0);
@@ -612,8 +611,6 @@ mod tester_backlog_tests {
             empty.try_calls.load(std::sync::atomic::Ordering::Relaxed),
             1
         );
-        // Lower bound only: the counter is process-wide and shared by parallel tests.
-        let _ = before;
     }
 
     /// The default `try_recv` (devices without a non-blocking read) reports
