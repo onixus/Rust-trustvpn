@@ -132,13 +132,16 @@ fn arm(interface: &str, mac: [u8; 6]) -> Option<(OwnedFd, usize)> {
 }
 /// Send one byte from `socket` (already bound to `interface`) to `target`
 /// and watch the interface: for our datagram during WATCH, and until CONTROL
-/// for any other frame this host sends there. Blocking, at most CONTROL.
-/// Nothing is sent once the run that started it is gone.
+/// for any other frame this host sends there. `stimulus` then causes such a
+/// frame (a query through the tunnel leaves as transport), so an idle tunnel
+/// does not leave the control missing. Blocking, at most CONTROL. Nothing is
+/// sent once the run that started it is gone.
 pub(super) fn watched_send(
     interface: &str,
     socket: UdpSocket,
     target: SocketAddr,
     live: &Live,
+    stimulus: impl FnOnce(),
 ) -> Seen {
     let Some(mac) = mac(interface) else {
         return Seen::Unknown;
@@ -153,6 +156,7 @@ pub(super) fn watched_send(
         return Seen::Unknown;
     }
     let sent = crate::sysprobe::send(&socket, target);
+    stimulus();
     let started = Instant::now();
     let mut buffer = vec![0u8; length];
     let mut control = false;
@@ -225,7 +229,13 @@ mod tests {
         let socket = super::super::probe::socket(false, &entry.interface).unwrap();
         let (_fence, live) = crate::sysprobe::fence();
         assert_eq!(
-            watched_send(&entry.interface, socket, SocketAddr::new(gateway, 9), &live),
+            watched_send(
+                &entry.interface,
+                socket,
+                SocketAddr::new(gateway, 9),
+                &live,
+                || {}
+            ),
             Seen::Captured
         );
     }
@@ -249,7 +259,13 @@ mod tests {
         let (fence, live) = crate::sysprobe::fence();
         drop(fence);
         assert_eq!(
-            watched_send(&entry.interface, socket, SocketAddr::new(gateway, 9), &live),
+            watched_send(
+                &entry.interface,
+                socket,
+                SocketAddr::new(gateway, 9),
+                &live,
+                || {}
+            ),
             Seen::Unknown
         );
     }

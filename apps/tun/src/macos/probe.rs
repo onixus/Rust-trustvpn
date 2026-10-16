@@ -212,13 +212,23 @@ async fn onlink(
         IpAddr::V4(ip) => SocketAddr::new(ip.into(), port),
         IpAddr::V6(ip) => std::net::SocketAddrV6::new(ip, port, 0, index).into(),
     };
+    // One `. IN NS` query into the tunnel: its transport leaves on the
+    // physical interface as the control frame. The reply is not awaited.
+    let tunnel = socket(false, DEVICE);
+    let resolver = SocketAddr::new(plan.dns.into(), 53);
+    let stimulus = move || {
+        if let Some(tunnel) = tunnel {
+            let _ = tunnel.send_to(&sysprobe::query(rand::random()), resolver);
+        }
+    };
     let Some(socket) = socket(v6, interface) else {
         return Attempt::Unknown;
     };
     let before = blocked_packets(plan.uid).await;
     let name = interface.to_owned();
     let live = live.clone();
-    let Some(watch) = CAPTURE.spawn(move || capture::watched_send(&name, socket, target, &live))
+    let Some(watch) =
+        CAPTURE.spawn(move || capture::watched_send(&name, socket, target, &live, stimulus))
     else {
         return Attempt::Unknown;
     };

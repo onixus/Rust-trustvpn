@@ -194,8 +194,9 @@ check `unknown` with `check_unavailable`.
   wire is `failed`. A refusal needs all of: `sendto` succeeded (an errno is
   routing or ARP, not PF), our datagram absent for 300 ms, **another frame
   this host sent on that interface seen within 1 s** (the per-run control
-  that the tap sees output at all; in full mode that is normally tunnel
-  transport to the endpoint), no BPF drops, and our final `block drop out`
+  that the tap sees output at all: right after our datagram the service sends
+  one `. IN NS` query into the tunnel, whose transport to the endpoint leaves
+  on that interface), no BPF drops, and our final `block drop out`
   rule counting more packets (`pfctl -vsr`). Anything else (no route,
   `link#N` gateway, an endpoint gateway, no tap, a quiet interface) is
   `unknown`. If the guard is broken, that one byte reaches the LAN gateway's
@@ -247,10 +248,12 @@ Known limitations of the probes (accepted, fail-closed: each reads as
   the BPF window), within the 4 s part budget. One or two physical
   default-route interfaces fit; with more the part runs out and the guard is
   `unknown` rather than `passed`.
-- **Quiet macOS interface.** Without any own output on the interface during
-  the 1 s window (an idle tunnel with no transport traffic) the control is
-  missing and the guard reads `unknown` for that run; the next busier run can
-  pass.
+- **Missing macOS control.** If the tunnel query's transport does not leave
+  on the probed interface within 1 s (transport via another interface, a
+  stalled engine) the control is missing and the guard reads `unknown` for
+  that run. Without the query an idle tunnel did exactly that in 2 of 5 runs
+  on the lab Mac, which also turned DNS `failed` (a foreign scoped resolver
+  needs a `passed` guard).
 - **Refusal errnos are unverified.** `EPERM` (Linux) and `WSAEACCES` (Windows
   ALE) are the expected local refusals but have no installed-package capture
   yet (lab gate below). Another errno is `unknown`. macOS uses no errno (see
