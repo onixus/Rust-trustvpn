@@ -70,7 +70,13 @@ and Linux and uses the profile's transport, HTTP/2 or HTTP/3 ([HTTP/3](http3.md)
 
 The service adds only its own PF anchor, routes tagged with `RTF_PROTO2`, and a
 SystemConfiguration DNS entry. Recovery verifies ownership before deletion.
-Foreign VPN routes, PF rules or existing PF states cause preflight refusal.
+Foreign VPN routes or PF rules cause preflight refusal. Existing PF states
+(for example left by Cisco Secure Client / AnyConnect) do not: once the guard
+rules are loaded and PF is enabled, the service flushes the global state table
+(`pfctl -F states`), because pre-existing states would bypass the guard. PF
+cannot flush per owner, so every PF-tracked connection, including other
+components', is dropped and re-established under the guard; the guard's own
+rules are `no state`, so the tunnel transport is unaffected.
 Transport reconnect retains the utun device. GUI/service failure retains the
 session guard until explicit recovery. macOS boot always-on is not implemented.
 Network handoff to a different physical gateway is not yet accepted.

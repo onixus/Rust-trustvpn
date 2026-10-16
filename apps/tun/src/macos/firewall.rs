@@ -1,4 +1,5 @@
-//! A private PF anchor. Never flush the root ruleset, foreign states or tables.
+//! A private PF anchor. Never flush the root ruleset, foreign rules or tables.
+//! The global state table is flushed once the guard is active (`flush_states`).
 use super::{command, device::DEVICE};
 use std::{io::Write, path::Path};
 pub(super) const ANCHOR: &str = "com.apple/zz-rtrust";
@@ -14,6 +15,9 @@ pub(super) fn standard_root(lines: &[&str]) -> bool {
             ]
 }
 pub(super) fn preflight() -> Result<(), String> {
+    preflight_with(pf)
+}
+fn preflight_with(mut pf: impl FnMut(&[&str]) -> Result<String, String>) -> Result<(), String> {
     let root = pf(&["-sr"])?;
     let lines: Vec<_> = root
         .lines()
@@ -38,12 +42,23 @@ pub(super) fn preflight() -> Result<(), String> {
             return Err("Other active PF rules prevent a reliable VPN guard; existing rules are left unchanged".into());
         }
     }
-    // Existing state entries bypass new filtering rules. Refuse coexistence,
-    // rather than silently flushing states owned by another system component.
-    if !pf(&["-ss"])?.trim().is_empty() {
-        return Err("Existing PF states prevent a reliable VPN guard; other firewall connections must stop first".into());
-    }
+    // Existing state entries (e.g. left by another VPN client) are not a
+    // refusal reason: they bypass new rules, so flush_states clears them once
+    // the guard is active.
     Ok(())
+}
+/// Clears the global PF state table after the guard rules and PF are active,
+/// so no pre-existing state can bypass them. pfctl cannot flush states per
+/// owner: every PF-tracked connection, including another component's (such as
+/// another VPN client), is dropped and must re-establish under the guard. The
+/// guard's own rules are `no state`, so the tunnel transport is unaffected.
+pub(super) fn flush_states() -> Result<(), String> {
+    flush_states_with(pf)
+}
+fn flush_states_with(mut pf: impl FnMut(&[&str]) -> Result<String, String>) -> Result<(), String> {
+    pf(&["-F", "states"])
+        .map(|_| ())
+        .map_err(|_| "Cannot clear existing PF states; guard retained for recovery".into())
 }
 pub(super) fn anchor_path(anchor: &str) -> Option<String> {
     if !anchor
@@ -243,5 +258,50 @@ mod tests {
             "anchor \"com.apple/*\" all"
         ]));
         assert!(!standard_root(&["anchor \"other/*\" all"]));
+    }
+    fn stock_pf<'a>(
+        foreign_rules: &'static str,
+        calls: &'a mut Vec<String>,
+    ) -> impl FnMut(&[&str]) -> Result<String, String> + 'a {
+        move |args| {
+            calls.push(args.join(" "));
+            Ok(match args {
+                ["-sr"] => "scrub-anchor \"com.apple/*\" all fragment reassemble\nanchor \"com.apple/*\" all\n",
+                ["-a", "com.apple", "-s", "Anchors"] => "  com.apple/200.AirDrop\n  com.apple/250.ApplicationFirewall\n",
+                ["-a", "com.apple/250.ApplicationFirewall", "-sr"] => foreign_rules,
+                ["-ss"] => "ALL tcp 172.29.60.25:54096 -> 172.28.252.168:443       ESTABLISHED:ESTABLISHED\n",
+                _ => "",
+            }
+            .into())
+        }
+    }
+    #[test]
+    fn foreign_states_do_not_refuse_but_foreign_rules_still_do() {
+        let mut calls = vec![];
+        assert_eq!(preflight_with(stock_pf("", &mut calls)), Ok(()));
+        assert!(!calls.iter().any(|c| c == "-ss" || c.starts_with("-F")));
+        let mut calls = vec![];
+        assert!(
+            preflight_with(stock_pf("block drop out all\n", &mut calls))
+                .unwrap_err()
+                .contains("Other active PF rules")
+        );
+    }
+    #[test]
+    fn flush_clears_only_the_state_table() {
+        let mut calls = vec![];
+        assert_eq!(
+            flush_states_with(|args| {
+                calls.push(args.join(" "));
+                Ok(String::new())
+            }),
+            Ok(())
+        );
+        assert_eq!(calls, ["-F states"]);
+        assert!(
+            flush_states_with(|_| Err("pfctl failed".into()))
+                .unwrap_err()
+                .contains("guard retained")
+        );
     }
 }
