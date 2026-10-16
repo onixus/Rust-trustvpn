@@ -61,13 +61,22 @@ fn mac(interface: &str) -> Option<[u8; 6]> {
         {
             continue;
         }
-        let link = unsafe { &*(item.ifa_addr as *const libc::sockaddr_dl) };
-        let (start, length) = (usize::from(link.sdl_nlen), usize::from(link.sdl_alen));
-        if length == 6 && usize::from(link.sdl_len) >= 8 + start + length {
-            let data = unsafe {
-                std::slice::from_raw_parts(link.sdl_data.as_ptr().cast::<u8>().add(start), 6)
-            };
-            found = data.try_into().ok();
+        // `sockaddr_dl` is variable-length (name, then address, past the
+        // declared 12-byte `sdl_data`): read bytes, bounded by `sdl_len`.
+        // Offsets: len 0, nlen 5, alen 6, data 8.
+        let raw = item.ifa_addr as *const u8;
+        let field = |at: usize| unsafe { *raw.add(at) };
+        let (total, start, length) = (
+            usize::from(field(0)),
+            usize::from(field(5)),
+            usize::from(field(6)),
+        );
+        if length == 6 && total >= 8 + start + length {
+            let mut address = [0u8; 6];
+            for (i, byte) in address.iter_mut().enumerate() {
+                *byte = field(8 + start + i);
+            }
+            found = Some(address);
         }
         break;
     }
@@ -161,8 +170,10 @@ pub(super) fn watched_send(
     let mut buffer = vec![0u8; length];
     let mut control = false;
     loop {
+        // Once the control is in, only our datagram's window remains.
+        let limit = if control { WATCH } else { CONTROL };
         let elapsed = started.elapsed();
-        if elapsed >= CONTROL || (control && elapsed >= WATCH) {
+        if elapsed >= limit {
             break;
         }
         let mut poll = libc::pollfd {
@@ -170,7 +181,7 @@ pub(super) fn watched_send(
             events: libc::POLLIN,
             revents: 0,
         };
-        let wait = (CONTROL - elapsed).as_millis().max(1) as libc::c_int;
+        let wait = (limit - elapsed).as_millis().max(1) as libc::c_int;
         let ready = unsafe { libc::poll(&mut poll, 1, wait) };
         if ready < 0 {
             return Seen::Unknown;

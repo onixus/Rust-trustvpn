@@ -703,6 +703,16 @@ pub mod macos {
         };
         u16_at(udp) == Some(port) && u16_at(udp + 2) == Some(9)
     }
+    /// IP traffic other than ICMPv6. ARP and neighbour discovery are not a
+    /// control: a probe queued behind address resolution could leave after
+    /// the window while our own ARP/ND request showed the tap working.
+    fn carries_traffic(frame: &[u8]) -> bool {
+        match frame.get(12..14) {
+            Some([0x08, 0x00]) => true,
+            Some([0x86, 0xdd]) => frame.get(20).is_some_and(|&next| next != 58),
+            _ => false,
+        }
+    }
     /// What one BPF read buffer holds (Darwin `bpf_hdr`: 8-byte timeval32,
     /// caplen at 8, hdrlen at 16, records 4-byte aligned).
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -734,7 +744,7 @@ pub mod macos {
             };
             if probe_frame(frame, port) {
                 found.probe = true;
-            } else if frame.get(6..12) == Some(&mac[..]) {
+            } else if frame.get(6..12) == Some(&mac[..]) && carries_traffic(frame) {
                 found.control = true;
             }
             at += (hdrlen + caplen + 3) & !3;
@@ -2493,6 +2503,13 @@ mod tests {
         assert_eq!(scan(&transport, 50_000), only_control);
         // Our datagram is never its own control; another port of ours is.
         assert_eq!(scan(&ours, 50_005), only_control);
+        // ARP and ICMPv6 (neighbour discovery) from us are no control.
+        let mut arp = frame(MAC, false, 1, 443);
+        arp[12..14].copy_from_slice(&[0x08, 0x06]);
+        assert_eq!(scan(&bpf_record(&arp), 50_000), macos::Scan::default());
+        let mut nd = frame(MAC, true, 1, 443);
+        nd[20] = 58;
+        assert_eq!(scan(&bpf_record(&nd), 50_000), macos::Scan::default());
         // A frame not from this MAC (the filter drops it) proves nothing.
         assert_eq!(
             scan(&bpf_record(&frame(OTHER, false, 1, 443)), 50_000),

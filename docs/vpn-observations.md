@@ -194,7 +194,9 @@ check `unknown` with `check_unavailable`.
   wire is `failed`. A refusal needs all of: `sendto` succeeded (an errno is
   routing or ARP, not PF), our datagram absent for 300 ms, **another frame
   this host sent on that interface seen within 1 s** (the per-run control
-  that the tap sees output at all: right after our datagram the service sends
+  that the tap sees output at all; ARP and ICMPv6 neighbour discovery do not
+  count, as a probe queued behind resolution could leave late: right after
+  our datagram the service sends
   one `. IN NS` query into the tunnel, whose transport to the endpoint leaves
   on that interface), no BPF drops, and our final `block drop out`
   rule counting more packets (`pfctl -vsr`). Anything else (no route,
@@ -244,10 +246,11 @@ Known limitations of the probes (accepted, fail-closed: each reads as
   eight physical default-route interfaces, makes the bypass check
   `unknown`; such hosts never reach a `passed` guard.
 - **macOS bypass budget.** The macOS attempts run one after another on one
-  capture lane, each up to about a second (route lookup, two `pfctl -vsr`,
-  the BPF window), within the 4 s part budget. One or two physical
-  default-route interfaces fit; with more the part runs out and the guard is
-  `unknown` rather than `passed`.
+  capture lane within the 4 s part budget. A passing attempt takes about
+  0.4 s (route lookup, two `pfctl -vsr`, 300 ms once the control is in); one
+  still waiting for its control takes up to about 1.1 s. Two dual-stack
+  physical interfaces (four attempts) fit when controls arrive; more, or
+  slow controls, run the part out and the guard is `unknown`, not `passed`.
 - **Missing macOS control.** If the tunnel query's transport does not leave
   on the probed interface within 1 s (transport via another interface, a
   stalled engine) the control is missing and the guard reads `unknown` for
