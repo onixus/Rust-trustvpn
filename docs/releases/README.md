@@ -1,6 +1,6 @@
 # Release assets
 
-A GitHub release publishes one macOS file:
+After v0.6.2-beta.1 a GitHub release publishes one macOS file:
 `R-TrustTunnel-macOS-arm64-UI-Choices.dmg`. It contains the Native, WebView and
 Both PKG installers; the user installs exactly one.
 
@@ -16,5 +16,6 @@ to the GitHub release:
 `system-candidate` under another name.
 
 On October 16, 2026 the other macOS files were removed from the v0.6.1 release and
-its `SHA256SUMS` was regenerated; the remaining digests did not change. Earlier
-releases keep their full macOS asset sets.
+its `SHA256SUMS` was regenerated; the remaining digests did not change.
+v0.6.2-beta.1 (published before this change) has the six system-candidate
+DMG/PKG files and no UI Choices DMG; earlier releases keep their full sets.

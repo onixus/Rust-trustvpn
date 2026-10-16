@@ -279,6 +279,31 @@ mod tests {
         assert_eq!(mutations.get(), 3);
     }
     #[test]
+    fn scoped_ipv6_defaults_of_other_utuns_do_not_conflict_with_split_defaults() {
+        // macOS gives every utun (system ones and other VPN clients') an
+        // interface-scoped IPv6 default. Scoped routes serve only sockets bound
+        // to that interface, so they neither conflict with nor shadow ::/1 and
+        // 8000::/1; the PF guard drops anything such sockets send.
+        let table = "Internet6:\nDestination Gateway Flags Netif Expire\n\
+            default fe80::%utun0 UGcIg utun0\n\
+            default fe80::%utun5 UGcIg utun5\n\
+            fe80::%utun0/64 fe80::1%utun0 UcI utun0\n";
+        let rows = route_table::parse(table).unwrap();
+        let routes = vec![fixture(true, "::/1"), fixture(true, "8000::/1")];
+        assert_eq!(
+            batch_with(
+                &routes,
+                Operation::Vacant,
+                |_| Ok(route_table::parse(table).unwrap()),
+                |_, _| panic!("vacant never mutates"),
+            ),
+            Ok(())
+        );
+        for route in &routes {
+            assert_eq!(route.current(&rows), Ok(None));
+        }
+    }
+    #[test]
     fn preflights_all_conflicts_and_ambiguity_before_mutation() {
         let routes = vec![fixture(false, "0.0.0.0/1"), fixture(false, "128.0.0.0/1")];
         for ambiguous in [false, true] {

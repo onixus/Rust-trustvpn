@@ -98,19 +98,57 @@ publish real profiles to create documentation.
   `has_ipv6=true`; otherwise Android blocks that family without direct bypass.
   An IPv6 DNS server is rejected for an IPv4-only endpoint. Every endpoint socket is protected
   and bound to the underlying non-VPN network before connect; protection failure
-  rejects the attempt. A blocking TUN is established before endpoint DNS resolution. Startup waits for an underlying network and retries unavailable DNS, including offline startup.
+  rejects the attempt. For a portal-enrolled profile a blocking TUN is
+  established before endpoint DNS resolution; a profile imported without the
+  portal resolves its endpoint hostname on the underlying network before the
+  first TUN exists. Startup waits for an underlying network and retries
+  unavailable DNS, including offline startup.
 - The underlying network follows Android's own choice: candidates are ranked
   validated, then unmetered, then not cellular, so the tunnel does not run over
   mobile data that stays up next to Wi-Fi. After a handoff the lost network is
   skipped and every network change redeclares the underlying network at once, so
   the VPN reports the current network's transports (0.6.0-preview.2, #63).
+- Link-property updates on the same underlying network reconnect only when an
+  IPv4 address, the interface or an existing address/route changes or is
+  removed; IPv6 address and route additions (SLAAC after Wi-Fi returns) keep the
+  established session and its in-flight flows (#75). The comparison starts from
+  the link properties read at connect. It also reconnects when:
+  - the link MTU changes, including from unknown (0) to a value. Whether Android
+    reports such an update right after connect still has to be confirmed on an
+    emulator;
+  - the NAT64 prefix changes on an IPv6-only link (Android 11+). On a link with
+    an IPv4 address the prefix is ignored, so a PREF64 that arrives in a later
+    router advertisement does not reconnect a dual-stack session;
+  - an address fails DAD, or a non-temporary address becomes deprecated. An RFC
+    4941 temporary IPv6 address that becomes deprecated is tolerated while
+    another preferred global IPv6 address (not link-local or ULA) remains. IPv4
+    addresses get no such exception;
+  - an unreachable/throw route appears or a route type changes (route types are
+    visible on Android 13+).
+
+  Removing any address still reconnects, because the app cannot tell which
+  source address the session uses. This includes an unused temporary IPv6
+  address when it expires: about 7 days after it was created by default, or daily
+  when the device expires temporary addresses daily. CLAT stacked links are
+  not public API, so CLAT is seen only through the NAT64 prefix; a CLAT start or
+  stop without another visible change keeps the session, which then relies on
+  its health check.
 - A session switched to Always-on in system Settings while the app is in the
   background is recorded, so the app can reconnect it if it dies.
-- A session that carries no traffic fails its health check and reconnects. A
-  degraded exit after a stable session (≥30 s) that delivered traffic refunds its
-  attempt in the finite per-session budget, so such exits over days cannot block
-  the VPN permanently; see [dead-session detection](http3.md#dead-session-detection)
-  (main after 0.6.1).
+- A session that carries no traffic fails its health check and reconnects. Any
+  session that ended after the stable period (≥30 s of real time, sleep
+  included) restores the finite per-session reconnect budget, as on desktop:
+  lost transport, degraded exit with delivered traffic, or replacement on a
+  network change. Sleep/wake and roaming over days therefore cannot block the
+  VPN permanently, and the next delay starts from the base backoff. Short
+  sessions, and degraded ones that never delivered data, still count; see
+  [dead-session detection](http3.md#dead-session-detection) (main after 0.6.1).
+- Waking from deep sleep checks the connected transport at once (6 s bound) and
+  reconnects if it does not answer. Retry delays and the stable period run on
+  `CLOCK_BOOTTIME`: monotonic timers stop while the device sleeps, so a backoff
+  begun before sleep ends at wake instead of running on afterwards.
+- Diagnostics shows reconnect attempts of the budget and the coarse cause and
+  age of the last connection end (no endpoint, address or error text).
 - Rust duplicates the TUN FD, cancels/joins its worker before closing the duplicate,
   and retains TUN while reconnecting. The Java service owns the original FD.
   Stop/revoke closes both. Temporary handshake EOF/reset remains retryable;
@@ -245,7 +283,8 @@ App Disconnect is disabled while Always-on is active; change that system setting
 first. Excluded apps have no Internet under lockdown. Credentials remain in
 credential-encrypted storage; no plaintext direct-boot copy is created. Before
 first unlock the system policy, rather than an established tunnel, must provide
-blocking. Android may exempt some system traffic from VPN policy.
+blocking. Android may exempt some system traffic from VPN policy (see the
+process-death gap below).
 
 A profile whose policy sets `kill_switch = "always_on"` connects only under system
 Always-on with Block connections without VPN; otherwise it reports that the VPN
@@ -280,13 +319,22 @@ this:
   Always-on setting changes, and when the app package is replaced. It does not
   start it when the process dies. MIUI autostart does not change this.
 
-Lockdown keeps blocking all traffic meanwhile, and nothing falls back to a
-direct path. The app records that its last session was the system Always-on VPN.
+Lockdown keeps blocking app sockets meanwhile, and the app has no direct
+fallback. The block is enforced by Android, not by the dead app, and it is not
+complete: on an Android 16 emulator (October 15, 2026, issue #75) the system
+resolver can still send other apps' DNS queries to the network's DNS server
+during this gap, and privileged Google Play services traffic went direct. No
+such egress was seen while the app's TUN was up, including app STOP/START under
+Always-on, which keeps the same TUN. The app records that its last session was
+the system Always-on VPN.
 When the app is opened while no tunnel is running, it starts the service in
 recovery mode. Android reports `isAlwaysOn()` only for an established VPN.
-Recovery therefore establishes the blocking TUN first and then checks. If this
-app is no longer the Always-on VPN, it closes the TUN immediately and stays
-disconnected. Recovery needs the app to be opened. A reboot, toggling Always-on
+Recovery therefore establishes the TUN first and then checks. For a
+portal-enrolled profile the blocking TUN is established before endpoint DNS
+resolution. A profile imported without the portal resolves its endpoint on the
+underlying network first; its TUN is established only after that, right before
+the check. If this app is no longer the Always-on VPN, it closes the TUN
+immediately and stays disconnected. Recovery needs the app to be opened. A reboot, toggling Always-on
 or an app update also restarts the VPN through the system. A background
 watchdog is not implemented.
 

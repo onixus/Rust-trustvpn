@@ -1,4 +1,5 @@
 //! Persistent, transactionally installed WFP policy. Only our provider is removed.
+use crate::sysprobe::wfp::{self, Condition, Layer, Spec};
 use std::{net::SocketAddrV4, ptr};
 use windows_sys::{
     Win32::{Foundation::HANDLE, NetworkManagement::WindowsFilteringPlatform::*},
@@ -220,6 +221,93 @@ pub fn install_boot(
 pub fn install_boot_permits(luid: u64, permits: &[crate::failover::Permit]) -> Result<(), String> {
     install_in(luid, permits, BOOT, true)
 }
+pub(super) fn layer_key(layer: Layer) -> GUID {
+    match layer {
+        Layer::ConnectV4 => FWPM_LAYER_ALE_AUTH_CONNECT_V4,
+        Layer::ConnectV6 => FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+        Layer::PacketV4 => FWPM_LAYER_OUTBOUND_IPPACKET_V4,
+        Layer::PacketV6 => FWPM_LAYER_OUTBOUND_IPPACKET_V6,
+        Layer::ForwardV4 => FWPM_LAYER_IPFORWARD_V4,
+        Layer::ForwardV6 => FWPM_LAYER_IPFORWARD_V6,
+    }
+}
+type Ranges = Vec<Box<FWP_RANGE0>>;
+/// WFP conditions point into `luid`, `blob` and the returned range storage;
+/// keep all of them alive until the filter is added.
+fn conditions(
+    specs: &[Condition],
+    luid: &mut u64,
+    blob: *mut FWP_BYTE_BLOB,
+) -> Result<(Vec<FWPM_FILTER_CONDITION0>, Ranges), String> {
+    let mut ranges = Vec::new();
+    let conditions = specs
+        .iter()
+        .map(|spec| {
+            Ok(match *spec {
+                Condition::Loopback => {
+                    let mut loopback =
+                        u32_condition(FWPM_CONDITION_FLAGS, FWP_CONDITION_FLAG_IS_LOOPBACK);
+                    loopback.matchType = FWP_MATCH_FLAGS_ALL_SET;
+                    loopback
+                }
+                Condition::LocalInterface(_) => condition(
+                    FWPM_CONDITION_IP_LOCAL_INTERFACE,
+                    FWP_UINT64,
+                    FWP_CONDITION_VALUE0_0 {
+                        uint64: luid as *mut u64,
+                    },
+                ),
+                Condition::RemoteAddress(address) => {
+                    u32_condition(FWPM_CONDITION_IP_REMOTE_ADDRESS, address)
+                }
+                Condition::AppId => condition(
+                    FWPM_CONDITION_ALE_APP_ID,
+                    FWP_BYTE_BLOB_TYPE,
+                    FWP_CONDITION_VALUE0_0 { byteBlob: blob },
+                ),
+                Condition::Protocol(protocol) => condition(
+                    FWPM_CONDITION_IP_PROTOCOL,
+                    FWP_UINT8,
+                    FWP_CONDITION_VALUE0_0 { uint8: protocol },
+                ),
+                Condition::RemotePort(port) => condition(
+                    FWPM_CONDITION_IP_REMOTE_PORT,
+                    FWP_UINT16,
+                    FWP_CONDITION_VALUE0_0 { uint16: port },
+                ),
+                Condition::RemotePorts(low, high) => {
+                    let mut range = Box::new(FWP_RANGE0 {
+                        valueLow: FWP_VALUE0 {
+                            r#type: FWP_UINT16,
+                            Anonymous: FWP_VALUE0_0 { uint16: low },
+                        },
+                        valueHigh: FWP_VALUE0 {
+                            r#type: FWP_UINT16,
+                            Anonymous: FWP_VALUE0_0 { uint16: high },
+                        },
+                    });
+                    let mut port = condition(
+                        FWPM_CONDITION_IP_REMOTE_PORT,
+                        FWP_RANGE_TYPE,
+                        FWP_CONDITION_VALUE0_0 {
+                            rangeValue: &mut *range,
+                        },
+                    );
+                    port.matchType = FWP_MATCH_RANGE;
+                    ranges.push(range);
+                    port
+                }
+                Condition::LocalPort(port) => condition(
+                    FWPM_CONDITION_IP_LOCAL_PORT,
+                    FWP_UINT16,
+                    FWP_CONDITION_VALUE0_0 { uint16: port },
+                ),
+                Condition::Other => return Err("Invalid WFP policy".to_owned()),
+            })
+        })
+        .collect::<Result<_, String>>()?;
+    Ok((conditions, ranges))
+}
 fn install_in(
     mut luid: u64,
     permits: &[crate::failover::Permit],
@@ -243,19 +331,6 @@ fn install_in(
         if boot && existed {
             remove_in(&engine, space)?;
         }
-        let add = |engine: &Engine,
-                   layer: GUID,
-                   permit: bool,
-                   conditions: &mut [FWPM_FILTER_CONDITION0]| {
-            add_in(
-                engine,
-                space,
-                FWPM_FILTER_FLAG_PERSISTENT,
-                layer,
-                permit,
-                conditions,
-            )
-        };
         let mut name: Vec<u16> = "R-TrustTunnel full tunnel\0".encode_utf16().collect();
         let mut provider = space.provider;
         let data = FWPM_DISPLAY_DATA0 {
@@ -288,134 +363,194 @@ fn install_in(
                 ptr::null_mut(),
             )
         })?;
-        // Packet filters cover existing flows and raw packets as well as new connects.
-        for (layer, v4, ale) in [
-            (FWPM_LAYER_ALE_AUTH_CONNECT_V4, true, true),
-            (FWPM_LAYER_ALE_AUTH_CONNECT_V6, false, true),
-            (FWPM_LAYER_OUTBOUND_IPPACKET_V4, true, false),
-            (FWPM_LAYER_OUTBOUND_IPPACKET_V6, false, false),
-        ] {
-            let mut loopback = u32_condition(FWPM_CONDITION_FLAGS, FWP_CONDITION_FLAG_IS_LOOPBACK);
-            loopback.matchType = FWP_MATCH_FLAGS_ALL_SET;
-            add(&engine, layer, true, &mut [loopback])?;
-            if luid != 0 {
-                add(
-                    &engine,
-                    layer,
-                    true,
-                    &mut [condition(
-                        FWPM_CONDITION_IP_LOCAL_INTERFACE,
-                        FWP_UINT64,
-                        FWP_CONDITION_VALUE0_0 { uint64: &mut luid },
-                    )],
-                )?;
-            }
-            if v4 {
-                for permit in permits {
-                    let endpoint = &permit.address;
-                    let ports = &permit.ports;
-                    let mut conditions = vec![u32_condition(
-                        FWPM_CONDITION_IP_REMOTE_ADDRESS,
-                        u32::from(*endpoint.ip()),
-                    )];
-                    if ale {
-                        conditions.push(condition(
-                            FWPM_CONDITION_ALE_APP_ID,
-                            FWP_BYTE_BLOB_TYPE,
-                            FWP_CONDITION_VALUE0_0 { byteBlob: blob.0 },
-                        ));
-                        conditions.push(condition(
-                            FWPM_CONDITION_IP_PROTOCOL,
-                            FWP_UINT8,
-                            FWP_CONDITION_VALUE0_0 {
-                                // QUIC (HTTP/3, Hysteria 2) and AmneziaWG use UDP.
-                                uint8: if permit.udp { 17 } else { 6 },
-                            },
-                        ));
-                        if !ports.is_empty() {
-                            for (low, high) in ports {
-                                let mut range = FWP_RANGE0 {
-                                    valueLow: FWP_VALUE0 {
-                                        r#type: FWP_UINT16,
-                                        Anonymous: FWP_VALUE0_0 { uint16: *low },
-                                    },
-                                    valueHigh: FWP_VALUE0 {
-                                        r#type: FWP_UINT16,
-                                        Anonymous: FWP_VALUE0_0 { uint16: *high },
-                                    },
-                                };
-                                let mut port = condition(
-                                    FWPM_CONDITION_IP_REMOTE_PORT,
-                                    FWP_RANGE_TYPE,
-                                    FWP_CONDITION_VALUE0_0 {
-                                        rangeValue: &mut range,
-                                    },
-                                );
-                                port.matchType = FWP_MATCH_RANGE;
-                                let mut ranged = conditions.clone();
-                                ranged.push(port);
-                                add(&engine, layer, true, &mut ranged)?;
-                            }
-                            continue;
-                        }
-                        conditions.push(condition(
-                            FWPM_CONDITION_IP_REMOTE_PORT,
-                            FWP_UINT16,
-                            FWP_CONDITION_VALUE0_0 {
-                                uint16: endpoint.port(),
-                            },
-                        ));
-                    }
-                    add(&engine, layer, true, &mut conditions)?;
-                }
-                let mut dhcp = vec![u32_condition(
-                    FWPM_CONDITION_IP_REMOTE_ADDRESS,
-                    u32::from(std::net::Ipv4Addr::BROADCAST),
-                )];
-                if ale {
-                    dhcp.push(condition(
-                        FWPM_CONDITION_IP_PROTOCOL,
-                        FWP_UINT8,
-                        FWP_CONDITION_VALUE0_0 { uint8: 17 },
-                    ));
-                    dhcp.push(condition(
-                        FWPM_CONDITION_IP_LOCAL_PORT,
-                        FWP_UINT16,
-                        FWP_CONDITION_VALUE0_0 { uint16: 68 },
-                    ));
-                    dhcp.push(condition(
-                        FWPM_CONDITION_IP_REMOTE_PORT,
-                        FWP_UINT16,
-                        FWP_CONDITION_VALUE0_0 { uint16: 67 },
-                    ));
-                }
-                add(&engine, layer, true, &mut dhcp)?;
-            }
-            add(&engine, layer, false, &mut [])?;
-        }
-        for layer in [FWPM_LAYER_IPFORWARD_V4, FWPM_LAYER_IPFORWARD_V6] {
-            add(&engine, layer, false, &mut [])?;
-        }
-        if boot {
-            // Separate flags on the SAME provider: WFP transitions atomically at BFE startup.
-            for layer in [
-                FWPM_LAYER_OUTBOUND_IPPACKET_V4,
-                FWPM_LAYER_OUTBOUND_IPPACKET_V6,
-                FWPM_LAYER_IPFORWARD_V4,
-                FWPM_LAYER_IPFORWARD_V6,
-            ] {
-                add_in(
-                    &engine,
-                    space,
-                    FWPM_FILTER_FLAG_BOOTTIME,
-                    layer,
-                    false,
-                    &mut [],
-                )?;
-            }
+        // The same data the probe audits; see sysprobe::wfp::filter_specs.
+        for spec in crate::sysprobe::wfp::filter_specs(luid, permits, boot) {
+            let (mut conditions, _ranges) = conditions(&spec.conditions, &mut luid, blob.0)?;
+            let flags = if spec.boottime {
+                FWPM_FILTER_FLAG_BOOTTIME
+            } else {
+                FWPM_FILTER_FLAG_PERSISTENT
+            };
+            add_in(
+                &engine,
+                space,
+                flags,
+                layer_key(spec.layer),
+                spec.permit,
+                &mut conditions,
+            )?;
         }
         Ok(())
     })
+}
+fn same(a: &GUID, b: &GUID) -> bool {
+    (a.data1, a.data2, a.data3, a.data4) == (b.data1, b.data2, b.data3, b.data4)
+}
+/// The service executable's WFP app id bytes.
+pub fn app_id() -> Result<Vec<u8>, String> {
+    let exe = std::env::current_exe().map_err(|_| "Service path unavailable")?;
+    use std::os::windows::ffi::OsStrExt;
+    let path: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut blob = Blob(ptr::null_mut());
+    check(unsafe { FwpmGetAppIdFromFileName0(path.as_ptr(), &mut blob.0) })?;
+    if blob.0.is_null() {
+        return Err("WFP app id unavailable".into());
+    }
+    let blob = unsafe { &*blob.0 };
+    Ok(unsafe { std::slice::from_raw_parts(blob.data, blob.size as usize) }.to_vec())
+}
+fn read_condition(c: &FWPM_FILTER_CONDITION0, app: &[u8]) -> Condition {
+    let value = &c.conditionValue;
+    let (key, kind, equal) = (&c.fieldKey, value.r#type, c.matchType == FWP_MATCH_EQUAL);
+    unsafe {
+        if same(key, &FWPM_CONDITION_FLAGS)
+            && c.matchType == FWP_MATCH_FLAGS_ALL_SET
+            && kind == FWP_UINT32
+            && value.Anonymous.uint32 == FWP_CONDITION_FLAG_IS_LOOPBACK
+        {
+            Condition::Loopback
+        } else if same(key, &FWPM_CONDITION_IP_LOCAL_INTERFACE)
+            && equal
+            && kind == FWP_UINT64
+            && !value.Anonymous.uint64.is_null()
+        {
+            Condition::LocalInterface(*value.Anonymous.uint64)
+        } else if same(key, &FWPM_CONDITION_IP_REMOTE_ADDRESS) && equal && kind == FWP_UINT32 {
+            Condition::RemoteAddress(value.Anonymous.uint32)
+        } else if same(key, &FWPM_CONDITION_ALE_APP_ID)
+            && equal
+            && kind == FWP_BYTE_BLOB_TYPE
+            && !value.Anonymous.byteBlob.is_null()
+            && {
+                let blob = &*value.Anonymous.byteBlob;
+                !blob.data.is_null()
+                    && std::slice::from_raw_parts(blob.data, blob.size as usize) == app
+            }
+        {
+            Condition::AppId
+        } else if same(key, &FWPM_CONDITION_IP_PROTOCOL) && equal && kind == FWP_UINT8 {
+            Condition::Protocol(value.Anonymous.uint8)
+        } else if same(key, &FWPM_CONDITION_IP_REMOTE_PORT) && equal && kind == FWP_UINT16 {
+            Condition::RemotePort(value.Anonymous.uint16)
+        } else if same(key, &FWPM_CONDITION_IP_REMOTE_PORT)
+            && c.matchType == FWP_MATCH_RANGE
+            && kind == FWP_RANGE_TYPE
+            && !value.Anonymous.rangeValue.is_null()
+            && (*value.Anonymous.rangeValue).valueLow.r#type == FWP_UINT16
+            && (*value.Anonymous.rangeValue).valueHigh.r#type == FWP_UINT16
+        {
+            let range = &*value.Anonymous.rangeValue;
+            Condition::RemotePorts(
+                range.valueLow.Anonymous.uint16,
+                range.valueHigh.Anonymous.uint16,
+            )
+        } else if same(key, &FWPM_CONDITION_IP_LOCAL_PORT) && equal && kind == FWP_UINT16 {
+            Condition::LocalPort(value.Anonymous.uint16)
+        } else {
+            Condition::Other
+        }
+    }
+}
+/// Read-only: every filter of the full-tunnel provider and every filter of
+/// any provider in its sublayer, as policy data. None when the provider or
+/// its sublayer is gone. Filters the service may not enumerate are not seen.
+pub fn read_back(app: &[u8]) -> Result<Option<Vec<Spec>>, String> {
+    if !active()? {
+        return Ok(None);
+    }
+    let engine = Engine::open()?;
+    let mut sublayer = ptr::null_mut();
+    let code = unsafe { FwpmSubLayerGetByKey0(engine.0, &SUBLAYER, &mut sublayer) };
+    if code == 0x80320007 {
+        return Ok(None); // FWP_E_SUBLAYER_NOT_FOUND
+    }
+    check(code)?;
+    unsafe { FwpmFreeMemory0((&mut sublayer as *mut *mut FWPM_SUBLAYER0).cast()) };
+    // Bounds on what one read-back walks and keeps; beyond them it is Unknown.
+    const SCANNED: usize = 1 << 16;
+    const KEPT: usize = 4096;
+    let mut scanned = 0usize;
+    let mut specs = Vec::new();
+    for layer in [
+        Layer::ConnectV4,
+        Layer::ConnectV6,
+        Layer::PacketV4,
+        Layer::PacketV6,
+        Layer::ForwardV4,
+        Layer::ForwardV6,
+    ] {
+        let template = FWPM_FILTER_ENUM_TEMPLATE0 {
+            layerKey: layer_key(layer),
+            // All providers: a template cannot select a sublayer.
+            actionMask: u32::MAX,
+            flags: FWP_FILTER_ENUM_FLAG_INCLUDE_BOOTTIME | FWP_FILTER_ENUM_FLAG_INCLUDE_DISABLED,
+            ..Default::default()
+        };
+        let mut enumeration = ptr::null_mut();
+        check(unsafe { FwpmFilterCreateEnumHandle0(engine.0, &template, &mut enumeration) })?;
+        let result: Result<(), String> = (|| {
+            loop {
+                let mut entries = ptr::null_mut();
+                let mut count = 0;
+                check(unsafe {
+                    FwpmFilterEnum0(engine.0, enumeration, 256, &mut entries, &mut count)
+                })?;
+                scanned += count as usize;
+                if count > 0 {
+                    for filter in unsafe { std::slice::from_raw_parts(entries, count as usize) } {
+                        let filter = unsafe { &**filter };
+                        let permit = filter.action.r#type == FWP_ACTION_PERMIT;
+                        let read = wfp::classify(
+                            !filter.providerKey.is_null()
+                                && same(unsafe { &*filter.providerKey }, &PROVIDER),
+                            same(&filter.subLayerKey, &SUBLAYER),
+                            permit || filter.action.r#type == FWP_ACTION_BLOCK,
+                        );
+                        if read == wfp::Read::Skip {
+                            continue;
+                        }
+                        let mut conditions: Vec<_> = if filter.numFilterConditions == 0 {
+                            vec![]
+                        } else {
+                            unsafe {
+                                std::slice::from_raw_parts(
+                                    filter.filterCondition,
+                                    filter.numFilterConditions as usize,
+                                )
+                            }
+                            .iter()
+                            .map(|c| read_condition(c, app))
+                            .collect()
+                        };
+                        if read == wfp::Read::Foreign {
+                            conditions.push(Condition::Other);
+                        }
+                        specs.push(Spec {
+                            layer,
+                            boottime: filter.flags & FWPM_FILTER_FLAG_BOOTTIME != 0,
+                            permit,
+                            conditions,
+                        });
+                    }
+                }
+                if !entries.is_null() {
+                    unsafe {
+                        FwpmFreeMemory0((&mut entries as *mut *mut *mut FWPM_FILTER0).cast())
+                    };
+                }
+                if scanned > SCANNED || specs.len() > KEPT {
+                    return Err("WFP read-back too large".into());
+                }
+                if count == 0 {
+                    break;
+                }
+            }
+            Ok(())
+        })();
+        unsafe { FwpmFilterDestroyEnumHandle0(engine.0, enumeration) };
+        result?;
+    }
+    Ok(Some(specs))
 }
 pub fn remove() -> Result<(), String> {
     remove_space(FULL)

@@ -277,7 +277,21 @@ pub fn observation_summary(
             &snapshot.guard,
             &snapshot.connectivity,
         ])
-        .filter_map(|(name, o)| Some(format!("{name}: {}", label(o.outcome, russian)?)))
+        .enumerate()
+        .filter_map(|(index, (name, o))| {
+            // Split DNS is not probed (the selection may or may not carry the
+            // resolver) and split has no kill switch: neither claims a leak.
+            let split = o.mode == rtrust_control::observations::Mode::Split
+                && o.outcome == Outcome::Unsupported;
+            let value = match (split, index, russian) {
+                (true, 2, true) => "не проверяется",
+                (true, 2, false) => "not checked",
+                (true, 3, true) => "не включена",
+                (true, 3, false) => "off",
+                _ => label(o.outcome, russian)?,
+            };
+            Some(format!("{name}: {value}"))
+        })
         .chain(recent_change(
             snapshot,
             russian,
@@ -330,6 +344,15 @@ mod tests {
         );
         let proxy = Monitor::new(Mode::Proxy, Source::ProxyLifecycle, now).sample(now);
         assert!(!observation_summary(&proxy, true).contains("не проверено"));
+        let split = Monitor::new(Mode::Split, Source::ServiceLifecycle, now).sample(now);
+        assert_eq!(
+            observation_summary(&split, true),
+            "Транспорт: запущен · DNS: не проверяется · защита: не включена"
+        );
+        assert_eq!(
+            observation_summary(&split, false),
+            "Transport: running · DNS: not checked · guard: off"
+        );
     }
     #[test]
     fn a_recent_network_change_or_resume_is_shown_then_ages_out() {

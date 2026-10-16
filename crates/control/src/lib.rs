@@ -142,7 +142,12 @@ impl Capabilities {
             managed_access_freshness: cfg!(any(target_os = "linux", target_os = "windows")),
             observations_schema: observations::SCHEMA,
             lifecycle_observations: true,
-            system_probes: false,
+            // Service-owned DNS/guard/transport probes in whole-computer mode.
+            system_probes: cfg!(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "windows"
+            )),
             endpoint_probes: cfg!(target_os = "linux"),
             network_events: true,
             failover: true,

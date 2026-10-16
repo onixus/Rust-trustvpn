@@ -1,10 +1,12 @@
 //! macOS privileged VPN service and recovery journal.
+mod capture;
 mod command;
 pub mod device;
 pub mod dns;
 mod events;
 mod firewall;
 mod power;
+mod probe;
 mod route_table;
 mod routes;
 mod service;

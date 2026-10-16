@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exact-commit H2/H3/failover evidence in disposable Docker namespaces.
+"""Exact-commit H2/H3/failover/route-explain evidence in disposable Docker namespaces.
 
 Run locally with --sha, --host and --endpoint-archive. Never installs a service,
 uses host networking, or runs packet harnesses outside a disposable container.
@@ -31,7 +31,19 @@ RUN apt-get -o Acquire::http::Timeout=20 update -qq && apt-get install -y -qq --
 '''
 LANES = [('service', ['scripts/service-interop.py']), ('h2', ['scripts/full-tunnel-interop.py']),
          ('h3', ['scripts/full-tunnel-interop.py', '--http3']),
-         ('failover', ['scripts/failover-interop.py'])]
+         ('failover', ['scripts/failover-interop.py']),
+         ('recovery', ['scripts/recovery-interop.py']),
+         ('explain', ['scripts/route-explain-interop.py'])]
+# Per-lane deadlines; recovery waits through real backoff, hysteresis and
+# handoff, route explain runs one desktop service and two mobile flow sessions.
+LANE_TIMEOUT = 420
+LANE_TIMEOUTS = {'recovery': 720, 'explain': 600}
+# Tool image (600 s) + build (900 s) + kill waits, cleanup and transfers (220 s).
+SSH_OVERHEAD = 1720
+
+
+def ssh_budget():
+    return SSH_OVERHEAD + sum(LANE_TIMEOUTS.get(label, LANE_TIMEOUT) for label, _ in LANES)
 
 
 def digest(path):
@@ -53,7 +65,7 @@ def json_write(path, data):
 def docker_names(run_id):
     if not re.fullmatch(r'[0-9a-f]{12}', run_id):
         raise ValueError('Invalid laboratory run ID')
-    return ['rtrust-lab-' + run_id + '-' + name for name in ['build', 'service', 'h2', 'h3', 'failover']]
+    return ['rtrust-lab-' + run_id + '-' + name for name in ['build'] + [label for label, _ in LANES]]
 
 
 def worker(run_dir, endpoint_archive):
@@ -155,7 +167,8 @@ def worker(run_dir, endpoint_archive):
         manifest['source_cache_fence'] = 'fresh regular-file timestamps after verified archive extraction'
         manifest['script_sha256'] = {str(path.relative_to(source)): digest(path) for path in
                                      [archived_runner, source / 'scripts/full-tunnel-interop.py',
-                                      source / 'scripts/failover-interop.py', source / 'scripts/service-interop.py']}
+                                      source / 'scripts/failover-interop.py', source / 'scripts/recovery-interop.py',
+                                      source / 'scripts/service-interop.py', source / 'scripts/route-explain-interop.py']}
         fixture = run_dir / 'fixture'
         fixture.mkdir()
         endpoint_archive = Path(endpoint_archive)
@@ -199,10 +212,11 @@ def worker(run_dir, endpoint_archive):
         manifest['build_target_volume'] = target_volume
         build = '''set -eu
 rustc --version; cargo --version; cargo clippy --version; dpkg-query -W
-cargo test --locked --offline -p rtrust-tun -p rtrust-control --quiet
+cargo test --locked --offline -p rtrust-tun -p rtrust-control -p rtrust-inspect --quiet
 cargo clippy --locked --offline -p rtrust-tun -p rtrust-control --all-targets -- -D warnings
 cargo build --locked --offline -p rtrust-tun -p rtrust-inspect
-cp target/debug/rtrust-service target/debug/rtrust-tun target/debug/rtrust-inspect /out/bin/
+cargo build --locked --offline -p rtrust-tun --example flow-lab
+cp target/debug/rtrust-service target/debug/rtrust-tun target/debug/rtrust-inspect target/debug/examples/flow-lab /out/bin/
 chmod 755 /out/bin/*
 '''
         logged('build', ['docker', 'run', '--rm', '--name', names[0], '--network', 'none',
@@ -220,7 +234,8 @@ chmod 755 /out/bin/*
                            '--device', '/dev/net/tun', '--stop-timeout', '5',
                            '-v', f'{source}:/work:ro', '-v', f'{out / "bin"}:/work/target/debug:ro',
                            '-v', f'{fixture}:/fixture:ro', '-w', '/work', manifest['tool_image_id'],
-                           'python3', script, '/fixture/trusttunnel_endpoint', *flags], 420)
+                           'python3', script, '/fixture/trusttunnel_endpoint', *flags],
+                       LANE_TIMEOUTS.get(label, LANE_TIMEOUT))
     except BaseException as error:
         failure = error
         manifest['failure'] = type(error).__name__ + ': ' + str(error)
@@ -279,7 +294,7 @@ def main():
     try:
         checked(['scp', '-q', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', str(archive), str(output / 'request.json'), str(Path(__file__).resolve()), args.host + ':' + remote + '/'], timeout=120)
         command = 'exec python3 ' + shlex.quote(remote + '/linux_lab.py') + ' --worker ' + shlex.quote(remote) + ' --endpoint-archive ' + shlex.quote(args.endpoint_archive)
-        result = subprocess.run([*ssh, command], timeout=3400)
+        result = subprocess.run([*ssh, command], timeout=ssh_budget())
         checked(['scp', '-q', '-o', 'BatchMode=yes', args.host + ':' + remote + '/evidence.tar.gz', str(output / 'evidence.tar.gz')], timeout=120)
         print('Evidence: ' + str(output / 'evidence.tar.gz'), flush=True)
         if result.returncode:

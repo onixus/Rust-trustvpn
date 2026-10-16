@@ -106,28 +106,191 @@ not durable across process restart. Observations are advisory and do not change 
 
 | Platform / mode | Transport | Route / DNS / guard | End-to-end connectivity | UI |
 | --- | --- | --- | --- | --- |
-| Linux selected / full / Always-on | Service worker lifecycle; failure/reconnect/gap; netlink network change, kernel-clock resume | Unknown; no live system probe | Unknown | Native and WebView share the Rust verdict |
-| Windows selected / full / Always-on | Service worker lifecycle; failure/reconnect/gap; polled adapter change, kernel-clock resume | Unknown; no live system probe | Unknown | Native and WebView share the Rust verdict |
-| macOS selected / full | Service worker lifecycle; failure/reconnect/gap; routing-socket network change, kernel-clock resume | Unknown; no live system probe | Unknown | Native and WebView share the Rust verdict |
+| Linux selected / full / Always-on | Service worker lifecycle; failure/reconnect/gap; netlink network change, kernel-clock resume; full: `passed` while a service DNS answer through the tunnel is fresh | Full: service probe (see below), route Unknown; selected: DNS/guard `unsupported` | Unknown | Native and WebView share the Rust verdict |
+| Windows selected / full / Always-on | Service worker lifecycle; failure/reconnect/gap; polled adapter change, kernel-clock resume; full: `passed` while a service DNS answer through the tunnel is fresh | Full: service probe (see below), route Unknown; selected: DNS/guard `unsupported` | Unknown | Native and WebView share the Rust verdict |
+| macOS selected / full | Service worker lifecycle; failure/reconnect/gap; routing-socket network change, kernel-clock resume; full: `passed` while a service DNS answer through the tunnel is fresh | Full: service probe (see below), route Unknown; selected: DNS/guard `unsupported` | Unknown | Native and WebView share the Rust verdict |
 | Desktop SOCKS | Proxy lifecycle only | Unsupported for the system path | Unknown | Explicit proxy scope |
 | Android | Shared mobile worker lifecycle; failure/recovery/gap; selected underlying Network/link-property changes; kernel deep-sleep clock evidence | Unknown; VpnService setup is not a live audit of DNS or lockdown | Unknown | JNI JSON, localized summary of checks that have a result, no green lifecycle badge |
 | iOS | Shared mobile worker lifecycle; failure/recovery/gap; provider path updates and native wake callback | Unknown; NetworkExtension status is not a live audit | Unknown | Redacted provider message; generation/age checked; localized summary |
 
-Capabilities explicitly advertise `system_probes=false`. The desktop GUI may
+Desktop services advertise `system_probes=true` (issue #81, see below);
+Android and iOS do not. The desktop GUI may
 fold its own path check of one user-chosen destination into the snapshot it
 displays, as `source: app_probe` for route and connectivity only; a service
-never sends that source, and it replaces only open or expired service results.
+never sends that source, and it replaces only open or expired service results,
+never a current `system_probe` row.
 The adapters retain
 existing platform differences; this change does not make unsupported checks
 available or constitute packet-level leak acceptance.
 
-Since 0.6.1 (#67) every client lists only checks that produced a result. Route,
-DNS, guard and connectivity have no runtime producer yet, so while they are
+Since 0.6.1 (#67) every client lists only checks that produced a result. Route
+and connectivity have no service producer, so while they are
 Unknown they are omitted instead of shown as "unchecked": a running transport
 reads "Transport: running" (iOS/Android widgets: "Transport running"). The amber
 colour still means that nothing is verified. Failed, stale and unsupported
 results are always shown. Desktop system-path diagnostics are reported separately;
 see [system diagnostics](system-diagnostics.md).
+
+## Service system probes (issue #81)
+
+In whole-computer mode the Linux, macOS and Windows services probe their own
+DNS, guard and transport, read-only, and publish `source: system_probe` rows.
+Wire shape is unchanged (IPC 6, schema 2): verdicts use existing enums,
+`passed`/`failed` with `configuration_applied`, an inconclusive or timed-out
+check `unknown` with `check_unavailable`.
+
+- **Schedule.** One run at a time per lease, on the lease loop's own timer:
+  2 s after Connected or any invalidation, then 15 s after the previous run
+  ended (`PROBE_INTERVAL_MS`), for as long as the session is Connected.
+  Status never starts a probe; but the client holding the lease polls Status
+  as a keepalive (see known limitations), so in practice probes run every
+  15 s throughout a Connected session whether or not a window shows them.
+  Outside Connected a due tick is not re-armed on a short timer: the next
+  lifecycle change (reconnect, network change, resume) re-arms it; Windows
+  defers a run whose permit list is unavailable by a full interval.
+  Each run has a 5 s hard deadline; its parts (own rules, bypass attempts,
+  DNS) each have 4 s (`PART`), so a slow part (e.g. `pfctl`) reports only its
+  own checks `unknown` and keeps the tunnel DNS reply gathered beside it; each
+  tool has 2 s. A run is dropped (its sockets closed, children killed) on
+  reconnect, worker failure, network change, resume, sleep, access expiry and
+  Stop. A result is applied only to the running generation it started in and
+  is stamped with the run's start, not its completion. Blocking OS calls
+  (Windows IP Helper/WFP/registry, macOS SCDynamicStore) cannot be
+  cancelled; at most one stays alive per backend, and while it is stuck later
+  runs report those checks `unknown` instead of stacking threads. On Windows
+  the rules read, the bypass datagrams and the DNS read share one blocking
+  call; it checks a flag cleared when its run is dropped before every
+  datagram and before the DNS read, so after Stop (the run is dropped before
+  WFP teardown) it sends nothing. Rows carry `valid_for_ms = PROBE_TTL_MS`
+  (30 s: interval plus two deadlines plus 5 s, since evidence is stamped with
+  its run start); readers cap `system_probe` rows at 30 s and every other
+  service row at 6 s. Without a repeat, green falls back to blue after 30 s.
+  A probe failure expires with its TTL; on a new generation every probe row
+  is stale.
+- **Guard** is `passed` only if the service's own objects read back exactly as
+  the installer's generator produces them (Linux `nft -j list table inet
+  rtrust_full` against `guard_rules()`; macOS PF enabled, standard root, no
+  other non-empty `com.apple` anchor, our anchor equal to `pfctl -n` of
+  `policy()`; Windows every filter of our provider and every filter of any
+  provider in our sublayer, read per layer, equal to `filter_specs()`: a
+  foreign filter placed in our sublayer is a mismatch, `failed`), **and** one unmarked UDP datagram to `192.0.2.1:9` and
+  one to `[2001:db8::1]:9`, bound to every physical default-route interface,
+  are refused locally. Where the interface has an IPv6 default route, the IPv6
+  datagram must be refused too (an unreachable errno or socket setup failure
+  is `unknown`); only without one does IPv6 count as absent. Any missing/changed
+  rule or a datagram that leaves is `failed`; everything else is `unknown`.
+  The probe socket never carries the transport mark or an endpoint address.
+  **macOS differs** (installed package, macOS 26.5.2, full mode): PF drops
+  output silently, so `sendto` returns success while nothing leaves (tcpdump
+  on en0 empty, our block rule's packet counter up), and with the tunnel up an
+  unscoped physical default no longer serves interface-scoped lookups for far
+  targets, so `192.0.2.1` fails with `ENETUNREACH` in routing before PF. The
+  macOS probe therefore sends to the interface's own default gateway (port 9;
+  IPv6 only a link-local gateway of that interface, without one IPv6 is
+  absent and nothing is sent) after `route -n get -ifscope` confirms the
+  scoped route, and watches the interface on a read-only BPF tap (`/dev/bpf*`,
+  SEESENT read back, Ethernet only, a filter keeping frames whose source MAC
+  is the interface's own, i.e. this host's output there). The datagram on the
+  wire is `failed`. A refusal needs all of: `sendto` succeeded (an errno is
+  routing or ARP, not PF), our datagram absent for 300 ms, **another frame
+  this host sent on that interface seen within 1 s** (the per-run control
+  that the tap sees output at all; ARP and ICMPv6 neighbour discovery do not
+  count, as a probe queued behind resolution could leave late: right after
+  our datagram the service sends
+  one `. IN NS` query into the tunnel, whose transport to the endpoint leaves
+  on that interface), no BPF drops, and our final `block drop out`
+  rule counting more packets (`pfctl -vsr`). Anything else (no route,
+  `link#N` gateway, an endpoint gateway, no tap, a quiet interface) is
+  `unknown`. If the guard is broken, that one byte reaches the LAN gateway's
+  discard port.
+- **DNS** is `passed` only if the tunnel resolver configuration is the
+  service's own (Linux resolved link `rtrust0`: that server, `~.`,
+  default-route; macOS our SCDynamicStore entry, compared not installed, and
+  present in `scutil --dns`; Windows Wintun interface settings), the route to
+  the resolver uses the VPN interface, a `. IN NS` query bound to that
+  interface gets a matching NOERROR reply with a well-formed answer record, and every other resolver the OS
+  may select (other links/adapters, IPv6, resolv.conf, NRPT, scoped
+  resolvers) is contained by a `passed` guard of the same run. A foreign
+  resolver with an unproven guard, a changed configuration or a resolver
+  route outside the tunnel is `failed`.
+- **Transport** becomes `passed` while a reply from the tunnel resolver over
+  the tunnel interface in the current generation is fresh and the worker
+  runs; otherwise lifecycle `configured` as before. After a polling gap or
+  resume, only such a reply from a run started after it restores transport;
+  lifecycle `configured` still waits for a worker transition.
+- **Selected networks (split).** DNS and guard are `unsupported` from the
+  start and never `passed`: there is no kill switch, and system DNS is not
+  probed. A selection that carries the resolver gets the VPN resolver (and on
+  Windows a DNS lock), one that does not keeps the system resolver; neither is
+  verified. UIs show "not checked" and "off" without claiming a leak; the
+  status stays blue. No probe runs.
+- **Privacy.** Results are enums and timestamps only. Tool output, argv,
+  addresses, resolvers and interface names are parsed in memory and dropped;
+  nothing is logged.
+
+Known limitations of the probes (accepted, fail-closed: each reads as
+`unknown`, never `passed`):
+
+- **Probes run without a reader.** The desktop client's lease connection
+  polls Status every 2 s and the always-on supervisor every 1 s as a
+  keepalive, whether or not a window shows the rows, so the service cannot
+  tell a reader from a keepalive. It probes every 15 s for the whole
+  Connected session (on macOS about a dozen short-lived tool processes and
+  one DNS query through the tunnel per run). A result is shown only if a
+  later read finds it fresh in the same generation; internal paths also
+  sample the monitor, so an unread result is not guaranteed to be discarded.
+  Reducing this needs an IPC flag meaning
+  "a UI is reading" (capability-gated, sent only by clients whose UI polls);
+  that is a follow-up, not done here.
+- **Large macOS route tables.** `netstat -rn` output over 64 KiB, or more than
+  eight physical default-route interfaces, makes the bypass check
+  `unknown`; such hosts never reach a `passed` guard.
+- **macOS bypass budget.** The macOS attempts run one after another on one
+  capture lane within the 4 s part budget. A passing attempt takes about
+  0.4 s (route lookup, two `pfctl -vsr`, 300 ms once the control is in); one
+  still waiting for its control takes up to about 1.1 s. Two dual-stack
+  physical interfaces (four attempts) fit when controls arrive; more, or
+  slow controls, run the part out and the guard is `unknown`, not `passed`.
+- **Missing macOS control.** If the tunnel query's transport does not leave
+  on the probed interface within 1 s (transport via another interface, a
+  stalled engine) the control is missing and the guard reads `unknown` for
+  that run. Without the query an idle tunnel did exactly that in 2 of 5 runs
+  on the lab Mac, which also turned DNS `failed` (a foreign scoped resolver
+  needs a `passed` guard).
+- **Refusal errnos are unverified.** `EPERM` (Linux) and `WSAEACCES` (Windows
+  ALE) are the expected local refusals but have no installed-package capture
+  yet (lab gate below). Another errno is `unknown`. macOS uses no errno (see
+  Guard above).
+- **macOS block counter is shared.** Other traffic our guard drops (for
+  example mDNS) also counts, so in full mode it almost always grows; it only
+  shows PF dropped something meanwhile, never our datagram, and does not
+  detect a blind tap. That is the per-run control frame's job.
+- **A send already in progress.** On Windows and macOS sends run on a
+  detached blocking thread that checks the run is still live right before
+  sending; a datagram whose send call had started when its run was dropped
+  can still complete, every later one is suppressed. Linux runs no send
+  outside the polled run.
+- **WFP enumeration rights.** The read-back sees only filters the service may
+  enumerate; a filter hidden by its security descriptor is not compared.
+  More than 65 536 enumerated or 4 096 kept filters reads `unknown`.
+- **Defensive-branch tests.** Some unit tests cover branches no production
+  input reaches (an empty expected rule set, an endpoint equal to a
+  documentation probe target). They pin the parser and classifier contracts,
+  not runtime behaviour, and are no evidence for an installed package.
+
+Lab-unconfirmed (no installed-package run yet): the local refusal errno
+(Linux `EPERM` with the kernel's bound-interface on-link fallback; for IPv6
+the unreachable policy route may answer first, which would keep dual-stack
+Linux guard `unknown`; Windows `WSAEACCES` at ALE; on macOS that the BPF tap
+sees an unguarded probe datagram (`tap_sees_an_unguarded_datagram` lab test,
+one Wi-Fi Mac; other drivers, USB/Thunderbolt Ethernet, VLAN and bridge
+interfaces unconfirmed)); nft JSON rendering across
+nftables versions; `resolvectl` output format; `pfctl -sr` versus `pfctl -nv`
+rendering (a same-count, own-label difference is `unknown`, not `failed`);
+`scutil --dns` rendering of the supplemental entry; WFP enumeration of the
+conditions as installed. A mismatch in any of these reads as `unknown` or, for
+a changed rule set, `failed` (yellow) on a healthy host and needs a lab
+capture to correct.
 
 ## Validation and remaining acceptance
 

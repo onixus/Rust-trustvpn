@@ -1,7 +1,9 @@
 # Exact-commit Linux laboratory evidence
 
-`ci/linux_lab.py` runs the existing service IPC, full-tunnel HTTP/2, HTTP/3 and permitted
-failover scenarios against an immutable source archive. This checks synthetic
+`ci/linux_lab.py` runs the existing service IPC, full-tunnel HTTP/2, HTTP/3, permitted
+failover, always-on automatic recovery (`scripts/recovery-interop.py`) and route-explain
+(`explain`, [issue #32](route-explain.md#validation))
+scenarios against an immutable source archive. This checks synthetic
 traffic in disposable Docker and nested Linux network namespaces. It does not
 establish installed-package, physical-device, signing or update acceptance.
 
@@ -21,8 +23,9 @@ cached on an x86_64 Linux Docker VM. The archive checksum is checked before
 extracting a new fixture binary. The runner uses the existing
 `rtrust-linux-cargo` registry cache and a private Docker build volume for each run;
 `cargo build --locked --offline` fails explicitly if a dependency is absent.
-Only `rtrust-tun` and `rtrust-inspect` are built. Unit tests and strict all-target Clippy check `rtrust-tun` and
-`rtrust-control`. The disposable extracted source receives fresh regular-file
+Only `rtrust-tun`, `rtrust-inspect` and the unpackaged Linux `flow-lab`
+example of `rtrust-tun` are built. Unit tests cover `rtrust-tun`, `rtrust-control` and `rtrust-inspect`; strict
+all-target Clippy checks `rtrust-tun` and `rtrust-control`. The disposable extracted source receives fresh regular-file
 timestamps before the build. Parallel runs never share build outputs, so another
 commit cannot replace binaries between compilation and evidence collection. Source contents remain the archived
 bytes. Test binaries are copied and
@@ -43,7 +46,10 @@ No host network, host PID namespace, Docker socket, host service directory or
 host resolver configuration is mounted. The runner never installs a system
 service or changes host routes/firewall.
 
-Build/image/scenario steps have independent deadlines. Interrupts and failures
+Build/image/scenario steps have independent deadlines. Each lane uses
+`LANE_TIMEOUTS` (default 420 s; longer for lanes that wait through real backoff),
+and the SSH deadline is derived from the image and build limits plus the sum of
+all lane deadlines, so adding a lane cannot silently shorten another. Interrupts and failures
 remove only this run's explicitly named containers, build volume and image. If SSH is lost,
 the local cleanup path stops only the recorded worker whose process command
 still matches this run's temporary directory, then removes its containers.
@@ -56,7 +62,7 @@ Evidence is saved under `dist/lab/SHA-RUN_ID/` (or `--output NEW_DIRECTORY`):
 - `evidence.tar.gz`, containing the source archive, manifest, Dockerfile and
   per-step stdout/stderr logs, including compiler and package versions.
 - Manifest hashes for the runner, all imported packet harnesses, endpoint
-  archive/binary, tool image and all three built binaries.
+  archive/binary, tool image and all four built binaries.
 - `artifact_sha256.json` binding the retained evidence files. Build binaries are
   discarded after recording their hashes.
 

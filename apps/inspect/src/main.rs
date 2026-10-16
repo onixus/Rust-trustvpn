@@ -19,6 +19,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("SERVICE recovered");
         return Ok(());
     }
+    if args.first().is_some_and(|s| s == "--explain-selected") {
+        let (decision, routes) = explain_selected(&args[1..])?;
+        println!("{decision}");
+        println!("{routes}");
+        return Ok(());
+    }
     let path = args
         .first()
         .ok_or("Usage: rtrust-inspect FILE [--probe-http HOST:PORT]")?;
@@ -191,4 +197,143 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Unknown operation".into());
     }
     Ok(())
+}
+
+const EXPLAIN_SELECTED: &str = "Usage: rtrust-inspect --explain-selected IP --include CIDRS \
+[--exclude CIDRS] [--exclude-lan | --lan CIDRS] [--endpoints IPS]";
+
+fn ipv4_list<T: std::str::FromStr>(text: &str) -> Result<Vec<T>, String> {
+    text.split([',', ' '])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().map_err(|_| "Invalid IPv4 list".to_owned()))
+        .collect()
+}
+
+/// Offline desktop selected-IPv4 prediction using the installation subtraction.
+/// No profile, socket, resolver or route change. Returns the decision JSON and,
+/// when every runtime input is known, the prefix set `Selection::routes` would
+/// install. Neither line contains the destination.
+fn explain_selected(
+    args: &[std::ffi::OsString],
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let mut args = args.iter().map(|a| a.to_str().ok_or(EXPLAIN_SELECTED));
+    let destination: std::net::IpAddr = args.next().ok_or(EXPLAIN_SELECTED)??.parse()?;
+    let mut include = None;
+    let mut exclude = "";
+    let mut exclude_lan = false;
+    let mut local: Option<Vec<rtrust_control::Ipv4Net>> = None;
+    let mut endpoints: Option<Vec<std::net::Ipv4Addr>> = None;
+    while let Some(flag) = args.next() {
+        let mut value = || args.next().ok_or(EXPLAIN_SELECTED);
+        match flag? {
+            "--include" => include = Some(value()??),
+            "--exclude" => exclude = value()??,
+            // Requested but unobserved local networks: the prediction is unknown.
+            "--exclude-lan" => exclude_lan = true,
+            // Observed local networks, as the service reads them before Start.
+            "--lan" => {
+                let networks: Vec<rtrust_control::Ipv4Net> = ipv4_list(value()??)?;
+                if networks.iter().any(|n| n.trunc() != *n) {
+                    return Err("Local networks must be canonical CIDRs".into());
+                }
+                exclude_lan = true;
+                local = Some(networks);
+            }
+            "--endpoints" => endpoints = Some(ipv4_list(value()??)?),
+            _ => return Err(EXPLAIN_SELECTED.into()),
+        }
+    }
+    let selection =
+        rtrust_control::Selection::parse(include.ok_or(EXPLAIN_SELECTED)?, exclude, exclude_lan)?;
+    // Linux policy-routes only the desktop UID, so the root service's endpoint
+    // needs no exception (as Native offline explain). Elsewhere it is unknown
+    // unless the caller states the endpoint addresses.
+    let endpoints = endpoints.or_else(|| cfg!(target_os = "linux").then(Vec::new));
+    let context = rtrust_profile::routing::Context {
+        source: rtrust_profile::routing::Source::Local,
+        revision: None,
+    };
+    let decision =
+        selection.explain(destination, endpoints.as_deref(), local.as_deref(), context)?;
+    let routes = match (&endpoints, &local) {
+        (Some(endpoints), _) if !exclude_lan => Some(selection.routes(endpoints, &[])?),
+        (Some(endpoints), Some(local)) => Some(selection.routes(endpoints, local)?),
+        _ => None,
+    };
+    Ok((
+        serde_json::to_string(&decision)?,
+        serde_json::json!({ "routes": routes }).to_string(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::explain_selected;
+    fn run(args: &[&str]) -> (serde_json::Value, serde_json::Value) {
+        let args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+        let (decision, routes) = explain_selected(&args).unwrap();
+        assert!(!decision.contains("198.18.1.1") && !decision.contains("2001:db8"));
+        (
+            serde_json::from_str(&decision).unwrap(),
+            serde_json::from_str(&routes).unwrap(),
+        )
+    }
+    const A: [&str; 4] = [
+        "--include",
+        "198.18.0.0/16,10.0.0.0/8",
+        "--exclude",
+        "198.18.2.0/24",
+    ];
+    #[test]
+    fn requested_lan_without_observation_is_unknown_and_has_no_route_set() {
+        let mut args = vec!["198.18.1.1"];
+        args.extend(A);
+        args.extend(["--exclude-lan", "--endpoints", ""]);
+        let (decision, routes) = run(&args);
+        assert_eq!(decision["action"], "unknown");
+        assert_eq!(decision["reason"], "local_networks_unobserved");
+        assert!(routes["routes"].is_null());
+    }
+    #[test]
+    fn observed_inputs_predict_and_return_installation_prefixes() {
+        for (destination, action, reason) in [
+            ("198.18.1.1", "tunnel", "selected_prefix"),
+            ("198.18.2.1", "direct", "excluded_prefix"),
+            ("10.99.0.1", "direct", "local_network_bypass"),
+            ("203.0.113.1", "direct", "outside_selection"),
+            ("169.254.1.1", "direct", "reserved_address"),
+            ("2001:db8::1", "unknown", "unsupported_family"),
+        ] {
+            let mut args = vec![destination];
+            args.extend(A);
+            args.extend(["--lan", "10.99.0.0/30", "--endpoints", ""]);
+            let (decision, routes) = run(&args);
+            assert_eq!(decision["action"], action, "{destination}");
+            assert_eq!(decision["reason"], reason, "{destination}");
+            assert_eq!(decision["prediction"], true);
+            let routes = routes["routes"].as_array().unwrap();
+            assert!(routes.iter().any(|r| r == "198.18.0.0/23"));
+            assert!(!routes.iter().any(|r| r == "10.99.0.0/30"));
+        }
+    }
+    #[test]
+    fn missing_or_invalid_inputs_are_rejected() {
+        for args in [
+            vec!["198.18.1.1"],
+            vec!["not-an-ip", "--include", "198.18.0.0/16"],
+            vec!["198.18.1.1", "--include", "198.18.0.1/16"],
+            vec![
+                "198.18.1.1",
+                "--include",
+                "198.18.0.0/16",
+                "--lan",
+                "10.99.0.1/30",
+            ],
+            vec!["198.18.1.1", "--include", "198.18.0.0/16", "--unknown"],
+        ] {
+            let args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+            assert!(explain_selected(&args).is_err());
+        }
+    }
 }

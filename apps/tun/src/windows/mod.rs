@@ -1,6 +1,7 @@
 //! Windows SCM service with one SID-authorized lease and bounded IPv4 routing.
 mod firewall;
 mod full;
+mod probe;
 mod routes;
 use rtrust_control::{Command, Request, Response, State, VERSION, read, write};
 use rtrust_engine::Session;
@@ -458,7 +459,7 @@ async fn serve(
         device.clone(),
         &mut worker,
         &mut stop,
-        dns.is_some(),
+        dns,
         (supervisor.as_deref(), freshness),
     )
     .await;
@@ -492,13 +493,27 @@ async fn lease_loop(
     device: Arc<tun_rs::AsyncDevice>,
     worker: &mut Worker,
     stop: &mut watch::Receiver<bool>,
-    full: bool,
+    dns: Option<Ipv4Addr>,
     context: (
         Option<&crate::always_on::Supervisor>,
         Option<rtrust_control::freshness::Deadline>,
     ),
 ) -> Result<Option<rtrust_control::observations::Snapshot>, String> {
     let (supervisor, mut freshness) = context;
+    let full = dns.is_some();
+    let plan = match (dns, device.if_index()) {
+        (Some(dns), Ok(index)) => Some(probe::Plan {
+            index,
+            dns,
+            endpoints: failover
+                .endpoint_addresses()
+                .iter()
+                .filter_map(|a| a.parse::<std::net::SocketAddr>().ok().map(|a| a.ip()))
+                .collect(),
+        }),
+        _ => None,
+    };
+    let mut probes = crate::sysprobe::Runner::default();
     let mut access_expired = false;
     let mut monitor = rtrust_control::observations::Monitor::new(
         if full {
@@ -550,14 +565,18 @@ async fn lease_loop(
         let request = loop {
             tokio::select! {
                 biased;
-                _=async{freshness.as_mut().unwrap().expired().await},if freshness.is_some() && !access_expired=>{worker.stop().await;connecting=Box::pin(std::future::pending());reconnecting=false;access_expired=true;state=State::Blocked;monitor.transition(false,rtrust_control::observations::now_ms());},
+                _=async{freshness.as_mut().unwrap().expired().await},if freshness.is_some() && !access_expired=>{worker.stop().await;connecting=Box::pin(std::future::pending());reconnecting=false;access_expired=true;state=State::Blocked;probes.cancel();monitor.transition(false,rtrust_control::observations::now_ms());},
                 r = &mut pending => break r?,
-                change = netwatch.next() => match change {
-                    crate::netwatch::Change::Network => monitor.network_changed(rtrust_control::observations::now_ms()),
-                    crate::netwatch::Change::Resumed => monitor.resumed(rtrust_control::observations::now_ms()),
+                change = netwatch.next() => {
+                    probes.cancel();
+                    match change {
+                        crate::netwatch::Change::Network => monitor.network_changed(rtrust_control::observations::now_ms()),
+                        crate::netwatch::Change::Resumed => monitor.resumed(rtrust_control::observations::now_ms()),
+                    }
                 },
                 _ = stop.changed() => return Ok(None),
                 unproven = worker.finished(), if state == State::Connected => {
+                    probes.cancel();
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
                     budget.disconnected(connected_since.elapsed(), unproven);
                     if failover.ended(connected_since.elapsed(), std::time::Instant::now()) {
@@ -581,6 +600,7 @@ async fn lease_loop(
                     match result {
                         Ok((session,udp)) => {
                             *worker=Worker::new(tokio::spawn(crate::dataplane::run(session,udp,device.clone(),ADDRESS)));
+                            probes.cancel();
                             state=State::Connected; monitor.transition(true, rtrust_control::observations::now_ms()); connected_since=std::time::Instant::now();
                         },
                         Err(_) => {
@@ -591,6 +611,20 @@ async fn lease_loop(
                             retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                         },
                     }
+                },
+                // Started only by this timer while connected in full mode; Status never probes.
+                tick = probes.next(), if plan.is_some() => match tick {
+                    crate::sysprobe::Tick::Due => if state == State::Connected && !access_expired {
+                        // Permits are re-read: the audit compares against the current candidates.
+                        if let (Some(plan), Ok(permits)) = (plan.clone(), failover.permits()) {
+                            probes.start(monitor.generation(), probe::collect(plan, permits));
+                        } else {
+                            probes.defer();
+                        }
+                    },
+                    crate::sysprobe::Tick::Done(generation, result) => {
+                        monitor.apply_system(generation, result, rtrust_control::observations::now_ms());
+                    },
                 },
             }
         };

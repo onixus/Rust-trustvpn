@@ -1,7 +1,9 @@
-# Состояние реализации — 14 октября 2026
+# Состояние реализации — 16 октября 2026
 
-Workspace: **0.6.1** (desktop update sequence 11, Android
-0.6.1-preview.1 / 60101, iOS 0.6.1 / 60101).
+Workspace: **0.6.2** (desktop update sequence 12, Android
+0.6.2-beta.1 / 60201, iOS 0.6.2 / 60201). Бета [v0.6.2-beta.1](releases/v0.6.2.md)
+содержит только пакеты macOS и Android.
+
 [v0.6.1](releases/v0.6.1.md) опубликован 13 октября из `db8796a`:
 Android APK, Windows installer и macOS packages. Самые новые Linux assets
 (Flatpak и `rtrust-host-0.6.0-7`) — в [v0.6.0](releases/v0.6.0.md), iOS — в v0.5.0. Более новый main `e10cb99` включает #69,
