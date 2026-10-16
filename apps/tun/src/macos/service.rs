@@ -149,6 +149,17 @@ async fn publish(
     Ok(())
 }
 
+/// How long after a (re)connect the data-plane counters are summarised.
+const SUMMARY_DELAY: Duration = Duration::from_secs(30);
+fn summary_after(
+    after: &'static str,
+) -> (tokio::time::Instant, &'static str, crate::stats::Snapshot) {
+    (
+        tokio::time::Instant::now() + SUMMARY_DELAY,
+        after,
+        crate::stats::snapshot(),
+    )
+}
 fn millis(since: Instant) -> u64 {
     u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -839,6 +850,10 @@ async fn connected(
         return Ok(());
     }
     events::record("tunnel_connected");
+    // Numbers only: a bounded data-plane summary after each (re)connect so a
+    // session that proxies nothing is visible without raw traffic capture.
+    let mut summary: Option<(tokio::time::Instant, &'static str, crate::stats::Snapshot)> =
+        Some(summary_after("connect"));
     let mut retry_delay = rtrust_control::recovery::Budget::default();
     let mut connected_since = Instant::now();
     let mut monitor = rtrust_control::observations::Monitor::new(
@@ -900,6 +915,7 @@ async fn connected(
                     let event = *power.borrow_and_update();
                     awake = event.awake;
                     events::record(&format!("power_event awake={awake} generation={}", event.generation));
+                    summary = None;
                     workers.cancel();
                     probes.cancel();
                     restart_pending = true;
@@ -918,6 +934,7 @@ async fn connected(
                 result = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() => {
                     workers.tunnel = None;
                     probes.cancel();
+                    summary = None;
                     if restart_pending { continue; }
                     let degraded = result.as_ref().ok().and_then(crate::dataplane::degraded);
                     if let Some(proven) = degraded { events::record(&format!("transport_degraded proven={proven}")); }
@@ -956,6 +973,7 @@ async fn connected(
                         probes.cancel();
                         monitor.transition(true, rtrust_control::observations::now_ms());
                         events::record("reconnect_complete");
+                        summary = Some(summary_after("reconnect"));
                         continue;
                     }
                     if failover.failed(Instant::now()) {
@@ -965,6 +983,14 @@ async fn connected(
                 request = commands.recv() => {
                     if let Some(request) = request { break request; }
                     return Err("Service supervisor stopped".into());
+                },
+                _ = tokio::time::sleep_until(summary.map(|s| s.0).unwrap_or_else(tokio::time::Instant::now)), if summary.is_some() => {
+                    let (_, after, base) = summary.take().unwrap();
+                    events::record(&format!(
+                        "dataplane_summary after={after} window_s={} {}",
+                        SUMMARY_DELAY.as_secs(),
+                        crate::stats::snapshot().since(&base).render()
+                    ));
                 },
                 // Started only by this timer while awake and connected; Status never probes.
                 tick = probes.next(), if plan.is_some() => match tick {

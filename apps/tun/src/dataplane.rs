@@ -24,11 +24,20 @@ pub trait PacketDevice: Send + Sync {
         &self,
         packet: &[u8],
     ) -> impl std::future::Future<Output = std::io::Result<usize>> + Send;
+    /// Non-blocking read; `WouldBlock` when nothing is queued. Devices that
+    /// cannot peek report `WouldBlock`, which disables backlog discard.
+    fn try_recv(&self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::WouldBlock.into())
+    }
 }
 #[cfg(not(target_os = "ios"))]
 impl PacketDevice for tun_rs::AsyncDevice {
     async fn recv(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
         tun_rs::AsyncDevice::recv(self, buffer).await
+    }
+    #[cfg(unix)]
+    fn try_recv(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        tun_rs::AsyncDevice::try_recv(self, buffer)
     }
     async fn send(&self, packet: &[u8]) -> std::io::Result<usize> {
         tun_rs::AsyncDevice::send(self, packet).await
@@ -51,6 +60,30 @@ pub fn degraded<T>(result: &Result<T, Box<dyn std::error::Error + Send + Sync>>)
         rtrust_engine::Error::Degraded { proven } => Some(*proven),
         _ => None,
     }
+}
+
+/// Packets queued on the device before this session existed belong to an
+/// earlier one: after sleep they are mostly SYNs of host sockets that have
+/// already given up. Opening upstream streams for them wastes the fresh
+/// session's capacity, and their resets would then occupy flow slots. TCP and
+/// DNS retransmit what still matters. Bounded so a busy device cannot starve
+/// the session start.
+pub const BACKLOG_LIMIT: usize = 4096;
+fn discard_backlog<D: PacketDevice>(device: &D) -> usize {
+    let mut buffer = [0; 65536];
+    let mut discarded = 0;
+    while discarded < BACKLOG_LIMIT {
+        match device.try_recv(&mut buffer) {
+            Ok(_) => discarded += 1,
+            Err(_) => break,
+        }
+    }
+    if discarded > 0 {
+        crate::stats::COUNTERS
+            .backlog_discarded
+            .fetch_add(discarded as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+    discarded
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -90,6 +123,7 @@ pub async fn run_with_policy<D: PacketDevice>(
     mut updates: Option<&mut crate::policy::Receiver>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dns = std::sync::Arc::new(dns);
+    discard_backlog(device.as_ref());
     let mut dns_jobs = JoinSet::new();
     let mut direct_jobs = JoinSet::new();
     let mut direct_flows: HashMap<packet::Key, mpsc::Sender<Vec<u8>>> = HashMap::new();
@@ -332,7 +366,13 @@ async fn udp_stream(
                 let Some(d) = outgoing else { return Ok(()); };
                 mappings.retain(|_, seen: &mut Instant| seen.elapsed() < Duration::from_secs(60));
                 let key = (d.source, d.destination);
-                if !mappings.contains_key(&key) && mappings.len() >= 256 { continue; }
+                if !mappings.contains_key(&key) && mappings.len() >= 256 {
+                    // A full table must not refuse new flows until old ones
+                    // age out: evict the least recently used mapping instead.
+                    let Some(oldest) = mappings.iter().min_by_key(|(_, seen)| **seen).map(|(k, _)| *k) else { continue; };
+                    mappings.remove(&oldest);
+                    crate::stats::COUNTERS.udp_evicted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 mappings.insert(key, Instant::now());
                 let frame = udp::encode(&d, "rtrust-tun")?;
                 tokio::time::timeout(Duration::from_secs(10), writer.write_all(&frame)).await.map_err(|_| rtrust_engine::Error::Protocol)??;
@@ -430,5 +470,48 @@ mod tests {
             assert_eq!(super::degraded(&other), None);
             assert!(!super::unproven(&other));
         }
+    }
+}
+
+#[cfg(test)]
+mod backlog_tests {
+    use super::*;
+    struct Queued(std::sync::Mutex<usize>);
+    impl PacketDevice for Queued {
+        async fn recv(&self, _: &mut [u8]) -> std::io::Result<usize> {
+            std::future::pending().await
+        }
+        async fn send(&self, p: &[u8]) -> std::io::Result<usize> {
+            Ok(p.len())
+        }
+        fn try_recv(&self, _: &mut [u8]) -> std::io::Result<usize> {
+            let mut left = self.0.lock().unwrap();
+            if *left == 0 {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            *left -= 1;
+            Ok(40)
+        }
+    }
+    #[test]
+    fn backlog_discard_is_bounded_and_counted() {
+        let before = crate::stats::snapshot();
+        assert_eq!(discard_backlog(&Queued(std::sync::Mutex::new(7))), 7);
+        let flooded = Queued(std::sync::Mutex::new(BACKLOG_LIMIT * 2));
+        assert_eq!(discard_backlog(&flooded), BACKLOG_LIMIT);
+        assert_eq!(*flooded.0.lock().unwrap(), BACKLOG_LIMIT);
+        assert!(
+            crate::stats::snapshot().since(&before).backlog_discarded >= 7 + BACKLOG_LIMIT as u64
+        );
+        struct Blind;
+        impl PacketDevice for Blind {
+            async fn recv(&self, _: &mut [u8]) -> std::io::Result<usize> {
+                std::future::pending().await
+            }
+            async fn send(&self, p: &[u8]) -> std::io::Result<usize> {
+                Ok(p.len())
+            }
+        }
+        assert_eq!(discard_backlog(&Blind), 0);
     }
 }
