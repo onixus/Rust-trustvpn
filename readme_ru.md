@@ -6,25 +6,29 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 
 Клиент реализует транспорт самостоятельно и **не является оболочкой** над официальными CLI TrustTunnel или Hysteria.
 
-> **Статус проекта: development preview, 15 октября 2026 года.**
+> **Статус проекта: development preview, 16 октября 2026 года.**
 >
-> Workspace — **0.6.1**, update sequence 11. [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) опубликован 13 октября из `db8796a`. Изменения, перечисленные [ниже](#изменения-main-после-v061), вошли в main после тега и отсутствуют в опубликованных пакетах 0.6.1. Публикация не доказывает приёмку установленного пакета или production-ready статус. См. [текущее состояние и открытые gates](docs/project-status.md). [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0), опубликованный в тот же день, — самый новый релиз с Linux-пакетами; архивы iOS есть только в [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0).
+> Workspace — **0.6.2**, update sequence 12. [v0.6.2-beta.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2-beta.1) — бета pre-release только с пакетами macOS и Android; изменения перечислены [ниже](#что-нового-в-062-beta). [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) (13 октября, `db8796a`) остаётся последним полным релизом и источником Windows installer. Публикация не доказывает приёмку установленного пакета или production-ready статус. См. [текущее состояние и открытые gates](docs/project-status.md). [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0), опубликованный в тот же день, — самый новый релиз с Linux-пакетами; архивы iOS есть только в [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0).
 
 ## Скачать
 
 | Платформа | Последний опубликованный набор | Ограничения |
 | --- | --- | --- |
 | Windows x64 | Installer из [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) | Без Authenticode-подписи. Update/rollback именно этого пакета не принят; лабораторная репетиция 9 → 10 с откатом относится к 0.6.0. |
-| macOS Apple Silicon | UI Choices, preview, bundled/system candidate DMG/PKG из v0.6.1 | Ad-hoc sealed, без Developer ID и notarization. Приёмка системного VPN не завершена, автоматическое обновление не промотировано. |
-| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` из v0.6.1 | Версия исходников 0.6.1-preview.1 / 60101; ключ релиза введён в 0.6.0. 0.6.0 обновляется поверх; 0.5.x и старше нужно переустановить, локальные профили при этом удаляются. |
+| macOS Apple Silicon | System candidate DMG/PKG (Native, WebView, Both) из [v0.6.2-beta.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2-beta.1) (бета); прежний набор — v0.6.1 | Ad-hoc sealed, без Developer ID и notarization. Приёмка системного VPN не завершена, автоматическое обновление не промотировано. |
+| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` из [v0.6.2-beta.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2-beta.1) (бета) | 0.6.2-beta.1 / 60201; ключ релиза введён в 0.6.0. 0.6.0 и 0.6.1 обновляются поверх; 0.5.x и старше нужно переустановить, локальные профили при этом удаляются. |
 | Linux x86_64, Wayland | Native / WebView / Both Flatpak и `rtrust-host-0.6.0-7` из v0.6.0 | В v0.6.1 Linux-пакетов нет. Системному VPN нужен отдельный host package. |
 | iOS arm64 / Simulator | Архивы из [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0) | В v0.6.1 нет iOS assets. Device archive требует Apple signing и не является готовым IPA. |
 
-В v0.6.1 есть SHA256SUMS и native source identity/manifest. Наличие файлов не заменяет проверку подписи, provenance или канала обновлений. [Объём релиза](docs/releases/v0.6.1.md).
+В v0.6.1 и v0.6.2-beta.1 есть SHA256SUMS. Наличие файлов не заменяет проверку подписи, provenance или канала обновлений. Объём релизов: [v0.6.2-beta.1](docs/releases/v0.6.2.md), [v0.6.1](docs/releases/v0.6.1.md).
 
-## Изменения main после v0.6.1
+## Что нового в 0.6.2 beta
 
-Пока не вошли ни в один опубликованный пакет:
+В пакетах v0.6.2-beta.1 для macOS и Android (в Windows и Linux пакетах пока нет):
+
+- **Доказательство защиты на macOS** ([#96](https://github.com/onixus/Rust-trustvpn/pull/96)). PF отбрасывает исходящие пакеты молча, поэтому служба macOS доказывает kill switch через BPF-захват только на чтение с контрольным кадром в каждом прогоне, а не по errno. На установленном пакете строки «Защита» и DNS в режиме «весь компьютер» зелёные, а сломанная защита даёт failed.
+- **Жизненный цикл macOS** ([#80](https://github.com/onixus/Rust-trustvpn/pull/80), [#94](https://github.com/onixus/Rust-trustvpn/pull/94), [#95](https://github.com/onixus/Rust-trustvpn/pull/95)). Status отвечает во время Stop, а сам Stop на тестовом Mac занимает меньше половины секунды; длительности Stop и reconnect пишутся в `events.log`; PF-состояния, оставленные другими VPN (Cisco AnyConnect), сбрасываются при подключении вместо отказа.
+- **Восстановление Android после сна** ([#92](https://github.com/onixus/Rust-trustvpn/pull/92)). Бюджет переподключений возвращается после стабильной сессии, таймеры учитывают время сна, при пробуждении проверяется транспорт.
 
 - **Проверки на стороне desktop-службы** ([#84](https://github.com/onixus/Rust-trustvpn/pull/84), [#91](https://github.com/onixus/Rust-trustvpn/pull/91)). В режиме «весь компьютер» службы Linux, macOS и Windows каждые 15 секунд, пока VPN подключён, только читая состояние, проверяют свою защиту (kill switch) и DNS туннеля. Транспорт подтверждается ответом DNS через туннель. Результаты действуют 30 секунд: без свежих доказательств зелёный статус возвращается к синему. В режиме выбранных сетей DNS и защита помечаются как неподдерживаемые, статус остаётся синим. См. [наблюдения VPN](docs/vpn-observations.md#service-system-probes-issue-81).
 - **Обнаружение мёртвой сессии** ([#69](https://github.com/onixus/Rust-trustvpn/pull/69)). Сессия, которая не пропускает трафик, проваливает health check и переподключается защищённым путём; см. [HTTP/3](docs/http3.md#dead-session-detection). Приёмка sleep/roam на установленном macOS остаётся открытой в #62.
@@ -175,7 +179,7 @@ SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS
 5. Для fail-closed поведения после гибели процесса включите в Android **Always-on VPN** и **Block connections without VPN**.
 6. Server profiles можно регистрировать и синхронизировать через portal integration.
 
-В текущих исходниках заданы Android minSdk 29, targetSdk 36, versionCode 60101 и versionName 0.6.1-preview.1 ([v0.6.1](docs/releases/v0.6.1.md)); APK подписывается релизным ключом, введённым в v0.6.0, и не обновляет установки 0.5.0 и старше.
+В текущих исходниках заданы Android minSdk 29, targetSdk 36, versionCode 60201 и versionName 0.6.2-beta.1 ([v0.6.2](docs/releases/v0.6.2.md)); APK подписывается релизным ключом, введённым в v0.6.0, и не обновляет установки 0.5.0 и старше.
 
 См. [Android](docs/android.md) и [обмен профилями](docs/portal.md).
 
