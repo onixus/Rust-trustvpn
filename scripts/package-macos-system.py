@@ -22,8 +22,6 @@ def main():
     parser.add_argument('--pkg-only', action='store_true', help='Create and verify the PKG without a disk image')
     parser.add_argument('--binary-dir', type=pathlib.Path,
                         help='Use binaries from a verified CI build')
-    parser.add_argument('--bundled-service', action='store_true',
-                        help='Use the separately named bundled-candidate output')
     parser.add_argument('--ui',choices=['native','webview','both'],default='native')
     args = parser.parse_args()
     frontend='rtrust-webview' if args.ui=='webview' else 'rtrust-native'
@@ -33,8 +31,6 @@ def main():
         if run('/usr/bin/lipo', '-archs', str(binary / name)).strip() != b'arm64':
             raise RuntimeError('Expected macOS arm64 binary: ' + name)
     output = ROOT / 'dist/R-TrustTunnel-macOS-arm64-system-candidate.dmg'
-    if args.bundled_service:
-        output = output.with_name('R-TrustTunnel-macOS-arm64-bundled-candidate.dmg')
     if args.ui!='native':output=output.with_name(output.stem+'-'+args.ui+output.suffix)
     output.parent.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='rtrust-system-package-') as temporary:
