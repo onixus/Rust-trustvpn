@@ -15,7 +15,7 @@ The client implements its own transport and does **not** wrap the official Trust
 | Platform | Latest published artifact set | Notes |
 | --- | --- | --- |
 | Windows x64 | Installer from [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) | Artifact presence verified; Authenticode and exact-package update/rollback acceptance were not verified in this refresh. |
-| macOS Apple Silicon | UI Choices, preview, bundled/system candidate DMG/PKG from v0.6.1 | Candidate naming remains; Developer ID/notarization and system-VPN acceptance are not established by publication. |
+| macOS Apple Silicon | `R-TrustTunnel-macOS-arm64-UI-Choices.dmg` from v0.6.1: one DMG with Native, WebView and Both PKG installers | Install exactly one PKG. Unsigned candidate: Developer ID/notarization and system-VPN acceptance are not established by publication. Other macOS files in v0.6.1 duplicate this DMG or are obsolete. |
 | Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` from v0.6.1 | Source version 0.6.1-preview.1 / 60101; release key introduced in 0.6.0. Older 0.5.x installations require reinstall. Artifact certificate was not rechecked here. |
 | Linux x86_64, Wayland | Native / WebView / Both Flatpaks and `rtrust-host-0.6.0-7` from v0.6.0 | v0.6.1 has no Linux packages. System VPN needs the separate host package. |
 | iOS arm64 / Simulator | Archives from [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0) | No iOS assets in v0.6.1. Device archive requires Apple signing and is not an installable IPA. |

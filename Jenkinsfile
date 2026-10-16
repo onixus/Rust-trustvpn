@@ -63,7 +63,6 @@ pipeline {
               python3 scripts/package-preview.py
               python3 ci/run.py macos-dmg python3 scripts/package-macos-dmg.py
               python3 ci/run.py macos-system-package python3 scripts/package-macos-system.py
-              python3 ci/run.py macos-bundled-package python3 scripts/package-macos-system.py --bundled-service
               python3 ci/run.py macos-ui-choices python3 scripts/package-macos-ui-choices.py --binary-dir target/release
             '''
             stash name: 'macos-bins', includes: 'target/release/rtrust-inspect'

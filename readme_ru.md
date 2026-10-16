@@ -15,7 +15,7 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 | Платформа | Последний опубликованный набор | Ограничения |
 | --- | --- | --- |
 | Windows x64 | Installer из [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) | Наличие артефакта проверено; Authenticode и update/rollback точного пакета в этой актуализации не проверялись. |
-| macOS Apple Silicon | UI Choices, preview, bundled/system candidate DMG/PKG из v0.6.1 | Пакеты остаются кандидатами; публикация не подтверждает Developer ID/notarization или system-VPN acceptance. |
+| macOS Apple Silicon | `R-TrustTunnel-macOS-arm64-UI-Choices.dmg` из v0.6.1: один DMG с PKG-установщиками Native, WebView и Both | Установите ровно один PKG. Неподписанный кандидат: публикация не подтверждает Developer ID/notarization или system-VPN acceptance. Остальные macOS-файлы в v0.6.1 дублируют этот DMG или устарели. |
 | Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` из v0.6.1 | Версия исходников 0.6.1-preview.1 / 60101; ключ релиза введён в 0.6.0. Для старых 0.5.x нужен reinstall. Сертификат артефакта здесь повторно не проверялся. |
 | Linux x86_64, Wayland | Native / WebView / Both Flatpak и `rtrust-host-0.6.0-7` из v0.6.0 | В v0.6.1 Linux-пакетов нет. Системному VPN нужен отдельный host package. |
 | iOS arm64 / Simulator | Архивы из [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0) | В v0.6.1 нет iOS assets. Device archive требует Apple signing и не является готовым IPA. |
