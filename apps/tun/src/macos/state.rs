@@ -223,6 +223,8 @@ impl Guard {
         let script = firewall::policy(uid, full, &j.networks, permits);
         j.pf_token = Some(firewall::install(Path::new(DIRECTORY), &script)?);
         save(&j, false)?;
+        // After the token is journaled, so a failure stays recoverable.
+        firewall::flush_states()?;
         routes::ensure(&j.routes)?;
         if let Some(resolver) = tunnel_dns {
             dns::install(uid, resolver)?;
