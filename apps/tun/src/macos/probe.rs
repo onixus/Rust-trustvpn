@@ -23,10 +23,13 @@ pub(super) struct Plan {
     pub endpoints: Vec<IpAddr>,
 }
 pub(super) async fn collect(plan: Plan) -> SystemProbe {
+    // Dropping the run (cancel, Stop, sleep, deadline) clears `live`, so a
+    // detached capture thread sends nothing afterwards.
+    let (_fence, live) = sysprobe::fence();
     sysprobe::evidence(async {
         let (audit, attempts, dns) = tokio::join!(
             sysprobe::part(Audit::Unknown, audit(&plan)),
-            sysprobe::part(vec![Attempt::Unknown], attempts(&plan)),
+            sysprobe::part(vec![Attempt::Unknown], attempts(&plan, &live)),
             sysprobe::part(Dns::UNKNOWN, dns(&plan)),
         );
         (dns, audit, attempts)
@@ -163,9 +166,16 @@ async fn blocked_packets(uid: u32) -> Option<u64> {
 /// 128/1, an unscoped physical default no longer answers interface-scoped
 /// lookups for far targets, so 192.0.2.1 failed in routing (ENETUNREACH)
 /// before PF saw it; the gateway is on-link and its scoped route is checked
-/// first. PF's drop is silent, so the verdict is the tap, not the errno.
-/// No route, an endpoint address or an unusable tap is Unknown.
-async fn onlink(plan: &Plan, interface: &str, gateway: Option<IpAddr>) -> Attempt {
+/// first. PF's drop is silent, so the verdict is the tap, not the errno: the
+/// tap must also see another frame this host sent there in the same window
+/// (a tap that sees nothing proves nothing). No route, an endpoint address,
+/// an unusable tap or a quiet interface is Unknown.
+async fn onlink(
+    plan: &Plan,
+    live: &sysprobe::Live,
+    interface: &str,
+    gateway: Option<IpAddr>,
+) -> Attempt {
     let Some(gateway) = gateway else {
         return Attempt::Unknown;
     };
@@ -207,7 +217,9 @@ async fn onlink(plan: &Plan, interface: &str, gateway: Option<IpAddr>) -> Attemp
     };
     let before = blocked_packets(plan.uid).await;
     let name = interface.to_owned();
-    let Some(watch) = CAPTURE.spawn(move || capture::watched_send(&name, socket, target)) else {
+    let live = live.clone();
+    let Some(watch) = CAPTURE.spawn(move || capture::watched_send(&name, socket, target, &live))
+    else {
         return Attempt::Unknown;
     };
     let seen = match tokio::time::timeout(sysprobe::PART / 2, watch).await {
@@ -218,9 +230,11 @@ async fn onlink(plan: &Plan, interface: &str, gateway: Option<IpAddr>) -> Attemp
     macos::verdict(seen, before, after)
 }
 /// Every interface with a default route refuses a datagram to its own
-/// gateway. Without an IPv6 default nothing is sent: a silent PF drop and a
+/// gateway. Attempts run one after another (one capture lane), each up to
+/// about a second, inside the part budget: hosts with more than two or three
+/// physical default routes run out of it and read Unknown. Without an IPv6 default nothing is sent: a silent PF drop and a
 /// missing path look alike, and the family has no path there to leak by.
-async fn attempts(plan: &Plan) -> Vec<Attempt> {
+async fn attempts(plan: &Plan, live: &sysprobe::Live) -> Vec<Attempt> {
     if sysprobe::collides(&plan.endpoints) {
         return vec![Attempt::Unknown];
     }
@@ -229,9 +243,9 @@ async fn attempts(plan: &Plan) -> Vec<Attempt> {
     };
     let mut attempts = Vec::new();
     for (interface, gateway) in v4 {
-        attempts.push(onlink(plan, &interface, gateway).await);
+        attempts.push(onlink(plan, live, &interface, gateway).await);
         attempts.push(match v6.iter().find(|(i, _)| *i == interface) {
-            Some((_, gateway)) => onlink(plan, &interface, *gateway).await,
+            Some((_, gateway)) => onlink(plan, live, &interface, *gateway).await,
             None => Attempt::Absent,
         });
     }
