@@ -1,7 +1,7 @@
 //! macOS facts for the service probe: own PF anchor, dynamic DNS entry,
 //! routes and two kinds of datagrams. Read-only: pfctl only lists or parses
 //! (`-n`), the DNS entry is compared, never installed.
-use super::{device::DEVICE, dns, firewall, route_table, state::DIRECTORY};
+use super::{capture, device::DEVICE, dns, firewall, route_table, state::DIRECTORY};
 use crate::sysprobe::{self, Attempt, Audit, Dns, Foreign, Path, macos};
 use rtrust_control::observations::SystemProbe;
 use std::{
@@ -12,6 +12,8 @@ use std::{
 const PFCTL: &str = "/sbin/pfctl";
 const MAX: usize = 64 * 1024;
 static LANE: sysprobe::Lane = sysprobe::Lane::new();
+/// The BPF watch blocks for up to half a second; never stack two.
+static CAPTURE: sysprobe::Lane = sysprobe::Lane::new();
 
 #[derive(Clone)]
 pub(super) struct Plan {
@@ -21,10 +23,13 @@ pub(super) struct Plan {
     pub endpoints: Vec<IpAddr>,
 }
 pub(super) async fn collect(plan: Plan) -> SystemProbe {
+    // Dropping the run (cancel, Stop, sleep, deadline) clears `live`, so a
+    // detached capture thread sends nothing afterwards.
+    let (_fence, live) = sysprobe::fence();
     sysprobe::evidence(async {
         let (audit, attempts, dns) = tokio::join!(
             sysprobe::part(Audit::Unknown, audit(&plan)),
-            sysprobe::part(vec![Attempt::Unknown], attempts(&plan)),
+            sysprobe::part(vec![Attempt::Unknown], attempts(&plan, &live)),
             sysprobe::part(Dns::UNKNOWN, dns(&plan)),
         );
         (dns, audit, attempts)
@@ -103,7 +108,7 @@ async fn audit(plan: &Plan) -> Audit {
         None => Audit::Unknown,
     }
 }
-fn socket(v6: bool, interface: &str) -> Option<std::net::UdpSocket> {
+pub(super) fn socket(v6: bool, interface: &str) -> Option<std::net::UdpSocket> {
     let socket = std::net::UdpSocket::bind(if v6 { "[::]:0" } else { "0.0.0.0:0" }).ok()?;
     let name = std::ffi::CString::new(interface).ok()?;
     let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
@@ -130,28 +135,116 @@ fn socket(v6: bool, interface: &str) -> Option<std::net::UdpSocket> {
     socket.set_nonblocking(true).ok()?;
     Some(socket)
 }
-async fn defaults(v6: bool) -> Option<Vec<String>> {
+/// Physical interfaces with a default route, each with its own gateway
+/// (None when the gateway is not a usable address, e.g. `link#N`).
+async fn defaults(v6: bool) -> Option<Vec<(String, Option<IpAddr>)>> {
     let table = text(
         "/usr/sbin/netstat",
         &["-rn", "-f", if v6 { "inet6" } else { "inet" }],
     )
     .await?;
-    let mut interfaces = Vec::new();
+    let mut interfaces: Vec<(String, Option<IpAddr>)> = Vec::new();
     for entry in route_table::parse(&table).ok()? {
         if entry.destination == "default"
             && !entry.interface.starts_with("utun")
             && entry.interface != "lo0"
-            && !interfaces.contains(&entry.interface)
+            && !interfaces.iter().any(|(i, _)| *i == entry.interface)
         {
-            interfaces.push(entry.interface);
+            let gateway = macos::gateway(&entry.gateway, &entry.interface);
+            interfaces.push((entry.interface, gateway));
         }
     }
     (interfaces.len() <= 8).then_some(interfaces)
 }
-/// Every interface with a (scoped) default route refuses a datagram bound to
-/// it. pf's drop on output is expected to surface as EHOSTUNREACH; with a
-/// scoped default present, routing cannot be the cause. Lab-unconfirmed.
-async fn attempts(plan: &Plan) -> Vec<Attempt> {
+/// Our final block rule's packet counter, read back without changes.
+async fn blocked_packets(uid: u32) -> Option<u64> {
+    let text = text(PFCTL, &["-a", firewall::ANCHOR, "-vsr"]).await?;
+    macos::block_packets(&text, &format!("label \"rtrust-{uid}\""))
+}
+/// A datagram bound to `interface` and sent to that interface's own default
+/// gateway, watched on the interface's BPF tap. Once utun owns 0/1 and
+/// 128/1, an unscoped physical default no longer answers interface-scoped
+/// lookups for far targets, so 192.0.2.1 failed in routing (ENETUNREACH)
+/// before PF saw it; the gateway is on-link and its scoped route is checked
+/// first. PF's drop is silent, so the verdict is the tap, not the errno: the
+/// tap must also see another frame this host sent there in the same window
+/// (a tap that sees nothing proves nothing). No route, an endpoint address,
+/// an unusable tap or a quiet interface is Unknown.
+async fn onlink(
+    plan: &Plan,
+    live: &sysprobe::Live,
+    interface: &str,
+    gateway: Option<IpAddr>,
+) -> Attempt {
+    let Some(gateway) = gateway else {
+        return Attempt::Unknown;
+    };
+    // An endpoint permit would pass it: that tests the exemption, not the guard.
+    if plan.endpoints.contains(&gateway) {
+        return Attempt::Unknown;
+    }
+    let v6 = gateway.is_ipv6();
+    let name = std::ffi::CString::new(interface).ok();
+    let index = name.map_or(0, |name| unsafe { libc::if_nametoindex(name.as_ptr()) });
+    if index == 0 {
+        return Attempt::Unknown;
+    }
+    let address = match gateway {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("{ip}%{interface}"),
+    };
+    let family = if v6 { "-inet6" } else { "-inet" };
+    let lookup = text(
+        "/sbin/route",
+        &["-n", "get", family, "-ifscope", interface, &address],
+    )
+    .await;
+    if lookup
+        .as_deref()
+        .and_then(macos::route_interface)
+        .as_deref()
+        != Some(interface)
+    {
+        return Attempt::Unknown;
+    }
+    let port = sysprobe::TARGET_V4.port();
+    let target = match gateway {
+        IpAddr::V4(ip) => SocketAddr::new(ip.into(), port),
+        IpAddr::V6(ip) => std::net::SocketAddrV6::new(ip, port, 0, index).into(),
+    };
+    // One `. IN NS` query into the tunnel: its transport leaves on the
+    // physical interface as the control frame. The reply is not awaited.
+    let tunnel = socket(false, DEVICE);
+    let resolver = SocketAddr::new(plan.dns.into(), 53);
+    let stimulus = move || {
+        if let Some(tunnel) = tunnel {
+            let _ = tunnel.send_to(&sysprobe::query(rand::random()), resolver);
+        }
+    };
+    let Some(socket) = socket(v6, interface) else {
+        return Attempt::Unknown;
+    };
+    let before = blocked_packets(plan.uid).await;
+    let name = interface.to_owned();
+    let live = live.clone();
+    let Some(watch) =
+        CAPTURE.spawn(move || capture::watched_send(&name, socket, target, &live, stimulus))
+    else {
+        return Attempt::Unknown;
+    };
+    let seen = match tokio::time::timeout(sysprobe::PART / 2, watch).await {
+        Ok(Ok(seen)) => seen,
+        _ => macos::Seen::Unknown,
+    };
+    let after = blocked_packets(plan.uid).await;
+    macos::verdict(seen, before, after)
+}
+/// Every interface with a default route refuses a datagram to its own
+/// gateway. Attempts run one after another (one capture lane), each up to
+/// about a second, inside the part budget: hosts with more than two or three
+/// physical default routes run out of it and read Unknown. Without an IPv6 default nothing is sent: a silent PF drop and a
+/// missing path look alike, and the family has no path there to leak by.
+async fn attempts(plan: &Plan, live: &sysprobe::Live) -> Vec<Attempt> {
     if sysprobe::collides(&plan.endpoints) {
         return vec![Attempt::Unknown];
     }
@@ -159,24 +252,12 @@ async fn attempts(plan: &Plan) -> Vec<Attempt> {
         return vec![Attempt::Unknown];
     };
     let mut attempts = Vec::new();
-    for interface in v4 {
-        attempts.push(match socket(false, &interface) {
-            Some(socket) => sysprobe::attempt(
-                sysprobe::send(&socket, sysprobe::TARGET_V4),
-                &[libc::EHOSTUNREACH],
-                &[],
-            ),
-            None => Attempt::Unknown,
+    for (interface, gateway) in v4 {
+        attempts.push(onlink(plan, live, &interface, gateway).await);
+        attempts.push(match v6.iter().find(|(i, _)| *i == interface) {
+            Some((_, gateway)) => onlink(plan, live, &interface, *gateway).await,
+            None => Attempt::Absent,
         });
-        // EHOSTUNREACH is a PF refusal only with a scoped default present.
-        let scoped = v6.contains(&interface);
-        let blocked: &[i32] = if scoped { &[libc::EHOSTUNREACH] } else { &[] };
-        attempts.push(sysprobe::v6_attempt(
-            scoped,
-            socket(true, &interface).map(|socket| sysprobe::send(&socket, sysprobe::TARGET_V6)),
-            blocked,
-            &[libc::EHOSTUNREACH, libc::ENETUNREACH, libc::EADDRNOTAVAIL],
-        ));
     }
     attempts
 }

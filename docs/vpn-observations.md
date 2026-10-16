@@ -180,6 +180,29 @@ check `unknown` with `check_unavailable`.
   is `unknown`); only without one does IPv6 count as absent. Any missing/changed
   rule or a datagram that leaves is `failed`; everything else is `unknown`.
   The probe socket never carries the transport mark or an endpoint address.
+  **macOS differs** (installed package, macOS 26.5.2, full mode): PF drops
+  output silently, so `sendto` returns success while nothing leaves (tcpdump
+  on en0 empty, our block rule's packet counter up), and with the tunnel up an
+  unscoped physical default no longer serves interface-scoped lookups for far
+  targets, so `192.0.2.1` fails with `ENETUNREACH` in routing before PF. The
+  macOS probe therefore sends to the interface's own default gateway (port 9;
+  IPv6 only a link-local gateway of that interface, without one IPv6 is
+  absent and nothing is sent) after `route -n get -ifscope` confirms the
+  scoped route, and watches the interface on a read-only BPF tap (`/dev/bpf*`,
+  SEESENT read back, Ethernet only, a filter keeping frames whose source MAC
+  is the interface's own, i.e. this host's output there). The datagram on the
+  wire is `failed`. A refusal needs all of: `sendto` succeeded (an errno is
+  routing or ARP, not PF), our datagram absent for 300 ms, **another frame
+  this host sent on that interface seen within 1 s** (the per-run control
+  that the tap sees output at all; ARP and ICMPv6 neighbour discovery do not
+  count, as a probe queued behind resolution could leave late: right after
+  our datagram the service sends
+  one `. IN NS` query into the tunnel, whose transport to the endpoint leaves
+  on that interface), no BPF drops, and our final `block drop out`
+  rule counting more packets (`pfctl -vsr`). Anything else (no route,
+  `link#N` gateway, an endpoint gateway, no tap, a quiet interface) is
+  `unknown`. If the guard is broken, that one byte reaches the LAN gateway's
+  discard port.
 - **DNS** is `passed` only if the tunnel resolver configuration is the
   service's own (Linux resolved link `rtrust0`: that server, `~.`,
   default-route; macOS our SCDynamicStore entry, compared not installed, and
@@ -222,13 +245,31 @@ Known limitations of the probes (accepted, fail-closed: each reads as
 - **Large macOS route tables.** `netstat -rn` output over 64 KiB, or more than
   eight physical default-route interfaces, makes the bypass check
   `unknown`; such hosts never reach a `passed` guard.
-- **Refusal errnos are unverified.** `EPERM` (Linux), `EHOSTUNREACH` (macOS
-  PF) and `WSAEACCES` (Windows ALE) are the expected local refusals but have
-  no installed-package capture yet (lab gate below). Another errno is
-  `unknown`.
-- **A send already in progress.** On Windows a datagram whose send call had
-  started when its run was dropped can still complete; every later one is
-  suppressed. Other platforms run no send outside the polled run.
+- **macOS bypass budget.** The macOS attempts run one after another on one
+  capture lane within the 4 s part budget. A passing attempt takes about
+  0.4 s (route lookup, two `pfctl -vsr`, 300 ms once the control is in); one
+  still waiting for its control takes up to about 1.1 s. Two dual-stack
+  physical interfaces (four attempts) fit when controls arrive; more, or
+  slow controls, run the part out and the guard is `unknown`, not `passed`.
+- **Missing macOS control.** If the tunnel query's transport does not leave
+  on the probed interface within 1 s (transport via another interface, a
+  stalled engine) the control is missing and the guard reads `unknown` for
+  that run. Without the query an idle tunnel did exactly that in 2 of 5 runs
+  on the lab Mac, which also turned DNS `failed` (a foreign scoped resolver
+  needs a `passed` guard).
+- **Refusal errnos are unverified.** `EPERM` (Linux) and `WSAEACCES` (Windows
+  ALE) are the expected local refusals but have no installed-package capture
+  yet (lab gate below). Another errno is `unknown`. macOS uses no errno (see
+  Guard above).
+- **macOS block counter is shared.** Other traffic our guard drops (for
+  example mDNS) also counts, so in full mode it almost always grows; it only
+  shows PF dropped something meanwhile, never our datagram, and does not
+  detect a blind tap. That is the per-run control frame's job.
+- **A send already in progress.** On Windows and macOS sends run on a
+  detached blocking thread that checks the run is still live right before
+  sending; a datagram whose send call had started when its run was dropped
+  can still complete, every later one is suppressed. Linux runs no send
+  outside the polled run.
 - **WFP enumeration rights.** The read-back sees only filters the service may
   enumerate; a filter hidden by its security descriptor is not compared.
   More than 65 536 enumerated or 4 096 kept filters reads `unknown`.
@@ -240,8 +281,10 @@ Known limitations of the probes (accepted, fail-closed: each reads as
 Lab-unconfirmed (no installed-package run yet): the local refusal errno
 (Linux `EPERM` with the kernel's bound-interface on-link fallback; for IPv6
 the unreachable policy route may answer first, which would keep dual-stack
-Linux guard `unknown`; macOS
-`EHOSTUNREACH` from PF, Windows `WSAEACCES` at ALE); nft JSON rendering across
+Linux guard `unknown`; Windows `WSAEACCES` at ALE; on macOS that the BPF tap
+sees an unguarded probe datagram (`tap_sees_an_unguarded_datagram` lab test,
+one Wi-Fi Mac; other drivers, USB/Thunderbolt Ethernet, VLAN and bridge
+interfaces unconfirmed)); nft JSON rendering across
 nftables versions; `resolvectl` output format; `pfctl -sr` versus `pfctl -nv`
 rendering (a same-count, own-label difference is `unknown`, not `failed`);
 `scutil --dns` rendering of the supplemental entry; WFP enumeration of the

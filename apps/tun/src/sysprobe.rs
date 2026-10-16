@@ -122,23 +122,23 @@ impl Runner {
 /// checks before anything that sends. Teardown happens after the drop, so
 /// no datagram starts once the guard may be gone; one already inside the
 /// send call when the run is dropped can still complete.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 pub struct Fence(std::sync::Arc<std::sync::atomic::AtomicBool>);
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 #[derive(Clone)]
 pub struct Live(std::sync::Arc<std::sync::atomic::AtomicBool>);
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 pub fn fence() -> (Fence, Live) {
     let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     (Fence(flag.clone()), Live(flag))
 }
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 impl Drop for Fence {
     fn drop(&mut self) {
         self.0.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 impl Live {
     pub fn get(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::SeqCst)
@@ -237,6 +237,8 @@ impl Dns {
     };
 }
 
+/// Linux and Windows refuse with an errno; macOS PF drops silently (see `macos::verdict`).
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub fn attempt(sent: Result<(), i32>, blocked: &[i32], absent: &[i32]) -> Attempt {
     match sent {
         Ok(()) => Attempt::Leaked,
@@ -247,6 +249,7 @@ pub fn attempt(sent: Result<(), i32>, blocked: &[i32], absent: &[i32]) -> Attemp
 }
 /// IPv6 proves nothing either way only where the interface has no IPv6
 /// default route; with one, a failed setup or an unreachable errno is Unknown.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub fn v6_attempt(
     default: bool,
     sent: Option<Result<(), i32>>,
@@ -623,7 +626,143 @@ pub mod linux {
 /// Read-back parsers for the macOS service's own objects; host-tested.
 #[cfg(any(target_os = "macos", test))]
 pub mod macos {
-    use super::Audit;
+    use super::{Attempt, Audit};
+    /// What the interface's BPF tap saw while one probe datagram was sent.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Seen {
+        /// The datagram left on the wire.
+        Captured,
+        /// Armed tap, no drops, our datagram absent. `control`: the tap saw
+        /// another frame this host sent on the interface in the same window,
+        /// so it does see output there right now.
+        Silent {
+            sent: Result<(), i32>,
+            control: bool,
+        },
+        /// Tap unavailable, wrong link type, SEESENT off, drops, run gone.
+        Unknown,
+    }
+    /// PF drops output silently: `sendto` returns success and nothing leaves
+    /// (macOS 26.5.2, installed package: tcpdump on en0 empty). A refusal is
+    /// our datagram absent from a tap that saw this host's own output on the
+    /// same interface in the same window, after a successful send (an errno
+    /// comes from routing or ARP, not PF). Our block rule must also have
+    /// counted packets; it is shared with other dropped traffic, so it only
+    /// shows PF dropped something meanwhile, never which packet. A datagram
+    /// on the wire is a leak.
+    pub fn verdict(seen: Seen, before: Option<u64>, after: Option<u64>) -> Attempt {
+        match (seen, before, after) {
+            (Seen::Captured, _, _) => Attempt::Leaked,
+            (
+                Seen::Silent {
+                    sent: Ok(()),
+                    control: true,
+                },
+                Some(before),
+                Some(after),
+            ) if after > before => Attempt::Blocked,
+            _ => Attempt::Unknown,
+        }
+    }
+    /// Bytes kept per frame: enough for Ethernet + IPv6 + UDP headers.
+    pub const SNAPLEN: u32 = 128;
+    /// Classic BPF over DLT_EN10MB keeping only frames whose source MAC is
+    /// the interface's own, i.e. what this host sends there.
+    pub fn filter(mac: [u8; 6]) -> [(u16, u8, u8, u32); 6] {
+        let high = u32::from_be_bytes([mac[0], mac[1], mac[2], mac[3]]);
+        let low = u32::from(u16::from_be_bytes([mac[4], mac[5]]));
+        [
+            (0x20, 0, 0, 6),       // 0 ld [6]   source MAC, first 4 bytes
+            (0x15, 0, 3, high),    // 1 jeq ? 2 : reject
+            (0x28, 0, 0, 10),      // 2 ldh [10] source MAC, last 2 bytes
+            (0x15, 0, 1, low),     // 3 jeq ? accept : reject
+            (0x06, 0, 0, SNAPLEN), // 4 accept
+            (0x06, 0, 0, 0),       // 5 reject
+        ]
+    }
+    /// One Ethernet frame: UDP from `port` to port 9.
+    fn probe_frame(frame: &[u8], port: u16) -> bool {
+        let u16_at = |at: usize| {
+            frame
+                .get(at..at + 2)
+                .map(|b| u16::from_be_bytes([b[0], b[1]]))
+        };
+        let udp = match u16_at(12) {
+            Some(0x0800) => {
+                let Some(&first) = frame.get(14) else {
+                    return false;
+                };
+                let header = usize::from(first & 0x0f) * 4;
+                if first >> 4 != 4 || header < 20 || frame.get(23) != Some(&17) {
+                    return false;
+                }
+                14 + header
+            }
+            Some(0x86dd) if frame.get(20) == Some(&17) => 54,
+            _ => return false,
+        };
+        u16_at(udp) == Some(port) && u16_at(udp + 2) == Some(9)
+    }
+    /// IP traffic other than ICMPv6. ARP and neighbour discovery are not a
+    /// control: a probe queued behind address resolution could leave after
+    /// the window while our own ARP/ND request showed the tap working.
+    fn carries_traffic(frame: &[u8]) -> bool {
+        match frame.get(12..14) {
+            Some([0x08, 0x00]) => true,
+            Some([0x86, 0xdd]) => frame.get(20).is_some_and(|&next| next != 58),
+            _ => false,
+        }
+    }
+    /// What one BPF read buffer holds (Darwin `bpf_hdr`: 8-byte timeval32,
+    /// caplen at 8, hdrlen at 16, records 4-byte aligned).
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Scan {
+        /// Our datagram.
+        pub probe: bool,
+        /// Any other frame the filter kept (this host's own output).
+        pub control: bool,
+        /// A record that did not parse.
+        pub malformed: bool,
+    }
+    pub fn scan(buffer: &[u8], port: u16, mac: [u8; 6]) -> Scan {
+        let mut found = Scan::default();
+        let mut at = 0;
+        while at < buffer.len() {
+            let Some(header) = buffer.get(at..at + 18) else {
+                found.malformed = true;
+                break;
+            };
+            let caplen =
+                u32::from_ne_bytes([header[8], header[9], header[10], header[11]]) as usize;
+            let hdrlen = usize::from(u16::from_ne_bytes([header[16], header[17]]));
+            let frame = (hdrlen >= 18)
+                .then(|| buffer.get(at + hdrlen..at + hdrlen + caplen))
+                .flatten();
+            let Some(frame) = frame else {
+                found.malformed = true;
+                break;
+            };
+            if probe_frame(frame, port) {
+                found.probe = true;
+            } else if frame.get(6..12) == Some(&mac[..]) && carries_traffic(frame) {
+                found.control = true;
+            }
+            at += (hdrlen + caplen + 3) & !3;
+        }
+        found
+    }
+    /// `pfctl -a <anchor> -vsr`: packets counted by our final block rule.
+    pub fn block_packets(text: &str, label: &str) -> Option<u64> {
+        let mut lines = text.lines().map(str::trim);
+        lines.find(|l| l.starts_with("block drop out quick all") && l.contains(label))?;
+        let counters = lines.next()?.strip_prefix('[')?;
+        let value = counters
+            .split("Packets:")
+            .nth(1)?
+            .split_whitespace()
+            .next()?;
+        value.parse().ok()
+    }
     /// `pfctl -s info`.
     pub fn pf_enabled(text: &str) -> Option<bool> {
         let status = text
@@ -658,6 +797,23 @@ pub mod macos {
         } else {
             Audit::Unknown
         }
+    }
+    /// `netstat -rn` gateway of a default route on `interface`: a unicast
+    /// address, IPv6 only link-local scoped to that same interface. `link#N`,
+    /// a foreign scope or anything else is None.
+    pub fn gateway(value: &str, interface: &str) -> Option<std::net::IpAddr> {
+        use std::net::IpAddr;
+        if let Ok(IpAddr::V4(ip)) = value.parse::<IpAddr>() {
+            let usable = !(ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_multicast()
+                || ip.is_broadcast()
+                || ip.is_link_local());
+            return usable.then_some(IpAddr::V4(ip));
+        }
+        let (address, scope) = value.split_once('%')?;
+        let ip: std::net::Ipv6Addr = address.parse().ok()?;
+        (scope == interface && ip.is_unicast_link_local()).then_some(IpAddr::V6(ip))
     }
     /// `route -n get`.
     pub fn route_interface(text: &str) -> Option<String> {
@@ -1385,6 +1541,28 @@ mod tests {
             macos::route_interface("route: writing to routing socket: not in table"),
             None
         );
+        assert_eq!(
+            macos::gateway("198.51.100.1", "en0"),
+            Some("198.51.100.1".parse().unwrap())
+        );
+        assert_eq!(
+            macos::gateway("fe80::1%en0", "en0"),
+            Some("fe80::1".parse().unwrap())
+        );
+        for value in [
+            "link#11",
+            "fe80::1%en1",
+            "fe80::1",
+            "2001:db8::1%en0",
+            "0.0.0.0",
+            "127.0.0.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "169.254.1.1",
+            "",
+        ] {
+            assert_eq!(macos::gateway(value, "en0"), None, "{value}");
+        }
         let config = "DNS configuration\n\nresolver #1\n  nameserver[0] : 198.51.100.53\n  flags    : Supplemental\n\nresolver #2\n  nameserver[0] : 192.0.2.53\n  if_index : 15 (en0)\n";
         assert_eq!(
             macos::resolvers(config),
@@ -1646,10 +1824,14 @@ mod tests {
             attempt(Err(ETIMEDOUT_LINUX), linux_v6.0, linux_v6.1),
             Attempt::Unknown
         );
-        let mac_v4: (&[i32], &[i32]) = (&[EHOSTUNREACH_MAC], &[]);
-        for code in [ENETUNREACH_MAC, ETIMEDOUT_MAC, EPERM, -1] {
+        // macOS proves nothing by errno: PF drops silently, an errno is routing.
+        for code in [EHOSTUNREACH_MAC, ENETUNREACH_MAC, ETIMEDOUT_MAC, EPERM, -1] {
+            let seen = macos::Seen::Silent {
+                sent: Err(code),
+                control: true,
+            };
             assert_eq!(
-                attempt(Err(code), mac_v4.0, mac_v4.1),
+                macos::verdict(seen, Some(1), Some(2)),
                 Attempt::Unknown,
                 "mac {code}"
             );
@@ -1663,7 +1845,7 @@ mod tests {
             );
         }
         // A send that succeeded is a leak whatever the lists say.
-        for (blocked, absent) in [linux_v4, linux_v6, mac_v4, windows] {
+        for (blocked, absent) in [linux_v4, linux_v6, windows] {
             assert_eq!(attempt(Ok(()), blocked, absent), Attempt::Leaked);
             assert_eq!(
                 guard(Audit::Match, &[attempt(Ok(()), blocked, absent)]),
@@ -2214,6 +2396,176 @@ mod tests {
         ] {
             let at = at.unwrap();
             assert!(at >= before && at + 40 <= after, "{before} {at} {after}");
+        }
+    }
+
+    const MAC: [u8; 6] = [0x02, 0x00, 0x5e, 0x10, 0x20, 0x30];
+    const OTHER: [u8; 6] = [0x02, 0x00, 0x5e, 0x10, 0x20, 0x31];
+    /// Classic BPF subset used by `macos::filter`.
+    fn run_filter(program: &[(u16, u8, u8, u32)], frame: &[u8]) -> u32 {
+        let mut pc = 0usize;
+        let mut a = 0u32;
+        while pc < program.len() {
+            let (code, jt, jf, k) = program[pc];
+            let at = k as usize;
+            pc += 1;
+            match code {
+                0x20 => match frame.get(at..at + 4) {
+                    Some(b) => a = u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+                    None => return 0,
+                },
+                0x28 => match frame.get(at..at + 2) {
+                    Some(b) => a = u32::from(u16::from_be_bytes([b[0], b[1]])),
+                    None => return 0,
+                },
+                0x15 => pc += usize::from(if a == k { jt } else { jf }),
+                0x06 => return k,
+                _ => panic!("opcode {code:#x}"),
+            }
+        }
+        0
+    }
+    fn frame(source: [u8; 6], v6: bool, port: u16, destination: u16) -> Vec<u8> {
+        let mut frame = vec![0xff; 6];
+        frame.extend(source);
+        if v6 {
+            frame.extend([0x86, 0xdd, 0x60, 0, 0, 0, 0, 9, 17, 64]);
+            frame.extend([0u8; 32]);
+        } else {
+            frame.extend([0x08, 0x00, 0x45, 0, 0, 29, 0, 0, 0, 0, 64, 17, 0, 0]);
+            frame.extend([198, 51, 100, 2, 198, 51, 100, 1]);
+        }
+        frame.extend(port.to_be_bytes());
+        frame.extend(destination.to_be_bytes());
+        frame.extend([0, 9, 0, 0, 0]);
+        frame
+    }
+    fn bpf_record(frame: &[u8]) -> Vec<u8> {
+        let mut record = vec![0u8; 8];
+        record.extend((frame.len() as u32).to_ne_bytes());
+        record.extend((frame.len() as u32).to_ne_bytes());
+        record.extend(20u16.to_ne_bytes());
+        record.extend([0, 0]);
+        record.extend(frame);
+        while !record.len().is_multiple_of(4) {
+            record.push(0);
+        }
+        record
+    }
+    #[test]
+    fn macos_filter_keeps_only_this_hosts_own_output() {
+        let program = macos::filter(MAC);
+        for v6 in [false, true] {
+            assert_eq!(
+                run_filter(&program, &frame(MAC, v6, 50_000, 9)),
+                macos::SNAPLEN
+            );
+            assert_eq!(
+                run_filter(&program, &frame(MAC, v6, 50_000, 443)),
+                macos::SNAPLEN
+            );
+            assert_eq!(run_filter(&program, &frame(OTHER, v6, 50_000, 9)), 0);
+        }
+        // Differs only in the last two MAC bytes, or only in the first four.
+        let mut low = MAC;
+        low[4] ^= 1;
+        assert_eq!(run_filter(&program, &frame(low, false, 1, 9)), 0);
+        let mut high = MAC;
+        high[0] ^= 1;
+        assert_eq!(run_filter(&program, &frame(high, false, 1, 9)), 0);
+        assert_eq!(run_filter(&program, &[0u8; 8]), 0);
+        // Ethernet + IPv6 + UDP headers fit the snap length.
+        assert!(macos::SNAPLEN as usize >= 14 + 40 + 8);
+    }
+    #[test]
+    fn macos_scan_separates_our_datagram_from_the_control_frame() {
+        let ours = bpf_record(&frame(MAC, false, 50_000, 9));
+        let v6 = bpf_record(&frame(MAC, true, 50_001, 9));
+        let transport = bpf_record(&frame(MAC, false, 50_002, 443));
+        let scan = |b: &[u8], port| macos::scan(b, port, MAC);
+        let only_probe = macos::Scan {
+            probe: true,
+            ..Default::default()
+        };
+        let only_control = macos::Scan {
+            control: true,
+            ..Default::default()
+        };
+        assert_eq!(scan(&ours, 50_000), only_probe);
+        assert_eq!(
+            scan(&[transport.clone(), v6].concat(), 50_001),
+            macos::Scan {
+                probe: true,
+                control: true,
+                malformed: false
+            }
+        );
+        assert_eq!(scan(&transport, 50_000), only_control);
+        // Our datagram is never its own control; another port of ours is.
+        assert_eq!(scan(&ours, 50_005), only_control);
+        // ARP and ICMPv6 (neighbour discovery) from us are no control.
+        let mut arp = frame(MAC, false, 1, 443);
+        arp[12..14].copy_from_slice(&[0x08, 0x06]);
+        assert_eq!(scan(&bpf_record(&arp), 50_000), macos::Scan::default());
+        let mut nd = frame(MAC, true, 1, 443);
+        nd[20] = 58;
+        assert_eq!(scan(&bpf_record(&nd), 50_000), macos::Scan::default());
+        // A frame not from this MAC (the filter drops it) proves nothing.
+        assert_eq!(
+            scan(&bpf_record(&frame(OTHER, false, 1, 443)), 50_000),
+            macos::Scan::default()
+        );
+        // Truncated or malformed buffers are flagged, never a capture.
+        let cut = scan(&ours[..10], 50_000);
+        assert!(cut.malformed && !cut.probe && !cut.control);
+        let mut short = ours.clone();
+        short[16..18].copy_from_slice(&4u16.to_ne_bytes());
+        assert!(scan(&short, 50_000).malformed);
+        let mut long = ours.clone();
+        long[8..12].copy_from_slice(&4096u32.to_ne_bytes());
+        assert!(scan(&long, 50_000).malformed);
+        assert_eq!(scan(&[], 50_000), macos::Scan::default());
+    }
+    #[test]
+    fn macos_block_counter_reads_only_our_final_rule() {
+        let label = "label \"rtrust-501\"";
+        let text = "pass out quick on lo0 all no state label \"rtrust-501\"\n  [ Evaluations: 90        Packets: 80        Bytes: 800         States: 0     ]\n  [ Inserted: uid 0 pid 1 State Creations: 0     ]\nblock drop out quick all label \"rtrust-501\"\n  [ Evaluations: 12        Packets: 7         Bytes: 420         States: 0     ]\n  [ Inserted: uid 0 pid 1 State Creations: 0     ]\n";
+        assert_eq!(macos::block_packets(text, label), Some(7));
+        assert_eq!(macos::block_packets(text, "label \"rtrust-502\""), None);
+        assert_eq!(
+            macos::block_packets("block drop out quick all label \"rtrust-501\"\n", label),
+            None
+        );
+        assert_eq!(macos::block_packets("", label), None);
+    }
+    #[test]
+    fn macos_refusal_needs_a_seeing_tap_a_clean_send_and_our_block_counting() {
+        use Attempt::*;
+        use macos::Seen::*;
+        let silent = |sent, control| Silent { sent, control };
+        assert_eq!(macos::verdict(Captured, Some(1), Some(2)), Leaked);
+        assert_eq!(macos::verdict(Captured, None, None), Leaked);
+        assert_eq!(
+            macos::verdict(silent(Ok(()), true), Some(1), Some(2)),
+            Blocked
+        );
+        for (seen, before, after) in [
+            // A blind tap: our datagram unseen proves nothing.
+            (silent(Ok(()), false), Some(1), Some(2)),
+            // Darwin EHOSTUNREACH/ENETUNREACH: routing or ARP, not PF.
+            (silent(Err(65), true), Some(1), Some(2)),
+            (silent(Err(51), true), Some(1), Some(2)),
+            (silent(Ok(()), true), Some(2), Some(2)),
+            (silent(Ok(()), true), None, Some(2)),
+            (silent(Ok(()), true), Some(1), None),
+            (silent(Ok(()), true), Some(3), Some(2)),
+            (macos::Seen::Unknown, Some(1), Some(2)),
+        ] {
+            assert_eq!(
+                macos::verdict(seen, before, after),
+                Attempt::Unknown,
+                "{seen:?}"
+            );
         }
     }
 }
