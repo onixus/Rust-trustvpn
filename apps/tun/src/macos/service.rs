@@ -149,6 +149,9 @@ async fn publish(
     Ok(())
 }
 
+fn millis(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
 async fn guarded_connect<T>(
     lease: Lease,
     refresh: impl Fn() -> Result<(), String>,
@@ -192,18 +195,38 @@ impl Workers {
         let wait = delay.next_delay(rand::random());
         self.reconnect = Some(tokio::spawn(async move {
             tokio::time::sleep(wait).await;
+            let started = Instant::now();
+            let refresh_ms = std::sync::atomic::AtomicU64::new(0);
             // Darwin can discard endpoint host routes during sleep. Restore
             // them before opening a socket, or split routes send it into utun.
-            guarded_connect(lease, || guard.refresh(), async {
-                tokio::time::timeout(
-                    Duration::from_secs(30),
-                    device::Prepared::reconnect(&profile, device),
-                )
-                .await
-                .map_err(|_| "Reconnect timed out".to_owned())?
-                .map_err(|e| format!("Reconnect failed: {e}"))
-            })
-            .await
+            let result = guarded_connect(
+                lease,
+                || {
+                    let refresh = Instant::now();
+                    let result = guard.refresh();
+                    refresh_ms.fetch_add(millis(refresh), std::sync::atomic::Ordering::Relaxed);
+                    result
+                },
+                async {
+                    tokio::time::timeout(
+                        Duration::from_secs(30),
+                        device::Prepared::reconnect(&profile, device),
+                    )
+                    .await
+                    .map_err(|_| "Reconnect timed out".to_owned())?
+                    .map_err(|e| format!("Reconnect failed: {e}"))
+                },
+            )
+            .await;
+            // Durations only: no endpoint, route or profile data.
+            events::record(&format!(
+                "reconnect_timing wait_ms={} route_refresh_ms={} total_ms={} ok={}",
+                wait.as_millis(),
+                refresh_ms.into_inner(),
+                millis(started),
+                result.is_ok()
+            ));
+            result
         }));
     }
     fn cancel(&self) {
@@ -978,6 +1001,7 @@ async fn connected(
             }
             Command::Stop => {
                 events::record("stop_requested");
+                let stop_started = Instant::now();
                 probes.cancel();
                 monitor.transition(false, rtrust_control::observations::now_ms());
                 let mut waiters = vec![request.response];
@@ -996,6 +1020,7 @@ async fn connected(
                 // The retry closure retains the persistent utun Arc. Drop it
                 // after workers drain, before reporting successful restoration.
                 drop(retry);
+                let drain_ms = millis(stop_started);
                 if shutdown_requested(&shutdown) {
                     for waiter in waiters {
                         let _ = waiter.send(Response::new(
@@ -1035,6 +1060,14 @@ async fn connected(
                     }
                 };
                 drop(worker);
+                // Durations only. The utun is released at drain; release covers
+                // the owned routes, DNS and PF restored from the journal.
+                events::record(&format!(
+                    "stop_timing drain_ms={drain_ms} release_ms={} total_ms={} ok={}",
+                    millis(stop_started).saturating_sub(drain_ms),
+                    millis(stop_started),
+                    matches!(result, Ok(Ok(())))
+                ));
                 let response = match result {
                     Ok(Ok(())) => {
                         monitor.stop(rtrust_control::observations::now_ms());
