@@ -627,6 +627,11 @@ pub mod linux {
 #[cfg(any(target_os = "macos", test))]
 pub mod macos {
     use super::{Attempt, Audit};
+    /// Darwin `<errno.h>`; spelled out because this module is also built
+    /// in host tests on Windows, where `libc` is not a dependency.
+    pub const EHOSTUNREACH: i32 = 65;
+    #[cfg(test)]
+    pub const ENETUNREACH: i32 = 51;
     /// What the interface's BPF tap saw of one probe datagram.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Seen {
@@ -645,7 +650,7 @@ pub mod macos {
     pub fn verdict(seen: Seen, before: Option<u64>, after: Option<u64>) -> Attempt {
         match (seen, before, after) {
             (Seen::Captured, _, _) => Attempt::Leaked,
-            (Seen::Silent(Ok(()) | Err(libc::EHOSTUNREACH)), Some(before), Some(after))
+            (Seen::Silent(Ok(()) | Err(EHOSTUNREACH)), Some(before), Some(after))
                 if after > before =>
             {
                 Attempt::Blocked
@@ -2485,7 +2490,7 @@ mod tests {
         assert_eq!(macos::verdict(Captured, None, None), Leaked);
         assert_eq!(macos::verdict(Silent(Ok(())), Some(1), Some(2)), Blocked);
         assert_eq!(
-            macos::verdict(Silent(Err(libc::EHOSTUNREACH)), Some(1), Some(2)),
+            macos::verdict(Silent(Err(macos::EHOSTUNREACH)), Some(1), Some(2)),
             Blocked
         );
         for (seen, before, after) in [
@@ -2493,7 +2498,7 @@ mod tests {
             (Silent(Ok(())), None, Some(2)),
             (Silent(Ok(())), Some(1), None),
             (Silent(Ok(())), Some(3), Some(2)),
-            (Silent(Err(libc::ENETUNREACH)), Some(1), Some(2)),
+            (Silent(Err(macos::ENETUNREACH)), Some(1), Some(2)),
             (macos::Seen::Unknown, Some(1), Some(2)),
         ] {
             assert_eq!(

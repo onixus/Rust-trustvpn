@@ -160,3 +160,9 @@ mod tests {
         );
     }
 }
+#[cfg(test)]
+#[test]
+fn darwin_errno_constants_match_libc() {
+    assert_eq!(crate::sysprobe::macos::EHOSTUNREACH, libc::EHOSTUNREACH);
+    assert_eq!(crate::sysprobe::macos::ENETUNREACH, libc::ENETUNREACH);
+}
