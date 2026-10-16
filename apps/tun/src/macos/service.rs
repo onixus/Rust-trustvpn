@@ -967,13 +967,15 @@ async fn connected(
                         _ => {},
                     }
                     if let Ok(Ok(prepared)) = result {
+                        // Baseline before the data plane runs: its backlog
+                        // discard must land inside the summary window.
+                        summary = Some(summary_after("reconnect"));
                         workers.tunnel = Some(tokio::spawn(prepared.run()));
                         connected_since = Instant::now();
                         state = State::Connected;
                         probes.cancel();
                         monitor.transition(true, rtrust_control::observations::now_ms());
                         events::record("reconnect_complete");
-                        summary = Some(summary_after("reconnect"));
                         continue;
                     }
                     if failover.failed(Instant::now()) {
@@ -2755,5 +2757,151 @@ mod tests {
         let first = new_owner().unwrap();
         assert!(!first.matches(&new_owner().unwrap()));
         assert!(!format!("{first:?}").contains(first.to_hex().as_str()));
+    }
+}
+
+/// Independent tester coverage for issue #99 (dataplane_summary timer,
+/// criterion 7). `events::record` is a no-op without root, so the timer is
+/// checked for not disturbing the supervisor, and the line format separately.
+#[cfg(test)]
+mod tester_summary_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    async fn failover() -> crate::failover::Failover {
+        let profile = rtrust_profile::Profile::import("hostname='test.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='synthetic'\n").unwrap();
+        crate::failover::Failover::pin(profile, vec![], crate::failover::Pin::Ipv4)
+            .await
+            .unwrap()
+    }
+    /// Same harness as `tests::connected` (private there): a supervisor
+    /// bridged to a duplex stream, with no probe plan and no shutdown signal.
+    async fn connected(
+        mut stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        workers: Workers,
+        power: tokio::sync::watch::Receiver<power::State>,
+        failover: crate::failover::Failover,
+        retry: impl FnMut(&mut Workers, &rtrust_profile::Profile, &mut rtrust_control::recovery::Budget)
+        + Send
+        + 'static,
+    ) -> Result<(), String> {
+        let (actor, commands) = mpsc::channel(16);
+        let (_shutdown_signal, shutdown_events) = tokio::sync::watch::channel(false);
+        let (initial, response) = oneshot::channel();
+        let supervisor = tokio::spawn(super::connected(
+            Control {
+                commands,
+                initial: Some(initial),
+                shutdown: shutdown_events,
+                probe: None,
+            },
+            workers,
+            false,
+            power,
+            failover,
+            retry,
+            || Ok(()),
+        ));
+        write_response(&mut stream, &response.await.unwrap()).await?;
+        let result = bridge(stream, actor, None).await;
+        if result.is_err() {
+            supervisor.abort();
+        }
+        let _ = supervisor.await;
+        result
+    }
+
+    #[test]
+    fn summary_is_scheduled_thirty_seconds_ahead_and_renders_numbers_only() {
+        let before = tokio::time::Instant::now();
+        let (due, after, base) = summary_after("connect");
+        assert_eq!(after, "connect");
+        assert!(due - before >= SUMMARY_DELAY);
+        assert!(due - before <= SUMMARY_DELAY + Duration::from_secs(1));
+        assert_eq!(base, crate::stats::snapshot());
+        let line = format!(
+            "dataplane_summary after={after} window_s={} {}",
+            SUMMARY_DELAY.as_secs(),
+            crate::stats::snapshot().since(&base).render()
+        );
+        assert!(line.starts_with("dataplane_summary after=connect window_s=30 syn_accepted="));
+        // Every token after the event name is key=number; no addresses,
+        // hosts, ports or profile material can appear.
+        for token in line.split(' ').skip(1) {
+            let (key, value) = token.split_once('=').expect("key=value token");
+            assert!(
+                key.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{key}"
+            );
+            assert!(
+                key == "after" && value == "connect" || value.chars().all(|c| c.is_ascii_digit()),
+                "{token}"
+            );
+        }
+        assert!(!line.contains('.') && !line.contains(':'));
+    }
+
+    /// The 30 s summary timer fires inside the supervisor loop without
+    /// blocking Status, and a power event followed by Stop still works
+    /// whether the timer has fired or was cancelled.
+    #[tokio::test(start_paused = true)]
+    async fn summary_timer_does_not_block_status_power_or_stop() {
+        let (power, receiver) = tokio::sync::watch::channel(power::State::default());
+        let (mut client, server) = tokio::io::duplex(4096);
+        let supervisor = tokio::spawn(connected(
+            server,
+            Workers {
+                tunnel: Some(tokio::spawn(std::future::pending())),
+                reconnect: None,
+            },
+            receiver,
+            failover().await,
+            |workers, _, _| {
+                workers.reconnect = Some(tokio::spawn(std::future::pending()));
+            },
+        ));
+        let initial: Response = read(&mut client).await.unwrap();
+        assert_eq!(initial.state, State::Connected);
+        // Past the summary deadline: the timer branch runs and disarms.
+        tokio::time::advance(SUMMARY_DELAY + Duration::from_secs(1)).await;
+        for _ in 0..3 {
+            write(
+                &mut client,
+                &Request {
+                    version: VERSION,
+                    command: Command::Status,
+                },
+            )
+            .await
+            .unwrap();
+            let status: Response = tokio::time::timeout(Duration::from_secs(5), read(&mut client))
+                .await
+                .expect("Status answered after the summary timer")
+                .unwrap();
+            assert_eq!(status.state, State::Connected);
+        }
+        // Sleep cancels any pending summary; Stop must still be served.
+        power.send_modify(|s| {
+            s.awake = false;
+            s.generation += 1;
+        });
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::time::advance(SUMMARY_DELAY).await;
+        write(
+            &mut client,
+            &Request {
+                version: VERSION,
+                command: Command::Stop,
+            },
+        )
+        .await
+        .unwrap();
+        let stopped: Response = tokio::time::timeout(Duration::from_secs(5), read(&mut client))
+            .await
+            .expect("Stop answered")
+            .unwrap();
+        assert_eq!(stopped.state, State::Idle);
+        client.shutdown().await.unwrap();
+        supervisor.await.unwrap().unwrap();
     }
 }

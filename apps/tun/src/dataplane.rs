@@ -69,6 +69,8 @@ pub fn degraded<T>(result: &Result<T, Box<dyn std::error::Error + Send + Sync>>)
 /// DNS retransmit what still matters. Bounded so a busy device cannot starve
 /// the session start.
 pub const BACKLOG_LIMIT: usize = 4096;
+/// Longest wait for the first queued packet before the session starts.
+pub const PRIME_WAIT: Duration = Duration::from_millis(5);
 fn discard_backlog<D: PacketDevice>(device: &D) -> usize {
     let mut buffer = [0; 65536];
     let mut discarded = 0;
@@ -123,7 +125,18 @@ pub async fn run_with_policy<D: PacketDevice>(
     mut updates: Option<&mut crate::policy::Receiver>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dns = std::sync::Arc::new(dns);
-    discard_backlog(device.as_ref());
+    // One awaited read first: it registers interest with the reactor, so the
+    // non-blocking sweep below sees readiness the kernel recorded while no
+    // session was reading. Bounded, so an empty device costs milliseconds.
+    {
+        let mut primer = [0; 65536];
+        if let Ok(Ok(_)) = tokio::time::timeout(PRIME_WAIT, device.recv(&mut primer)).await {
+            crate::stats::COUNTERS
+                .backlog_discarded
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            discard_backlog(device.as_ref());
+        }
+    }
     let mut dns_jobs = JoinSet::new();
     let mut direct_jobs = JoinSet::new();
     let mut direct_flows: HashMap<packet::Key, mpsc::Sender<Vec<u8>>> = HashMap::new();
@@ -512,6 +525,115 @@ mod backlog_tests {
                 Ok(p.len())
             }
         }
+        assert_eq!(discard_backlog(&Blind), 0);
+    }
+}
+
+/// Independent tester coverage for issue #99 (backlog discard, criterion 6).
+#[cfg(test)]
+mod tester_backlog_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// try_recv and recv share one queue, like a real device: discard must
+    /// stop at the first non-Ok result and leave later packets for recv.
+    struct Shared {
+        queue: Mutex<std::collections::VecDeque<std::io::Result<usize>>>,
+        try_calls: std::sync::atomic::AtomicUsize,
+    }
+    impl Shared {
+        fn with(items: Vec<std::io::Result<usize>>) -> Self {
+            Self {
+                queue: Mutex::new(items.into()),
+                try_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+    impl PacketDevice for Shared {
+        async fn recv(&self, _: &mut [u8]) -> std::io::Result<usize> {
+            loop {
+                if let Some(item) = self.queue.lock().unwrap().pop_front() {
+                    return item;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+        async fn send(&self, p: &[u8]) -> std::io::Result<usize> {
+            Ok(p.len())
+        }
+        fn try_recv(&self, _: &mut [u8]) -> std::io::Result<usize> {
+            self.try_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.queue
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Err(std::io::ErrorKind::WouldBlock.into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn discard_stops_at_would_block_and_recv_still_serves_later_packets() {
+        let device = Shared::with(vec![Ok(60), Ok(60), Ok(1500)]);
+        assert_eq!(discard_backlog(&device), 3);
+        // Exactly one extra probe that returned WouldBlock; no spinning.
+        assert_eq!(
+            device.try_calls.load(std::sync::atomic::Ordering::Relaxed),
+            4
+        );
+        device.queue.lock().unwrap().push_back(Ok(80));
+        let mut buffer = [0; 65536];
+        let served = tokio::time::timeout(Duration::from_secs(1), device.recv(&mut buffer))
+            .await
+            .expect("recv must not hang after discard")
+            .unwrap();
+        assert_eq!(served, 80);
+    }
+
+    #[tokio::test]
+    async fn discard_stops_at_any_error_and_never_blocks_on_an_empty_device() {
+        // A hard error (not WouldBlock) also ends the discard without panic
+        // and the packets behind it stay for recv.
+        let device = Shared::with(vec![
+            Ok(40),
+            Err(std::io::ErrorKind::Interrupted.into()),
+            Ok(40),
+        ]);
+        assert_eq!(discard_backlog(&device), 1);
+        let mut buffer = [0; 65536];
+        assert_eq!(device.recv(&mut buffer).await.unwrap(), 40);
+        // Empty device: one probe, zero discarded, nothing counted.
+        let before = crate::stats::snapshot();
+        let empty = Shared::with(vec![]);
+        let started = Instant::now();
+        assert_eq!(discard_backlog(&empty), 0);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            empty.try_calls.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        // Lower bound only: the counter is process-wide and shared by parallel tests.
+        let _ = before;
+    }
+
+    /// The default `try_recv` (devices without a non-blocking read) reports
+    /// WouldBlock, so discard is a no-op there rather than an error.
+    #[test]
+    fn default_try_recv_reports_would_block() {
+        struct Blind;
+        impl PacketDevice for Blind {
+            async fn recv(&self, _: &mut [u8]) -> std::io::Result<usize> {
+                std::future::pending().await
+            }
+            async fn send(&self, p: &[u8]) -> std::io::Result<usize> {
+                Ok(p.len())
+            }
+        }
+        let mut buffer = [0; 16];
+        assert_eq!(
+            Blind.try_recv(&mut buffer).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
         assert_eq!(discard_backlog(&Blind), 0);
     }
 }

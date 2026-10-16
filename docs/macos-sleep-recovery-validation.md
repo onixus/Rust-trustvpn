@@ -129,8 +129,12 @@ Changes: a handshake reset by the host frees its slot immediately; a handshake
 without progress for `stack::HANDSHAKE` (10 s) is aborted; the UDP relay evicts
 its least recently used mapping instead of refusing new datagrams at 256; and the
 data plane discards packets queued on the device before the session started
-(bounded by `dataplane::BACKLOG_LIMIT`), so TCP and DNS retransmit instead of
-opening upstream streams for sockets that are already gone.
+(one awaited read bounded by `dataplane::PRIME_WAIT`, then a non-blocking sweep
+bounded by `dataplane::BACKLOG_LIMIT`), so TCP and DNS retransmit instead of
+opening upstream streams for sockets that are already gone. The sweep is
+best-effort and Unix-only (`try_recv`; Windows discards nothing); correctness
+after wake rests on the stack changes, the discard only spares the fresh
+session a burst of upstream opens.
 
 Diagnostics: 30 seconds after `tunnel_connected` and after `reconnect_complete`
 the service records `dataplane_summary after=<connect|reconnect> window_s=30`
