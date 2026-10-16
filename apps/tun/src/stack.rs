@@ -17,6 +17,10 @@ use tokio::{
 };
 
 pub const MAX_FLOWS: usize = 128;
+/// A SYN that is never acknowledged, or whose SYN-ACK the host resets, must
+/// not hold a flow slot for the full idle timeout: a stale backlog after sleep
+/// would otherwise fill the table and silently refuse every new connection.
+pub const HANDSHAKE: Duration = Duration::from_secs(10);
 const QUEUE: usize = 256;
 const BUFFER: usize = 32 * 1024;
 
@@ -67,6 +71,9 @@ struct Flow {
     last_activity: Instant,
     input_closed: bool,
     output_closed: bool,
+    /// The socket left LISTEN at least once, so LISTEN again means the host
+    /// reset the handshake (smoltcp returns to LISTEN on RST in SYN-RECEIVED).
+    engaged: bool,
 }
 impl Drop for Flow {
     fn drop(&mut self) {
@@ -130,9 +137,18 @@ impl Stack {
             return;
         };
         if !self.flows.contains_key(&key) {
-            if !syn || self.flows.len() + self.retired.len() >= MAX_FLOWS {
+            if !syn {
                 return;
             }
+            if self.flows.len() + self.retired.len() >= MAX_FLOWS {
+                crate::stats::COUNTERS
+                    .syn_refused
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+            crate::stats::COUNTERS
+                .syn_accepted
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut socket = Socket::new(
                 SocketBuffer::new(vec![0; BUFFER]),
                 SocketBuffer::new(vec![0; BUFFER]),
@@ -153,6 +169,7 @@ impl Stack {
                     last_activity: Instant::now(),
                     input_closed: false,
                     output_closed: false,
+                    engaged: false,
                 },
             );
         }
@@ -172,6 +189,23 @@ impl Stack {
             let socket = self.sockets.get_mut::<Socket>(flow.socket);
             if flow.last_activity.elapsed() > Duration::from_secs(300) {
                 socket.abort();
+            }
+            match socket.state() {
+                State::Listen if flow.engaged => {
+                    // RST answered our SYN-ACK: the peer socket is gone.
+                    crate::stats::COUNTERS
+                        .handshake_reset
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    socket.abort();
+                }
+                State::Listen | State::SynReceived if flow.last_activity.elapsed() > HANDSHAKE => {
+                    crate::stats::COUNTERS
+                        .handshake_timeout
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    socket.abort();
+                }
+                State::Listen => {}
+                _ => flow.engaged = true,
             }
             if flow.task.as_ref().is_some_and(|task| task.is_finished())
                 && !matches!(flow.task.take().unwrap().now_or_never(), Some(Ok(Ok(()))))
@@ -388,6 +422,77 @@ mod tests {
         .unwrap();
     }
 
+    fn pending_connect(
+        key: Key,
+        bridge: DuplexStream,
+    ) -> JoinHandle<Result<(), rtrust_engine::Error>> {
+        tokio::spawn(async move {
+            let _keep = (key, bridge);
+            std::future::pending().await
+        })
+    }
+    /// Acknowledgement number of the stack's SYN-ACK: the sequence number a
+    /// host RST must carry to be accepted in SYN-RECEIVED.
+    fn syn_ack_ack(packet: &[u8]) -> u32 {
+        assert_eq!(packet[33] & 0x12, 0x12, "expected SYN-ACK");
+        u32::from_be_bytes(packet[28..32].try_into().unwrap())
+    }
+
+    #[tokio::test]
+    async fn host_reset_after_syn_ack_frees_the_flow_slot() {
+        let mut stack = Stack::new();
+        stack.ingest(crate::packet::test_syn(5000), pending_connect);
+        assert_eq!(stack.connections(), 1);
+        let syn_ack = stack.output().expect("SYN-ACK queued");
+        let seq = syn_ack_ack(&syn_ack);
+        stack.ingest(crate::packet::test_rst(5000, seq), pending_connect);
+        assert_eq!(
+            stack.connections(),
+            0,
+            "RST must close the handshake, not park it in LISTEN"
+        );
+        // A later SYN for the same tuple opens a fresh flow and is answered.
+        stack.ingest(crate::packet::test_syn(5000), pending_connect);
+        assert_eq!(stack.connections(), 1);
+        assert!(stack.output().is_some_and(|p| p[33] & 0x12 == 0x12));
+    }
+
+    #[tokio::test]
+    async fn stale_backlog_resets_do_not_exhaust_the_flow_table() {
+        let mut stack = Stack::new();
+        // Every slot is taken by a handshake the host immediately resets.
+        for port in 0..MAX_FLOWS as u16 {
+            stack.ingest(crate::packet::test_syn(6000 + port), pending_connect);
+            let syn_ack = stack.output().expect("SYN-ACK queued");
+            let seq = syn_ack_ack(&syn_ack);
+            stack.ingest(crate::packet::test_rst(6000 + port, seq), pending_connect);
+        }
+        assert_eq!(stack.connections(), 0);
+        // Aborted connect owners retire as soon as the runtime polls them.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        stack.poll();
+        assert!(stack.retired.is_empty());
+        // A live connection attempt still gets its SYN-ACK.
+        stack.ingest(crate::packet::test_syn(7000), pending_connect);
+        assert_eq!(stack.connections(), 1);
+        assert!(stack.output().is_some_and(|p| p[33] & 0x12 == 0x12));
+    }
+
+    #[tokio::test]
+    async fn unanswered_handshakes_expire_before_the_idle_timeout() {
+        let mut stack = Stack::new();
+        stack.ingest(crate::packet::test_syn(8000), pending_connect);
+        assert_eq!(stack.connections(), 1);
+        while stack.output().is_some() {}
+        for flow in stack.flows.values_mut() {
+            flow.last_activity = Instant::now() - HANDSHAKE - Duration::from_millis(1);
+        }
+        stack.poll();
+        assert_eq!(stack.connections(), 0);
+    }
+
     #[tokio::test]
     async fn syn_retransmission_limit_checksums_and_expiry() {
         let mut stack = Stack::new();
@@ -421,5 +526,223 @@ mod tests {
         }
         stack.poll();
         assert_eq!(stack.connections(), 0);
+    }
+}
+
+/// Independent tester coverage for issue #99 (reset handshakes, handshake
+/// limit, engaged-flow regression). Synthetic addresses only.
+#[cfg(test)]
+mod tester_tests {
+    use super::*;
+
+    fn pending_connect(
+        key: Key,
+        bridge: DuplexStream,
+    ) -> JoinHandle<Result<(), rtrust_engine::Error>> {
+        tokio::spawn(async move {
+            let _keep = (key, bridge);
+            std::future::pending().await
+        })
+    }
+    fn syn_ack_ack(packet: &[u8]) -> u32 {
+        assert_eq!(packet[33] & 0x12, 0x12, "expected SYN-ACK");
+        u32::from_be_bytes(packet[28..32].try_into().unwrap())
+    }
+    fn state_of(stack: &Stack, port: u16) -> Option<(State, bool)> {
+        stack
+            .flows
+            .iter()
+            .find(|(key, _)| key.0.port() == port)
+            .map(|(_, flow)| {
+                (
+                    stack.sockets.get::<Socket>(flow.socket).state(),
+                    flow.engaged,
+                )
+            })
+    }
+    /// `stats::COUNTERS` is process-wide and shared with every test in this
+    /// binary, so deltas are lower bounds under parallel execution; a
+    /// `--test-threads=1` run checks them exactly.
+    fn counters() -> crate::stats::Snapshot {
+        crate::stats::snapshot()
+    }
+
+    /// Criterion 1: the reset is counted, the socket is removed from the
+    /// socket set (no leak behind the flow map) and the same tuple reconnects.
+    #[tokio::test]
+    async fn host_reset_is_counted_and_leaves_no_socket_behind() {
+        let before = counters();
+        let mut stack = Stack::new();
+        stack.ingest(crate::packet::test_syn(9100), pending_connect);
+        assert_eq!(state_of(&stack, 9100), Some((State::SynReceived, true)));
+        let seq = syn_ack_ack(&stack.output().unwrap());
+        stack.ingest(crate::packet::test_rst(9100, seq), pending_connect);
+        assert_eq!(stack.connections(), 0);
+        assert_eq!(
+            stack.sockets.iter().count(),
+            0,
+            "reset socket must be removed"
+        );
+        assert!(counters().since(&before).handshake_reset >= 1);
+        stack.ingest(crate::packet::test_syn(9100), pending_connect);
+        assert_eq!(state_of(&stack, 9100), Some((State::SynReceived, true)));
+        assert!(stack.output().is_some_and(|p| p[33] & 0x12 == 0x12));
+        assert!(counters().since(&before).syn_accepted >= 2);
+    }
+
+    /// Criterion 2, stronger than the developer test: after a full table of
+    /// reset handshakes, a full table of live handshakes is admitted.
+    #[tokio::test]
+    async fn a_full_table_of_resets_then_a_full_table_of_live_syns_is_admitted() {
+        let before = counters();
+        let mut stack = Stack::new();
+        for port in 0..MAX_FLOWS as u16 {
+            stack.ingest(crate::packet::test_syn(10000 + port), pending_connect);
+            let seq = syn_ack_ack(&stack.output().unwrap());
+            stack.ingest(crate::packet::test_rst(10000 + port, seq), pending_connect);
+        }
+        assert_eq!(stack.connections(), 0);
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        stack.poll();
+        assert!(stack.retired.is_empty());
+        for port in 0..MAX_FLOWS as u16 {
+            stack.ingest(crate::packet::test_syn(11000 + port), pending_connect);
+            assert!(stack.output().is_some_and(|p| p[33] & 0x12 == 0x12));
+        }
+        assert_eq!(stack.connections(), MAX_FLOWS);
+        let delta = counters().since(&before);
+        assert!(delta.handshake_reset >= MAX_FLOWS as u64);
+        assert!(delta.syn_accepted >= 2 * MAX_FLOWS as u64);
+    }
+
+    /// Criterion 4: SYN retransmissions before the SYN-ACK is answered are a
+    /// normal handshake, not a reset; a flow still in LISTEN (its SYN dropped
+    /// by ingress backpressure) is kept until the handshake limit, and
+    /// recovers once the SYN gets through.
+    #[tokio::test]
+    async fn syn_retransmissions_and_an_unengaged_listen_are_not_resets() {
+        let mut stack = Stack::new();
+        let syn = crate::packet::test_syn(9200);
+        for _ in 0..50 {
+            stack.ingest(syn.clone(), pending_connect);
+            stack.poll();
+        }
+        assert_eq!(stack.connections(), 1);
+        assert_eq!(state_of(&stack, 9200), Some((State::SynReceived, true)));
+        // Ingress backpressure: a full output queue makes the device refuse
+        // the SYN, so the flow exists but its socket never left LISTEN.
+        while stack.output().is_some() {}
+        stack
+            .device
+            .output
+            .extend(std::iter::repeat_n(vec![0u8; 1], QUEUE));
+        stack.ingest(crate::packet::test_syn(9201), pending_connect);
+        assert_eq!(state_of(&stack, 9201), Some((State::Listen, false)));
+        for _ in 0..5 {
+            stack.poll();
+        }
+        assert_eq!(
+            state_of(&stack, 9201),
+            Some((State::Listen, false)),
+            "LISTEN before engagement must survive until HANDSHAKE"
+        );
+        // Still below the handshake limit: nothing is aborted.
+        for flow in stack.flows.values_mut() {
+            flow.last_activity = Instant::now() - HANDSHAKE + Duration::from_secs(1);
+        }
+        stack.poll();
+        assert_eq!(stack.connections(), 2);
+        assert_eq!(state_of(&stack, 9200), Some((State::SynReceived, true)));
+        // Backpressure clears: the queued SYN is served and the flow engages.
+        stack.device.output.clear();
+        stack.poll();
+        assert_eq!(state_of(&stack, 9201), Some((State::SynReceived, true)));
+        assert!(stack.output().is_some_and(|p| p[33] & 0x12 == 0x12));
+    }
+
+    /// Criterion 3: a LISTEN socket that never saw its SYN expires at the
+    /// handshake limit and is counted as a timeout.
+    #[tokio::test]
+    async fn unengaged_listen_expires_at_the_handshake_limit() {
+        let before = counters();
+        let mut stack = Stack::new();
+        stack
+            .device
+            .output
+            .extend(std::iter::repeat_n(vec![0u8; 1], QUEUE));
+        stack.ingest(crate::packet::test_syn(9300), pending_connect);
+        assert_eq!(state_of(&stack, 9300), Some((State::Listen, false)));
+        for flow in stack.flows.values_mut() {
+            flow.last_activity = Instant::now() - HANDSHAKE - Duration::from_millis(1);
+        }
+        stack.poll();
+        assert_eq!(stack.connections(), 0);
+        assert_eq!(stack.sockets.iter().count(), 0);
+        assert!(counters().since(&before).handshake_timeout >= 1);
+    }
+
+    /// Criterion 3 regression: an established, engaged flow is not touched by
+    /// the handshake limit; only the 300 s idle timeout removes it.
+    #[tokio::test]
+    async fn established_flow_survives_the_handshake_limit_until_idle_timeout() {
+        let mut stack = Stack::new();
+        let mut packets = Packets::default();
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = 11;
+        let mut client = Interface::new(config, &mut packets, SmolInstant::from_millis(0));
+        client.update_ip_addrs(|a| a.push(IpCidr::new(IpAddress::v4(10, 77, 0, 2), 0)).unwrap());
+        let mut sockets = SocketSet::new(vec![]);
+        let mut socket = Socket::new(
+            SocketBuffer::new(vec![0; BUFFER]),
+            SocketBuffer::new(vec![0; BUFFER]),
+        );
+        socket
+            .connect(client.context(), (IpAddress::v4(198, 18, 0, 1), 80), 9400)
+            .unwrap();
+        let handle = sockets.add(socket);
+        let epoch = Instant::now();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let now = SmolInstant::from_millis(epoch.elapsed().as_millis() as i64);
+                client.poll(now, &mut packets, &mut sockets);
+                while let Some(bytes) = packets.output.pop_front() {
+                    stack.ingest(bytes, pending_connect);
+                }
+                stack.poll();
+                while let Some(bytes) = stack.output() {
+                    packets.input = Some(bytes);
+                    client.poll(now, &mut packets, &mut sockets);
+                }
+                if state_of(&stack, 9400) == Some((State::Established, true))
+                    && sockets.get::<Socket>(handle).state() == State::Established
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("three-way handshake completes");
+        assert_eq!(stack.connections(), 1);
+        for flow in stack.flows.values_mut() {
+            flow.last_activity = Instant::now() - HANDSHAKE - Duration::from_secs(5);
+        }
+        for _ in 0..3 {
+            stack.poll();
+        }
+        assert_eq!(
+            state_of(&stack, 9400),
+            Some((State::Established, true)),
+            "handshake limit must not abort an established flow"
+        );
+        // The idle timeout still applies to established flows.
+        for flow in stack.flows.values_mut() {
+            flow.last_activity = Instant::now() - Duration::from_secs(301);
+        }
+        stack.poll();
+        assert_eq!(stack.connections(), 0);
+        assert_eq!(stack.sockets.iter().count(), 0);
     }
 }
