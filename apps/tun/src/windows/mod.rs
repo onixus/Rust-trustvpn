@@ -636,7 +636,7 @@ async fn lease_loop(
         match request.command {
             Command::Status { viewed } => {
                 if viewed {
-                    probes.viewed();
+                    probes.viewed(state == State::Connected && !access_expired);
                 }
                 reply_observed(
                     pipe,

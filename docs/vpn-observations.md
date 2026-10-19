@@ -160,24 +160,31 @@ check `unknown` with `check_unavailable`.
   `rtrust-inspect`) never mark a view. The service keeps its own monotonic
   window: a `viewed` Status extends it to 10 s (`VIEW_TTL_MS`) from arrival;
   a due tick outside that window does not start a run. A run already in
-  progress when the view ends finishes normally. When a view returns, the
-  runner is re-armed: the next run starts 2 s later, but never earlier than
-  15 s after the previous run ended. A view never shortens a pending timer or
+  progress when the view ends finishes normally. When a view returns while
+  the session is Connected (and, on macOS, awake), the runner is re-armed:
+  the next run starts 2 s later, but never earlier than 15 s after the
+  previous run ended. Views while Blocked or after access expiry only extend
+  the window; the return to Connected settles the runner as any lifecycle
+  change does. A view never shortens a pending timer or
   queues a run, so a stream of `viewed` requests from any local client cannot
   raise the rate above one run per interval. On macOS only the lease
   connection's flag counts; a Status from another connection is forwarded as
   not viewed. For always-on, `AlwaysOnStatus { viewed: true }` from a shown UI
   (polled every 5 s) opens a 10 s window that the supervisor's internal
   keepalive forwards; the internal 1 s keepalive alone never enables probes.
-  After the last view, probes may still run for up to about 10 s (20 s under
-  always-on, both windows in series). Fail-closed: without views the DNS and
+  Delay after the UI is hidden: for a normal session a new run can still
+  start for up to about 17 s (5 s client window, then a keepalive step of
+  up to 2 s, then the 10 s service window); under always-on up to about
+  21 s or more (the UI polls every 5 s; the supervisor's 10 s window, its
+  1 s keepalive and the 10 s service window run in series). A run started
+  at the end of that window still completes within its 5 s deadline. Fail-closed: without views the DNS and
   guard rows are never refreshed, so they read `unknown`/`stale` rather than
   `passed`; a `passed` row never outlives `PROBE_TTL_MS`. An OS-level
   minimize of the native window is not detected and counts as viewed (more
   probes, never a false result).
   Outside Connected a due tick is not re-armed on a short timer: the next
-  lifecycle change (reconnect, network change, resume) or a returning view
-  re-arms it; Windows defers a run whose permit list is unavailable by a full
+  lifecycle change (reconnect, network change, resume) or a view returning
+  while Connected re-arms it; Windows defers a run whose permit list is unavailable by a full
   interval.
   Each run has a 5 s hard deadline; its parts (own rules, bypass attempts,
   DNS) each have 4 s (`PART`), so a slow part (e.g. `pfctl`) reports only its

@@ -40,9 +40,11 @@ pub enum Tick {
 }
 /// Single flight, no queue: a due tick while a run is pending cannot exist.
 ///
-/// After a due tick the caller did not use (not Connected), the runner sleeps
-/// instead of re-arming a short timer; `next` is re-created by every
-/// `select!` iteration, so a later `cancel`/`defer` is seen at once.
+/// After a due tick the caller did not use (not Connected, or nobody viewing),
+/// the runner sleeps instead of re-arming a short timer. Only `cancel` (every
+/// lifecycle change, including the return to Connected), `defer`, or a view
+/// arriving while a run is possible (`viewed(true)`) re-arms it. `next` is
+/// re-created by every `select!` iteration, so such a change is seen at once.
 pub struct Runner {
     task: Option<(u64, Task)>,
     due: Pin<Box<tokio::time::Sleep>>,
@@ -103,11 +105,16 @@ impl Runner {
         self.armed = true;
         self.reschedule(Duration::from_millis(PROBE_INTERVAL_MS));
     }
-    /// A lease Status said a user interface is viewing. Extends the view
-    /// window and wakes an idle runner; it never runs a probe itself.
-    pub fn viewed(&mut self) {
+    /// A lease Status said a user interface is viewing: extend the view
+    /// window. `can_run` (the session is Connected, awake and not expired)
+    /// also wakes an idle runner; otherwise nothing is re-armed, so views
+    /// while Blocked cause no idle due ticks. The return to Connected
+    /// cancels (settles) the runner anyway. A view never runs a probe itself.
+    pub fn viewed(&mut self, can_run: bool) {
         self.viewed_until = Some(tokio::time::Instant::now() + Duration::from_millis(VIEW_TTL_MS));
-        self.wake();
+        if can_run {
+            self.wake();
+        }
     }
     /// A due tick may start a run only while this holds.
     pub fn viewing(&self) -> bool {
@@ -1285,7 +1292,7 @@ mod tests {
         let mut runner = Runner::default();
         assert!(!runner.viewing());
         assert!(matches!(runner.next().await, Tick::Due));
-        runner.viewed();
+        runner.viewed(true);
         assert!(runner.viewing());
         let before = tokio::time::Instant::now();
         assert!(matches!(runner.next().await, Tick::Due));
@@ -2716,5 +2723,236 @@ mod tests {
                 "{seen:?}"
             );
         }
+    }
+}
+
+/// Independent tester checks for issue #90: the runner driven the way the
+/// lease loops drive it (a due tick starts a run only while connected and
+/// viewed), with scripted views, lifecycle changes and slow runs.
+#[cfg(test)]
+mod view_gate_tests {
+    use super::*;
+    use tokio::time::{Instant, sleep_until};
+
+    const INTERVAL: Duration = Duration::from_millis(PROBE_INTERVAL_MS);
+    const VIEW: Duration = Duration::from_millis(VIEW_TTL_MS);
+
+    #[derive(Default, Debug)]
+    struct Log {
+        starts: Vec<(Instant, u64)>,
+        done: Vec<(Instant, u64)>,
+    }
+
+    /// One scripted lease loop. `views(t)` says whether a viewed Status
+    /// arrives at keepalive time `t` (every 2 s); `connected(t)` is the
+    /// session state; `lifecycle` lists times of cancel() (wake, network
+    /// change, reconnect); each run takes `run_for`.
+    async fn drive(
+        until: Duration,
+        run_for: Duration,
+        views: impl Fn(Duration) -> bool,
+        connected: impl Fn(Duration) -> bool,
+        lifecycle: &[Duration],
+    ) -> Log {
+        let origin = Instant::now();
+        let mut runner = Runner::default();
+        let mut log = Log::default();
+        let mut generation = 0u64;
+        let mut keepalive = origin + Duration::from_secs(2);
+        let mut changes = lifecycle.iter().map(|d| origin + *d).collect::<Vec<_>>();
+        changes.sort();
+        changes.reverse();
+        while origin.elapsed() < until {
+            let next_change = changes.last().copied();
+            tokio::select! {
+                biased;
+                _ = async { sleep_until(next_change.unwrap()).await }, if next_change.is_some() => {
+                    changes.pop();
+                    generation += 1;
+                    runner.cancel();
+                }
+                _ = sleep_until(keepalive) => {
+                    if views(origin.elapsed()) {
+                        // As the lease loops: wake only when a run is possible.
+                        runner.viewed(connected(origin.elapsed()));
+                    }
+                    keepalive += Duration::from_secs(2);
+                }
+                tick = runner.next() => match tick {
+                    Tick::Due => if connected(origin.elapsed()) && runner.viewing() {
+                        log.starts.push((Instant::now(), generation));
+                        runner.start(generation, async move {
+                            tokio::time::sleep(run_for).await;
+                            SystemProbe::unknown(now_ms())
+                        });
+                    },
+                    Tick::Done(g, _) => log.done.push((Instant::now(), g)),
+                },
+                _ = sleep_until(origin + until) => {}
+            }
+        }
+        log
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn views_while_blocked_cause_no_idle_due_ticks() {
+        // Blocked (or access expired) with a UI open: a viewed keepalive
+        // every 2 s for a minute must not re-arm the runner each time.
+        let mut runner = Runner::default();
+        let start = Instant::now();
+        let mut keepalive = tokio::time::interval(Duration::from_secs(2));
+        let mut dues = Vec::new();
+        while start.elapsed() < Duration::from_secs(60) {
+            tokio::select! {
+                tick = runner.next() => match tick {
+                    // Not Connected: the tick goes unused, nothing starts.
+                    Tick::Due => dues.push(start.elapsed()),
+                    Tick::Done(..) => panic!("no run may start while Blocked"),
+                },
+                _ = keepalive.tick() => runner.viewed(false),
+            }
+        }
+        // Only the initial settle tick after the lease began.
+        assert_eq!(dues, [SETTLE], "idle wake-ups while Blocked");
+        assert!(runner.viewing(), "the view window still follows the UI");
+        // Back to Connected: the lifecycle change settles and the next due
+        // tick starts a run while the view lasts.
+        runner.cancel();
+        runner.viewed(true);
+        let before = Instant::now();
+        assert!(matches!(runner.next().await, Tick::Due));
+        assert_eq!(before.elapsed(), SETTLE);
+        assert!(runner.viewing());
+        runner.start(1, async { SystemProbe::unknown(now_ms()) });
+        assert!(matches!(runner.next().await, Tick::Done(1, _)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_views_means_no_runs_for_ten_minutes() {
+        let log = drive(
+            Duration::from_secs(600),
+            Duration::from_secs(1),
+            |_| false,
+            |_| true,
+            &[Duration::from_secs(100), Duration::from_secs(300)],
+        )
+        .await;
+        assert!(log.starts.is_empty(), "{log:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn view_end_allows_at_most_one_more_run_and_a_running_one_completes() {
+        // Several phases where the view ends at different offsets relative
+        // to the 15 s cadence, with 4 s runs (inside the 5 s deadline).
+        for stop in (30..=60).step_by(1) {
+            let stop = Duration::from_secs(stop);
+            let origin = Instant::now();
+            let log = drive(
+                stop + Duration::from_secs(120),
+                Duration::from_secs(4),
+                |t| t <= stop,
+                |_| true,
+                &[],
+            )
+            .await;
+            let after: Vec<_> = log
+                .starts
+                .iter()
+                .filter(|(at, _)| *at - origin > stop)
+                .collect();
+            assert!(after.len() <= 1, "stop={stop:?}: {log:?}");
+            for (at, _) in &after {
+                assert!(*at - origin < stop + VIEW, "outside the service window");
+            }
+            // Every started run delivered its result: leaving the view does
+            // not cancel it.
+            assert_eq!(log.starts.len(), log.done.len(), "stop={stop:?}");
+            // Cadence: a run never starts within an interval of the previous end.
+            for (end, start) in log.done.iter().zip(log.starts.iter().skip(1)) {
+                assert!(start.0 - end.0 >= INTERVAL, "stop={stop:?}: {log:?}");
+            }
+            // First run: the settle after the first view, not before.
+            assert!(log.starts[0].0 - origin >= Duration::from_secs(2));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unused_due_while_not_connected_does_not_strand_a_returning_view() {
+        // Viewed throughout, but connected only from 21 s: the early due
+        // ticks go unused (armed=false); views must re-arm the runner so a
+        // run follows soon after Connected, without any lifecycle cancel.
+        let origin = Instant::now();
+        let log = drive(
+            Duration::from_secs(60),
+            Duration::from_secs(1),
+            |_| true,
+            |t| t >= Duration::from_secs(21),
+            &[],
+        )
+        .await;
+        let first = log.starts.first().expect("a run after Connected").0 - origin;
+        assert!(first >= Duration::from_secs(21), "{log:?}");
+        assert!(
+            first <= Duration::from_secs(21) + SETTLE + Duration::from_secs(2),
+            "{first:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn view_returning_after_an_unused_due_waits_the_interval_since_the_last_run() {
+        // One viewed keepalive at 2 s (window to 12 s): run 2..3 s. A
+        // lifecycle change at 10 s settles to an unused due at 12 s (the
+        // window just closed). The view returns at 14 s: the runner must wait
+        // for 15 s after the last run ended (18 s), not just the settle (16 s).
+        let origin = Instant::now();
+        let log = drive(
+            Duration::from_secs(40),
+            Duration::from_secs(1),
+            |t| t == Duration::from_secs(2) || t >= Duration::from_secs(14),
+            |_| true,
+            &[Duration::from_secs(10)],
+        )
+        .await;
+        assert!(log.starts.len() >= 2, "{log:?}");
+        assert_eq!(log.done[0].0 - origin, Duration::from_secs(3), "{log:?}");
+        let second = log.starts[1].0 - origin;
+        assert_eq!(second, Duration::from_secs(18), "{log:?}");
+    }
+    #[tokio::test(start_paused = true)]
+    async fn lifecycle_change_mid_run_drops_the_stale_generation() {
+        // A wake/network change at 3 s lands during the first run (2..6 s):
+        // its result is never delivered, and the next run (new generation)
+        // follows the settle, as before #90.
+        let log = drive(
+            Duration::from_secs(30),
+            Duration::from_secs(4),
+            |_| true,
+            |_| true,
+            &[Duration::from_secs(3)],
+        )
+        .await;
+        assert_eq!(log.starts[0].1, 0);
+        assert!(log.done.iter().all(|(_, g)| *g != 0), "{log:?}");
+        assert_eq!(log.starts[1].1, 1);
+        assert!(log.done.iter().any(|(_, g)| *g == 1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lifecycle_cancel_without_a_view_starts_nothing() {
+        // Sleep/wake and network changes while nobody views: settle ticks
+        // fire but stay unused.
+        let log = drive(
+            Duration::from_secs(120),
+            Duration::from_secs(1),
+            |t| t <= Duration::from_secs(4),
+            |_| true,
+            &[
+                Duration::from_secs(40),
+                Duration::from_secs(41),
+                Duration::from_secs(80),
+            ],
+        )
+        .await;
+        assert_eq!(log.starts.len(), 1, "{log:?}");
     }
 }

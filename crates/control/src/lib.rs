@@ -637,6 +637,52 @@ mod tests {
         );
     }
     #[test]
+    fn viewed_flag_rejects_malformed_values_and_keeps_v6_bytes() {
+        for bad in [
+            r#"{"op":"Status","viewed":null}"#,
+            r#"{"op":"Status","viewed":1}"#,
+            r#"{"op":"Status","viewed":"true"}"#,
+            r#"{"op":"Status","Viewed":true}"#,
+            r#"{"op":"Status","viewed":true,"viewed":true}"#,
+            r#"{"op":"AlwaysOnStatus","viewed":[true]}"#,
+        ] {
+            assert!(serde_json::from_str::<Command>(bad).is_err(), "{bad}");
+        }
+        // Pre-existing serde behaviour (not #90): internally tagged unit
+        // variants ignore extra keys despite deny_unknown_fields.
+        for lenient in [
+            r#"{"op":"Capabilities","viewed":true}"#,
+            r#"{"op":"PrepareUpdate","viewed":true}"#,
+            r#"{"op":"Stop","viewed":true}"#,
+            r#"{"op":"DisableAlwaysOn","viewed":true}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Command>(lenient).is_ok(),
+                "{lenient}"
+            );
+        }
+        // Whole request frame of a non-viewed keepalive: identical to v6 bytes
+        // apart from the version number.
+        let keepalive = Request {
+            version: VERSION,
+            command: Command::Status { viewed: false },
+        };
+        assert_eq!(
+            serde_json::to_string(&keepalive).unwrap(),
+            r#"{"version":7,"command":{"op":"Status"}}"#
+        );
+        // A v6 frame that carries the new flag is still refused.
+        let v6: Request =
+            serde_json::from_str(r#"{"version":6,"command":{"op":"Status","viewed":true}}"#)
+                .unwrap();
+        assert_eq!(admitted_version(&v6), None);
+        let v6: Request = serde_json::from_str(
+            r#"{"version":6,"command":{"op":"AlwaysOnStatus","viewed":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(admitted_version(&v6), None);
+    }
+    #[test]
     fn previous_version_may_only_negotiate_and_reserve_for_rollback() {
         let request = |version, json: &str| Request {
             version,

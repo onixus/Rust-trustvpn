@@ -1052,7 +1052,7 @@ async fn connected(
         match request.command {
             Command::Status { viewed } => {
                 if viewed {
-                    probes.viewed();
+                    probes.viewed(awake && state == State::Connected);
                 }
                 let mut response = Response::new(
                     state.clone(),

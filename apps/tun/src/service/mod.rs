@@ -483,7 +483,7 @@ async fn serve(
         match request.command {
             Command::Status { viewed } => {
                 if viewed {
-                    probes.viewed();
+                    probes.viewed(state == State::Connected && !access_expired);
                 }
                 endpoint_lease.update(
                     failover.current(),
