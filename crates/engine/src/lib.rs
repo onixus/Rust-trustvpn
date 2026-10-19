@@ -25,6 +25,32 @@ use tokio::{
 use zeroize::Zeroizing;
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Process-wide TCP flow counts since start, across sessions: numbers only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FlowCounters {
+    /// TCP CONNECTs the endpoint accepted.
+    pub tcp_opened: u64,
+    /// Watched flows (ports that answer the first write) answered after it.
+    pub tcp_answered: u64,
+    /// Watched flows closed after writing without any answer.
+    pub tcp_quiet: u64,
+    /// TCP CONNECTs that failed in transport (no endpoint answer).
+    pub tcp_open_failed: u64,
+    /// Opens of any kind that found no stream credit in time.
+    pub credit_timeout: u64,
+}
+pub fn flow_counters() -> FlowCounters {
+    use std::sync::atomic::Ordering::Relaxed;
+    let flows = &liveness::FLOWS;
+    FlowCounters {
+        tcp_opened: flows.opened.load(Relaxed),
+        tcp_answered: flows.answered.load(Relaxed),
+        tcp_quiet: flows.quiet.load(Relaxed),
+        tcp_open_failed: flows.failed.load(Relaxed),
+        credit_timeout: flows.credit.load(Relaxed),
+    }
+}
 /// Protect/bind a transport socket before its first packet (Android VpnService).
 /// Failure is terminal for that attempt: no unprotected fallback is allowed.
 pub type SocketProtector = Arc<dyn Fn(i32) -> std::io::Result<()> + Send + Sync>;
@@ -52,13 +78,20 @@ pub enum Error {
     Rejected(u16),
     #[error("Operation timed out")]
     Timeout,
+    /// No stream credit within the open deadline: the session already has
+    /// as many streams open as the endpoint allows, and none was freed.
+    #[error("Tunnel stream limit reached")]
+    Credit,
     #[error("Tunnel I/O failed")]
     Io,
     #[error("Invalid destination authority")]
     Destination,
     /// Outbound traffic stayed unanswered while opens to several destinations
-    /// failed or stayed silent. `proven`: the session delivered inbound data
-    /// earlier in its life, so it was not dead from the start.
+    /// failed or stayed silent, or most TCP flows that wrote first across
+    /// several hosts never got an answer. `proven`: the session delivered
+    /// inbound data earlier in its life, so it was not dead from the start;
+    /// always false for the second case, where a few answered flows are
+    /// exactly what hid the dead session (issue #99).
     #[error("Tunnel carries no traffic")]
     Degraded { proven: bool },
 }
@@ -251,11 +284,9 @@ impl Session {
             Transport::Hysteria(s) => s.health().await?,
             Transport::Amnezia(s) => s.health().await?,
         }
-        match self.2.verdict() {
-            liveness::Verdict::Healthy => Ok(()),
-            liveness::Verdict::Degraded => Err(Error::Degraded {
-                proven: self.2.delivered(),
-            }),
+        match self.2.degraded() {
+            None => Ok(()),
+            Some(proven) => Err(Error::Degraded { proven }),
         }
     }
     pub async fn open_tcp(&self, target: &str) -> Result<Tunnel> {
@@ -295,6 +326,11 @@ impl Session {
     /// that counts as evidence (see `Liveness::opened`). Every tunnel still
     /// records its traffic.
     fn track(&self, opened: Result<Tunnel>, flow: Option<(&str, Duration)>) -> Result<Tunnel> {
+        if let Err(Error::Credit) = opened {
+            liveness::FLOWS
+                .credit
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some((target, started)) = flow {
             self.2.opened(
                 &opened.as_ref().map(|_| ()).map_err(Clone::clone),
@@ -303,6 +339,12 @@ impl Session {
             );
         }
         opened.map(|mut tunnel| {
+            if let Some((target, _)) = flow {
+                liveness::FLOWS
+                    .opened
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tunnel.watch = self.2.watch(target);
+            }
             tunnel.liveness = Some(self.2.clone());
             tunnel
         })
@@ -410,13 +452,15 @@ impl H2Session {
             .header("proxy-authorization", self.0.auth.clone())
             .body(())
             .map_err(|_| Error::Destination)?;
-        let mut sender = self
-            .0
-            .sender
-            .clone()
-            .ready()
-            .await
-            .map_err(|_| Error::Protocol)?;
+        // Bounded like the response. Each request uses a fresh clone, which
+        // h2 lets queue one stream past the endpoint's concurrency limit, so
+        // credit starvation mostly ends below as `Timeout`; a handle that
+        // does wait here ends as `Credit`. Both are failed opens.
+        let mut sender =
+            tokio::time::timeout(Duration::from_secs(10), self.0.sender.clone().ready())
+                .await
+                .map_err(|_| Error::Credit)?
+                .map_err(|_| Error::Protocol)?;
         let (response, send) = sender
             .send_request(request, authority == "_check")
             .map_err(|_| Error::Protocol)?;
@@ -489,6 +533,7 @@ impl H2Session {
             io: client,
             pump,
             liveness: None,
+            watch: Default::default(),
         })
     }
 }
@@ -498,37 +543,44 @@ pub struct Tunnel {
     pump: tokio::task::JoinHandle<()>,
     /// The owning session's evidence; set by `Session`, never shared across sessions.
     liveness: Option<Arc<liveness::Liveness>>,
+    /// Whether this TCP flow's first write was answered (verdict B).
+    watch: liveness::Watch,
 }
 impl Drop for Tunnel {
     fn drop(&mut self) {
         self.pump.abort();
+        liveness::closed(self.watch);
     }
 }
 impl AsyncRead for Tunnel {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
         let before = buf.filled().len();
-        let polled = Pin::new(&mut self.io).poll_read(cx, buf);
-        if let (Some(liveness), Poll::Ready(Ok(()))) = (&self.liveness, &polled)
+        let polled = Pin::new(&mut this.io).poll_read(cx, buf);
+        if let (Some(liveness), Poll::Ready(Ok(()))) = (&this.liveness, &polled)
             && buf.filled().len() > before
         {
             liveness.inbound();
+            liveness.read(&mut this.watch);
         }
         polled
     }
 }
 impl AsyncWrite for Tunnel {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        let polled = Pin::new(&mut self.io).poll_write(cx, buf);
-        if let (Some(liveness), Poll::Ready(Ok(1..))) = (&self.liveness, &polled) {
+        let this = self.get_mut();
+        let polled = Pin::new(&mut this.io).poll_write(cx, buf);
+        if let (Some(liveness), Poll::Ready(Ok(1..))) = (&this.liveness, &polled) {
             liveness.outbound();
+            liveness.wrote(&mut this.watch);
         }
         polled
     }

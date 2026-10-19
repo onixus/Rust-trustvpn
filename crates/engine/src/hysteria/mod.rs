@@ -256,13 +256,14 @@ impl HysteriaSession {
         }
     }
     pub async fn open_tcp(&self, target: &str) -> Result<Tunnel> {
-        let (mut send, mut recv) = tokio::time::timeout(Duration::from_secs(10), async {
-            let (mut send, mut recv) = self
-                .0
-                .connection
-                .open_bi()
-                .await
-                .map_err(|_| Error::Connect)?;
+        // One deadline; waiting for a bidirectional stream past it means the
+        // endpoint's stream limit is exhausted (`Credit`).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let (mut send, mut recv) = tokio::time::timeout_at(deadline, self.0.connection.open_bi())
+            .await
+            .map_err(|_| Error::Credit)?
+            .map_err(|_| Error::Connect)?;
+        let (mut send, mut recv) = tokio::time::timeout_at(deadline, async move {
             let mut header = Vec::new();
             varint(0x401, &mut header)?;
             varint(target.len() as u64, &mut header)?;
@@ -302,6 +303,7 @@ impl HysteriaSession {
             io,
             pump,
             liveness: None,
+            watch: Default::default(),
         })
     }
     pub async fn open_udp(&self) -> Result<Tunnel> {

@@ -8,6 +8,10 @@ use tokio::{
 };
 
 async fn endpoint() -> (Profile, tokio::task::JoinHandle<()>) {
+    endpoint_limited(None).await
+}
+/// `streams`: the endpoint's SETTINGS_MAX_CONCURRENT_STREAMS.
+async fn endpoint_limited(streams: Option<u32>) -> (Profile, tokio::task::JoinHandle<()>) {
     let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
@@ -30,7 +34,11 @@ async fn endpoint() -> (Profile, tokio::task::JoinHandle<()>) {
                 let Ok(tls) = acceptor.accept(tcp).await else {
                     return;
                 };
-                let mut conn = h2::server::handshake(tls).await.unwrap();
+                let mut builder = h2::server::Builder::new();
+                if let Some(streams) = streams {
+                    builder.max_concurrent_streams(streams);
+                }
+                let mut conn = builder.handshake(tls).await.unwrap();
                 while let Some(Ok((req, mut response))) = conn.accept().await {
                     tokio::spawn(async move {
                         assert_eq!(req.method(), "CONNECT");
@@ -420,4 +428,46 @@ async fn interrupted_tls_handshake_is_retryable_but_certificate_failures_are_not
     profile.endpoint.hostname = "wrong.example".into();
     assert!(matches!(Session::connect(&profile).await, Err(Error::Tls)));
     endpoint.abort();
+}
+
+/// Issue #99: opens beyond the endpoint's concurrency limit end within the
+/// open deadline. h2 queues them locally (every request uses its own
+/// `SendRequest` clone, so `ready()` does not wait), and they end as an
+/// unanswered CONNECT (`Timeout`); `Credit` remains possible for a handle
+/// that does wait. Both count as failed opens for liveness.
+#[tokio::test(flavor = "multi_thread")]
+async fn h2_opens_past_the_stream_limit_end_within_the_deadline() {
+    let (p, server) = endpoint_limited(Some(2)).await;
+    let session = Session::connect(&p).await.unwrap();
+    session.health().await.unwrap();
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        let mut flow = session.open_tcp("192.0.2.1:7").await.unwrap();
+        flow.write_all(b"x").await.unwrap();
+        let mut byte = [0u8; 1];
+        flow.read_exact(&mut byte).await.unwrap();
+        held.push(flow);
+    }
+    let before = rtrust_engine::flow_counters();
+    let started = std::time::Instant::now();
+    let waiting: Vec<_> = (0..5)
+        .map(|_| {
+            let session = session.clone();
+            tokio::spawn(async move { session.open_tcp("192.0.2.1:443").await.map(|_| ()) })
+        })
+        .collect();
+    for task in waiting {
+        let result = tokio::time::timeout(Duration::from_secs(15), task)
+            .await
+            .expect("bounded wait")
+            .unwrap();
+        assert!(
+            matches!(result, Err(Error::Timeout | Error::Credit)),
+            "{result:?}"
+        );
+    }
+    assert!(started.elapsed() < Duration::from_secs(13));
+    assert!(rtrust_engine::flow_counters().tcp_open_failed >= before.tcp_open_failed + 5);
+    drop(held);
+    server.abort();
 }

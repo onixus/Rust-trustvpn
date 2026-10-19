@@ -317,6 +317,7 @@ impl AmneziaSession {
             io,
             pump,
             liveness: None,
+            watch: Default::default(),
         })
     }
     pub async fn open_udp(&self) -> Result<Tunnel> {
@@ -364,6 +365,7 @@ impl AmneziaSession {
             io,
             pump,
             liveness: None,
+            watch: Default::default(),
         })
     }
 }

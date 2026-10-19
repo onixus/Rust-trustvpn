@@ -148,11 +148,15 @@ impl H3Session {
             .body(())
             .map_err(|_| Error::Destination)?;
         let mut sender = self.0.sender.clone();
-        tokio::time::timeout(Duration::from_secs(10), async {
-            let mut stream = sender
-                .send_request(request)
-                .await
-                .map_err(|_| Error::Protocol)?;
+        // One deadline for the whole request. `send_request` first waits for
+        // stream credit (the endpoint's concurrent stream limit), so running
+        // out of time there is `Credit`, not an unanswered CONNECT.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut stream = tokio::time::timeout_at(deadline, sender.send_request(request))
+            .await
+            .map_err(|_| Error::Credit)?
+            .map_err(|_| Error::Protocol)?;
+        tokio::time::timeout_at(deadline, async {
             if target == "_check" {
                 stream.finish().await.map_err(|_| Error::Io)?;
             }
@@ -226,6 +230,7 @@ impl H3Session {
             io: client,
             pump,
             liveness: None,
+            watch: Default::default(),
         })
     }
 }

@@ -9,6 +9,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// 1.1.0 with a blocked stream, it finishes `lost*.invalid`, `_icmp` and every later
 /// `_check` without a response.
 async fn endpoint() -> (Profile, tokio::task::JoinHandle<()>) {
+    endpoint_limited(None).await
+}
+/// `streams`: the endpoint's concurrent bidirectional stream limit.
+async fn endpoint_limited(streams: Option<u32>) -> (Profile, tokio::task::JoinHandle<()>) {
     let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
@@ -20,11 +24,13 @@ async fn endpoint() -> (Profile, tokio::task::JoinHandle<()>) {
         .unwrap();
     tls.alpn_protocols = vec![b"h3".to_vec()];
     let quic = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
-    let server = quinn::Endpoint::server(
-        quinn::ServerConfig::with_crypto(Arc::new(quic)),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .unwrap();
+    let mut config = quinn::ServerConfig::with_crypto(Arc::new(quic));
+    if let Some(streams) = streams {
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_concurrent_bidi_streams(streams.into());
+        config.transport_config(Arc::new(transport));
+    }
+    let server = quinn::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap();
     let address = server.local_addr().unwrap();
     let p = Profile::import(&format!(
         "hostname='localhost'\naddresses=['{address}']\nusername='test'\npassword='secret'\nupstream_protocol='http3'\ncertificate='''{}'''\n",
@@ -273,5 +279,44 @@ async fn unanswered_traffic_degrades_only_its_own_session() {
         proven.health().await,
         Err(Error::Degraded { proven: true })
     ));
+    server.abort();
+}
+
+/// Issue #99: a CONNECT that cannot get stream credit within the open
+/// deadline is reported as `Credit`, distinct from an unanswered CONNECT.
+#[tokio::test(flavor = "multi_thread")]
+async fn exhausted_stream_credit_is_reported_as_credit() {
+    let (p, server) = endpoint_limited(Some(2)).await;
+    let session = Session::connect(&p).await.unwrap();
+    let before = rtrust_engine::flow_counters();
+    // Echo flows stay open until the client's FIN, holding both streams.
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(session.open_tcp("192.0.2.1:7").await.unwrap());
+    }
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        session.open_tcp("192.0.2.1:443").await,
+        Err(Error::Credit)
+    ));
+    assert!(started.elapsed() >= std::time::Duration::from_secs(9));
+    let after = rtrust_engine::flow_counters();
+    assert!(after.credit_timeout > before.credit_timeout);
+    assert!(after.tcp_open_failed > before.tcp_open_failed);
+    // Freeing a stream lets the next open through on the same session.
+    let mut first = held.remove(0);
+    first.write_all(b"x").await.unwrap();
+    first.shutdown().await.unwrap();
+    let mut echoed = Vec::new();
+    first.read_to_end(&mut echoed).await.unwrap();
+    drop(first);
+    let mut next = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        session.open_tcp("192.0.2.1:7"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    next.write_all(b"y").await.unwrap();
     server.abort();
 }
