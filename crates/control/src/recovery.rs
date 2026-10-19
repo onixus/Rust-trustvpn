@@ -286,11 +286,40 @@ impl Budget {
     pub fn cooling(&self) -> bool {
         self.cooling
     }
+    /// An attempt cancelled before it could run (the system went to sleep
+    /// while the delay was pending) proved nothing about the endpoint and is
+    /// refunded, so repeated short wakes do not exhaust the burst budget.
+    /// A cooldown already entered is kept: it was earned by real failures.
+    pub fn interrupted(&mut self) {
+        if self.cooling {
+            return;
+        }
+        self.attempts = self.attempts.saturating_sub(1);
+        self.exponent = self.exponent.saturating_sub(1);
+    }
 }
 
 #[cfg(test)]
 mod budget_tests {
     use super::*;
+    #[test]
+    fn sleep_interrupted_attempts_are_refunded_but_a_cooldown_is_kept() {
+        let mut budget = Budget::default();
+        for _ in 0..100 {
+            assert_eq!(budget.next_delay(0), Duration::from_secs(2));
+            budget.interrupted();
+        }
+        for seconds in [2, 4, 8, 16, 30, 30, 30, 30] {
+            assert_eq!(budget.next_delay(0), Duration::from_secs(seconds));
+        }
+        assert_eq!(budget.next_delay(0), COOLDOWN);
+        assert!(budget.cooling());
+        budget.interrupted();
+        assert!(budget.cooling());
+        // Sustained liveness still restores the budget after a cooldown.
+        budget.disconnected(STABLE_CONNECTION, false);
+        assert_eq!(budget.next_delay(0), Duration::from_secs(2));
+    }
     #[test]
     fn outage_and_flapping_cannot_exceed_burst_budget() {
         let mut budget = Budget::default();

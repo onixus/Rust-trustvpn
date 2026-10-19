@@ -16,7 +16,14 @@ use tokio::{
     task::JoinHandle,
 };
 
+/// Concurrent local TCP flows. A desktop waking from sleep sees hundreds of
+/// applications reconnect at once; refused SYNs are retransmitted by the host,
+/// but a table sized for a phone turned every wake into a minute of silence.
+/// Buffers are allocated per flow (2 x BUFFER), so mobile keeps the lower bound.
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub const MAX_FLOWS: usize = 128;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub const MAX_FLOWS: usize = 512;
 /// A SYN that is never acknowledged, or whose SYN-ACK the host resets, must
 /// not hold a flow slot for the full idle timeout: a stale backlog after sleep
 /// would otherwise fill the table and silently refuse every new connection.
@@ -469,10 +476,13 @@ mod tests {
         }
         assert_eq!(stack.connections(), 0);
         // Aborted connect owners retire as soon as the runtime polls them.
-        for _ in 0..8 {
+        for _ in 0..10_000 {
             tokio::task::yield_now().await;
+            stack.poll();
+            if stack.retired.is_empty() {
+                break;
+            }
         }
-        stack.poll();
         assert!(stack.retired.is_empty());
         // A live connection attempt still gets its SYN-ACK.
         stack.ingest(crate::packet::test_syn(7000), pending_connect);
@@ -514,7 +524,7 @@ mod tests {
         corrupt[20] ^= 1;
         stack.ingest(corrupt, &mut add);
         assert_eq!(stack.connections(), 1);
-        for port in 4001..4300 {
+        for port in 4001..(4001 + MAX_FLOWS as u16 + 171) {
             stack.ingest(crate::packet::test_syn(port), &mut add);
         }
         assert_eq!(stack.connections(), MAX_FLOWS);
@@ -602,10 +612,13 @@ mod tester_tests {
             stack.ingest(crate::packet::test_rst(10000 + port, seq), pending_connect);
         }
         assert_eq!(stack.connections(), 0);
-        for _ in 0..8 {
+        for _ in 0..10_000 {
             tokio::task::yield_now().await;
+            stack.poll();
+            if stack.retired.is_empty() {
+                break;
+            }
         }
-        stack.poll();
         assert!(stack.retired.is_empty());
         for port in 0..MAX_FLOWS as u16 {
             stack.ingest(crate::packet::test_syn(11000 + port), pending_connect);

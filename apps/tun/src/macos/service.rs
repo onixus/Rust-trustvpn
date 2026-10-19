@@ -916,6 +916,16 @@ async fn connected(
                     awake = event.awake;
                     events::record(&format!("power_event awake={awake} generation={}", event.generation));
                     summary = None;
+                    if !awake {
+                        // Sleep after a stable session restores the budget as a
+                        // natural disconnect would; a pending attempt it cancels
+                        // is refunded. Wake-to-wake flapping keeps the backoff.
+                        if workers.tunnel.is_some() {
+                            retry_delay.disconnected(connected_since.elapsed(), false);
+                        } else if workers.reconnect.is_some() {
+                            retry_delay.interrupted();
+                        }
+                    }
                     workers.cancel();
                     probes.cancel();
                     restart_pending = true;
@@ -959,9 +969,10 @@ async fn connected(
                     // its pre-wake transport even if its result was successful.
                     if restart_pending { continue; }
                     match &result {
-                        Ok(Err(_)) => {
+                        Ok(Err(error)) => {
                             last_failure = "VPN reconnect failed".into();
-                            events::record(&last_failure);
+                            // Fixed reason strings from device.rs only; no endpoint data.
+                            events::record(&format!("{last_failure}: {error}"));
                         }
                         Err(_) => last_failure = "VPN reconnect worker failed".into(),
                         _ => {},
@@ -2206,6 +2217,90 @@ mod tests {
         assert_eq!(
             delays.lock().unwrap()[8],
             rtrust_control::recovery::COOLDOWN
+        );
+        write(
+            &mut client,
+            &Request {
+                version: VERSION,
+                command: Command::Stop,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read::<Response>(&mut client).await.unwrap().state,
+            State::Idle
+        );
+        supervisor.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn sleep_during_a_pending_reconnect_refunds_the_attempt() {
+        let (power, receiver) = tokio::sync::watch::channel(power::State::default());
+        let delays = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = delays.clone();
+        let (mut client, server) = tokio::io::duplex(4096);
+        let supervisor = tokio::spawn(connected(
+            server,
+            Workers {
+                tunnel: Some(tokio::spawn(std::future::pending())),
+                reconnect: None,
+            },
+            false,
+            receiver,
+            failover().await,
+            move |workers, _, budget| {
+                recorded.lock().unwrap().push(budget.next_delay(0));
+                workers.reconnect = Some(tokio::spawn(std::future::pending()));
+            },
+            || Ok(()),
+        ));
+        let _: Response = read(&mut client).await.unwrap();
+        async fn settle(
+            delays: &Arc<std::sync::Mutex<Vec<Duration>>>,
+            expected: usize,
+            client: &mut tokio::io::DuplexStream,
+        ) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    write(
+                        client,
+                        &Request {
+                            version: VERSION,
+                            command: Command::Status,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    let status: Response = read(client).await.unwrap();
+                    if delays.lock().unwrap().len() == expected && status.state == State::Blocked {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        // Wake while connected: the first attempt is scheduled.
+        for round in 1..=3 {
+            power.send_modify(|s| {
+                s.awake = true;
+                s.generation += 1;
+            });
+            settle(&delays, round, &mut client).await;
+            // Sleep again while that attempt is still pending: it is refunded.
+            power.send_modify(|s| {
+                s.awake = false;
+                s.generation += 1;
+            });
+            settle(&delays, round, &mut client).await;
+        }
+        let delays = delays.lock().unwrap().clone();
+        assert_eq!(
+            delays,
+            vec![Duration::from_secs(2); 3],
+            "refunded attempts restart at the base delay"
         );
         write(
             &mut client,

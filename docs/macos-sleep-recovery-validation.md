@@ -147,7 +147,22 @@ summary. Regressions: `stack::tests::host_reset_after_syn_ack_frees_the_flow_slo
 `unanswered_handshakes_expire_before_the_idle_timeout`,
 `dataplane::backlog_tests::backlog_discard_is_bounded_and_counted`.
 
-Not covered: the retry budget still consumes an attempt for a reconnect that a
-second sleep interrupts (`repeated_power_events_preserve_retry_budget_and_stale_evidence`
-pins that behaviour), and installed-package sleep/wake acceptance on a real Mac
-remains required before the issue is closed.
+Installed-package observation 2026-10-16/17 (four wake reconnects without manual
+intervention, handshakes within seconds) confirmed the stack change. Two follow-up
+defects showed on 2026-10-18/19:
+
+- After long sleeps the first 30 seconds saw `syn_refused` of 563 and 149: the
+  wake burst of application reconnects, not stale backlog, exceeded 128 flows.
+  `stack::MAX_FLOWS` is now 512 on desktop (128 stays on Android/iOS; buffers are
+  allocated per flow).
+- Power events never restored the retry budget: eight wake attempts across a
+  day, two of them cancelled by an immediate second sleep, reached the 300 s
+  cooldown, so a failed reconnect at 14:15 left the user without a tunnel. Sleep
+  after a stable session now restores the budget (`Budget::disconnected`), and a
+  pending attempt that sleep cancels is refunded (`Budget::interrupted`); a
+  cooldown already entered is kept. Wake-to-wake flapping still keeps the
+  backoff (`repeated_power_events_preserve_retry_budget_and_stale_evidence`).
+  `VPN reconnect failed` now carries its fixed reason string.
+
+Installed-package sleep/wake acceptance on a real Mac remains required before
+the issue is closed.
