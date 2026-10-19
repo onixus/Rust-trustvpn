@@ -222,7 +222,7 @@ async fn serve(
             supervisor.cancel_pending_enable();
         }
         match request.command {
-            Command::AlwaysOnStatus=>return write(&mut stream,&supervisor.state()).await,
+            Command::AlwaysOnStatus{viewed}=>return write(&mut stream,&supervisor.status(viewed)).await,
             command @ (Command::EnableAlwaysOn{..}|Command::EnableRecovery{..}|Command::DisableAlwaysOn)=>return write(&mut stream,&supervisor.command(command).await).await,
             _ if supervisor.enabled()=>return reply(&mut stream,State::Error,"Always-on управляется системной службой. Для обслуживания сначала выключите always-on.").await,
             _=>{},
@@ -464,9 +464,10 @@ async fn serve(
                     }
                     workers.retry(failover.current(), &mut retry_delay, full);
                 }
-                // Started only by this timer while connected in full mode; Status never probes.
+                // Started only by this timer while connected in full mode and
+                // viewed through the lease; Status never probes.
                 tick = probes.next(), if plan.is_some() => match tick {
-                    crate::sysprobe::Tick::Due => if state == State::Connected && !access_expired {
+                    crate::sysprobe::Tick::Due => if state == State::Connected && !access_expired && probes.viewing() {
                         probes.start(monitor.generation(), probe::collect(plan.clone().unwrap()));
                     },
                     crate::sysprobe::Tick::Done(generation, result) => {
@@ -480,7 +481,10 @@ async fn serve(
             return Err("IPC version mismatch".into());
         }
         match request.command {
-            Command::Status => {
+            Command::Status { viewed } => {
+                if viewed {
+                    probes.viewed(state == State::Connected && !access_expired);
+                }
                 endpoint_lease.update(
                     failover.current(),
                     monitor

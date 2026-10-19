@@ -16,6 +16,8 @@ use tokio::sync::{mpsc, oneshot};
 struct Inner {
     stop: mpsc::Sender<oneshot::Sender<Result<(), String>>>,
     status: Arc<Mutex<Response>>,
+    /// Monotonic time a user interface last showed this session's status.
+    viewed_at: Arc<Mutex<Option<tokio::time::Instant>>>,
     owner: Option<owner::Owner>,
     abort: tokio::task::AbortHandle,
 }
@@ -45,7 +47,11 @@ async fn socket() -> Result<UnixStream, String> {
     }
     Ok(stream)
 }
-async fn exchange(stream: &mut Pipe, command: Command, seconds: u64) -> Result<Response, String> {
+async fn exchange(
+    stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
+    command: Command,
+    seconds: u64,
+) -> Result<Response, String> {
     #[cfg(target_os = "macos")]
     let mut suspend = super::suspend::Watch::default();
     exchange_with_resume(stream, command, Duration::from_secs(seconds), || {
@@ -135,7 +141,7 @@ impl Client {
             Command::EnableAlwaysOn { .. }
                 | Command::EnableRecovery { .. }
                 | Command::DisableAlwaysOn
-                | Command::AlwaysOnStatus
+                | Command::AlwaysOnStatus { .. }
         ) {
             return Err("Invalid always-on operation".into());
         }
@@ -151,7 +157,13 @@ impl Client {
             // Receive the fence before opening the mutation connection. An aborted
             // caller cannot leave a complete old Enable carrying a post-Disable fence.
             let mut status_pipe = socket().await?;
-            let status = exchange(&mut status_pipe, Command::AlwaysOnStatus, 5).await?;
+            // The fence read is not a view: it never enables probes.
+            let status = exchange(
+                &mut status_pipe,
+                Command::AlwaysOnStatus { viewed: false },
+                5,
+            )
+            .await?;
             *generation = Some(status.always_on_generation.ok_or(
                 "Always-on cancellation fence unavailable; update UI and service together",
             )?);
@@ -280,14 +292,25 @@ impl Client {
             return Err("Служба не поддерживает резервные профили; обновите службу".into());
         }
         let mut stream = socket().await?;
-        let mut response = exchange(&mut stream, command, 45).await?;
+        let response = exchange(&mut stream, command, 45).await?;
         if response.state != State::Connected {
             return Err(response.message);
         }
+        Ok(Self::poll(stream, response))
+    }
+    /// Keep the admitted session's connection as the service lease: poll
+    /// Status every 2 s until Stop. Each poll reports whether a user
+    /// interface marked the session viewed within `CLIENT_VIEW_MS`.
+    fn poll(
+        mut stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+        mut response: Response,
+    ) -> Self {
         // Kept apart from the shared status so snapshots never carry it.
         let owner = response.owner.take();
         let status = Arc::new(Mutex::new(response));
         let shared = status.clone();
+        let viewed_at = Arc::new(Mutex::new(None::<tokio::time::Instant>));
+        let viewed_shared = viewed_at.clone();
         let (stop, mut receiver) = mpsc::channel::<oneshot::Sender<Result<(), String>>>(1);
         let task = tokio::spawn(async move {
             loop {
@@ -309,10 +332,11 @@ impl Client {
                         break;
                     }
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                        let viewed = recently_viewed(*viewed_shared.lock().unwrap(), tokio::time::Instant::now());
                         // Darwin's root service can resume later than the GUI.
                         // Keep the same framed exchange alive through that gap.
                         let seconds = if cfg!(target_os = "macos") { 30 } else { 5 };
-                        match exchange(&mut stream, Command::Status, seconds).await {
+                        match exchange(&mut stream, Command::Status { viewed }, seconds).await {
                             Ok(response) => *shared.lock().unwrap() = response,
                             Err(_) => {
                                 let mut response = shared.lock().unwrap();
@@ -326,12 +350,19 @@ impl Client {
                 }
             }
         });
-        Ok(Self(Arc::new(Inner {
+        Self(Arc::new(Inner {
             stop,
             status,
+            viewed_at,
             owner,
             abort: task.abort_handle(),
-        })))
+        }))
+    }
+    /// A user interface is showing this session's status now. The next
+    /// keepalives (within `CLIENT_VIEW_MS`) ask the service to keep its
+    /// system probes running. Status reads alone never mark a view.
+    pub fn mark_viewed(&self) {
+        *self.0.viewed_at.lock().unwrap() = Some(tokio::time::Instant::now());
     }
     pub fn status(&self) -> Response {
         let mut response = self.0.status.lock().unwrap().clone();
@@ -367,6 +398,12 @@ impl Client {
     }
 }
 
+fn recently_viewed(at: Option<tokio::time::Instant>, now: tokio::time::Instant) -> bool {
+    at.is_some_and(|at| {
+        now.saturating_duration_since(at) < Duration::from_millis(observations::CLIENT_VIEW_MS)
+    })
+}
+
 #[cfg(test)]
 mod resume_tests {
     use super::*;
@@ -379,7 +416,7 @@ mod resume_tests {
         let (resume, resumed) = oneshot::channel();
         let task = tokio::spawn(async move {
             let request: Request = read(&mut server).await.unwrap();
-            assert!(matches!(request.command, Command::Status));
+            assert!(matches!(request.command, Command::Status { viewed: false }));
             let response = Response::new(State::Connected, "restored");
             let (mut encoder, mut bytes) = tokio::io::duplex(4096);
             write(&mut encoder, &response).await.unwrap();
@@ -396,7 +433,7 @@ mod resume_tests {
         let mut resume = Some(resume);
         let result = exchange_with_resume(
             &mut client,
-            Command::Status,
+            Command::Status { viewed: false },
             Duration::from_millis(50),
             || {
                 resume.take().unwrap().send(()).unwrap();
@@ -412,6 +449,53 @@ mod resume_tests {
         task.await.unwrap();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn keepalive_reports_viewed_only_within_the_client_window() {
+        let (client, mut server) = tokio::io::duplex(1 << 16);
+        let (seen_tx, mut seen) = mpsc::unbounded_channel();
+        let service = tokio::spawn(async move {
+            while let Ok(request) = read::<Request>(&mut server).await {
+                let Command::Status { viewed } = request.command else {
+                    panic!("keepalive must be Status");
+                };
+                seen_tx.send(viewed).unwrap();
+                write(&mut server, &Response::new(State::Connected, "up"))
+                    .await
+                    .unwrap();
+            }
+        });
+        let session = Client::poll(client, Response::new(State::Connected, "up"));
+        // Service-side readers (diagnostics, endpoint checks) are not views.
+        let _ = session.status();
+        assert!(!seen.recv().await.unwrap());
+        let _ = session.status();
+        assert!(!seen.recv().await.unwrap());
+        session.mark_viewed();
+        assert!(seen.recv().await.unwrap(), "2 s after the mark");
+        assert!(seen.recv().await.unwrap(), "4 s after the mark");
+        assert!(!seen.recv().await.unwrap(), "6 s: the client window passed");
+        assert!(!seen.recv().await.unwrap());
+        session.mark_viewed();
+        assert!(seen.recv().await.unwrap());
+        drop(session);
+        service.await.unwrap();
+    }
+
+    #[test]
+    fn view_window_is_bounded_and_monotonic() {
+        let now = tokio::time::Instant::now();
+        let window = Duration::from_millis(observations::CLIENT_VIEW_MS);
+        assert!(!recently_viewed(None, now));
+        assert!(recently_viewed(Some(now), now));
+        assert!(recently_viewed(
+            Some(now),
+            now + window - Duration::from_millis(1)
+        ));
+        assert!(!recently_viewed(Some(now), now + window));
+        // A mark "from the future" (clock reordering) counts as now.
+        assert!(recently_viewed(Some(now + window * 4), now));
+    }
+
     #[tokio::test]
     async fn repeated_resume_cannot_extend_a_dead_service_forever() {
         let (mut client, _server) = tokio::io::duplex(4096);
@@ -419,7 +503,7 @@ mod resume_tests {
             Duration::from_millis(200),
             exchange_with_resume(
                 &mut client,
-                Command::Status,
+                Command::Status { viewed: false },
                 Duration::from_millis(10),
                 || true,
             ),
@@ -434,7 +518,7 @@ mod resume_tests {
         let (mut client, _server) = tokio::io::duplex(4096);
         let error = exchange_with_resume(
             &mut client,
-            Command::Status,
+            Command::Status { viewed: false },
             Duration::from_millis(10),
             || false,
         )

@@ -246,7 +246,7 @@ def exact(s,n):
         part=s.recv(n-len(data));assert part,"IPC closed";data+=part
     return data
 def request(s,command):
-    data=json.dumps({"version":6,"command":command}).encode()
+    data=json.dumps({"version":7,"command":command}).encode()
     s.sendall(struct.pack("!I",len(data))+data)
     return json.loads(exact(s,struct.unpack("!I",exact(s,4))[0]))
 s=socket.socket(socket.AF_UNIX);s.settimeout(45);s.connect("/run/rtrust/control.sock")

@@ -339,8 +339,10 @@ function fillForms(){
  set('address',()=>{$('address').value=c.sync.origin});
  $('networks-managed').hidden=!c.managed_routes;modeFields();
 }
+// The service runs DNS/guard probes only while a shown window reports views.
+function viewed(){return document.visibilityState==='visible';}
 async function refresh(){
- state=await invoke('view',{russian:LANG==='ru'});unavailable=false;
+ state=await invoke('view',{russian:LANG==='ru',viewed:viewed()});unavailable=false;
  selected=Math.min(selected,Math.max(0,state.profiles.length-1));
  lastListKey=listKey();
  fillForms();renderAll();
@@ -406,7 +408,7 @@ setInterval(async()=>{
  // A reply that was in flight when an action started is older than that action's refresh.
  const gen=actionGen;polling=true;
  try{
-  const next=await invoke('view',{russian:LANG==='ru'});
+  const next=await invoke('view',{russian:LANG==='ru',viewed:viewed()});
   if(busy||gen!==actionGen)return;
   state.connected=next.connected;state.verified=next.verified;state.observations=next.observations;state.status=next.status;state.diagnostics=next.diagnostics;state.connected_profile=next.connected_profile;state.active_profile=next.active_profile;state.on_fallback=next.on_fallback;
   unavailable=false;if(state.connected)connectError=null;

@@ -149,7 +149,9 @@ continue under the existing guard. Before installation, an abandoned Start is
 cancelled; it cannot create a late tunnel after its caller disappears.
 
 A fresh authenticated Status request observes the current session once and
-does not acquire mutation rights. The original Start connection keeps its
+does not acquire mutation rights. Its IPC 7 `viewed` flag is ignored: only the
+lease connection can keep the service's system probes running
+([observations](vpn-observations.md#service-system-probes-issue-81)). The original Start connection keeps its
 particular session sender, so a late Stop cannot affect a replacement session.
 There is no automatic GUI adoption. A GUI which loses IPC reports
 ControlLost; reopening it does not prove control was recovered.
@@ -216,7 +218,7 @@ the owner reached the Keychain (or the Keychain write failed), only the original
 connection can Stop that session; otherwise an administrator restart of the
 service (journal path) is required. A same-uid process able to read the GUI's
 memory or approved for its Keychain item is outside this boundary. Linux and
-Windows services accept the v6 wire format and ignore `owner`: their Recover
+Windows services accept the same wire format (`owner` since IPC v6, current v7) and ignore `owner`: their Recover
 runs only when no session holds the lease, so it never stops a live session.
 Deterministic synthetic tests cover rejection, owner Recover and the journal
 path; installed-package/device acceptance of this change has NOT RUN.

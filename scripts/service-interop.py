@@ -149,7 +149,7 @@ def main():
 import socket,struct,json,time
 
 def request(s):
-    data=json.dumps({"version":6,"command":{"op":"PrepareUpdate"}}).encode()
+    data=json.dumps({"version":7,"command":{"op":"PrepareUpdate"}}).encode()
     s.sendall(struct.pack("!I",len(data))+data)
     header=s.recv(4);size=struct.unpack("!I",header)[0]
     raw=b""
@@ -188,7 +188,7 @@ def exact(s,n):
     return data
 
 def request(s,command):
-    data=json.dumps({"version":6,"command":command}).encode()
+    data=json.dumps({"version":7,"command":command}).encode()
     s.sendall(struct.pack("!I",len(data))+data)
     size=struct.unpack("!I",exact(s,4))[0]
     return json.loads(exact(s,size))
@@ -220,7 +220,7 @@ with socket.socket(socket.AF_UNIX) as s:
 import socket,struct,json,sys
 with socket.socket(socket.AF_UNIX) as s:
     s.settimeout(5); s.connect("/run/rtrust/control.sock")
-    request={"version":6,"command":{"op":"Start","profile":json.load(open(sys.argv[1])),"networks":["198.18.0.1/32"]}}
+    request={"version":7,"command":{"op":"Start","profile":json.load(open(sys.argv[1])),"networks":["198.18.0.1/32"]}}
     data=json.dumps(request).encode(); s.sendall(struct.pack("!I",len(data))+data)
     size=struct.unpack("!I",s.recv(4))[0]; assert json.loads(s.recv(size))["state"]=="Error"
 ''', str(profile))

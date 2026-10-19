@@ -150,6 +150,16 @@ impl Session {
             Self::Tun(..) => None,
         }
     }
+    /// A visible user interface is showing this session now. The service
+    /// runs its DNS/guard probes only while such views keep arriving; a
+    /// hidden window, tray or diagnostics read must not call this.
+    pub fn mark_viewed(&self) {
+        match self {
+            Self::Socks(_) => {}
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            Self::Tun(c, _) => c.mark_viewed(),
+        }
+    }
     pub fn is_tun(&self) -> bool {
         self.proxy().is_none()
     }

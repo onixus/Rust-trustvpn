@@ -243,7 +243,7 @@ async fn serve(
             supervisor.cancel_pending_enable();
         }
         match request.command {
-            Command::AlwaysOnStatus=>return write(pipe,&supervisor.state()).await,
+            Command::AlwaysOnStatus{viewed}=>return write(pipe,&supervisor.status(viewed)).await,
             command @ (Command::EnableAlwaysOn{..}|Command::EnableRecovery{..}|Command::DisableAlwaysOn)=>return write(pipe,&supervisor.command(command).await).await,
             _ if supervisor.enabled()=>return reply_as(pipe,version,State::Error,"Always-on управляется системной службой. Для обслуживания сначала выключите always-on.").await,
             _=>{},
@@ -612,9 +612,10 @@ async fn lease_loop(
                         },
                     }
                 },
-                // Started only by this timer while connected in full mode; Status never probes.
+                // Started only by this timer while connected in full mode and
+                // viewed through the lease; Status never probes.
                 tick = probes.next(), if plan.is_some() => match tick {
-                    crate::sysprobe::Tick::Due => if state == State::Connected && !access_expired {
+                    crate::sysprobe::Tick::Due => if state == State::Connected && !access_expired && probes.viewing() {
                         // Permits are re-read: the audit compares against the current candidates.
                         if let (Some(plan), Ok(permits)) = (plan.clone(), failover.permits()) {
                             probes.start(monitor.generation(), probe::collect(plan, permits));
@@ -633,7 +634,10 @@ async fn lease_loop(
             return Err("IPC version mismatch".into());
         }
         match request.command {
-            Command::Status => {
+            Command::Status { viewed } => {
+                if viewed {
+                    probes.viewed(state == State::Connected && !access_expired);
+                }
                 reply_observed(
                     pipe,
                     state.clone(),
@@ -714,11 +718,14 @@ mod tests {
         let previous = VERSION - 1;
         let response = exchange(previous, Command::Capabilities).await;
         assert_eq!((response.version, response.state), (previous, State::Idle));
+        // v6 Status/AlwaysOnStatus (with or without `viewed`) are refused.
         for command in [
             Command::Stop,
-            Command::Status,
+            Command::Status { viewed: false },
+            Command::Status { viewed: true },
             Command::Recover { owner: None },
             Command::DisableAlwaysOn,
+            Command::AlwaysOnStatus { viewed: false },
         ] {
             let response = exchange(previous, command).await;
             assert_eq!(response.version, VERSION);
@@ -734,10 +741,10 @@ mod tests {
             for command in [
                 Command::Capabilities,
                 Command::Stop,
-                Command::Status,
+                Command::Status { viewed: false },
                 Command::Recover { owner: None },
                 Command::DisableAlwaysOn,
-                Command::AlwaysOnStatus,
+                Command::AlwaysOnStatus { viewed: false },
             ] {
                 let response = exchange(version, command).await;
                 assert_eq!(response.version, VERSION);

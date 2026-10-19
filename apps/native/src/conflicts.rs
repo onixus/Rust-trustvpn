@@ -28,7 +28,7 @@ impl App {
                 )
             }
         }
-        Self::show_window()
+        self.show_window()
     }
     pub(super) fn resolve_store_conflict(&mut self, choice: Choice) -> Task<Message> {
         if !self.can_change_profiles() {

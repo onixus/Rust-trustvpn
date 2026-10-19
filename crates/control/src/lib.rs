@@ -11,7 +11,9 @@ pub const SOCKET: &str = "/private/var/run/rtrust/control.sock";
 pub const MAX_FALLBACKS: usize = 3;
 pub const LIMIT: usize = (2 + MAX_FALLBACKS) * rtrust_profile::MAX_INPUT;
 /// v6: Start returns a session owner; Recover of a live session requires it.
-pub const VERSION: u32 = 6;
+/// v7: Status/AlwaysOnStatus carry `viewed`; the service runs its system
+/// probes only while a user interface recently reported being viewed.
+pub const VERSION: u32 = 7;
 pub mod endpoint;
 pub mod freshness;
 pub mod observations;
@@ -60,7 +62,12 @@ pub enum Command {
         token: endpoint::Token,
     },
     Capabilities,
-    Status,
+    /// `viewed`: a user interface is showing this status now. Omitted when
+    /// false, so the keepalive keeps the exact v6 `{"op":"Status"}` form.
+    Status {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        viewed: bool,
+    },
     PrepareUpdate,
     EnableAlwaysOn {
         profile: Box<rtrust_profile::Profile>,
@@ -77,7 +84,11 @@ pub enum Command {
         generation: Option<u64>,
     },
     DisableAlwaysOn,
-    AlwaysOnStatus,
+    /// `viewed` as for `Status`; the always-on supervisor forwards it.
+    AlwaysOnStatus {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        viewed: bool,
+    },
     Stop,
     /// Stops a live session (owner required) or releases a retained guard
     /// from the journal after the session ended (no owner needed).
@@ -573,6 +584,105 @@ pub fn tunneled_resolver(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn viewed_is_optional_and_a_keepalive_keeps_the_v6_status_form() {
+        for (op, make) in [
+            (
+                "Status",
+                (|viewed| Command::Status { viewed }) as fn(bool) -> Command,
+            ),
+            ("AlwaysOnStatus", |viewed| Command::AlwaysOnStatus {
+                viewed,
+            }),
+        ] {
+            let viewed = |command: &Command| match command {
+                Command::Status { viewed } | Command::AlwaysOnStatus { viewed } => *viewed,
+                _ => panic!("unexpected command"),
+            };
+            let bare = format!(r#"{{"op":"{op}"}}"#);
+            let parsed: Command = serde_json::from_str(&bare).unwrap();
+            assert!(!viewed(&parsed));
+            assert_eq!(serde_json::to_string(&make(false)).unwrap(), bare);
+            let shown = serde_json::to_string(&make(true)).unwrap();
+            assert_eq!(shown, format!(r#"{{"op":"{op}","viewed":true}}"#));
+            assert!(viewed(&serde_json::from_str(&shown).unwrap()));
+            let explicit = format!(r#"{{"op":"{op}","viewed":false}}"#);
+            assert!(!viewed(&serde_json::from_str(&explicit).unwrap()));
+            for bad in [
+                format!(r#"{{"op":"{op}","viewed":true,"extra":1}}"#),
+                format!(r#"{{"op":"{op}","viewed":"yes"}}"#),
+            ] {
+                assert!(serde_json::from_str::<Command>(&bad).is_err(), "{bad}");
+            }
+            // v6 peers sent exactly the bare form; it is no longer admitted
+            // for status, while v6 negotiation and maintenance still are.
+            let v6 = Request {
+                version: 6,
+                command: serde_json::from_str(&bare).unwrap(),
+            };
+            assert_eq!(admitted_version(&v6), None);
+        }
+        for op in ["Capabilities", "PrepareUpdate"] {
+            let v6 = Request {
+                version: 6,
+                command: serde_json::from_str(&format!(r#"{{"op":"{op}"}}"#)).unwrap(),
+            };
+            assert_eq!(admitted_version(&v6), Some(6));
+        }
+        assert_eq!(VERSION, 7);
+        // The capability is the version itself: v6 replies keep their shape.
+        assert!(
+            !serde_json::to_string(&Capabilities::current())
+                .unwrap()
+                .contains("view")
+        );
+    }
+    #[test]
+    fn viewed_flag_rejects_malformed_values_and_keeps_v6_bytes() {
+        for bad in [
+            r#"{"op":"Status","viewed":null}"#,
+            r#"{"op":"Status","viewed":1}"#,
+            r#"{"op":"Status","viewed":"true"}"#,
+            r#"{"op":"Status","Viewed":true}"#,
+            r#"{"op":"Status","viewed":true,"viewed":true}"#,
+            r#"{"op":"AlwaysOnStatus","viewed":[true]}"#,
+        ] {
+            assert!(serde_json::from_str::<Command>(bad).is_err(), "{bad}");
+        }
+        // Pre-existing serde behaviour (not #90): internally tagged unit
+        // variants ignore extra keys despite deny_unknown_fields.
+        for lenient in [
+            r#"{"op":"Capabilities","viewed":true}"#,
+            r#"{"op":"PrepareUpdate","viewed":true}"#,
+            r#"{"op":"Stop","viewed":true}"#,
+            r#"{"op":"DisableAlwaysOn","viewed":true}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Command>(lenient).is_ok(),
+                "{lenient}"
+            );
+        }
+        // Whole request frame of a non-viewed keepalive: identical to v6 bytes
+        // apart from the version number.
+        let keepalive = Request {
+            version: VERSION,
+            command: Command::Status { viewed: false },
+        };
+        assert_eq!(
+            serde_json::to_string(&keepalive).unwrap(),
+            r#"{"version":7,"command":{"op":"Status"}}"#
+        );
+        // A v6 frame that carries the new flag is still refused.
+        let v6: Request =
+            serde_json::from_str(r#"{"version":6,"command":{"op":"Status","viewed":true}}"#)
+                .unwrap();
+        assert_eq!(admitted_version(&v6), None);
+        let v6: Request = serde_json::from_str(
+            r#"{"version":6,"command":{"op":"AlwaysOnStatus","viewed":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(admitted_version(&v6), None);
+    }
+    #[test]
     fn previous_version_may_only_negotiate_and_reserve_for_rollback() {
         let request = |version, json: &str| Request {
             version,
@@ -607,9 +717,11 @@ mod tests {
             },
             Command::Recover { owner: None },
             Command::Stop,
-            Command::Status,
+            Command::Status { viewed: false },
+            Command::Status { viewed: true },
             Command::DisableAlwaysOn,
-            Command::AlwaysOnStatus,
+            Command::AlwaysOnStatus { viewed: false },
+            Command::AlwaysOnStatus { viewed: true },
         ] {
             let request = Request {
                 version: previous,

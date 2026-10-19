@@ -39,7 +39,7 @@ ALT_HOST, ALT_CLIENT = "10.99.3.1", "10.99.3.2"
 POLICY = pathlib.Path("/var/lib/rtrust/always-on.rtrust")
 DNS = "198.18.0.1"
 # crates/control/src/lib.rs VERSION and crates/control/src/recovery.rs.
-IPC_VERSION = 6
+IPC_VERSION = 7
 BACKOFF = (3, 6, 12, 24, 48)
 JITTER = 3
 HYSTERESIS = 60

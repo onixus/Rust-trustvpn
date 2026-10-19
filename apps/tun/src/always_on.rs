@@ -12,8 +12,28 @@ use tokio::{
     io::DuplexStream,
     sync::{Mutex, mpsc, oneshot, watch},
 };
+/// When a user interface last asked for always-on status while visible, on
+/// the service's monotonic clock. The internal lease forwards it as `viewed`;
+/// the internal 1 s keepalive alone never counts as a view.
+#[derive(Default)]
+pub(crate) struct Views(std::sync::Mutex<Option<tokio::time::Instant>>);
+impl Views {
+    fn mark(&self) {
+        *self.0.lock().unwrap() = Some(
+            tokio::time::Instant::now()
+                + Duration::from_millis(rtrust_control::observations::VIEW_TTL_MS),
+        );
+    }
+    fn viewing(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap()
+            .is_some_and(|until| tokio::time::Instant::now() < until)
+    }
+}
 pub struct Supervisor {
     owner: String,
+    views: Arc<Views>,
     enabled: AtomicBool,
     generation: AtomicU64,
     observation_epochs: Arc<AtomicU64>,
@@ -23,6 +43,13 @@ pub struct Supervisor {
 impl Supervisor {
     pub fn enabled(&self) -> bool {
         self.enabled.load(Ordering::Acquire)
+    }
+    /// AlwaysOnStatus: `viewed` keeps the internal session's probes running.
+    pub fn status(&self, viewed: bool) -> Response {
+        if viewed {
+            self.views.mark();
+        }
+        self.state()
     }
     pub fn state(&self) -> Response {
         let mut response = self.state.borrow().clone();
@@ -82,6 +109,7 @@ impl Supervisor {
         let (events, mut rx) = mpsc::channel::<(Command, u64, oneshot::Sender<Response>)>(8);
         let this = Arc::new(Self {
             owner,
+            views: Arc::default(),
             enabled: AtomicBool::new(enabled),
             generation: AtomicU64::new(0),
             observation_epochs: Arc::new(AtomicU64::new(0)),
@@ -96,6 +124,7 @@ impl Supervisor {
                     lease.clone(),
                     state_tx.clone(),
                     task.observation_epochs.clone(),
+                    task.views.clone(),
                 )
             });
             while let Some((command, generation, reply)) = rx.recv().await {
@@ -158,6 +187,7 @@ impl Supervisor {
                                                 lease.clone(),
                                                 state_tx.clone(),
                                                 task.observation_epochs.clone(),
+                                                task.views.clone(),
                                             ));
                                             Ok(())
                                         }
@@ -279,6 +309,7 @@ fn launch(
     lease: Arc<Mutex<()>>,
     state: watch::Sender<Response>,
     observation_epochs: Arc<AtomicU64>,
+    views: Arc<Views>,
 ) -> Active {
     let (stop, mut stopped) = watch::channel(false);
     let task = tokio::spawn(async move {
@@ -368,7 +399,7 @@ fn launch(
                                 state.send_replace(response);return Ok::<(),String>(());
                             }
                             _=tokio::time::sleep(Duration::from_secs(1))=>{
-                                write(&mut client,&Request{version:VERSION,command:Command::Status}).await?;
+                                write(&mut client,&keepalive(&views)).await?;
                                 let mut response:Response=tokio::time::timeout(Duration::from_secs(10),read(&mut client)).await.map_err(|_| "Status timed out")??;
                                 response.recovery = planner.as_ref().map(|p| p.status());
                                 if !observations.accept(attempt, response.observations) { return Err("Stale status observation".into()); }
@@ -464,6 +495,17 @@ fn platform_active() -> Result<bool, String> {
     crate::windows::boot_active()
 }
 
+/// The internal lease's 1 s Status: viewed only while a user interface
+/// recently asked for always-on status as viewed.
+fn keepalive(views: &Views) -> Request {
+    Request {
+        version: VERSION,
+        command: Command::Status {
+            viewed: views.viewing(),
+        },
+    }
+}
+
 /// A finished JoinHandle must never be polled again: a setup error races IPC EOF.
 async fn session_exchange(
     exchange: impl std::future::Future<Output = Result<(), String>>,
@@ -482,6 +524,52 @@ async fn session_exchange(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn internal_keepalive_is_viewed_only_after_a_recent_viewed_status() {
+        let viewed = |request: Request| match request.command {
+            Command::Status { viewed } => viewed,
+            _ => panic!("keepalive must be Status"),
+        };
+        let views = Views::default();
+        // The internal 1 s poll alone never turns the probes on.
+        for _ in 0..30 {
+            assert!(!viewed(keepalive(&views)));
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        views.mark();
+        assert!(viewed(keepalive(&views)));
+        tokio::time::advance(Duration::from_millis(
+            rtrust_control::observations::VIEW_TTL_MS - 1,
+        ))
+        .await;
+        assert!(viewed(keepalive(&views)));
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(!viewed(keepalive(&views)));
+        // Through the supervisor: only AlwaysOnStatus{viewed:true} marks.
+        let (_, state) = watch::channel(Response::new(State::Idle, "off"));
+        let (events, _rx) = mpsc::channel(1);
+        let supervisor = Supervisor {
+            owner: "1000".into(),
+            views: Arc::default(),
+            enabled: AtomicBool::new(true),
+            generation: AtomicU64::new(0),
+            observation_epochs: Arc::new(AtomicU64::new(0)),
+            state,
+            events,
+        };
+        for _ in 0..3 {
+            assert_eq!(supervisor.status(false).always_on, Some(true));
+        }
+        assert!(!viewed(keepalive(&supervisor.views)));
+        assert_eq!(supervisor.status(true).always_on, Some(true));
+        assert!(viewed(keepalive(&supervisor.views)));
+        // A keepalive serializes exactly like the v6 Status.
+        let views = Views::default();
+        assert_eq!(
+            serde_json::to_string(&keepalive(&views)).unwrap(),
+            format!(r#"{{"version":{VERSION},"command":{{"op":"Status"}}}}"#)
+        );
+    }
     #[tokio::test]
     async fn setup_error_before_ipc_response_can_be_retried_without_double_poll_panic() {
         let server = tokio::spawn(async { Err("adapter not ready".to_owned()) });
@@ -541,6 +629,7 @@ mod tests {
         let (events, mut requests) = mpsc::channel(8);
         let supervisor = Arc::new(Supervisor {
             owner: "1000".into(),
+            views: Arc::default(),
             enabled: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             observation_epochs: Arc::new(AtomicU64::new(0)),
@@ -564,6 +653,7 @@ mod tests {
         (
             Arc::new(Supervisor {
                 owner: "1000".into(),
+                views: Arc::default(),
                 enabled: AtomicBool::new(false),
                 generation: AtomicU64::new(0),
                 observation_epochs: Arc::new(AtomicU64::new(0)),
