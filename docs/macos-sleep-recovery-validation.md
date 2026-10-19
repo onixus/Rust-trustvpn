@@ -107,3 +107,62 @@ Local validation of the integrated tree: 293 workspace tests passed, 10 ignored;
 strict workspace/all-target Clippy passed. Native IOKit registration/cleanup was
 also run separately and passed. Current-head CI and package evidence must remain
 bound to their own commit and artifacts.
+
+## Wake reconnect proxies nothing (issue #99, 2026-10-16)
+
+Three wake reconnects on 2026-10-16 (12:24, 13:14, 17:48) reported
+`reconnect_complete` while almost every TCP connection through utun5254 received
+no bytes, DNS through the tunnel retransmitted, and UDP returned nothing until a
+manual Stop/Start. Reconnects after `VPN transport stopped` (04:07, 13:47) worked.
+One episode without manual intervention recovered by itself exactly 300 seconds
+later. The mechanism is in the local TCP stack, not in QUIC, PF or routes:
+
+- Sleep cancels the data plane, so nobody reads utun until `reconnect_complete`;
+  the kernel keeps the SYNs queued meanwhile, and host sockets give up.
+- The new data plane answers each stale SYN with SYN-ACK; the host replies RST.
+  smoltcp returns a listening socket to LISTEN on RST in SYN-RECEIVED, the stack
+  skipped LISTEN sockets and removed only Closed ones, so each reset handshake
+  held a flow slot for the 300-second idle timeout.
+- With all 128 slots held, new SYNs were dropped silently: no SYN-ACK, no RST.
+
+Changes: a handshake reset by the host frees its slot immediately; a handshake
+without progress for `stack::HANDSHAKE` (10 s) is aborted; the UDP relay evicts
+its least recently used mapping instead of refusing new datagrams at 256; and the
+data plane discards packets queued on the device before the session started
+(one awaited read bounded by `dataplane::PRIME_WAIT`, then a non-blocking sweep
+bounded by `dataplane::BACKLOG_LIMIT`), so TCP and DNS retransmit instead of
+opening upstream streams for sockets that are already gone. The sweep is
+best-effort and Unix-only (`try_recv`; Windows and iOS discard at most the one
+packet the awaited read consumed); correctness
+after wake rests on the stack changes, the discard only spares the fresh
+session a burst of upstream opens.
+
+Diagnostics: 30 seconds after `tunnel_connected` and after `reconnect_complete`
+the service records `dataplane_summary after=<connect|reconnect> window_s=30`
+with process-wide counters only (`syn_accepted`, `syn_refused`,
+`handshake_reset`, `handshake_timeout`, `backlog_discarded`, `udp_evicted`); no
+addresses, hosts or profile data. Sleep or a transport failure cancels a pending
+summary. Regressions: `stack::tests::host_reset_after_syn_ack_frees_the_flow_slot`,
+`stale_backlog_resets_do_not_exhaust_the_flow_table`,
+`unanswered_handshakes_expire_before_the_idle_timeout`,
+`dataplane::backlog_tests::backlog_discard_is_bounded_and_counted`.
+
+Installed-package observation 2026-10-16/17 (four wake reconnects without manual
+intervention, handshakes within seconds) confirmed the stack change. Two follow-up
+defects showed on 2026-10-18/19:
+
+- After long sleeps the first 30 seconds saw `syn_refused` of 563 and 149: the
+  wake burst of application reconnects, not stale backlog, exceeded 128 flows.
+  `stack::MAX_FLOWS` is now 512 on desktop (128 stays on Android/iOS; buffers are
+  allocated per flow).
+- Power events never restored the retry budget: eight wake attempts across a
+  day, two of them cancelled by an immediate second sleep, reached the 300 s
+  cooldown, so a failed reconnect at 14:15 left the user without a tunnel. Sleep
+  after a stable session now restores the budget (`Budget::disconnected`), and a
+  pending attempt that sleep cancels is refunded (`Budget::interrupted`); a
+  cooldown already entered is kept. Wake-to-wake flapping still keeps the
+  backoff (`repeated_power_events_preserve_retry_budget_and_stale_evidence`).
+  `VPN reconnect failed` now carries its fixed reason string.
+
+Installed-package sleep/wake acceptance on a real Mac remains required before
+the issue is closed.

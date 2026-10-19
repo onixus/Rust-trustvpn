@@ -147,6 +147,19 @@ pub(crate) fn test_syn(port: u16) -> Vec<u8> {
     b
 }
 
+/// Host-side RST for the flow `test_syn(port)` opened, with sequence `seq`
+/// (the acknowledgement number the stack's SYN-ACK carried).
+#[cfg(test)]
+pub(crate) fn test_rst(port: u16, seq: u32) -> Vec<u8> {
+    let mut b = test_syn(port);
+    b[24..28].copy_from_slice(&seq.to_be_bytes());
+    b[33] = 0x04;
+    b[36..38].fill(0);
+    let checksum = finish(transport_sum(&b, &b[20..]));
+    b[36..38].copy_from_slice(&checksum.to_be_bytes());
+    b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

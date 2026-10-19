@@ -149,6 +149,17 @@ async fn publish(
     Ok(())
 }
 
+/// How long after a (re)connect the data-plane counters are summarised.
+const SUMMARY_DELAY: Duration = Duration::from_secs(30);
+fn summary_after(
+    after: &'static str,
+) -> (tokio::time::Instant, &'static str, crate::stats::Snapshot) {
+    (
+        tokio::time::Instant::now() + SUMMARY_DELAY,
+        after,
+        crate::stats::snapshot(),
+    )
+}
 fn millis(since: Instant) -> u64 {
     u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -839,6 +850,10 @@ async fn connected(
         return Ok(());
     }
     events::record("tunnel_connected");
+    // Numbers only: a bounded data-plane summary after each (re)connect so a
+    // session that proxies nothing is visible without raw traffic capture.
+    let mut summary: Option<(tokio::time::Instant, &'static str, crate::stats::Snapshot)> =
+        Some(summary_after("connect"));
     let mut retry_delay = rtrust_control::recovery::Budget::default();
     let mut connected_since = Instant::now();
     let mut monitor = rtrust_control::observations::Monitor::new(
@@ -900,6 +915,17 @@ async fn connected(
                     let event = *power.borrow_and_update();
                     awake = event.awake;
                     events::record(&format!("power_event awake={awake} generation={}", event.generation));
+                    summary = None;
+                    if !awake {
+                        // Sleep after a stable session restores the budget as a
+                        // natural disconnect would; a pending attempt it cancels
+                        // is refunded. Wake-to-wake flapping keeps the backoff.
+                        if workers.tunnel.is_some() {
+                            retry_delay.disconnected(connected_since.elapsed(), false);
+                        } else if workers.reconnect.is_some() {
+                            retry_delay.interrupted();
+                        }
+                    }
                     workers.cancel();
                     probes.cancel();
                     restart_pending = true;
@@ -918,6 +944,7 @@ async fn connected(
                 result = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() => {
                     workers.tunnel = None;
                     probes.cancel();
+                    summary = None;
                     if restart_pending { continue; }
                     let degraded = result.as_ref().ok().and_then(crate::dataplane::degraded);
                     if let Some(proven) = degraded { events::record(&format!("transport_degraded proven={proven}")); }
@@ -942,14 +969,18 @@ async fn connected(
                     // its pre-wake transport even if its result was successful.
                     if restart_pending { continue; }
                     match &result {
-                        Ok(Err(_)) => {
+                        Ok(Err(error)) => {
                             last_failure = "VPN reconnect failed".into();
-                            events::record(&last_failure);
+                            // Fixed reason strings from device.rs only; no endpoint data.
+                            events::record(&format!("{last_failure}: {error}"));
                         }
                         Err(_) => last_failure = "VPN reconnect worker failed".into(),
                         _ => {},
                     }
                     if let Ok(Ok(prepared)) = result {
+                        // Baseline before the data plane runs: its backlog
+                        // discard must land inside the summary window.
+                        summary = Some(summary_after("reconnect"));
                         workers.tunnel = Some(tokio::spawn(prepared.run()));
                         connected_since = Instant::now();
                         state = State::Connected;
@@ -965,6 +996,14 @@ async fn connected(
                 request = commands.recv() => {
                     if let Some(request) = request { break request; }
                     return Err("Service supervisor stopped".into());
+                },
+                _ = tokio::time::sleep_until(summary.map(|s| s.0).unwrap_or_else(tokio::time::Instant::now)), if summary.is_some() => {
+                    let (_, after, base) = summary.take().unwrap();
+                    events::record(&format!(
+                        "dataplane_summary after={after} window_s={} {}",
+                        SUMMARY_DELAY.as_secs(),
+                        crate::stats::snapshot().since(&base).render()
+                    ));
                 },
                 // Started only by this timer while awake and connected; Status never probes.
                 tick = probes.next(), if plan.is_some() => match tick {
@@ -2195,6 +2234,90 @@ mod tests {
         supervisor.await.unwrap().unwrap();
     }
 
+    #[tokio::test]
+    async fn sleep_during_a_pending_reconnect_refunds_the_attempt() {
+        let (power, receiver) = tokio::sync::watch::channel(power::State::default());
+        let delays = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = delays.clone();
+        let (mut client, server) = tokio::io::duplex(4096);
+        let supervisor = tokio::spawn(connected(
+            server,
+            Workers {
+                tunnel: Some(tokio::spawn(std::future::pending())),
+                reconnect: None,
+            },
+            false,
+            receiver,
+            failover().await,
+            move |workers, _, budget| {
+                recorded.lock().unwrap().push(budget.next_delay(0));
+                workers.reconnect = Some(tokio::spawn(std::future::pending()));
+            },
+            || Ok(()),
+        ));
+        let _: Response = read(&mut client).await.unwrap();
+        async fn settle(
+            delays: &Arc<std::sync::Mutex<Vec<Duration>>>,
+            expected: usize,
+            client: &mut tokio::io::DuplexStream,
+        ) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    write(
+                        client,
+                        &Request {
+                            version: VERSION,
+                            command: Command::Status,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    let status: Response = read(client).await.unwrap();
+                    if delays.lock().unwrap().len() == expected && status.state == State::Blocked {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        // Wake while connected: the first attempt is scheduled.
+        for round in 1..=3 {
+            power.send_modify(|s| {
+                s.awake = true;
+                s.generation += 1;
+            });
+            settle(&delays, round, &mut client).await;
+            // Sleep again while that attempt is still pending: it is refunded.
+            power.send_modify(|s| {
+                s.awake = false;
+                s.generation += 1;
+            });
+            settle(&delays, round, &mut client).await;
+        }
+        let delays = delays.lock().unwrap().clone();
+        assert_eq!(
+            delays,
+            vec![Duration::from_secs(2); 3],
+            "refunded attempts restart at the base delay"
+        );
+        write(
+            &mut client,
+            &Request {
+                version: VERSION,
+                command: Command::Stop,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read::<Response>(&mut client).await.unwrap().state,
+            State::Idle
+        );
+        supervisor.await.unwrap().unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wake_during_route_refresh_keeps_real_supervisor_responsive() {
         let lease = Arc::new(Mutex::new(()));
@@ -2729,5 +2852,155 @@ mod tests {
         let first = new_owner().unwrap();
         assert!(!first.matches(&new_owner().unwrap()));
         assert!(!format!("{first:?}").contains(first.to_hex().as_str()));
+    }
+}
+
+/// Independent tester coverage for issue #99 (dataplane_summary timer,
+/// criterion 7). `events::record` is a no-op without root, so the timer is
+/// checked for not disturbing the supervisor, and the line format separately.
+#[cfg(test)]
+mod tester_summary_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    async fn failover() -> crate::failover::Failover {
+        let profile = rtrust_profile::Profile::import("hostname='test.example'\naddresses=['192.0.2.1:443']\nusername='synthetic'\npassword='synthetic'\n").unwrap();
+        crate::failover::Failover::pin(profile, vec![], crate::failover::Pin::Ipv4)
+            .await
+            .unwrap()
+    }
+    /// Same harness as `tests::connected` (private there): a supervisor
+    /// bridged to a duplex stream, with no probe plan and no shutdown signal.
+    async fn connected(
+        mut stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        workers: Workers,
+        power: tokio::sync::watch::Receiver<power::State>,
+        failover: crate::failover::Failover,
+        retry: impl FnMut(&mut Workers, &rtrust_profile::Profile, &mut rtrust_control::recovery::Budget)
+        + Send
+        + 'static,
+    ) -> Result<(), String> {
+        let (actor, commands) = mpsc::channel(16);
+        let (_shutdown_signal, shutdown_events) = tokio::sync::watch::channel(false);
+        let (initial, response) = oneshot::channel();
+        let supervisor = tokio::spawn(super::connected(
+            Control {
+                commands,
+                initial: Some(initial),
+                shutdown: shutdown_events,
+                probe: None,
+            },
+            workers,
+            false,
+            power,
+            failover,
+            retry,
+            || Ok(()),
+        ));
+        write_response(&mut stream, &response.await.unwrap()).await?;
+        let result = bridge(stream, actor, None).await;
+        if result.is_err() {
+            supervisor.abort();
+        }
+        let _ = supervisor.await;
+        result
+    }
+
+    #[test]
+    fn summary_is_scheduled_thirty_seconds_ahead_and_renders_numbers_only() {
+        let before = tokio::time::Instant::now();
+        let (due, after, base) = summary_after("connect");
+        assert_eq!(after, "connect");
+        assert!(due - before >= SUMMARY_DELAY);
+        assert!(due - before <= SUMMARY_DELAY + Duration::from_secs(1));
+        // Counters are process-wide: parallel tests may advance them between
+        // the two snapshots, so the baseline is a lower bound, never equal.
+        let now = crate::stats::snapshot();
+        let delta = now.since(&base);
+        assert!(delta.syn_accepted <= now.syn_accepted && delta.udp_evicted <= now.udp_evicted);
+        let line = format!(
+            "dataplane_summary after={after} window_s={} {}",
+            SUMMARY_DELAY.as_secs(),
+            crate::stats::snapshot().since(&base).render()
+        );
+        assert!(line.starts_with("dataplane_summary after=connect window_s=30 syn_accepted="));
+        // Every token after the event name is key=number; no addresses,
+        // hosts, ports or profile material can appear.
+        for token in line.split(' ').skip(1) {
+            let (key, value) = token.split_once('=').expect("key=value token");
+            assert!(
+                key.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{key}"
+            );
+            assert!(
+                key == "after" && value == "connect" || value.chars().all(|c| c.is_ascii_digit()),
+                "{token}"
+            );
+        }
+        assert!(!line.contains('.') && !line.contains(':'));
+    }
+
+    /// The 30 s summary timer fires inside the supervisor loop without
+    /// blocking Status, and a power event followed by Stop still works
+    /// whether the timer has fired or was cancelled.
+    #[tokio::test(start_paused = true)]
+    async fn summary_timer_does_not_block_status_power_or_stop() {
+        let (power, receiver) = tokio::sync::watch::channel(power::State::default());
+        let (mut client, server) = tokio::io::duplex(4096);
+        let supervisor = tokio::spawn(connected(
+            server,
+            Workers {
+                tunnel: Some(tokio::spawn(std::future::pending())),
+                reconnect: None,
+            },
+            receiver,
+            failover().await,
+            |workers, _, _| {
+                workers.reconnect = Some(tokio::spawn(std::future::pending()));
+            },
+        ));
+        let initial: Response = read(&mut client).await.unwrap();
+        assert_eq!(initial.state, State::Connected);
+        // Past the summary deadline: the timer branch runs and disarms.
+        tokio::time::advance(SUMMARY_DELAY + Duration::from_secs(1)).await;
+        for _ in 0..3 {
+            write(
+                &mut client,
+                &Request {
+                    version: VERSION,
+                    command: Command::Status,
+                },
+            )
+            .await
+            .unwrap();
+            let status: Response = tokio::time::timeout(Duration::from_secs(5), read(&mut client))
+                .await
+                .expect("Status answered after the summary timer")
+                .unwrap();
+            assert_eq!(status.state, State::Connected);
+        }
+        // Sleep cancels any pending summary; Stop must still be served.
+        power.send_modify(|s| {
+            s.awake = false;
+            s.generation += 1;
+        });
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::time::advance(SUMMARY_DELAY).await;
+        write(
+            &mut client,
+            &Request {
+                version: VERSION,
+                command: Command::Stop,
+            },
+        )
+        .await
+        .unwrap();
+        let stopped: Response = tokio::time::timeout(Duration::from_secs(5), read(&mut client))
+            .await
+            .expect("Stop answered")
+            .unwrap();
+        assert_eq!(stopped.state, State::Idle);
+        client.shutdown().await.unwrap();
+        supervisor.await.unwrap().unwrap();
     }
 }
