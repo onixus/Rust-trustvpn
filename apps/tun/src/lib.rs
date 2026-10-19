@@ -41,5 +41,6 @@ pub mod windows;
 pub mod macos;
 
 pub use dataplane::{
-    PacketDevice, degraded, run_with_dns as run_packet_flow, run_with_policy, unproven,
+    PacketDevice, degraded, degraded_event, degraded_kind, run_with_dns as run_packet_flow,
+    run_with_policy, unproven,
 };

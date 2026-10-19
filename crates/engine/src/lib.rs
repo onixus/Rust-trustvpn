@@ -89,11 +89,30 @@ pub enum Error {
     /// Outbound traffic stayed unanswered while opens to several destinations
     /// failed or stayed silent, or most TCP flows that wrote first across
     /// several hosts never got an answer. `proven`: the session delivered
-    /// inbound data earlier in its life, so it was not dead from the start;
-    /// always false for the second case, where a few answered flows are
-    /// exactly what hid the dead session (issue #99).
+    /// inbound data earlier in its life, so it was not dead from the start.
+    /// In the second case only an answer from before the judged window
+    /// counts: the few answered flows right after a reconnect are exactly
+    /// what hid the dead session (issue #99).
+    /// `kind`: which evidence judged it.
     #[error("Tunnel carries no traffic")]
-    Degraded { proven: bool },
+    Degraded { proven: bool, kind: Stall },
+}
+/// Which liveness evidence ended a session as degraded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stall {
+    /// Outbound demand unanswered while opens failed or stayed silent.
+    Silent,
+    /// Most first-write TCP flows across several hosts got no answer.
+    Quiet,
+}
+impl Stall {
+    /// Stable token for event logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Silent => "silent",
+            Self::Quiet => "quiet",
+        }
+    }
 }
 impl From<std::io::Error> for Error {
     fn from(_: std::io::Error) -> Self {
@@ -286,7 +305,7 @@ impl Session {
         }
         match self.2.degraded() {
             None => Ok(()),
-            Some(proven) => Err(Error::Degraded { proven }),
+            Some((proven, kind)) => Err(Error::Degraded { proven, kind }),
         }
     }
     pub async fn open_tcp(&self, target: &str) -> Result<Tunnel> {
@@ -452,19 +471,20 @@ impl H2Session {
             .header("proxy-authorization", self.0.auth.clone())
             .body(())
             .map_err(|_| Error::Destination)?;
-        // Bounded like the response. Each request uses a fresh clone, which
-        // h2 lets queue one stream past the endpoint's concurrency limit, so
-        // credit starvation mostly ends below as `Timeout`; a handle that
-        // does wait here ends as `Credit`. Both are failed opens.
-        let mut sender =
-            tokio::time::timeout(Duration::from_secs(10), self.0.sender.clone().ready())
-                .await
-                .map_err(|_| Error::Credit)?
-                .map_err(|_| Error::Protocol)?;
+        // One deadline for readiness and the response, as on HTTP/3. Each
+        // request uses a fresh clone, which h2 lets queue one stream past the
+        // endpoint's concurrency limit, so credit starvation mostly ends below
+        // as `Timeout`; a handle that does wait here ends as `Credit`. Both
+        // are failed opens.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut sender = tokio::time::timeout_at(deadline, self.0.sender.clone().ready())
+            .await
+            .map_err(|_| Error::Credit)?
+            .map_err(|_| Error::Protocol)?;
         let (response, send) = sender
             .send_request(request, authority == "_check")
             .map_err(|_| Error::Protocol)?;
-        let response = tokio::time::timeout(Duration::from_secs(10), response)
+        let response = tokio::time::timeout_at(deadline, response)
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::Protocol)?;

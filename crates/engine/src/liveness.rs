@@ -35,9 +35,11 @@ pub(crate) enum Verdict {
     Healthy,
     /// Verdict A; reported with the session's delivery proof.
     Degraded,
-    /// Verdict B only. Always reported unproven: the few flows that did get
-    /// answers must not reset the reconnect budget, or a session that keeps
-    /// coming back in this state would reconnect without a cooldown.
+    /// Verdict B only. Proven only by a flow answered before the judged
+    /// window (`PROOF_AGE`): the few flows answered right after a reconnect
+    /// must not reset the reconnect budget, or a session that keeps coming
+    /// back in this state would reconnect without a cooldown. A long session
+    /// that worked before it went quiet does reset it.
     Quiet,
 }
 #[derive(Clone, Copy, Debug, Default)]
@@ -89,6 +91,11 @@ pub(crate) const SLOT: Duration = Duration::from_secs(5);
 pub(crate) const GRACE: Duration = Duration::from_secs(10);
 /// Mature slots judged together: 12 x 5 s = the last 60 s past the grace.
 pub(crate) const RECENT: u64 = 12;
+/// Verdict B is proven by a watched flow answered at least this long before
+/// the verdict: older than every write the verdict judges (grace + window),
+/// so the answers that judged window itself contains never count.
+pub(crate) const PROOF_AGE: Duration =
+    Duration::from_secs(GRACE.as_secs() + SLOT.as_secs() * RECENT);
 /// Ring size: the judged slots plus those still inside the grace period
 /// (the current one and two more), rounded up. Older slots are recycled.
 const SLOTS: usize = 16;
@@ -257,6 +264,9 @@ pub(crate) struct Liveness {
     delivered: AtomicBool,
     /// Verdict B ring, indexed by absolute slot number modulo its size.
     slots: [Slot; SLOTS],
+    /// Stamp of the first watched flow answered after its write; never
+    /// cleared. Proof for verdict B (`PROOF_AGE`).
+    answered: AtomicU64,
 }
 impl Liveness {
     pub fn new(silence: Duration) -> Self {
@@ -269,6 +279,7 @@ impl Liveness {
             silent: Evidence::default(),
             delivered: AtomicBool::new(false),
             slots: Default::default(),
+            answered: AtomicU64::new(0),
         }
     }
     /// Session clock; `open_tcp` passes its start back to `opened`.
@@ -372,8 +383,20 @@ impl Liveness {
     /// that write; a slot already recycled ignores it. A byte before any
     /// write makes the flow neutral.
     pub fn read(&self, watch: &mut Watch) {
+        match watch {
+            Watch::Wrote(..) => self.read_at(watch, self.now()),
+            Watch::Fresh(_) => *watch = Watch::Off,
+            Watch::Off => {}
+        }
+    }
+    fn read_at(&self, watch: &mut Watch, now: Duration) {
         if let Watch::Wrote(bit, number) = *watch {
             count(&FLOWS.answered);
+            if self.answered.load(Relaxed) == 0 {
+                let _ = self
+                    .answered
+                    .compare_exchange(0, stamp(now), Relaxed, Relaxed);
+            }
             let slot = &self.slots[number as usize % SLOTS];
             if slot.is(number) {
                 slot.answered.fetch_add(1, Relaxed);
@@ -461,15 +484,24 @@ impl Liveness {
     }
     /// `Some(proven)` when degraded; see `Verdict::Quiet` for why verdict B
     /// is never proven.
-    pub fn degraded(&self) -> Option<bool> {
-        self.degraded_at(self.now())
+    pub fn degraded(&self) -> Option<(bool, crate::Stall)> {
+        self.stall_at(self.now())
     }
-    fn degraded_at(&self, now: Duration) -> Option<bool> {
+    fn stall_at(&self, now: Duration) -> Option<(bool, crate::Stall)> {
         match self.verdict_at(now) {
             Verdict::Healthy => None,
-            Verdict::Degraded => Some(self.delivered()),
-            Verdict::Quiet => Some(false),
+            Verdict::Degraded => Some((self.delivered(), crate::Stall::Silent)),
+            Verdict::Quiet => {
+                let proven = unstamp(self.answered.load(Relaxed))
+                    .is_some_and(|at| now.saturating_sub(at) >= PROOF_AGE);
+                Some((proven, crate::Stall::Quiet))
+            }
         }
+    }
+    /// `Some(proven)` when degraded.
+    #[cfg(test)]
+    fn degraded_at(&self, now: Duration) -> Option<bool> {
+        self.stall_at(now).map(|(proven, _)| proven)
     }
 }
 /// TCP targets on a port in `ANSWERING_PORTS`.
@@ -706,7 +738,7 @@ mod tests {
     fn answered_flow(l: &Liveness, target: &str, t: Duration) {
         let mut watch = quiet_flow(l, target, t);
         l.inbound();
-        l.read(&mut watch);
+        l.read_at(&mut watch, t);
     }
     /// Like `run`, with the session-level outcome: `Some((second, proven))`.
     fn run_b(
@@ -934,6 +966,55 @@ mod tests {
         assert!(
             l.quiet_at(later + GRACE + SLOT).answered <= l.quiet_at(later + GRACE + SLOT).wrote
         );
+    }
+    #[test]
+    fn verdict_b_is_proven_only_by_answers_older_than_the_judged_window() {
+        let quiet_burst = |l: &Liveness, targets: &[String], t: Duration| {
+            for i in 0..24 {
+                quiet_flow(l, &targets[i % targets.len()], t);
+            }
+        };
+        // Quiet from the start: nothing ever answered.
+        let l = Liveness::new(SILENCE);
+        let targets = hosts(&l, 10);
+        quiet_burst(&l, &targets, S(0));
+        assert_eq!(l.stall_at(S(15)), Some((false, crate::Stall::Quiet)));
+        // Answered 30 s before the verdict, then quiet: still unproven.
+        let l = Liveness::new(SILENCE);
+        let mut all = hosts(&l, 11);
+        let live = all.pop().unwrap();
+        answered_flow(&l, &live, S(100));
+        quiet_burst(&l, &all, S(115));
+        assert_eq!(l.degraded_at(S(130)), Some(false));
+        // Healthy windows past the proof age, then quiet: proven, so a long
+        // working session that ends this way restores the reconnect budget.
+        let l = Liveness::new(SILENCE);
+        let mut all = hosts(&l, 11);
+        let live = all.pop().unwrap();
+        for t in 0..100 {
+            answered_flow(&l, &live, S(t));
+            assert_eq!(l.degraded_at(S(t)), None);
+        }
+        quiet_burst(&l, &all, S(200));
+        assert_eq!(l.stall_at(S(215)), Some((true, crate::Stall::Quiet)));
+        // The boundary: an answer exactly `PROOF_AGE` old proves, younger not.
+        let l = Liveness::new(SILENCE);
+        let mut all = hosts(&l, 11);
+        let live = all.pop().unwrap();
+        answered_flow(&l, &live, S(0));
+        quiet_burst(&l, &all, PROOF_AGE - S(20));
+        assert_eq!(l.degraded_at(PROOF_AGE - S(1)), Some(false));
+        assert_eq!(l.degraded_at(PROOF_AGE), Some(true));
+        // A flow answered before its write slot matured still dates from the
+        // answer, not the write; a byte before any write proves nothing.
+        let l = Liveness::new(SILENCE);
+        let targets = hosts(&l, 10);
+        let mut first = l.watch(&targets[0]);
+        l.read_at(&mut first, S(0));
+        quiet_burst(&l, &targets, S(100));
+        assert_eq!(l.degraded_at(S(115)), Some(false));
+        // Grace plus the judged window.
+        assert_eq!(PROOF_AGE, S(70));
     }
     #[test]
     fn verdict_b_is_per_session_and_counts_flows_process_wide() {

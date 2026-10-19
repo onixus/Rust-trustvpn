@@ -7,7 +7,11 @@ use std::time::Duration;
 
 type Exit = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 fn degraded(proven: bool) -> Exit {
-    Err(rtrust_engine::Error::Degraded { proven }.into())
+    Err(rtrust_engine::Error::Degraded {
+        proven,
+        kind: rtrust_engine::Stall::Quiet,
+    }
+    .into())
 }
 
 #[test]

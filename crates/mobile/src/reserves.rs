@@ -63,6 +63,26 @@ impl Planner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Issue #99 review: long sessions that end degraded but proven (verdict
+    /// B after earlier delivery) must never exhaust the budget, however many;
+    /// unproven ones still do.
+    #[test]
+    fn long_proven_degraded_sessions_never_exhaust_the_budget() {
+        let mut p = Planner::new(1).unwrap();
+        for _ in 0..(LIMIT * 3) {
+            assert!(p.begin().is_some());
+            p.ended(Duration::from_secs(3600), false);
+            p.failed(false, Duration::from_secs(3600), 0);
+        }
+        assert!(p.begin().is_some());
+        let mut p = Planner::new(1).unwrap();
+        for _ in 0..LIMIT {
+            assert!(p.begin().is_some());
+            p.ended(Duration::from_secs(3600), true);
+            p.failed(false, Duration::from_secs(3600), 0);
+        }
+        assert!(p.begin().is_none());
+    }
     #[test]
     fn explicit_candidates_budget_and_fatal_isolation() {
         let mut p = Planner::new(3).unwrap();

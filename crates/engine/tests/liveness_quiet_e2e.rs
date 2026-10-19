@@ -123,7 +123,13 @@ async fn quiet_tls_opens_behind_live_flows_degrade_the_session_unproven() {
     }
     let (error, after) = first_error(&session, Duration::from_secs(30)).await;
     assert!(
-        matches!(error, Some(Error::Degraded { proven: false })),
+        matches!(
+            error,
+            Some(Error::Degraded {
+                proven: false,
+                kind: rtrust_engine::Stall::Quiet
+            })
+        ),
         "{error:?} after {after:?}"
     );
     // Not before the slot of the writes matured (>= 10 s grace).

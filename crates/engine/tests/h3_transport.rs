@@ -260,7 +260,10 @@ async fn unanswered_traffic_degrades_only_its_own_session() {
     // Inbound on the previous session's flow cannot vouch for this one.
     assert!(matches!(
         session.health().await,
-        Err(Error::Degraded { proven: false })
+        Err(Error::Degraded {
+            proven: false,
+            kind: rtrust_engine::Stall::Silent
+        })
     ));
     old.health().await.unwrap();
     // A session that delivered data before it went silent is reported as such.
@@ -277,7 +280,10 @@ async fn unanswered_traffic_degrades_only_its_own_session() {
     tokio::time::sleep(silence).await;
     assert!(matches!(
         proven.health().await,
-        Err(Error::Degraded { proven: true })
+        Err(Error::Degraded {
+            proven: true,
+            kind: rtrust_engine::Stall::Silent
+        })
     ));
     server.abort();
 }

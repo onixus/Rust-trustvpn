@@ -974,8 +974,9 @@ async fn connected(
                     probes.cancel();
                     summary = None;
                     if restart_pending { continue; }
-                    let degraded = result.as_ref().ok().and_then(crate::dataplane::degraded);
-                    if let Some(proven) = degraded { events::record(&format!("transport_degraded proven={proven}")); }
+                    let stalled = result.as_ref().ok().and_then(crate::dataplane::degraded_kind);
+                    let degraded = stalled.map(|(proven, _)| proven);
+                    if let Some((proven, kind)) = stalled { events::record(&crate::dataplane::degraded_event(proven, kind)); }
                     last_failure = match result {
                         Ok(Err(_)) => "VPN transport stopped".into(),
                         Ok(Ok(())) => "VPN transport stopped".into(),
