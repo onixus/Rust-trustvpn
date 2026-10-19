@@ -35,6 +35,19 @@ def ns(*args, **kwargs):
     return command("ip", "netns", "exec", NS, *args, **kwargs)
 
 
+def icmp_echo(*args, attempts=3):
+    # Endpoint 1.1.0 sends the echo request before it registers the reply
+    # waiter (lib/src/icmp_forwarder.rs), so on a local namespace a reply can
+    # arrive first and be dropped. Retry; a dropped reply never fakes success.
+    for attempt in range(attempts):
+        try:
+            return ns("ping", *args)
+        except RuntimeError:
+            if attempt == attempts - 1:
+                raise
+            print(f"ping {args[-1]} lost, retry {attempt + 1}/{attempts - 1}", flush=True)
+
+
 def stop(p):
     if p.poll() is None:
         p.terminate()
@@ -199,11 +212,11 @@ def main():
                     with adapter(profile):
                         actual6=ns("curl","--noproxy","*","-sSf","--max-time","10",f"http://[fd00:18::1]:{http6.server_port}/")
                         assert actual6==BODY
-                        ns("ping", "-6", "-n", "-c", "2", "-W", "3", "fd00:18::1")
-                        ns("ping", "-6", "-n", "-c", "1", "-W", "3", "-M", "dont", "-s", "5000", "fd00:18::1")
+                        icmp_echo("-6", "-n", "-c", "2", "-W", "3", "fd00:18::1")
+                        icmp_echo("-6", "-n", "-c", "1", "-W", "3", "-M", "dont", "-s", "5000", "fd00:18::1")
                         print("PASS IPv6 TUN TCP 512KiB, remote ICMPv6 and fragmented echo",flush=True)
-                        ns("ping", "-n", "-c", "2", "-W", "3", "198.18.0.1")
-                        ns("ping", "-n", "-c", "1", "-W", "3", "-M", "dont", "-s", "5000", "198.18.0.1")
+                        icmp_echo("-n", "-c", "2", "-W", "3", "198.18.0.1")
+                        icmp_echo("-n", "-c", "1", "-W", "3", "-M", "dont", "-s", "5000", "198.18.0.1")
                         command("ip", "route", "add", "blackhole", "198.18.0.2/32")
                         ns("ip", "route", "add", "198.18.0.2/32", "dev", "rtrust0", "src", "10.77.0.2")
                         ns("ping", "-n", "-c", "1", "-W", "1", "198.18.0.2", success=False)
