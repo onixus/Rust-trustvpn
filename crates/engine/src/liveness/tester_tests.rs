@@ -37,7 +37,7 @@ fn quiet_flow(l: &Liveness, target: &str, t: Duration) -> Watch {
 fn answered_flow(l: &Liveness, target: &str, wrote: Duration) {
     let mut watch = quiet_flow(l, target, wrote);
     l.inbound();
-    l.read(&mut watch);
+    l.read_at(&mut watch, wrote);
 }
 fn quiet_set(l: &Liveness, n: usize, hosts: &[String], t: Duration) {
     for i in 0..n {
@@ -114,7 +114,7 @@ fn an_answer_within_9_s_is_never_quiet_whatever_the_slot_phase() {
         let mut t = wrote;
         while t <= s(90) {
             if t >= answer {
-                flows.iter_mut().for_each(|w| l.read(w));
+                flows.iter_mut().for_each(|w| l.read_at(w, t));
             }
             assert_eq!(l.degraded_at(t), None, "wrote {wrote:?} at {t:?}");
             t += ms(100);
@@ -132,7 +132,7 @@ fn an_answer_after_11_s_counts_only_when_the_slot_matured_first() {
         .collect();
     // `read` is dated by the write's slot only, so any answer before 15 s
     // (here 11 s after the write) is counted as answered.
-    flows.iter_mut().for_each(|w| l.read(w));
+    flows.iter_mut().for_each(|w| l.read_at(w, s(11)));
     assert_eq!(l.degraded_at(s(15)), None);
     // Written late in slot 0 and answered 11 s later (15.9 s): judged quiet
     // from 15 s until the answers arrive. Effective grace is 10 to 15 s.
@@ -143,7 +143,7 @@ fn an_answer_after_11_s_counts_only_when_the_slot_matured_first() {
         .collect();
     assert_eq!(l.degraded_at(ms(14_999)), None);
     assert_eq!(l.degraded_at(s(15)), Some(false));
-    flows.iter_mut().for_each(|w| l.read(w));
+    flows.iter_mut().for_each(|w| l.read_at(w, ms(15_900)));
     assert_eq!(l.degraded_at(ms(15_900)), None);
 }
 
@@ -156,7 +156,7 @@ fn long_polls_answered_at_tls_then_idle_are_healthy() {
         let t = ms(i * 150);
         let mut w = quiet_flow(&l, &hosts[i as usize % 20], t);
         l.inbound();
-        l.read(&mut w);
+        l.read_at(&mut w, t);
         flows.push(w);
     }
     // Two minutes of requests on the same flows, no answer: later writes do
@@ -178,7 +178,7 @@ fn plain_http_long_polls_answered_after_30_s_are_judged_quiet_meanwhile() {
     let six = distinct(&l, 6, &mut 0, |i| format!("poll{i}.example.invalid:80"));
     let mut flows: Vec<_> = (0..24).map(|i| quiet_flow(&l, &six[i % 6], s(1))).collect();
     assert_eq!(l.degraded_at(s(15)), Some(false));
-    flows.iter_mut().for_each(|w| l.read(w));
+    flows.iter_mut().for_each(|w| l.read_at(w, s(30)));
     assert_eq!(l.degraded_at(s(30)), None);
 }
 
@@ -341,7 +341,7 @@ fn concurrent_flows_and_judging_stay_bounded_and_consistent() {
                             writes.fetch_add(1, Relaxed);
                             l.wrote_at(&mut w, t);
                             if i % 3 == 0 {
-                                l.read(&mut w);
+                                l.read_at(&mut w, t);
                             }
                             closed(w);
                         }
@@ -396,4 +396,151 @@ fn a_new_session_starts_clean_after_a_degraded_one() {
         .filter(|t| old.host(t) != new.host(t))
         .count();
     assert!(distinct_keys > 0);
+}
+
+// F1 (5dff0d8): verdict B is proven only by a watched flow answered at least
+// `PROOF_AGE` (70 s) before the verdict.
+#[test]
+fn f1_proof_age_boundary_against_the_first_answer() {
+    assert_eq!(PROOF_AGE, s(70));
+    for (answered, at, expected) in [
+        (ms(10_001), s(80), Some((false, crate::Stall::Quiet))),
+        (ms(10_000), s(80), Some((true, crate::Stall::Quiet))),
+        (ms(10_001), ms(80_001), Some((true, crate::Stall::Quiet))),
+    ] {
+        let l = Liveness::new(SILENCE);
+        let mut taken = 0;
+        let quiet = distinct(&l, 8, &mut taken, named);
+        let live = distinct(&l, 1, &mut taken, |i| {
+            format!("live{i}.example.invalid:443")
+        });
+        let mut w = quiet_flow(&l, &live[0], answered);
+        l.read_at(&mut w, answered);
+        // Slot 13 (65..70 s) matures at 80 s.
+        quiet_set(&l, 30, &quiet, s(65));
+        assert_eq!(l.stall_at(ms(79_999)), None);
+        assert_eq!(l.stall_at(at), expected, "{answered:?} at {at:?}");
+    }
+    // Only the first answer dates the proof; later ones do not move it.
+    let l = Liveness::new(SILENCE);
+    let mut taken = 0;
+    let quiet = distinct(&l, 8, &mut taken, named);
+    let live = distinct(&l, 2, &mut taken, |i| {
+        format!("live{i}.example.invalid:443")
+    });
+    answered_flow(&l, &live[0], s(10));
+    answered_flow(&l, &live[1], s(60));
+    quiet_set(&l, 30, &quiet, s(65));
+    assert_eq!(l.degraded_at(s(80)), Some(true));
+    // Answers on unwatched ports (or a byte before any write) never prove.
+    let l = Liveness::new(SILENCE);
+    let quiet = distinct(&l, 8, &mut 0, named);
+    let mut unwatched = l.watch("live.example.invalid:5228");
+    l.wrote_at(&mut unwatched, s(0));
+    l.read_at(&mut unwatched, s(0));
+    let mut first = l.watch(&named(9_999));
+    l.read_at(&mut first, s(0));
+    quiet_set(&l, 30, &quiet, s(200));
+    assert_eq!(l.degraded_at(s(215)), Some(false));
+}
+
+#[test]
+fn f1_quiet_right_after_reconnect_is_unproven_at_the_monitor_poll() {
+    // #99 replay: two flows answered within the first second, three quiet
+    // opens a second. The first 5 s monitor poll that sees it is unproven.
+    let l = Liveness::new(SILENCE);
+    let mut taken = 0;
+    let quiet = distinct(&l, 12, &mut taken, named);
+    let live = distinct(&l, 2, &mut taken, |i| {
+        format!("live{i}.example.invalid:443")
+    });
+    let mut first = None;
+    for ms_ in (0..120_000u64).step_by(333) {
+        let t = ms(ms_);
+        if ms_ < 1_000 {
+            for target in &live {
+                answered_flow(&l, target, t);
+            }
+        }
+        quiet_flow(&l, &quiet[(ms_ / 333) as usize % 12], t);
+        if ms_ % 5_000 < 333 && ms_ >= 5_000 && first.is_none() {
+            first = l.stall_at(t).map(|v| (ms_ / 1000, v));
+        }
+    }
+    // Slots 0-1 mature at 20 s; the poll grid here lands just after it.
+    assert!(
+        first.is_some_and(|(t, v)| t <= 25 && v == (false, crate::Stall::Quiet)),
+        "{first:?}"
+    );
+}
+
+/// Characterization of the F1 risk. Reconnect at 0; its only watched answers
+/// arrive at 0.5 s. Quiet opens every `interval` ms from `onset`. The monitor
+/// polls every 5 s. Returns the first degraded poll second and `proven`.
+fn onset(interval: u64, onset: u64) -> Option<(u64, bool)> {
+    let l = Liveness::new(SILENCE);
+    let mut taken = 0;
+    let quiet = distinct(&l, 12, &mut taken, named);
+    let live = distinct(&l, 2, &mut taken, |i| {
+        format!("live{i}.example.invalid:443")
+    });
+    for target in &live {
+        answered_flow(&l, target, ms(500));
+    }
+    let (mut next, mut i) = (onset, 0usize);
+    for poll in (5..=300u64).step_by(5) {
+        while next <= poll * 1000 {
+            quiet_flow(&l, &quiet[i % 12], ms(next));
+            i += 1;
+            next += interval;
+        }
+        if let Some((proven, kind)) = l.stall_at(s(poll)) {
+            assert_eq!(kind, crate::Stall::Quiet);
+            return Some((poll, proven));
+        }
+    }
+    None
+}
+#[test]
+fn f1_steady_quiet_from_the_reconnect_is_never_proven() {
+    // Any steady rate either fills the judged minute by 70 s (unproven: the
+    // answer at 0.5 s is 69.5 s old) or never reaches 24 per minute.
+    let outcomes: Vec<_> = [333u64, 1_000, 2_000, 2_400, 2_500, 2_600, 3_000]
+        .into_iter()
+        .map(|i| (i, onset(i, 0)))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (333, Some((20, false))),
+            (1_000, Some((35, false))),
+            (2_000, Some((60, false))),
+            (2_400, Some((70, false))),
+            (2_500, Some((70, false))),
+            (2_600, Some((70, false))),
+            (3_000, None),
+        ]
+    );
+}
+#[test]
+fn f1_quiet_onset_delayed_a_minute_after_the_first_answers_is_proven() {
+    // Residual risk: a reconnect whose few early answers are followed by a
+    // minute of no new watched opens, then a quiet burst, ends proven, so
+    // the budget is restored. Each such session lasts at least 75 s.
+    let outcomes: Vec<_> = [0u64, 30_000, 50_000, 54_999, 55_000, 60_000, 120_000]
+        .into_iter()
+        .map(|d| (d, onset(333, d)))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (0, Some((20, false))),
+            (30_000, Some((50, false))),
+            (50_000, Some((70, false))),
+            (54_999, Some((75, true))),
+            (55_000, Some((75, true))),
+            (60_000, Some((80, true))),
+            (120_000, Some((140, true))),
+        ]
+    );
 }
