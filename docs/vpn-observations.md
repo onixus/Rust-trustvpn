@@ -7,17 +7,24 @@ profile content or free-text error. Nothing is sent to a server.
 
 ## Contract and compatibility
 
-IPC version 6 requires observation schema 2 and an explicit capability response.
+IPC version 7 requires observation schema 2 and an explicit capability response.
 Version 6 adds the macOS session owner (Start reply, `Recover.owner`); see
-`docs/macos-system.md`.
+`docs/macos-system.md`. Version 7 (issue #90) adds an optional `viewed` flag to
+`Status` and `AlwaysOnStatus`: the service runs its system probes only while a
+user interface reports being viewed (see the schedule below). The flag is
+omitted when false, so a keepalive keeps the exact v6 `{"op":"Status"}` form;
+unknown fields are still rejected. There is no separate capability: the version
+is the capability, and the v6 reply shape (including `capabilities`) is unchanged.
 Schema 2 adds native network-change/resume events; schema 1 peers are rejected
 during capability negotiation, and the Android/iOS adapters accept only schema 2.
 Version 3 also adds opt-in persistent Linux/Windows recovery; observation schema remains 2.
 The desktop client negotiates through a separate authenticated, read-only
 `Capabilities` connection **before** sending a profile or issuing a mutation.
 Negotiation is available while another lease or Always-on owns the service.
-Version 1–5 clients/services are incompatible with version 6: upgrade the UI and service
-together. A mismatch fails before a new Start, Recover or update reservation;
+Version 1–6 clients/services are incompatible with version 7: upgrade the UI and service
+together. A v6 peer may still negotiate (`Capabilities`) and, on Windows,
+reserve for update rollback (`PrepareUpdate`); its `Status`/`AlwaysOnStatus`
+is refused. A mismatch fails before a new Start, Recover or update reservation;
 an existing service-owned VPN/guard is not disabled to achieve compatibility.
 Profile, routing-journal and boot-policy schema versions are unchanged.
 The Python IPC acceptance clients must use the same negotiated IPC version.
@@ -135,19 +142,43 @@ see [system diagnostics](system-diagnostics.md).
 
 In whole-computer mode the Linux, macOS and Windows services probe their own
 DNS, guard and transport, read-only, and publish `source: system_probe` rows.
-Wire shape is unchanged (IPC 6, schema 2): verdicts use existing enums,
+Since IPC 7 they run only while viewed (below); schema 2 is unchanged: verdicts use existing enums,
 `passed`/`failed` with `configuration_applied`, an inconclusive or timed-out
 check `unknown` with `check_unavailable`.
 
 - **Schedule.** One run at a time per lease, on the lease loop's own timer:
   2 s after Connected or any invalidation, then 15 s after the previous run
-  ended (`PROBE_INTERVAL_MS`), for as long as the session is Connected.
-  Status never starts a probe; but the client holding the lease polls Status
-  as a keepalive (see known limitations), so in practice probes run every
-  15 s throughout a Connected session whether or not a window shows them.
+  ended (`PROBE_INTERVAL_MS`), while the session is Connected **and viewed**.
+  Status never starts a probe synchronously.
+- **Viewed gate (IPC 7, issue #90).** The client holding the lease polls
+  Status every 2 s as a keepalive (the always-on supervisor every 1 s); that
+  poll carries `viewed: true` only if a user interface marked the session
+  viewed within the last 5 s (`CLIENT_VIEW_MS`): the native window on each
+  250 ms tick while shown (not hidden to the tray or minimized by the app),
+  the webview page while `document.visibilityState` is `visible`, the TUI on
+  each drawn snapshot. Service-side readers (diagnostics, endpoint checks,
+  `rtrust-inspect`) never mark a view. The service keeps its own monotonic
+  window: a `viewed` Status extends it to 10 s (`VIEW_TTL_MS`) from arrival;
+  a due tick outside that window does not start a run. A run already in
+  progress when the view ends finishes normally. When a view returns, the
+  runner is re-armed: the next run starts 2 s later, but never earlier than
+  15 s after the previous run ended. A view never shortens a pending timer or
+  queues a run, so a stream of `viewed` requests from any local client cannot
+  raise the rate above one run per interval. On macOS only the lease
+  connection's flag counts; a Status from another connection is forwarded as
+  not viewed. For always-on, `AlwaysOnStatus { viewed: true }` from a shown UI
+  (polled every 5 s) opens a 10 s window that the supervisor's internal
+  keepalive forwards; the internal 1 s keepalive alone never enables probes.
+  After the last view, probes may still run for up to about 10 s (20 s under
+  always-on, both windows in series). Fail-closed: without views the DNS and
+  guard rows are never refreshed, so they read `unknown`/`stale` rather than
+  `passed`; a `passed` row never outlives `PROBE_TTL_MS`. An OS-level
+  minimize of the native window is not detected and counts as viewed (more
+  probes, never a false result).
   Outside Connected a due tick is not re-armed on a short timer: the next
-  lifecycle change (reconnect, network change, resume) re-arms it; Windows
-  defers a run whose permit list is unavailable by a full interval.
+  lifecycle change (reconnect, network change, resume) or a returning view
+  re-arms it; Windows defers a run whose permit list is unavailable by a full
+  interval.
   Each run has a 5 s hard deadline; its parts (own rules, bypass attempts,
   DNS) each have 4 s (`PART`), so a slow part (e.g. `pfctl`) reports only its
   own checks `unknown` and keeps the tunnel DNS reply gathered beside it; each
@@ -231,17 +262,13 @@ check `unknown` with `check_unavailable`.
 Known limitations of the probes (accepted, fail-closed: each reads as
 `unknown`, never `passed`):
 
-- **Probes run without a reader.** The desktop client's lease connection
-  polls Status every 2 s and the always-on supervisor every 1 s as a
-  keepalive, whether or not a window shows the rows, so the service cannot
-  tell a reader from a keepalive. It probes every 15 s for the whole
-  Connected session (on macOS about a dozen short-lived tool processes and
-  one DNS query through the tunnel per run). A result is shown only if a
-  later read finds it fresh in the same generation; internal paths also
-  sample the monitor, so an unread result is not guaranteed to be discarded.
-  Reducing this needs an IPC flag meaning
-  "a UI is reading" (capability-gated, sent only by clients whose UI polls);
-  that is a follow-up, not done here.
+- **Views are self-reported.** Any local process of the same user that may
+  talk to the service can send `viewed: true` (on macOS only over its own
+  lease). It cannot raise the rate above one run per 15 s (on macOS about a
+  dozen short-lived tool processes and one DNS query through the tunnel per
+  run); it can only keep probes running as before IPC 7. A UI whose window
+  is visible but not drawn (an OS minimize, a covered window) still counts
+  as viewed.
 - **Large macOS route tables.** `netstat -rn` output over 64 KiB, or more than
   eight physical default-route interfaces, makes the bypass check
   `unknown`; such hosts never reach a `passed` guard.

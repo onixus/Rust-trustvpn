@@ -90,7 +90,29 @@ struct Control {
     initial: Option<oneshot::Sender<Response>>,
     shutdown: tokio::sync::watch::Receiver<bool>,
     /// Whole-computer sessions only; tests never probe the host.
-    probe: Option<super::probe::Plan>,
+    probe: Option<Probe>,
+}
+/// What a due probe tick runs: the host probe, or a synthetic one in tests.
+#[derive(Clone)]
+enum Probe {
+    Host(super::probe::Plan),
+    #[cfg(test)]
+    Fake(Arc<dyn Fn() -> rtrust_control::observations::SystemProbe + Send + Sync>),
+}
+impl Probe {
+    fn collect(
+        &self,
+    ) -> impl std::future::Future<Output = rtrust_control::observations::SystemProbe> + Send + 'static
+    {
+        let probe = self.clone();
+        async move {
+            match probe {
+                Probe::Host(plan) => super::probe::collect(plan).await,
+                #[cfg(test)]
+                Probe::Fake(collect) => collect(),
+            }
+        }
+    }
 }
 type ActorTask = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 struct Envelope {
@@ -398,8 +420,10 @@ async fn serve(
         return reply(&mut stream, State::Idle, "Capabilities").await;
     }
     let current = registry_slot(&registry).clone();
-    if matches!(request.command, Command::Status | Command::Recover { .. })
-        && let Some(session) = current
+    if matches!(
+        request.command,
+        Command::Status { .. } | Command::Recover { .. }
+    ) && let Some(session) = current
     {
         let stopping = matches!(request.command, Command::Recover { .. });
         if let Command::Recover { owner } = &request.command
@@ -416,10 +440,12 @@ async fn serve(
             // the journal path below, which needs no owner.
             forget(&registry, &session.actor);
         } else {
+            // Only the lease connection reports views: a Status from any
+            // other local connection never enables the system probes.
             let command = if stopping {
                 Command::Stop
             } else {
-                Command::Status
+                Command::Status { viewed: false }
             };
             match ask(&session.actor, command).await {
                 Ok(response) => {
@@ -454,7 +480,7 @@ async fn serve(
         .await;
     };
     match request.command {
-        Command::Status => {
+        Command::Status { .. } => {
             return reply(
                 &mut stream,
                 if state::pending() {
@@ -578,7 +604,7 @@ async fn bridge(
         if request.version != VERSION {
             return Err("IPC version mismatch".into());
         }
-        if !matches!(request.command, Command::Status | Command::Stop) {
+        if !matches!(request.command, Command::Status { .. } | Command::Stop) {
             return Err("Invalid operation during lease".into());
         }
         let stop = matches!(request.command, Command::Stop);
@@ -757,11 +783,13 @@ async fn start(
         return Ok(());
     }
     let permits = failover.permits()?;
-    let probe = resolver.filter(|_| full).map(|dns| super::probe::Plan {
-        uid,
-        dns,
-        permits: permits.clone(),
-        endpoints: endpoints.iter().map(|e| (*e.ip()).into()).collect(),
+    let probe = resolver.filter(|_| full).map(|dns| {
+        Probe::Host(super::probe::Plan {
+            uid,
+            dns,
+            permits: permits.clone(),
+            endpoints: endpoints.iter().map(|e| (*e.ip()).into()).collect(),
+        })
     });
     let guard = match Guard::install(uid, networks, full, resolver, endpoints, &permits) {
         Ok(guard) => guard,
@@ -813,7 +841,7 @@ impl Drop for CleanupThread {
 fn stopping_reply(request: Envelope, waiters: &mut Vec<oneshot::Sender<Response>>) {
     match request.command {
         Command::Stop if waiters.len() < 16 => waiters.push(request.response),
-        Command::Status | Command::Stop => {
+        Command::Status { .. } | Command::Stop => {
             let _ = request.response.send(Response::new(
                 State::Blocked,
                 "Отключение VPN; восстановление состояния ОС",
@@ -1005,10 +1033,11 @@ async fn connected(
                         crate::stats::snapshot().since(&base).render()
                     ));
                 },
-                // Started only by this timer while awake and connected; Status never probes.
+                // Started only by this timer while awake, connected and viewed
+                // through the lease; Status never probes.
                 tick = probes.next(), if plan.is_some() => match tick {
-                    crate::sysprobe::Tick::Due => if awake && state == State::Connected {
-                        probes.start(monitor.generation(), super::probe::collect(plan.clone().unwrap()));
+                    crate::sysprobe::Tick::Due => if awake && state == State::Connected && probes.viewing() {
+                        probes.start(monitor.generation(), plan.as_ref().unwrap().collect());
                     },
                     crate::sysprobe::Tick::Done(generation, result) => {
                         monitor.apply_system(generation, result, rtrust_control::observations::now_ms());
@@ -1021,7 +1050,10 @@ async fn connected(
             return Ok(());
         }
         match request.command {
-            Command::Status => {
+            Command::Status { viewed } => {
+                if viewed {
+                    probes.viewed();
+                }
                 let mut response = Response::new(
                     state.clone(),
                     if state == State::Connected {
@@ -1281,7 +1313,10 @@ mod tests {
         drop(client);
         assert!(bridge.await.unwrap().is_err());
         assert_eq!(
-            ask(&fixture.actor, Command::Status).await.unwrap().state,
+            ask(&fixture.actor, Command::Status { viewed: false })
+                .await
+                .unwrap()
+                .state,
             State::Connected
         );
         assert!(!fixture.task.is_finished());
@@ -1332,7 +1367,10 @@ mod tests {
             }
             assert!(bridge.await.unwrap().is_err());
             assert_eq!(
-                ask(&fixture.actor, Command::Status).await.unwrap().state,
+                ask(&fixture.actor, Command::Status { viewed: false })
+                    .await
+                    .unwrap()
+                    .state,
                 State::Connected
             );
             assert!(fixture.lease.try_lock().is_err());
@@ -1351,7 +1389,7 @@ mod tests {
             &mut client,
             &Request {
                 version: VERSION,
-                command: Command::Status,
+                command: Command::Status { viewed: false },
             },
         )
         .await
@@ -1383,7 +1421,7 @@ mod tests {
             &mut observer,
             &Request {
                 version: VERSION,
-                command: Command::Status,
+                command: Command::Status { viewed: false },
             },
         )
         .await
@@ -1406,7 +1444,10 @@ mod tests {
             .is_err()
         );
         assert_eq!(
-            ask(&fixture.actor, Command::Status).await.unwrap().state,
+            ask(&fixture.actor, Command::Status { viewed: false })
+                .await
+                .unwrap()
+                .state,
             State::Connected
         );
         assert!(fixture.lease.try_lock().is_err());
@@ -1424,7 +1465,7 @@ mod tests {
             &mut client,
             &Request {
                 version: VERSION,
-                command: Command::Status,
+                command: Command::Status { viewed: false },
             },
         )
         .await
@@ -1434,7 +1475,12 @@ mod tests {
             state.generation += 1;
         });
         tokio::time::timeout(Duration::from_secs(1), async {
-            while ask(&fixture.actor, Command::Status).await.unwrap().state != State::Blocked {
+            while ask(&fixture.actor, Command::Status { viewed: false })
+                .await
+                .unwrap()
+                .state
+                != State::Blocked
+            {
                 tokio::task::yield_now().await;
             }
         })
@@ -1476,7 +1522,10 @@ mod tests {
         new.initial.await.unwrap();
         assert!(ask(&captured, Command::Stop).await.is_err());
         assert_eq!(
-            ask(&new.actor, Command::Status).await.unwrap().state,
+            ask(&new.actor, Command::Status { viewed: false })
+                .await
+                .unwrap()
+                .state,
             State::Connected
         );
         assert!(!new.dropped.load(std::sync::atomic::Ordering::SeqCst));
@@ -1586,7 +1635,7 @@ mod tests {
         let (response, _receive) = oneshot::channel();
         actor
             .send(Envelope {
-                command: Command::Status,
+                command: Command::Status { viewed: false },
                 response,
             })
             .await
@@ -1597,7 +1646,7 @@ mod tests {
         );
         assert!(matches!(
             commands.recv().await.unwrap().command,
-            Command::Status
+            Command::Status { .. }
         ));
         assert!(
             commands.try_recv().is_err(),
@@ -1668,8 +1717,11 @@ mod tests {
             let released_before_drain = released.load(std::sync::atomic::Ordering::SeqCst);
             let status = if !shutdown {
                 Some(
-                    tokio::time::timeout(Duration::from_millis(200), ask(&actor, Command::Status))
-                        .await,
+                    tokio::time::timeout(
+                        Duration::from_millis(200),
+                        ask(&actor, Command::Status { viewed: false }),
+                    )
+                    .await,
                 )
             } else {
                 None
@@ -1756,9 +1808,11 @@ mod tests {
             entered.notified().await;
             let second_actor = actor.clone();
             let second = tokio::spawn(async move { ask(&second_actor, Command::Stop).await });
-            let status =
-                tokio::time::timeout(Duration::from_millis(200), ask(&actor, Command::Status))
-                    .await;
+            let status = tokio::time::timeout(
+                Duration::from_millis(200),
+                ask(&actor, Command::Status { viewed: false }),
+            )
+            .await;
             shutdown.send_replace(true);
             tokio::time::sleep(Duration::from_millis(20)).await;
             let held_during_release = lease.try_lock().is_err();
@@ -1918,7 +1972,7 @@ mod tests {
                     command: if index == 0 {
                         Command::Stop
                     } else {
-                        Command::Status
+                        Command::Status { viewed: false }
                     },
                     response,
                 })
@@ -2122,7 +2176,7 @@ mod tests {
                     &mut client,
                     &Request {
                         version: VERSION,
-                        command: Command::Status,
+                        command: Command::Status { viewed: false },
                     },
                 )
                 .await
@@ -2194,7 +2248,7 @@ mod tests {
                         &mut client,
                         &Request {
                             version: VERSION,
-                            command: Command::Status,
+                            command: Command::Status { viewed: false },
                         },
                     )
                     .await
@@ -2267,7 +2321,7 @@ mod tests {
                         client,
                         &Request {
                             version: VERSION,
-                            command: Command::Status,
+                            command: Command::Status { viewed: false },
                         },
                     )
                     .await
@@ -2363,7 +2417,7 @@ mod tests {
             &mut client,
             &Request {
                 version: VERSION,
-                command: Command::Status,
+                command: Command::Status { viewed: false },
             },
         )
         .await
@@ -2415,7 +2469,7 @@ mod tests {
         let (mut client, mut server) = tokio::io::duplex(4096);
         let ipc = tokio::spawn(async move {
             let request: Request = read(&mut server).await.unwrap();
-            assert!(matches!(request.command, Command::Status));
+            assert!(matches!(request.command, Command::Status { .. }));
             reply(&mut server, State::Blocked, "reconnecting")
                 .await
                 .unwrap();
@@ -2424,7 +2478,7 @@ mod tests {
             &mut client,
             &Request {
                 version: VERSION,
-                command: Command::Status,
+                command: Command::Status { viewed: false },
             },
         )
         .await
@@ -2660,7 +2714,10 @@ mod tests {
         assert!(lease.try_lock().is_ok());
         // Recreate the window between actor exit and registry cleanup: a dead
         // registration must still produce an answer, never an IPC EOF.
-        for command in [Command::Recover { owner: None }, Command::Status] {
+        for command in [
+            Command::Recover { owner: None },
+            Command::Status { viewed: false },
+        ] {
             *registry_slot(&registry) = Some(session.clone());
             let held = lease.clone().try_lock_owned().unwrap();
             let (response, result) = serve_once(&registry, &lease, command).await;
@@ -2672,7 +2729,8 @@ mod tests {
             drop(held);
         }
         // Read-only Status with a free lease reports the journal state.
-        let (response, result) = serve_once(&registry, &lease, Command::Status).await;
+        let (response, result) =
+            serve_once(&registry, &lease, Command::Status { viewed: false }).await;
         assert!(matches!(
             response.unwrap().state,
             State::Idle | State::Blocked
@@ -2768,12 +2826,16 @@ mod tests {
             assert!(!fixture.dropped.load(std::sync::atomic::Ordering::SeqCst));
             assert!(fixture.lease.try_lock().is_err());
             assert_eq!(
-                ask(&fixture.actor, Command::Status).await.unwrap().state,
+                ask(&fixture.actor, Command::Status { viewed: false })
+                    .await
+                    .unwrap()
+                    .state,
                 State::Connected
             );
         }
         // Read-only Status from a new connection needs no owner.
-        let (response, result) = serve_once(&registry, &fixture.lease, Command::Status).await;
+        let (response, result) =
+            serve_once(&registry, &fixture.lease, Command::Status { viewed: false }).await;
         let response = response.unwrap();
         assert_eq!(response.state, State::Connected);
         assert!(response.owner.is_none());
@@ -2836,6 +2898,114 @@ mod tests {
         result.unwrap();
         assert!(registry_slot(&registry).is_none());
         drop(held);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lease_probes_run_only_while_a_user_interface_views_the_session() {
+        use rtrust_control::observations::{Mode, Observation, Outcome, SystemProbe, now_ms};
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = runs.clone();
+        let fake = Probe::Fake(Arc::new(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            SystemProbe {
+                transport_proven_at: None,
+                dns: Observation::system(Outcome::Passed, Mode::Full, now_ms()),
+                guard: Observation::system(Outcome::Passed, Mode::Full, now_ms()),
+            }
+        }));
+        let (_power, receiver) = tokio::sync::watch::channel(power::State::default());
+        let (actor, commands) = mpsc::channel(16);
+        let (_shutdown_signal, shutdown_events) = tokio::sync::watch::channel(false);
+        let (initial, response) = oneshot::channel();
+        let supervisor = tokio::spawn(super::connected(
+            Control {
+                commands,
+                initial: Some(initial),
+                shutdown: shutdown_events,
+                probe: Some(fake),
+            },
+            Workers {
+                tunnel: Some(tokio::spawn(std::future::pending())),
+                reconnect: None,
+            },
+            true,
+            receiver,
+            failover().await,
+            |workers, _, _| workers.reconnect = Some(tokio::spawn(std::future::pending())),
+            || Ok(()),
+        ));
+        assert_eq!(response.await.unwrap().state, State::Connected);
+        let count = || runs.load(std::sync::atomic::Ordering::SeqCst);
+        let status = |viewed| ask(&actor, Command::Status { viewed });
+        // A minute of plain keepalives (no user interface): no run at all,
+        // and nothing claims DNS or guard evidence.
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let response = status(false).await.unwrap();
+            assert_eq!(response.state, State::Connected);
+            assert_ne!(response.observations.dns.outcome, Outcome::Passed);
+            assert_ne!(response.observations.guard.outcome, Outcome::Passed);
+        }
+        assert_eq!(count(), 0, "keepalives alone must not probe");
+        // A viewed keepalive wakes the idle runner after the settle; the
+        // Status itself never probes synchronously.
+        status(true).await.unwrap();
+        assert_eq!(count(), 0);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let response = status(true).await.unwrap();
+        assert_eq!(count(), 1);
+        assert_eq!(response.observations.dns.outcome, Outcome::Passed);
+        assert_eq!(response.observations.guard.outcome, Outcome::Passed);
+        // The view ends: the next interval tick falls outside the window.
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            status(false).await.unwrap();
+        }
+        assert_eq!(count(), 1, "probes stop once nobody views");
+        // A stream of viewed keepalives probes at most once per interval.
+        let start = tokio::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(61) {
+            status(true).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let viewed_runs = count() - 1;
+        assert!(
+            (4..=5).contains(&viewed_runs),
+            "one run per {} ms at most: {viewed_runs}",
+            rtrust_control::observations::PROBE_INTERVAL_MS
+        );
+        assert_eq!(ask(&actor, Command::Stop).await.unwrap().state, State::Idle);
+        supervisor.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_status_from_another_connection_cannot_mark_a_view() {
+        let lease = Arc::new(Mutex::new(()));
+        let (actor, mut commands) = mpsc::channel::<Envelope>(16);
+        let (_finished, completion) = tokio::sync::watch::channel(false);
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let registry: Registry = Arc::new(std::sync::Mutex::new(Some(Session {
+            actor,
+            finished: completion,
+            shutdown,
+            owner: test_owner(),
+        })));
+        let observer = tokio::spawn(async move {
+            let request = commands.recv().await.unwrap();
+            let forwarded = matches!(request.command, Command::Status { viewed: false });
+            let _ = request
+                .response
+                .send(Response::new(State::Connected, "observed"));
+            forwarded
+        });
+        let (response, result) =
+            serve_once(&registry, &lease, Command::Status { viewed: true }).await;
+        assert_eq!(response.unwrap().state, State::Connected);
+        result.unwrap();
+        assert!(
+            observer.await.unwrap(),
+            "only the lease connection may report a view"
+        );
     }
 
     #[test]
@@ -2968,7 +3138,7 @@ mod tester_summary_tests {
                 &mut client,
                 &Request {
                     version: VERSION,
-                    command: Command::Status,
+                    command: Command::Status { viewed: false },
                 },
             )
             .await

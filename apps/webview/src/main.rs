@@ -82,9 +82,17 @@ fn web_view(c: &Controller) -> WebView {
     }
 }
 #[tauri::command]
-async fn view(russian: Option<bool>, state: State<'_, Shared>) -> Result<WebView, String> {
+async fn view(
+    russian: Option<bool>,
+    viewed: Option<bool>,
+    state: State<'_, Shared>,
+) -> Result<WebView, String> {
     let mut c = state.lock().await;
     if let Some(session) = &c.session {
+        // Only a visible page counts; an absent flag (older page) does not.
+        if viewed == Some(true) {
+            session.mark_viewed();
+        }
         let health = session.lifecycle_health().await;
         c.status = health
             .err()

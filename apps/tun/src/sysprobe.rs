@@ -6,7 +6,8 @@
 //! Nothing here changes routes, DNS, marks or firewall rules. Facts are reduced
 //! to the enums below at once: no address, interface or tool output survives.
 use rtrust_control::observations::{
-    Mode, Observation, Outcome, PROBE_DEADLINE_MS, PROBE_INTERVAL_MS, SystemProbe, now_ms,
+    Mode, Observation, Outcome, PROBE_DEADLINE_MS, PROBE_INTERVAL_MS, SystemProbe, VIEW_TTL_MS,
+    now_ms,
 };
 use std::{
     future::Future,
@@ -46,8 +47,14 @@ pub struct Runner {
     task: Option<(u64, Task)>,
     due: Pin<Box<tokio::time::Sleep>>,
     /// False after a due tick the caller did not use; `cancel` (every
-    /// lifecycle change) or `defer` re-arms it.
+    /// lifecycle change), `defer` or `wake` re-arms it.
     armed: bool,
+    /// When the last run ended; `wake` never schedules the next run earlier
+    /// than a full interval after it.
+    last_end: Option<tokio::time::Instant>,
+    /// Until when (service monotonic clock) a user interface is viewing:
+    /// a due tick starts a run only before it. Clients send only a flag.
+    viewed_until: Option<tokio::time::Instant>,
 }
 impl Default for Runner {
     fn default() -> Self {
@@ -55,6 +62,8 @@ impl Default for Runner {
             task: None,
             due: Box::pin(tokio::time::sleep(SETTLE)),
             armed: true,
+            last_end: None,
+            viewed_until: None,
         }
     }
 }
@@ -94,6 +103,34 @@ impl Runner {
         self.armed = true;
         self.reschedule(Duration::from_millis(PROBE_INTERVAL_MS));
     }
+    /// A lease Status said a user interface is viewing. Extends the view
+    /// window and wakes an idle runner; it never runs a probe itself.
+    pub fn viewed(&mut self) {
+        self.viewed_until = Some(tokio::time::Instant::now() + Duration::from_millis(VIEW_TTL_MS));
+        self.wake();
+    }
+    /// A due tick may start a run only while this holds.
+    pub fn viewing(&self) -> bool {
+        self.viewed_until
+            .is_some_and(|until| tokio::time::Instant::now() < until)
+    }
+    /// A user interface started viewing: re-arm a runner whose due tick went
+    /// unused (nobody was viewing). It never shortens a pending timer, never
+    /// queues a run and never runs sooner than `PROBE_INTERVAL_MS` after the
+    /// previous one ended, so a stream of viewed requests from any local
+    /// client cannot raise the probe rate.
+    pub fn wake(&mut self) {
+        if self.task.is_some() || self.armed {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let settle = now + SETTLE;
+        let due = self.last_end.map_or(settle, |end| {
+            settle.max(end + Duration::from_millis(PROBE_INTERVAL_MS))
+        });
+        self.armed = true;
+        self.due.as_mut().reset(due);
+    }
     fn reschedule(&mut self, after: Duration) {
         self.due.as_mut().reset(tokio::time::Instant::now() + after);
     }
@@ -103,6 +140,7 @@ impl Runner {
             let probe = task.await;
             let generation = *generation;
             self.task = None;
+            self.last_end = Some(tokio::time::Instant::now());
             self.armed = true;
             self.reschedule(Duration::from_millis(PROBE_INTERVAL_MS));
             return Tick::Done(generation, probe);
@@ -1229,6 +1267,117 @@ mod tests {
         let before = tokio::time::Instant::now();
         assert!(matches!(runner.next().await, Tick::Due));
         assert!(before.elapsed() >= Duration::from_millis(PROBE_INTERVAL_MS));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn wake_re_arms_an_unused_tick_after_the_settle() {
+        let mut runner = Runner::default();
+        assert!(matches!(runner.next().await, Tick::Due));
+        // Nobody viewing: the tick went unused and nothing fires again.
+        let idle = tokio::time::timeout(Duration::from_secs(60), runner.next()).await;
+        assert!(idle.is_err());
+        runner.wake();
+        let before = tokio::time::Instant::now();
+        assert!(matches!(runner.next().await, Tick::Due));
+        assert_eq!(before.elapsed(), SETTLE);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_view_lasts_the_service_window_and_wakes_the_runner() {
+        let mut runner = Runner::default();
+        assert!(!runner.viewing());
+        assert!(matches!(runner.next().await, Tick::Due));
+        runner.viewed();
+        assert!(runner.viewing());
+        let before = tokio::time::Instant::now();
+        assert!(matches!(runner.next().await, Tick::Due));
+        assert_eq!(before.elapsed(), SETTLE);
+        tokio::time::advance(
+            Duration::from_millis(VIEW_TTL_MS) - SETTLE - Duration::from_millis(1),
+        )
+        .await;
+        assert!(runner.viewing());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(!runner.viewing(), "the view expires on the service clock");
+        // Lifecycle changes keep the view; they never create one.
+        runner.cancel();
+        assert!(!runner.viewing());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn wake_never_moves_an_armed_timer() {
+        let mut runner = Runner::default();
+        runner.defer();
+        let before = tokio::time::Instant::now();
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            runner.wake();
+        }
+        assert!(matches!(runner.next().await, Tick::Due));
+        assert_eq!(
+            before.elapsed(),
+            Duration::from_millis(PROBE_INTERVAL_MS),
+            "wake must not shorten or extend a pending timer"
+        );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn wake_waits_a_full_interval_after_the_last_run_and_ignores_a_running_one() {
+        let mut runner = Runner::default();
+        assert!(matches!(runner.next().await, Tick::Due));
+        runner.start(1, async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            passing(now_ms())
+        });
+        // A wake while running is a no-op: it cannot queue a second run.
+        runner.wake();
+        assert!(runner.busy());
+        let Tick::Done(1, _) = runner.next().await else {
+            panic!("expected the run");
+        };
+        let ended = tokio::time::Instant::now();
+        // A lifecycle change settles quickly, but that tick goes unused (the
+        // view ended); a view returning soon after still waits for the
+        // interval since the last run ended, not just the settle.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        runner.cancel();
+        assert!(matches!(runner.next().await, Tick::Due));
+        assert!(ended.elapsed() < Duration::from_secs(4));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        runner.wake();
+        assert!(matches!(runner.next().await, Tick::Due));
+        assert_eq!(ended.elapsed(), Duration::from_millis(PROBE_INTERVAL_MS));
+        // A view long after the last run: only the settle.
+        let mut runner = Runner::default();
+        assert!(matches!(runner.next().await, Tick::Due));
+        runner.start(2, async { passing(now_ms()) });
+        assert!(matches!(runner.next().await, Tick::Done(2, _)));
+        assert!(matches!(runner.next().await, Tick::Due));
+        tokio::time::advance(Duration::from_secs(60)).await;
+        runner.wake();
+        let before = tokio::time::Instant::now();
+        assert!(matches!(runner.next().await, Tick::Due));
+        assert_eq!(before.elapsed(), SETTLE);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_of_wakes_cannot_raise_the_probe_rate() {
+        let mut runner = Runner::default();
+        let mut runs = Vec::new();
+        let start = tokio::time::Instant::now();
+        let mut flood = tokio::time::interval(Duration::from_millis(10));
+        while start.elapsed() < Duration::from_secs(120) {
+            tokio::select! {
+                tick = runner.next() => match tick {
+                    Tick::Due => runner.start(0, async { passing(now_ms()) }),
+                    Tick::Done(..) => runs.push(tokio::time::Instant::now()),
+                },
+                _ = flood.tick() => runner.wake(),
+            }
+        }
+        assert!(
+            runs.len() >= 7,
+            "viewed runs keep happening: {}",
+            runs.len()
+        );
+        for pair in runs.windows(2) {
+            assert!(pair[1] - pair[0] >= Duration::from_millis(PROBE_INTERVAL_MS));
+        }
     }
     #[tokio::test(start_paused = true)]
     async fn a_dropped_run_stops_its_detached_blocking_work_before_any_send() {

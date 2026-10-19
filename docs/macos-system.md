@@ -149,7 +149,9 @@ continue under the existing guard. Before installation, an abandoned Start is
 cancelled; it cannot create a late tunnel after its caller disappears.
 
 A fresh authenticated Status request observes the current session once and
-does not acquire mutation rights. The original Start connection keeps its
+does not acquire mutation rights. Its IPC 7 `viewed` flag is ignored: only the
+lease connection can keep the service's system probes running
+([observations](vpn-observations.md#service-system-probes-issue-81)). The original Start connection keeps its
 particular session sender, so a late Stop cannot affect a replacement session.
 There is no automatic GUI adoption. A GUI which loses IPC reports
 ControlLost; reopening it does not prove control was recovered.

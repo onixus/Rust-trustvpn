@@ -4,7 +4,7 @@
 
 Главные архитектурные добавления 0.6.x: типизированные [наблюдения VPN](vpn-observations.md)
 с generations, [системная диагностика](system-diagnostics.md), защищённое
-[восстановление](recovery.md) через резервные профили, desktop control IPC v6 и
+[восстановление](recovery.md) через резервные профили, desktop control IPC v7 и
 проверка живости сессии ([dead-session detection](http3.md#dead-session-detection)).
 
 ## 1. Граница репозитория

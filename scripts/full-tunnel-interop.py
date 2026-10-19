@@ -258,7 +258,7 @@ def main():
             def ipc(op, **values):
                 if op in ('EnableAlwaysOn', 'EnableRecovery'):
                     values['generation'] = ipc('AlwaysOnStatus')['always_on_generation']
-                request=json.dumps(dict(version=6,command=dict(op=op,**values)))
+                request=json.dumps(dict(version=7,command=dict(op=op,**values)))
                 program="""import socket,struct,json,sys
 c=socket.socket(socket.AF_UNIX);c.settimeout(60);c.connect('/run/rtrust/control.sock')
 b=sys.argv[1].encode();c.sendall(struct.pack('!I',len(b))+b)

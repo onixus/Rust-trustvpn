@@ -248,6 +248,11 @@ struct App {
     login_start: bool,
     boot_connect_pending: bool,
     tray_ready: bool,
+    /// The window is shown (not hidden to the tray or minimized by the app).
+    /// Only then does Tick tell the service a user is viewing the session.
+    /// An OS-level minimize is not tracked: it stays "visible" (more probes,
+    /// never a false result).
+    window_visible: bool,
     tray_smoke: bool,
     pending_close: Option<bool>,
     autosave_due: Option<std::time::Instant>,
@@ -390,6 +395,7 @@ enum Message {
     Tick,
     SmokeExit,
     CloseRequested,
+    WindowFocused,
     DraftName(String),
     Rename,
     Delete,
@@ -430,6 +436,7 @@ impl App {
             login_start: false,
             boot_connect_pending: false,
             tray_ready: false,
+            window_visible: true,
             tray_smoke: false,
             pending_close: None,
             autosave_due: None,
@@ -536,6 +543,8 @@ impl App {
         }
         app.boot_connect_pending = args.iter().all(|arg| arg == "--autostart");
         app.login_start = args.iter().any(|arg| arg == "--autostart");
+        // A login start hides the window as soon as the tray is ready.
+        app.window_visible = !app.login_start;
         if let Some(arg) = args
             .iter()
             .find(|arg| *arg != "--autostart" && *arg != "--no-auto-connect")
@@ -576,7 +585,7 @@ impl App {
             .into();
             self.pending_close = None;
             self.login_start = false;
-            return Self::show_window();
+            return self.show_window();
         }
         // Never toggle an already active connection or restart a cancelled attempt.
         if self.connecting || self.session.is_some() || self.disconnecting {
@@ -765,7 +774,7 @@ impl App {
                     Err(error) => {
                         self.startup_error = Some(error);
                         self.pending_close = None;
-                        return Self::show_window();
+                        return self.show_window();
                     }
                 }
             }
@@ -813,7 +822,7 @@ impl App {
                     return Task::none();
                 }
                 return Task::batch([
-                    Self::show_window(),
+                    self.show_window(),
                     Task::perform(
                         async { tokio::time::sleep(std::time::Duration::from_millis(400)).await },
                         |_| Message::TraySmokeStep(2),
@@ -835,7 +844,7 @@ impl App {
                     tray::Action::Show => {
                         if self.tray_smoke {
                             Task::batch([
-                                Self::show_window(),
+                                self.show_window(),
                                 Task::perform(
                                     async {
                                         tokio::time::sleep(std::time::Duration::from_millis(400))
@@ -845,13 +854,13 @@ impl App {
                                 ),
                             ])
                         } else {
-                            Self::show_window()
+                            self.show_window()
                         }
                     }
                     #[cfg(target_os = "linux")]
                     tray::Action::Unavailable => {
                         self.tray_ready = false;
-                        Self::show_window()
+                        self.show_window()
                     }
                     tray::Action::Toggle => self.update(Message::ToggleDefaultConnection),
                     tray::Action::Exit => self.update(Message::ExitRequested),
@@ -868,6 +877,7 @@ impl App {
             }
             Message::SmokeExit => return iced::exit(),
             Message::CloseRequested => return self.request_close(false),
+            Message::WindowFocused => self.window_visible = true,
             Message::ExitRequested => return self.request_close(true),
             Message::DraftName(name) if !self.busy => self.draft_name = name,
             Message::Rename if self.can_change_profiles() => {
@@ -1005,7 +1015,7 @@ impl App {
                     self.last_error = Some(self.status.clone());
                     self.reconnect_then_check = false;
                     self.follow_up = None;
-                    return Self::show_window();
+                    return self.show_window();
                 }
                 if std::mem::take(&mut self.reconnect_then_check) {
                     // Start through the ordinary path; the check follows Connected.
@@ -1032,6 +1042,7 @@ impl App {
                 glass::save_preference(enabled);
             }
             Message::Tick => {
+                self.mark_viewed();
                 if !self.busy {
                     if let Some(exit) = self.pending_close.take() {
                         return self.request_close(exit);
@@ -1051,7 +1062,7 @@ impl App {
                     && let Some(link) = open_url::take()
                 {
                     self.apply_import(Profile::import(&link).map(Some).map_err(|e| e.to_string()));
-                    return Self::show_window();
+                    return self.show_window();
                 }
                 if self.tray_ready {
                     let events = tray::poll();
@@ -1229,7 +1240,7 @@ impl App {
                         self.status = error;
                         self.pending_close = None;
                         self.login_start = false;
-                        return Self::show_window();
+                        return self.show_window();
                     }
                 }
             }
@@ -1482,7 +1493,7 @@ impl App {
                         self.status = e;
                         self.pending_close = None;
                         self.login_start = false;
-                        return Self::show_window();
+                        return self.show_window();
                     }
                 }
             }
@@ -1497,7 +1508,7 @@ impl App {
                     Err(error) => {
                         self.pending_close = None;
                         self.status = format!("Не сохранено: {error}");
-                        return Self::show_window();
+                        return self.show_window();
                     }
                 };
                 let vault = rtrust_store::Vault {
@@ -1546,7 +1557,7 @@ impl App {
                         self.status = format!(
                             "Не удалось сохранить конфигурацию: {e}. Окно оставлено открытым."
                         );
-                        return Self::show_window();
+                        return self.show_window();
                     }
                 }
             }
@@ -1773,7 +1784,19 @@ impl App {
         }
         Task::none()
     }
-    fn show_window() -> Task<Message> {
+    /// Report a view to the service only while the window is shown.
+    fn mark_viewed(&self) {
+        if self.window_visible
+            && let Some(session) = &self.session
+        {
+            session.mark_viewed();
+        }
+    }
+    fn show_window(&mut self) -> Task<Message> {
+        self.window_visible = true;
+        Self::show_window_task()
+    }
+    fn show_window_task() -> Task<Message> {
         iced::window::oldest().then(|id| match id {
             Some(id) => Task::batch([
                 iced::window::set_mode(id, iced::window::Mode::Windowed),
@@ -1794,6 +1817,7 @@ impl App {
             return self.update(Message::Save);
         }
         if !exit {
+            self.window_visible = false;
             if self.tray_ready {
                 return iced::window::oldest().then(|id| match id {
                     Some(id) => {
@@ -1825,7 +1849,7 @@ impl App {
         }
         if self.connecting {
             self.status = "Дождитесь подключения или отмените его перед выходом.".into();
-            return Self::show_window();
+            return self.show_window();
         }
         self.disconnect();
         iced::exit()
@@ -1997,6 +2021,11 @@ impl App {
         iced::Subscription::batch([
             iced::window::open_events().map(Message::TrayInit),
             iced::window::close_requests().map(|_| Message::CloseRequested),
+            // A window restored by the OS (not through the tray) counts again.
+            iced::event::listen_with(|event, _, _| {
+                matches!(event, iced::Event::Window(iced::window::Event::Focused))
+                    .then_some(Message::WindowFocused)
+            }),
             iced::window::resize_events().map(|(_, size)| Message::Resized(size.width)),
             iced::system::theme_changes().map(Message::SystemTheme),
             iced::time::every(std::time::Duration::from_millis(250)).map(|_| Message::Tick),
@@ -2544,6 +2573,36 @@ mod tests {
         let _ = app.update(Message::Saved(Err("locked".into())));
         let _ = app.update(Message::Tick);
         assert!(!app.busy && app.dirty);
+    }
+    #[test]
+    fn ticks_report_a_view_only_while_the_window_is_shown() {
+        let mut app = app();
+        assert!(app.window_visible, "an interactive start shows the window");
+        // Hidden to the tray: ticks keep running but report no view.
+        app.tray_ready = true;
+        let _ = app.update(Message::CloseRequested);
+        assert!(!app.window_visible);
+        for _ in 0..4 {
+            let _ = app.update(Message::Tick);
+            assert!(!app.window_visible);
+        }
+        let _ = app.update(Message::TrayEvents(vec![tray::Action::Show]));
+        assert!(app.window_visible);
+        let _ = app.update(Message::Tick);
+        assert!(app.window_visible);
+        // Without a tray the app minimizes itself: also not viewed, until
+        // the OS restores and focuses the window.
+        app.tray_ready = false;
+        let _ = app.update(Message::CloseRequested);
+        assert!(!app.window_visible);
+        let _ = app.update(Message::WindowFocused);
+        assert!(app.window_visible);
+        // A login start hides the window once the tray is ready.
+        let mut app = super::tests::app();
+        app.login_start = true;
+        app.window_visible = false;
+        let _ = app.update(Message::TrayReady(true));
+        assert!(!app.window_visible);
     }
     #[test]
     fn closing_to_tray_keeps_connection_attempt_alive() {

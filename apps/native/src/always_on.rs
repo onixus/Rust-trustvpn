@@ -113,7 +113,9 @@ impl App {
                 self.always_on.next_poll = None;
                 return Task::none();
             }
-            Action::Check if !self.busy => rtrust_control::Command::AlwaysOnStatus,
+            Action::Check if !self.busy => rtrust_control::Command::AlwaysOnStatus {
+                viewed: self.window_visible,
+            },
             Action::Disable if !self.busy || self.always_on.enabling => {
                 // Abort capability negotiation / pending enable send too. A
                 // late enable request must not arrive after Disable completed.
@@ -235,8 +237,11 @@ impl App {
         self.always_on.next_poll =
             Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
         let generation = self.always_on.generation;
+        // Viewed only while the window is shown: the service then keeps the
+        // always-on session's system probes running.
+        let viewed = self.window_visible;
         Some(Task::perform(
-            rtrust_control::Client::always_on(rtrust_control::Command::AlwaysOnStatus),
+            rtrust_control::Client::always_on(rtrust_control::Command::AlwaysOnStatus { viewed }),
             move |r| Message::AlwaysOn(Action::Observed(generation, r)),
         ))
     }

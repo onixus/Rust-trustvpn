@@ -13,6 +13,9 @@ tokio.workspace = true
 zeroize.workspace = true
 ipnet = { version = "2", features = ["serde"] }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-service = "0.8.1"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }

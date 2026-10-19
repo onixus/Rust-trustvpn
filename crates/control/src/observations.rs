@@ -12,6 +12,13 @@ pub const FRESH_MS: u64 = 6_000;
 pub const PROBE_INTERVAL_MS: u64 = 15_000;
 pub const PROBE_DEADLINE_MS: u64 = 5_000;
 pub const PROBE_TTL_MS: u64 = PROBE_INTERVAL_MS + 2 * PROBE_DEADLINE_MS + 5_000;
+/// The service probes only while a `viewed` status arrived within this window
+/// (its own monotonic clock). It spans several 2 s keepalives so one late
+/// poll does not pause the probes.
+pub const VIEW_TTL_MS: u64 = 10_000;
+/// A user interface reports `viewed` for this long after it last drew the
+/// status while visible.
+pub const CLIENT_VIEW_MS: u64 = 5_000;
 /// Longest TTL a reader may honour for a source; longer claims are capped.
 pub fn ttl_cap(source: Source) -> u64 {
     if source == Source::SystemProbe {

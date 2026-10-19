@@ -170,12 +170,19 @@ async fn run(
             });
         }
         // Never wait for the controller here: Connect may hold it for seconds.
+        let mut shown = None;
         if let Ok(c) = shared.try_lock() {
             let (epoch, failure) = health.lock().map(|h| h.clone()).unwrap_or_default();
             let failure = failure.filter(|_| epoch == c.session_epoch);
             app.update(Snapshot::capture(&c, ru, failure));
+            shown = c.session.clone();
         }
-        if terminal.draw(|f| app.draw(f)).is_err() && input_open {
+        let drawn = terminal.draw(|f| app.draw(f)).is_ok();
+        // A drawn session snapshot is a view: the service keeps probing.
+        if drawn && let Some(session) = &shown {
+            session.mark_viewed();
+        }
+        if !drawn && input_open {
             input_open = false;
             pending = app.signal();
             continue;
