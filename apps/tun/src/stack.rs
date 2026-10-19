@@ -19,7 +19,9 @@ use tokio::{
 /// Concurrent local TCP flows. A desktop waking from sleep sees hundreds of
 /// applications reconnect at once; refused SYNs are retransmitted by the host,
 /// but a table sized for a phone turned every wake into a minute of silence.
-/// Buffers are allocated per flow (2 x BUFFER), so mobile keeps the lower bound.
+/// Each flow allocates 2 x BUFFER eagerly for smoltcp plus up to 2 x BUFFER
+/// lazily for the duplex bridge (about 64 MiB worst case at 512), so mobile
+/// keeps the lower bound.
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub const MAX_FLOWS: usize = 128;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

@@ -14,7 +14,7 @@ target/debug/rtrust-tun profile.json rtrust0 10.77.0.2
 
 ## Реализованный data plane
 
-- IPv4 TCP: smoltcp, проверка IP/TCP checksums до выделения flow, повторные SYN не создают новые соединения. 128 flows, по 32 KiB send/receive buffers стека и bounded duplex bridge. Выходная очередь — 256 пакетов, вход — один пакет; переполнение приводит к отбрасыванию и TCP retransmission. Тайм-аут неактивности — 300 секунд.
+- IPv4 TCP: smoltcp, проверка IP/TCP checksums до выделения flow, повторные SYN не создают новые соединения. 512 flows on desktop (128 on Android/iOS), по 32 KiB send/receive buffers стека и bounded duplex bridge. Выходная очередь — 256 пакетов, вход — один пакет; переполнение приводит к отбрасыванию и TCP retransmission. Тайм-аут неактивности — 300 секунд.
 - IPv4 UDP: `_udp2`, очереди по 64 датаграммы, до 256 source/destination mappings с 60-секундным временем ожидания ответа. Ответ принимается только для активной пары адресов. Максимальный payload — 1472 байта; IP-фрагментация не реализована.
 - Принимаются пакеты только с назначенным TUN source IP. Неверные длины, checksum, IP options, fragments, IPv6 и ICMP отбрасываются. Успешные ответы ping не имитируются.
 - Сохраняется TCP half-close. Ошибка открытия отдельного TCP tunnel вызывает reset его локального соединения. Ошибка общей session/UDP stream останавливает backend.
