@@ -952,3 +952,7 @@ mod tests {
         assert!(FLOWS.quiet.load(Relaxed) >= 30);
     }
 }
+
+// Independent tester coverage (issue #99); test-only, separate file.
+#[cfg(test)]
+mod tester_tests;
