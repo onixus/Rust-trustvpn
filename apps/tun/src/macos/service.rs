@@ -1104,6 +1104,9 @@ async fn connected(
                 // Join blocking release even on shutdown: abandoning OS
                 // mutations would allow a competing recovery. The production
                 // release closure retains the lease until this task completes.
+                // Paused-clock tests cannot see this thread: they must
+                // `tokio::time::resume()` before Stop, or an idle runtime
+                // auto-advances straight to their timeout.
                 let (complete, mut cleanup) = oneshot::channel();
                 let worker = std::thread::Builder::new()
                     .name("rtrust-cleanup".into())
@@ -1165,6 +1168,15 @@ async fn connected(
             }
         }
     }
+}
+
+/// A release slow enough that Stop is still waiting on the cleanup thread
+/// when the paused runtime goes idle, as on a loaded host. Paused-clock tests
+/// use it so a missing `tokio::time::resume()` fails every run, not 1 in N.
+#[cfg(test)]
+fn slow_release() -> Result<(), String> {
+    std::thread::sleep(Duration::from_millis(20));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3073,7 +3085,7 @@ mod tester_summary_tests {
             power,
             failover,
             retry,
-            || Ok(()),
+            slow_release,
         ));
         write_response(&mut stream, &response.await.unwrap()).await?;
         let result = bridge(stream, actor, None).await;
@@ -3164,6 +3176,10 @@ mod tester_summary_tests {
         });
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::time::advance(SUMMARY_DELAY).await;
+        // Stop joins `release` on a std::thread the paused clock cannot see:
+        // an idle runtime would auto-advance past the 5 s bound instantly.
+        // Every wait below is bounded on the real clock.
+        tokio::time::resume();
         write(
             &mut client,
             &Request {
@@ -3178,7 +3194,14 @@ mod tester_summary_tests {
             .expect("Stop answered")
             .unwrap();
         assert_eq!(stopped.state, State::Idle);
-        client.shutdown().await.unwrap();
-        supervisor.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), client.shutdown())
+            .await
+            .expect("client shut down")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), supervisor)
+            .await
+            .expect("supervisor finished after Stop")
+            .unwrap()
+            .unwrap();
     }
 }
