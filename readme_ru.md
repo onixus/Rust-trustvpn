@@ -6,25 +6,29 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 
 Клиент реализует транспорт самостоятельно и **не является оболочкой** над официальными CLI TrustTunnel или Hysteria.
 
-> **Статус проекта: development preview, 16 октября 2026 года.**
+> **Статус проекта: development preview, 21 октября 2026 года.**
 >
-> Workspace — **0.6.2**, update sequence 12. Готовится полный релиз **v0.6.2**, понятное описание изменений — в [docs/releases/v0.6.2.md](docs/releases/v0.6.2.md). [v0.6.2-beta.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2-beta.1) — бета pre-release только с пакетами macOS и Android; изменения перечислены [ниже](#что-нового-в-062-beta). [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) (13 октября, `db8796a`) остаётся последним полным релизом и источником Windows installer. Публикация не доказывает приёмку установленного пакета или production-ready статус. См. [текущее состояние и открытые gates](docs/project-status.md). [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0), опубликованный в тот же день, — самый новый релиз с Linux-пакетами; архивы iOS есть только в [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0).
+> Workspace — **0.6.2**, update sequence 12. [v0.6.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2) (21 октября, `4123160`) — последний релиз с пакетами для Windows, macOS, Linux и Android; изменения перечислены [ниже](#что-нового-в-062), простым языком — в [docs/releases/v0.6.2.md](docs/releases/v0.6.2.md). Публикация не доказывает приёмку установленного пакета или production-ready статус. См. [текущее состояние и открытые gates](docs/project-status.md). Архивы iOS есть только в [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0).
 
 ## Скачать
 
 | Платформа | Последний опубликованный набор | Ограничения |
 | --- | --- | --- |
-| Windows x64 | Installer из [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) | Без Authenticode-подписи. Update/rollback именно этого пакета не принят; лабораторная репетиция 9 → 10 с откатом относится к 0.6.0. |
-| macOS Apple Silicon | System candidate DMG/PKG (Native, WebView, Both) из [v0.6.2-beta.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2-beta.1) (бета); для v0.6.1 — `R-TrustTunnel-macOS-arm64-UI-Choices.dmg` (один DMG со всеми тремя PKG) | Установите ровно один PKG. Ad-hoc sealed, без Developer ID и notarization. Приёмка системного VPN не завершена, автоматическое обновление не промотировано. Следующие релизы публикуют только UI Choices DMG ([состав релиза](docs/releases/README.md)). |
-| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` из [v0.6.2-beta.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2-beta.1) (бета) | 0.6.2-beta.1 / 60201; ключ релиза введён в 0.6.0. 0.6.0 и 0.6.1 обновляются поверх; 0.5.x и старше нужно переустановить, локальные профили при этом удаляются. |
-| Linux x86_64, Wayland | Native / WebView / Both Flatpak и `rtrust-host-0.6.0-7` из v0.6.0 | В v0.6.1 Linux-пакетов нет. Системному VPN нужен отдельный host package. |
-| iOS arm64 / Simulator | Архивы из [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0) | В v0.6.1 нет iOS assets. Device archive требует Apple signing и не является готовым IPA. |
+| Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` из [v0.6.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2) | Без Authenticode-подписи. Update/rollback именно этого пакета не принят. |
+| macOS Apple Silicon | `R-TrustTunnel-macOS-arm64-UI-Choices.dmg` из [v0.6.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2) (PKG Native, WebView и Both в одном DMG) | Установите ровно один PKG. Ad-hoc sealed, без Developer ID и notarization. Приёмка системного VPN не завершена, автоматическое обновление не промотировано ([состав релиза](docs/releases/README.md)). |
+| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` из [v0.6.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2) | 0.6.2 / 60202; ключ релиза введён в 0.6.0. 0.6.0, 0.6.1 и 0.6.2-beta.1 обновляются поверх; 0.5.x и старше нужно переустановить, локальные профили при этом удаляются. |
+| Linux x86_64, Wayland | Native / WebView / Both Flatpak и `rtrust-host-0.6.2-12` из [v0.6.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2) | Системному VPN нужен отдельный host package. |
+| iOS arm64 / Simulator | Архивы из [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0) | В v0.6.x нет iOS assets. Device archive требует Apple signing и не является готовым IPA. |
 
-В v0.6.1 и v0.6.2-beta.1 есть SHA256SUMS. Наличие файлов не заменяет проверку подписи, provenance или канала обновлений. Объём релизов: [v0.6.2-beta.1](docs/releases/v0.6.2.md), [v0.6.1](docs/releases/v0.6.1.md).
+В v0.6.2 есть SHA256SUMS и описание исходников сборки. Наличие файлов не заменяет проверку подписи, provenance или канала обновлений. Объём релизов: [v0.6.2](docs/releases/v0.6.2.md), [v0.6.1](docs/releases/v0.6.1.md).
 
-## Что нового в 0.6.2 beta
+## Что нового в 0.6.2
 
-В пакетах v0.6.2-beta.1 для macOS и Android (в Windows и Linux пакетах пока нет):
+По сравнению с v0.6.1, во всех пакетах v0.6.2 для desktop и Android:
+
+- **Переподключение macOS после сна** ([#100](https://github.com/onixus/Rust-trustvpn/pull/100)). После пробуждения туннель снова передаёт трафик, а не зависает до ручного Stop/Start.
+- **Тихие зависшие соединения** ([#103](https://github.com/onixus/Rust-trustvpn/pull/103), [#104](https://github.com/onixus/Rust-trustvpn/pull/104)). Несколько живых соединений больше не скрывают сотни зависших; сессия помечается деградировавшей и переподключается, в режиме SOCKS тоже, без прямого выхода в обход VPN.
+- **Проверки только при открытом окне** ([#102](https://github.com/onixus/Rust-trustvpn/pull/102)). Системные проверки desktop запускаются, только пока окно UI показывает сессию (control IPC v7).
 
 - **Доказательство защиты на macOS** ([#96](https://github.com/onixus/Rust-trustvpn/pull/96)). PF отбрасывает исходящие пакеты молча, поэтому служба macOS доказывает kill switch через BPF-захват только на чтение с контрольным кадром в каждом прогоне, а не по errno. На установленном пакете строки «Защита» и DNS в режиме «весь компьютер» зелёные, а сломанная защита даёт failed.
 - **Жизненный цикл macOS** ([#80](https://github.com/onixus/Rust-trustvpn/pull/80), [#94](https://github.com/onixus/Rust-trustvpn/pull/94), [#95](https://github.com/onixus/Rust-trustvpn/pull/95)). Status отвечает во время Stop, а сам Stop на тестовом Mac занимает меньше половины секунды; длительности Stop и reconnect пишутся в `events.log`; PF-состояния, оставленные другими VPN (Cisco AnyConnect), сбрасываются при подключении вместо отказа.

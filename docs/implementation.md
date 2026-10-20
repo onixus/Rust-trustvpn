@@ -1,8 +1,8 @@
-# Состояние реализации — 20 октября 2026
+# Состояние реализации — 21 октября 2026
 
 Workspace: **0.6.2** (desktop update sequence 12, Android
-0.6.2 / 60202, iOS 0.6.2 / 60202). Готовится полный релиз [v0.6.2](releases/v0.6.2.md);
-бета v0.6.2-beta.1 содержала только пакеты macOS и Android.
+0.6.2 / 60202, iOS 0.6.2 / 60202). [v0.6.2](releases/v0.6.2.md) опубликован 21 октября из `4123160`:
+Windows, macOS (UI Choices DMG), Linux (Flatpak, `rtrust-host-0.6.2-12`) и Android.
 
 [v0.6.1](releases/v0.6.1.md) опубликован 13 октября из `db8796a`:
 Android APK, Windows installer и macOS packages. Самые новые Linux assets
