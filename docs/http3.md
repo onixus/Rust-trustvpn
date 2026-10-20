@@ -78,7 +78,7 @@ The exit carries `proven`: whether the session ever delivered an inbound byte.
   finite per-session budget unless it ended degraded without delivering data
   (`crates/mobile/src/reserves.rs`), so exits over days cannot block the VPN
   permanently. Unproven or short exits still count.
-- macOS records `transport_degraded proven=<bool>` in the service event log.
+- macOS records `transport_degraded proven=<bool> kind=silent|quiet` in the service event log.
 
 Liveness keeps only in-memory counters and a per-session keyed 64-bit host-hash
 set. No destination or address is stored, logged or exposed.

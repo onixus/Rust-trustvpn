@@ -52,14 +52,24 @@ pub fn unproven<T>(result: &Result<T, Box<dyn std::error::Error + Send + Sync>>)
 }
 /// `Some(proven)` when the data plane ended degraded.
 pub fn degraded<T>(result: &Result<T, Box<dyn std::error::Error + Send + Sync>>) -> Option<bool> {
+    degraded_kind(result).map(|(proven, _)| proven)
+}
+/// `Some((proven, kind))` when the data plane ended degraded.
+pub fn degraded_kind<T>(
+    result: &Result<T, Box<dyn std::error::Error + Send + Sync>>,
+) -> Option<(bool, rtrust_engine::Stall)> {
     match result
         .as_ref()
         .err()?
         .downcast_ref::<rtrust_engine::Error>()?
     {
-        rtrust_engine::Error::Degraded { proven } => Some(*proven),
+        rtrust_engine::Error::Degraded { proven, kind } => Some((*proven, *kind)),
         _ => None,
     }
+}
+/// Event-log line for a degraded exit: a boolean and a fixed token only.
+pub fn degraded_event(proven: bool, kind: rtrust_engine::Stall) -> String {
+    format!("transport_degraded proven={proven} kind={}", kind.as_str())
 }
 
 /// Packets queued on the device before this session existed belong to an
@@ -469,12 +479,27 @@ async fn direct_udp_flow(
 mod tests {
     #[test]
     fn only_a_degraded_exit_without_any_delivery_is_unproven() {
-        let exit = |proven| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            Err(rtrust_engine::Error::Degraded { proven }.into())
+        use rtrust_engine::Stall;
+        let exit = |proven, kind| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Err(rtrust_engine::Error::Degraded { proven, kind }.into())
         };
-        assert!(super::unproven(&exit(false)));
-        assert_eq!(super::degraded(&exit(true)), Some(true));
-        assert!(!super::unproven(&exit(true)));
+        for kind in [Stall::Silent, Stall::Quiet] {
+            assert!(super::unproven(&exit(false, kind)));
+            assert_eq!(super::degraded(&exit(true, kind)), Some(true));
+            assert_eq!(
+                super::degraded_kind(&exit(false, kind)),
+                Some((false, kind))
+            );
+            assert!(!super::unproven(&exit(true, kind)));
+        }
+        assert_eq!(
+            super::degraded_event(false, Stall::Quiet),
+            "transport_degraded proven=false kind=quiet"
+        );
+        assert_eq!(
+            super::degraded_event(true, Stall::Silent),
+            "transport_degraded proven=true kind=silent"
+        );
         for other in [
             Err(rtrust_engine::Error::Timeout.into()),
             Err("Transport worker stopped".into()),

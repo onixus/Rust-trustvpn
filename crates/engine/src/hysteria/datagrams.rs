@@ -116,6 +116,7 @@ pub(super) async fn open(session: HysteriaSession) -> Result<Tunnel> {
         io,
         pump,
         liveness: None,
+        watch: Default::default(),
     })
 }
 async fn relay(session: HysteriaSession, bridge: DuplexStream) -> Result<()> {

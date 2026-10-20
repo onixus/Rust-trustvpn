@@ -544,7 +544,8 @@ fn classify(error: rtrust_engine::Error) -> Reason {
         Error::Authentication => Reason::AuthenticationFailed,
         Error::Protocol => Reason::ProtocolFailed,
         Error::Rejected(_) => Reason::EndpointRejected,
-        Error::Timeout => Reason::Timeout,
+        // Out of stream credit: the endpoint never answered in time either.
+        Error::Timeout | Error::Credit => Reason::Timeout,
         _ => Reason::ConnectionFailed,
     }
 }

@@ -20,7 +20,7 @@ Since main after 0.6.1 (#62) a session that carries no traffic fails its health
 check and is reconnected. If it never delivered an inbound byte, its exit does not
 restore the retry budget, however long it lasted, so an endpoint handing out dead
 sessions reaches the five-minute cooldown instead of a fast loop. The service event
-log records `transport_degraded proven=<bool>` without destinations or addresses.
+log records `transport_degraded proven=<bool> kind=silent|quiet` without destinations or addresses.
 See [dead-session detection](http3.md#dead-session-detection).
 
 The desktop client keeps a partially read IPC response through sleep and never
