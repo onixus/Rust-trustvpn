@@ -2932,7 +2932,12 @@ mod tests {
             receiver,
             failover().await,
             |workers, _, _| workers.reconnect = Some(tokio::spawn(std::future::pending())),
-            || Ok(()),
+            // A real, slow release (as on a loaded host) keeps Stop waiting
+            // on the cleanup thread rather than finishing before it parks.
+            || {
+                std::thread::sleep(Duration::from_millis(20));
+                Ok(())
+            },
         ));
         assert_eq!(response.await.unwrap().state, State::Connected);
         let count = || runs.load(std::sync::atomic::Ordering::SeqCst);
@@ -2974,6 +2979,9 @@ mod tests {
             "one run per {} ms at most: {viewed_runs}",
             rtrust_control::observations::PROBE_INTERVAL_MS
         );
+        // Stop joins `release` on a std::thread the paused clock cannot see:
+        // an idle runtime would auto-advance past the 45 s bound instantly.
+        tokio::time::resume();
         assert_eq!(ask(&actor, Command::Stop).await.unwrap().state, State::Idle);
         supervisor.await.unwrap().unwrap();
     }
