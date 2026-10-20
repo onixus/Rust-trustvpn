@@ -218,17 +218,45 @@ impl Session {
     }
     /// Worker/IPC liveness only; use observations for verified network availability.
     pub async fn lifecycle_health(&self) -> Result<(), String> {
+        self.health().await.map_err(|e| e.message)
+    }
+    /// `lifecycle_health` that keeps a SOCKS degraded verdict structured, so
+    /// the caller can tell a tunnel carrying no traffic from a dead one.
+    pub async fn health(&self) -> Result<(), HealthError> {
         match self {
-            Self::Socks(p) => p.health().await.map_err(|e| e.to_string()),
+            Self::Socks(p) => p.health().await.map_err(HealthError::from),
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             Self::Tun(c, _) => {
                 let r = c.status();
                 if r.state == rtrust_control::State::Connected {
                     Ok(())
                 } else {
-                    Err(r.message)
+                    Err(HealthError {
+                        message: r.message,
+                        degraded: None,
+                    })
                 }
             }
+        }
+    }
+}
+/// A failed lifecycle check. `degraded` is `Some(proven)` when the transport
+/// still answers but carries no traffic (`rtrust_engine::Error::Degraded`);
+/// `proven`: it delivered data earlier in its life. The message never holds
+/// profile secrets: it is the engine's fixed error text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HealthError {
+    pub message: String,
+    pub degraded: Option<bool>,
+}
+impl From<rtrust_engine::Error> for HealthError {
+    fn from(error: rtrust_engine::Error) -> Self {
+        Self {
+            degraded: match error {
+                rtrust_engine::Error::Degraded { proven, .. } => Some(proven),
+                _ => None,
+            },
+            message: error.to_string(),
         }
     }
 }
@@ -291,6 +319,23 @@ pub async fn recover_service(
         forget_owner().await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+    #[test]
+    fn only_a_degraded_engine_error_is_marked_with_its_proof() {
+        use rtrust_engine::{Error, Stall};
+        for proven in [false, true] {
+            for kind in [Stall::Silent, Stall::Quiet] {
+                let error = HealthError::from(Error::Degraded { proven, kind });
+                assert_eq!(error.degraded, Some(proven));
+                assert_eq!(error.message, "Tunnel carries no traffic");
+            }
+        }
+        assert_eq!(HealthError::from(Error::Io).degraded, None);
+    }
 }
 
 #[cfg(test)]

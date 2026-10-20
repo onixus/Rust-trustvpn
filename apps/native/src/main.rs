@@ -14,6 +14,7 @@ mod intent;
 #[cfg(target_os = "macos")]
 mod open_url;
 mod portal;
+mod socks_recovery;
 mod sync;
 mod tray;
 mod ui;
@@ -287,6 +288,8 @@ struct App {
     connection_epoch: u64,
     connection_task: Option<iced::task::Handle>,
     session: Option<Session>,
+    /// SOCKS reconnect policy for the connection the user started (#99).
+    socks_recovery: Option<socks_recovery::Recovery>,
     connecting: bool,
     connection_name: String,
     /// Whether the connected endpoint relays IPv6; otherwise IPv6 is refused locally.
@@ -403,7 +406,7 @@ enum Message {
     ToggleConnection,
     ToggleDefaultConnection,
     Connected(u64, Result<Session, String>),
-    Health(u64, Result<(), String>),
+    Health(u64, Result<(), connection::HealthError>),
 }
 // Never derive Debug on UI messages carrying pasted profiles or file contents.
 impl std::fmt::Debug for Message {
@@ -468,6 +471,7 @@ impl App {
             connection_epoch: 0,
             connection_task: None,
             session: None,
+            socks_recovery: None,
             connecting: false,
             connection_name: String::new(),
             connection_ipv6: true,
@@ -1120,6 +1124,7 @@ impl App {
                     return task;
                 }
                 if self.connecting || self.session.is_some() {
+                    // disconnect() also ends any SOCKS reconnect wait.
                     self.reconnect_then_check = false;
                     self.follow_up = None;
                     self.disconnect();
@@ -1173,6 +1178,8 @@ impl App {
                             return Task::none();
                         }
                     };
+                    self.socks_recovery = (mode == Mode::Socks)
+                        .then(|| socks_recovery::Recovery::new(profile.clone(), port));
                     self.connection_candidates = std::iter::once(profile.name.clone())
                         .chain(fallbacks.iter().map(|p| p.name.clone()))
                         .collect();
@@ -1209,6 +1216,11 @@ impl App {
                 self.connecting = false;
                 match result {
                     Ok(session) => {
+                        if let Some(recovery) = &mut self.socks_recovery {
+                            recovery.connected(std::time::Instant::now());
+                        }
+                        // A successful automatic attempt clears its wait notice.
+                        self.last_error = None;
                         self.session = Some(session);
                         // A new admitted session supersedes any lost one.
                         self.pending_owner = None;
@@ -1233,6 +1245,19 @@ impl App {
                         return Task::batch([self.monitor_connection(), self.start_diagnostic()]);
                     }
                     Err(error) => {
+                        if self
+                            .socks_recovery
+                            .as_ref()
+                            .is_some_and(socks_recovery::Recovery::retrying)
+                        {
+                            let retry = self
+                                .socks_recovery
+                                .as_mut()
+                                .unwrap()
+                                .attempt_failed(socks_recovery::entropy());
+                            return self.retry_socks(retry, &error);
+                        }
+                        self.socks_recovery = None;
                         self.reconnect_then_check = false;
                         self.follow_up = None;
                         self.connection_name.clear();
@@ -1278,12 +1303,10 @@ impl App {
                             self.cancel_diagnostic();
                             self.last_diagnostic = None;
                             self.diagnostic_report = None;
-                            self.status = error;
+                            self.status = error.message;
                             return self.monitor_connection();
                         }
-                        self.disconnect();
-                        self.status = format!("Соединение потеряно: {error}");
-                        self.last_error = Some(self.status.clone());
+                        return self.socks_lost(error);
                     }
                 }
             }
@@ -1847,7 +1870,13 @@ impl App {
             self.exit_after_stop = true;
             return self.update(Message::ToggleConnection);
         }
-        if self.connecting {
+        // A SOCKS reconnect wait has nothing to finish: its listener is down.
+        if self.connecting
+            && !self
+                .socks_recovery
+                .as_ref()
+                .is_some_and(socks_recovery::Recovery::retrying)
+        {
             self.status = "Дождитесь подключения или отмените его перед выходом.".into();
             return self.show_window();
         }
@@ -2016,6 +2045,72 @@ impl App {
         self.connecting = false;
         self.disconnecting = false;
         self.connection_name.clear();
+        self.socks_recovery = None;
+    }
+    /// A failed SOCKS health check. A tunnel that carries no traffic is
+    /// retried under the recovery budget; any other failure ends the session.
+    /// Either way the proxy stops first: no request is ever sent directly.
+    fn socks_lost(&mut self, error: connection::HealthError) -> Task<Message> {
+        let recovery = self.socks_recovery.take();
+        self.disconnect();
+        if let (Some(proven), Some(mut recovery)) = (error.degraded, recovery) {
+            let retry =
+                recovery.degraded(proven, std::time::Instant::now(), socks_recovery::entropy());
+            self.socks_recovery = Some(recovery);
+            return self.retry_socks(retry, &error.message);
+        }
+        self.status = format!("Соединение потеряно: {}", error.message);
+        self.last_error = Some(self.status.clone());
+        Task::none()
+    }
+    /// Waits, then starts the proxy again for the same profile and port. The
+    /// attempt is the connection task: Cancel and a stale epoch drop it.
+    fn retry_socks(&mut self, retry: socks_recovery::Retry, reason: &str) -> Task<Message> {
+        let Some(recovery) = &self.socks_recovery else {
+            return Task::none();
+        };
+        let (profile, port) = recovery.target();
+        self.cancel_diagnostic();
+        if let Some(handle) = self.connection_task.take() {
+            handle.abort();
+        }
+        self.connection_epoch += 1;
+        let epoch = self.connection_epoch;
+        self.connecting = true;
+        self.connection_name = profile.name.clone();
+        let seconds = retry.delay.as_secs().max(1);
+        self.status = if retry.cooling {
+            format!(
+                "Прокси остановлен: {reason}. Несколько попыток подряд не удались, следующая через {seconds} с. Прямых соединений нет."
+            )
+        } else {
+            format!(
+                "Прокси остановлен: {reason}. Переподключение через {seconds} с. Прямых соединений нет."
+            )
+        };
+        self.last_error = Some(self.status.clone());
+        let (task, handle) = Task::perform(
+            async move {
+                tokio::time::sleep(retry.delay).await;
+                tokio::time::timeout(
+                    rtrust_control::recovery::ATTEMPT_TIMEOUT,
+                    Session::start(
+                        profile,
+                        Vec::new(),
+                        Mode::Socks,
+                        port,
+                        Default::default(),
+                        String::new(),
+                    ),
+                )
+                .await
+                .map_err(|_| "Переподключение не уложилось в отведённое время".to_owned())?
+            },
+            move |r| Message::Connected(epoch, r),
+        )
+        .abortable();
+        self.connection_task = Some(handle);
+        task
     }
     fn subscription(&self) -> iced::Subscription<Message> {
         iced::Subscription::batch([
@@ -2196,7 +2291,7 @@ impl App {
                     15
                 }))
                 .await;
-                session.lifecycle_health().await.map_err(|e| e.to_string())
+                session.health().await
             },
             move |r| Message::Health(epoch, r),
         )
@@ -2935,6 +3030,105 @@ mod tests {
             assert!(!app.connecting);
             assert!(app.connection_task.is_none());
         }
+    }
+    /// A SOCKS session the user started and the proxy admitted. The proxy
+    /// itself is not needed: the health verdict arrives without it.
+    fn socks_admitted(app: &mut App) {
+        app.mode = Mode::Socks;
+        let mut recovery = socks_recovery::Recovery::new(app.profiles[0].clone(), 1080);
+        recovery.connected(std::time::Instant::now());
+        app.socks_recovery = Some(recovery);
+        app.connection_name = app.profiles[0].name.clone();
+    }
+    /// Seconds shown in a wait notice: the delay carries bounded jitter.
+    fn shown_wait(status: &str) -> u64 {
+        let tail = status.rsplit("через ").next().unwrap();
+        tail.split(' ').next().unwrap().parse().unwrap()
+    }
+    fn degraded(proven: bool) -> connection::HealthError {
+        connection::HealthError {
+            message: "Tunnel carries no traffic".into(),
+            degraded: Some(proven),
+        }
+    }
+    #[test]
+    fn socks_degraded_health_waits_and_retries_without_a_proxy() {
+        for proven in [false, true] {
+            let mut app = app();
+            socks_admitted(&mut app);
+            let epoch = app.connection_epoch;
+            let task = app.socks_lost(degraded(proven));
+            drop(task);
+            // Fail-closed: no proxy runs during the wait; the attempt is the
+            // current connection task under a new epoch.
+            assert!(app.session.is_none() && app.connecting);
+            assert!(app.connection_epoch > epoch && app.connection_task.is_some());
+            assert!(app.socks_recovery.as_ref().unwrap().retrying());
+            assert_eq!(app.connection_name, app.profiles[0].name);
+            assert!(app.status.contains("Переподключение через 2"));
+            assert!(app.status.contains("Прямых соединений нет"));
+            assert_eq!(app.last_error.as_deref(), Some(app.status.as_str()));
+        }
+    }
+    #[test]
+    fn socks_failures_other_than_degraded_still_disconnect() {
+        let mut app = app();
+        socks_admitted(&mut app);
+        let _ = app.socks_lost(connection::HealthError {
+            message: "Tunnel I/O failed".into(),
+            degraded: None,
+        });
+        assert!(!app.connecting && app.session.is_none() && app.socks_recovery.is_none());
+        assert_eq!(app.status, "Соединение потеряно: Tunnel I/O failed");
+    }
+    #[test]
+    fn socks_retry_failures_reach_the_cooldown_and_stay_cancellable() {
+        let mut app = app();
+        socks_admitted(&mut app);
+        let _ = app.socks_lost(degraded(false));
+        // The first wait was 2 s; seven more failed attempts spend the burst.
+        for seconds in [4, 8, 16, 30, 30, 30, 30] {
+            let _ = app.update(Message::Connected(
+                app.connection_epoch,
+                Err("Не удалось подключиться".into()),
+            ));
+            assert!(app.connecting && app.session.is_none());
+            assert!(app.status.contains("Переподключение через"));
+            assert!((seconds..=seconds * 5 / 4).contains(&shown_wait(&app.status)));
+        }
+        let _ = app.update(Message::Connected(app.connection_epoch, Err("x".into())));
+        assert!(app.status.contains("Несколько попыток подряд не удались"));
+        let cooldown = rtrust_control::recovery::COOLDOWN.as_secs();
+        assert!((cooldown..=cooldown + 30).contains(&shown_wait(&app.status)));
+        // A late result of the cancelled attempt cannot revive it.
+        let stale = app.connection_epoch;
+        let _ = app.update(Message::ToggleConnection);
+        assert!(!app.connecting && app.socks_recovery.is_none() && app.connection_task.is_none());
+        let _ = app.update(Message::Connected(stale, Err("late".into())));
+        assert!(!app.connecting && app.socks_recovery.is_none());
+    }
+    #[test]
+    fn a_failed_user_socks_start_is_shown_not_retried() {
+        let mut app = app();
+        app.mode = Mode::Socks;
+        let _ = app.update(Message::ToggleConnection);
+        assert!(app.connecting);
+        assert!(!app.socks_recovery.as_ref().unwrap().retrying());
+        let _ = app.update(Message::Connected(
+            app.connection_epoch,
+            Err("TLS failed".into()),
+        ));
+        assert!(!app.connecting && app.socks_recovery.is_none());
+        assert_eq!(app.status, "TLS failed");
+    }
+    #[test]
+    fn exit_is_not_blocked_by_a_socks_reconnect_wait() {
+        let mut app = app();
+        socks_admitted(&mut app);
+        let _ = app.socks_lost(degraded(true));
+        let _ = app.update(Message::ExitRequested);
+        assert!(!app.status.contains("Дождитесь"));
+        assert!(!app.connecting && app.socks_recovery.is_none());
     }
 }
 
