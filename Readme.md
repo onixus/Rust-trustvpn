@@ -6,9 +6,9 @@ R-TrustTunnel is a native VPN client written in Rust for **TrustTunnel**, **Hyst
 
 The client implements its own transport and does **not** wrap the official TrustTunnel or Hysteria CLI.
 
-> **Project status: development preview, October 16, 2026.**
+> **Project status: development preview, October 20, 2026.**
 >
-> The source workspace is **0.6.2**, update sequence 12. [v0.6.2-beta.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2-beta.1) is a beta pre-release with macOS and Android packages only, with the changes listed [below](#whats-new-in-062-beta). [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) (October 13, `db8796a`) remains the latest full release and the source of the Windows installer. Publication does not establish installed-package acceptance or production readiness. See [current implementation and open gates](docs/project-status.md). [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0), published the same day, is the newest release with Linux packages; iOS archives are only in [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0).
+> The source workspace is **0.6.2**, update sequence 12. The full **v0.6.2** release is being prepared; its plain-language notes are in [docs/releases/v0.6.2.md](docs/releases/v0.6.2.md). [v0.6.2-beta.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2-beta.1) was a beta pre-release with macOS and Android packages only, with the changes listed [below](#whats-new-in-062-beta). [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) (October 13, `db8796a`) remains the latest full release and the source of the Windows installer. Publication does not establish installed-package acceptance or production readiness. See [current implementation and open gates](docs/project-status.md). [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0), published the same day, is the newest release with Linux packages; iOS archives are only in [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0).
 
 ## Download
 
@@ -179,7 +179,7 @@ See [desktop lifecycle](docs/desktop-lifecycle.md) and [Always-on](docs/always-o
 5. For fail-closed behaviour after process death, enable Android **Always-on VPN** and **Block connections without VPN**.
 6. Server profiles can be enrolled and synchronized through the portal integration.
 
-The source tree currently declares Android minSdk 29, targetSdk 36, versionCode 60201 and versionName 0.6.2-beta.1 ([v0.6.2](docs/releases/v0.6.2.md)), signed with the release key introduced in v0.6.0 (it does not update APKs from v0.5.0 or earlier).
+The source tree currently declares Android minSdk 29, targetSdk 36, versionCode 60202 and versionName 0.6.2 ([v0.6.2](docs/releases/v0.6.2.md)), signed with the release key introduced in v0.6.0 (it does not update APKs from v0.5.0 or earlier).
 
 See [Android documentation](docs/android.md) and [profile exchange](docs/portal.md).
 
