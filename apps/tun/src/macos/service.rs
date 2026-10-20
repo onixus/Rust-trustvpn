@@ -2945,7 +2945,7 @@ mod tests {
             receiver,
             failover().await,
             |workers, _, _| workers.reconnect = Some(tokio::spawn(std::future::pending())),
-            || Ok(()),
+            slow_release,
         ));
         assert_eq!(response.await.unwrap().state, State::Connected);
         let count = || runs.load(std::sync::atomic::Ordering::SeqCst);
@@ -2987,8 +2987,19 @@ mod tests {
             "one run per {} ms at most: {viewed_runs}",
             rtrust_control::observations::PROBE_INTERVAL_MS
         );
-        assert_eq!(ask(&actor, Command::Stop).await.unwrap().state, State::Idle);
-        supervisor.await.unwrap().unwrap();
+        // Stop joins `release` on a std::thread the paused clock cannot see:
+        // an idle runtime would auto-advance past the 45 s bound instantly.
+        // A tighter real-clock bound keeps a stuck Stop from costing 45 s.
+        tokio::time::resume();
+        let stopped = tokio::time::timeout(Duration::from_secs(5), ask(&actor, Command::Stop))
+            .await
+            .expect("Stop answered");
+        assert_eq!(stopped.unwrap().state, State::Idle);
+        tokio::time::timeout(Duration::from_secs(5), supervisor)
+            .await
+            .expect("supervisor finished after Stop")
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
