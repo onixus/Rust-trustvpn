@@ -8,7 +8,7 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 
 > **Статус проекта: development preview, 16 октября 2026 года.**
 >
-> Workspace — **0.6.2**, update sequence 12. [v0.6.2-beta.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2-beta.1) — бета pre-release только с пакетами macOS и Android; изменения перечислены [ниже](#что-нового-в-062-beta). [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) (13 октября, `db8796a`) остаётся последним полным релизом и источником Windows installer. Публикация не доказывает приёмку установленного пакета или production-ready статус. См. [текущее состояние и открытые gates](docs/project-status.md). [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0), опубликованный в тот же день, — самый новый релиз с Linux-пакетами; архивы iOS есть только в [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0).
+> Workspace — **0.6.2**, update sequence 12. Готовится полный релиз **v0.6.2**, понятное описание изменений — в [docs/releases/v0.6.2.md](docs/releases/v0.6.2.md). [v0.6.2-beta.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2-beta.1) — бета pre-release только с пакетами macOS и Android; изменения перечислены [ниже](#что-нового-в-062-beta). [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1) (13 октября, `db8796a`) остаётся последним полным релизом и источником Windows installer. Публикация не доказывает приёмку установленного пакета или production-ready статус. См. [текущее состояние и открытые gates](docs/project-status.md). [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0), опубликованный в тот же день, — самый новый релиз с Linux-пакетами; архивы iOS есть только в [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0).
 
 ## Скачать
 
@@ -179,7 +179,7 @@ SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS
 5. Для fail-closed поведения после гибели процесса включите в Android **Always-on VPN** и **Block connections without VPN**.
 6. Server profiles можно регистрировать и синхронизировать через portal integration.
 
-В текущих исходниках заданы Android minSdk 29, targetSdk 36, versionCode 60201 и versionName 0.6.2-beta.1 ([v0.6.2](docs/releases/v0.6.2.md)); APK подписывается релизным ключом, введённым в v0.6.0, и не обновляет установки 0.5.0 и старше.
+В текущих исходниках заданы Android minSdk 29, targetSdk 36, versionCode 60202 и versionName 0.6.2 ([v0.6.2](docs/releases/v0.6.2.md)); APK подписывается релизным ключом, введённым в v0.6.0, и не обновляет установки 0.5.0 и старше.
 
 См. [Android](docs/android.md) и [обмен профилями](docs/portal.md).
 
