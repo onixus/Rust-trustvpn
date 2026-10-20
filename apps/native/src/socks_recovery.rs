@@ -70,6 +70,46 @@ impl Recovery {
         }
     }
 }
+/// Why an automatic attempt failed. `permanent`: retrying the same profile
+/// and port cannot help (the port is taken, the profile or its trust store is
+/// unusable, the endpoint refused the credentials), so recovery ends.
+/// TLS validation stays transient: after wake a captive portal may intercept
+/// until the user signs in, and a failed handshake never sends anything direct.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failure {
+    pub message: String,
+    pub permanent: bool,
+}
+impl From<rtrust_engine::Error> for Failure {
+    fn from(error: rtrust_engine::Error) -> Self {
+        use rtrust_engine::Error;
+        Self {
+            permanent: matches!(
+                error,
+                Error::LocalBind
+                    | Error::Profile
+                    | Error::Unsupported(_)
+                    | Error::Trust
+                    | Error::Authentication
+            ),
+            message: error.to_string(),
+        }
+    }
+}
+/// One automatic attempt: the same profile and port, no backups, no lease.
+/// A SOCKS start with a freshness lease is refused at the user's own start,
+/// and settings stay frozen while connecting, so none applies here.
+pub async fn attempt(profile: Profile, port: u16) -> Result<crate::Session, Failure> {
+    match tokio::time::timeout(
+        rtrust_control::recovery::ATTEMPT_TIMEOUT,
+        rtrust_engine::proxy::Proxy::start(&profile, port),
+    )
+    .await
+    {
+        Ok(started) => started.map(crate::Session::Socks).map_err(Failure::from),
+        Err(_) => Err(Failure::from(rtrust_engine::Error::Timeout)),
+    }
+}
 /// Jitter only; the budget bounds it for any value.
 pub fn entropy() -> u64 {
     use std::hash::{BuildHasher, Hasher};
@@ -134,6 +174,29 @@ mod tests {
         r.connected(now);
         now += STABLE_CONNECTION - Duration::from_secs(1);
         assert_eq!(r.degraded(true, now, 0).delay, Duration::from_secs(4));
+    }
+    #[test]
+    fn only_errors_a_retry_cannot_fix_end_recovery() {
+        use rtrust_engine::Error;
+        for error in [
+            Error::LocalBind,
+            Error::Profile,
+            Error::Unsupported("x"),
+            Error::Trust,
+            Error::Authentication,
+        ] {
+            assert!(Failure::from(error).permanent);
+        }
+        for error in [
+            Error::Connect,
+            Error::ConnectIo(std::io::ErrorKind::ConnectionRefused),
+            Error::Tls,
+            Error::Protocol,
+            Error::Timeout,
+            Error::Io,
+        ] {
+            assert!(!Failure::from(error).permanent);
+        }
     }
     #[test]
     fn failed_attempts_cool_down_and_jitter_stays_bounded() {

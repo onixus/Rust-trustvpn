@@ -14,8 +14,12 @@ mod intent;
 #[cfg(target_os = "macos")]
 mod open_url;
 mod portal;
+#[cfg(test)]
+mod socks_e2e_tests;
 mod socks_recovery;
 mod sync;
+#[cfg(test)]
+mod tester_socks_tests;
 mod tray;
 mod ui;
 #[cfg(target_os = "windows")]
@@ -406,6 +410,8 @@ enum Message {
     ToggleConnection,
     ToggleDefaultConnection,
     Connected(u64, Result<Session, String>),
+    /// An automatic SOCKS reconnect attempt (#99); see `socks_recovery`.
+    SocksAttempt(u64, Result<Session, socks_recovery::Failure>),
     Health(u64, Result<(), connection::HealthError>),
 }
 // Never derive Debug on UI messages carrying pasted profiles or file contents.
@@ -1245,18 +1251,6 @@ impl App {
                         return Task::batch([self.monitor_connection(), self.start_diagnostic()]);
                     }
                     Err(error) => {
-                        if self
-                            .socks_recovery
-                            .as_ref()
-                            .is_some_and(socks_recovery::Recovery::retrying)
-                        {
-                            let retry = self
-                                .socks_recovery
-                                .as_mut()
-                                .unwrap()
-                                .attempt_failed(socks_recovery::entropy());
-                            return self.retry_socks(retry, &error);
-                        }
                         self.socks_recovery = None;
                         self.reconnect_then_check = false;
                         self.follow_up = None;
@@ -1266,6 +1260,26 @@ impl App {
                         self.pending_close = None;
                         self.login_start = false;
                         return self.show_window();
+                    }
+                }
+            }
+            Message::SocksAttempt(epoch, result)
+                if epoch == self.connection_epoch && self.connecting =>
+            {
+                match result {
+                    Ok(session) => return self.update(Message::Connected(epoch, Ok(session))),
+                    // Retrying cannot fix it: end recovery, as a user start would.
+                    Err(failure) if failure.permanent => {
+                        self.disconnect();
+                        self.status = format!("Соединение потеряно: {}", failure.message);
+                        self.last_error = Some(self.status.clone());
+                    }
+                    Err(failure) => {
+                        self.connection_task = None;
+                        if let Some(recovery) = &mut self.socks_recovery {
+                            let retry = recovery.attempt_failed(socks_recovery::entropy());
+                            return self.retry_socks(retry, &failure.message);
+                        }
                     }
                 }
             }
@@ -2092,21 +2106,9 @@ impl App {
         let (task, handle) = Task::perform(
             async move {
                 tokio::time::sleep(retry.delay).await;
-                tokio::time::timeout(
-                    rtrust_control::recovery::ATTEMPT_TIMEOUT,
-                    Session::start(
-                        profile,
-                        Vec::new(),
-                        Mode::Socks,
-                        port,
-                        Default::default(),
-                        String::new(),
-                    ),
-                )
-                .await
-                .map_err(|_| "Переподключение не уложилось в отведённое время".to_owned())?
+                socks_recovery::attempt(profile, port).await
             },
-            move |r| Message::Connected(epoch, r),
+            move |r| Message::SocksAttempt(epoch, r),
         )
         .abortable();
         self.connection_task = Some(handle);
@@ -3088,15 +3090,18 @@ mod tests {
         let _ = app.socks_lost(degraded(false));
         // The first wait was 2 s; seven more failed attempts spend the burst.
         for seconds in [4, 8, 16, 30, 30, 30, 30] {
-            let _ = app.update(Message::Connected(
+            let _ = app.update(Message::SocksAttempt(
                 app.connection_epoch,
-                Err("Не удалось подключиться".into()),
+                Err(rtrust_engine::Error::Connect.into()),
             ));
             assert!(app.connecting && app.session.is_none());
             assert!(app.status.contains("Переподключение через"));
             assert!((seconds..=seconds * 5 / 4).contains(&shown_wait(&app.status)));
         }
-        let _ = app.update(Message::Connected(app.connection_epoch, Err("x".into())));
+        let _ = app.update(Message::SocksAttempt(
+            app.connection_epoch,
+            Err(rtrust_engine::Error::Timeout.into()),
+        ));
         assert!(app.status.contains("Несколько попыток подряд не удались"));
         let cooldown = rtrust_control::recovery::COOLDOWN.as_secs();
         assert!((cooldown..=cooldown + 30).contains(&shown_wait(&app.status)));
@@ -3104,7 +3109,10 @@ mod tests {
         let stale = app.connection_epoch;
         let _ = app.update(Message::ToggleConnection);
         assert!(!app.connecting && app.socks_recovery.is_none() && app.connection_task.is_none());
-        let _ = app.update(Message::Connected(stale, Err("late".into())));
+        let _ = app.update(Message::SocksAttempt(
+            stale,
+            Err(rtrust_engine::Error::Connect.into()),
+        ));
         assert!(!app.connecting && app.socks_recovery.is_none());
     }
     #[test]
@@ -3120,6 +3128,24 @@ mod tests {
         ));
         assert!(!app.connecting && app.socks_recovery.is_none());
         assert_eq!(app.status, "TLS failed");
+    }
+    #[test]
+    fn a_permanent_attempt_failure_ends_socks_recovery() {
+        for error in [
+            rtrust_engine::Error::LocalBind,
+            rtrust_engine::Error::Authentication,
+        ] {
+            let mut app = app();
+            socks_admitted(&mut app);
+            let _ = app.socks_lost(degraded(true));
+            let epoch = app.connection_epoch;
+            let message = error.to_string();
+            let _ = app.update(Message::SocksAttempt(epoch, Err(error.into())));
+            assert!(!app.connecting && app.session.is_none() && app.socks_recovery.is_none());
+            assert!(app.connection_task.is_none() && app.connection_epoch > epoch);
+            assert_eq!(app.status, format!("Соединение потеряно: {message}"));
+            assert!(!app.status.contains("Прямых соединений нет"));
+        }
     }
     #[test]
     fn exit_is_not_blocked_by_a_socks_reconnect_wait() {
