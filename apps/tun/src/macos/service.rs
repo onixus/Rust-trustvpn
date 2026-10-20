@@ -3065,7 +3065,12 @@ mod tester_summary_tests {
             power,
             failover,
             retry,
-            || Ok(()),
+            // A real, slow release (as on a loaded host) keeps Stop waiting
+            // on the cleanup thread rather than finishing before it parks.
+            || {
+                std::thread::sleep(Duration::from_millis(20));
+                Ok(())
+            },
         ));
         write_response(&mut stream, &response.await.unwrap()).await?;
         let result = bridge(stream, actor, None).await;
@@ -3156,6 +3161,9 @@ mod tester_summary_tests {
         });
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::time::advance(SUMMARY_DELAY).await;
+        // Stop joins `release` on a std::thread the paused clock cannot see:
+        // an idle runtime would auto-advance past the 5 s bound instantly.
+        tokio::time::resume();
         write(
             &mut client,
             &Request {
