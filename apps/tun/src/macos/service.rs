@@ -2944,12 +2944,7 @@ mod tests {
             receiver,
             failover().await,
             |workers, _, _| workers.reconnect = Some(tokio::spawn(std::future::pending())),
-            // A real, slow release (as on a loaded host) keeps Stop waiting
-            // on the cleanup thread rather than finishing before it parks.
-            || {
-                std::thread::sleep(Duration::from_millis(20));
-                Ok(())
-            },
+            slow_release,
         ));
         assert_eq!(response.await.unwrap().state, State::Connected);
         let count = || runs.load(std::sync::atomic::Ordering::SeqCst);
@@ -2993,9 +2988,17 @@ mod tests {
         );
         // Stop joins `release` on a std::thread the paused clock cannot see:
         // an idle runtime would auto-advance past the 45 s bound instantly.
+        // A tighter real-clock bound keeps a stuck Stop from costing 45 s.
         tokio::time::resume();
-        assert_eq!(ask(&actor, Command::Stop).await.unwrap().state, State::Idle);
-        supervisor.await.unwrap().unwrap();
+        let stopped = tokio::time::timeout(Duration::from_secs(5), ask(&actor, Command::Stop))
+            .await
+            .expect("Stop answered");
+        assert_eq!(stopped.unwrap().state, State::Idle);
+        tokio::time::timeout(Duration::from_secs(5), supervisor)
+            .await
+            .expect("supervisor finished after Stop")
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
