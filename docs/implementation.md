@@ -1,13 +1,14 @@
-# Состояние реализации — 20 октября 2026
+# Состояние реализации — 21 октября 2026
 
 Workspace: **0.6.2** (desktop update sequence 12, Android
-0.6.2 / 60202, iOS 0.6.2 / 60202). Готовится полный релиз [v0.6.2](releases/v0.6.2.md);
-бета v0.6.2-beta.1 содержала только пакеты macOS и Android.
+0.6.2 / 60202, iOS 0.6.2 / 60202). [v0.6.2](releases/v0.6.2.md) опубликован 21 октября из `4123160`:
+Windows, macOS (UI Choices DMG), Linux (Flatpak, `rtrust-host-0.6.2-12`) и Android.
 
-[v0.6.1](releases/v0.6.1.md) опубликован 13 октября из `db8796a`:
-Android APK, Windows installer и macOS packages. Самые новые Linux assets
-(Flatpak и `rtrust-host-0.6.0-7`) — в [v0.6.0](releases/v0.6.0.md), iOS — в v0.5.0. Более новый main `e10cb99` включает #69,
-#72, #73 и #74; эти изменения не входят в опубликованный тег v0.6.1.
+Тег `v0.6.2` соответствует main `4123160`; в него вошли UI v3, Linux TUI,
+service system probes, IPC v7 и исправления wake/liveness/SOCKS recovery
+(#69–#106). Архивы iOS по-прежнему опубликованы только в v0.5.0.
+Основание сверки — исходники тега, диффы merged PR и открытый
+[документационный PR #109](https://github.com/onixus/Rust-trustvpn/pull/109).
 [Сводка issue и доказательств](project-status.md) отделяет реализацию,
 публикацию и приёмку точного установленного пакета.
 
@@ -27,12 +28,12 @@ shared Rust core, desktop services и client-side portal integration.
 | Windows | Native desktop, Wintun/SCM service, WFP fail-closed, full-tunnel acceptance, sleep/wake recovery и signed metadata updater. |
 | Linux | Wayland desktop, TUN host service, nftables/systemd-resolved, Native/WebView/Both Flatpak, signed install/update/rollback flow. |
 | macOS | Native/WebView/Both packaging, LaunchDaemon/utun system path, glass UI toggle, live TrustTunnel acceptance; часть system-VPN/update acceptance ещё открыта. |
-| Android | VpnService, encrypted vault, file/text/QR import, app routing, portal sync, Always-on/lockdown, resizable widget и Quick Settings tile, managed recovery, следование за предпочтительной сетью после handoff, настройка учёта трафика VPN; minSdk 29, targetSdk 36, versionCode 60101, versionName 0.6.1-preview.1; APK опубликован в v0.6.1. В main после тега добавлены UI вариант 3 и VPN-bound checks (#73). |
+| Android | VpnService, encrypted vault, file/text/QR import, app routing, portal sync, Always-on/lockdown, resizable widget и Quick Settings tile, managed recovery, следование за предпочтительной сетью после handoff, настройка учёта трафика VPN; minSdk 29, targetSdk 36, versionCode 60202, versionName 0.6.2; APK опубликован в v0.6.2. UI вариант 3, VPN-bound checks (#73), исправление start/stop (#80), обработка link changes (#86/#89) и sleep recovery (#92). |
 | iOS | Preview на Swift/Network Extension: import/export, QR, portal sync, On Demand, widget; device archive требует Apple signing. |
 | Routing | Desktop IPv4 TUN include/exclude, LAN bypass, profile routing и server-assigned route groups. Route groups не используются Android/iOS. |
 | Linux TUI | `apps/tui` поверх общего desktop Controller: профили, connect/disconnect, SOCKS/TUN/Full настройки; portal/export/system diagnostics остаются в GUI. Installed TUN/full acceptance через TUI — NOT RUN. |
-| Proxy | SOCKS5 и HTTP-запросы на mixed desktop proxy port. |
-| Обновления | Опубликованный desktop sequence 9 исправляет ошибку идентичности старой 0.5.0 сборки; на Windows пройден реальный 7→9 update, forced unhealthy install, rollback на 7 и повторный update на 9. Текущие исходники — sequence 11; v0.6.0 и v0.6.1 опубликованы. Наличие release assets не подтверждает продвижение update-channel latest или подписи точного пакета. Для автоотката 10→9 служба Windows допускает от апдейтера sequence 9 (control IPC v1) только `PrepareUpdate` и отвечает в форме v1; покрыто unit-тестами; 2026-10-13 на Windows-стенде пройден 9→10 с принудительным откатом и повтором на манифестах с лабораторной подписью (продакшен-подпись sequence 10 и Authenticode не проверялись) (см. [v0.6.0](releases/v0.6.0.md#compatibility)). |
+| Proxy | SOCKS5 и HTTP-запросы на mixed desktop proxy port. Native UI при Degraded останавливает listener и повторяет тот же профиль/порт с recovery budget (#104); без смены режима или direct fallback. Обычные health errors и неудачный ручной Start не запускают этот retry. |
+| Обновления | Опубликованный desktop sequence 9 исправляет ошибку идентичности старой 0.5.0 сборки; на Windows пройден реальный 7→9 update, forced unhealthy install, rollback на 7 и повторный update на 9. Текущие исходники — sequence 12; v0.6.2 опубликован. Наличие release assets не подтверждает продвижение update-channel latest или подписи точного пакета. Для автоотката 10→9 служба Windows допускает от апдейтера sequence 9 (control IPC v1) только `PrepareUpdate` и отвечает в форме v1; покрыто unit-тестами; 2026-10-13 на Windows-стенде пройден 9→10 с принудительным откатом и повтором на манифестах с лабораторной подписью (продакшен-подпись sequence 10 и Authenticode не проверялись) (см. [v0.6.0](releases/v0.6.0.md#compatibility)). |
 | Наблюдения и диагностика | Типизированные observations с generations, события сети/пробуждения, route explain, system-path diagnostics с verdict/actions и автоматическими проверками; control IPC v7 (system probes только при просмотре UI). |
 | Recovery | Opt-in восстановление через разрешённые резервные профили (обычная сессия на desktop; Always-on — только Linux/Windows), guard не снимается; macOS/iOS Always-on fallback recovery не поддерживается. Android Always-on reconnect на текущей сети добавлен в #63; переключение на резервный профиль этим не подтверждается. |
 
@@ -46,16 +47,29 @@ shared Rust core, desktop services и client-side portal integration.
 - macOS automatic-update promotion пока withheld.
 - Android/iOS binaries в rebuild.9 не пересобирались; используются артефакты исходного v0.5.0.
 
-## Ограничения 0.6.0 и 0.6.1
+## Приёмка 0.6.2 и границы исторических результатов
+
+- [Issue #99](https://github.com/onixus/Rust-trustvpn/issues/99#issuecomment-6291062141)
+  закрыта после installed macOS sleep/wake на двух Mac с пакетом из `da92864`:
+  reconnect за 3–4 с и передача данных без ручного Stop/Start. Это evidence
+  для указанного пакета, а не приёмка артефактов тега `4123160`.
+- Итоги CI, Jenkins и тестовых бинарников, перенесённые из PR #109, указаны в
+  [v0.6.2](releases/v0.6.2.md#acceptance-status). Новые прогоны этой
+  документационной сверкой не выполнялись. Точные опубликованные пакеты,
+  upgrade Android с beta.1, SOCKS wake и handoff через сон — NOT RUN.
+
+### Исторические пакеты 0.6.0 и 0.6.1
 
 - Для 0.6.0 пройдены только две installed-package/device проверки: Windows
   9 → 10 с откатом на лабораторно подписанных манифестах и Android preview.2 на
   Huawei DEL-LX9. Остальные статусы NOT RUN/BLOCKED с владельцами перечислены в
   [v0.6.0](releases/v0.6.0.md#acceptance-status). Для 0.6.1 installed-package и
-  device acceptance не выполнялась, как и полный gate для точных пакетов текущего main ([v0.6.1](releases/v0.6.1.md#acceptance-status)).
-- Ни один runner не делает независимый packet capture физического интерфейса:
-  отсутствие утечек подтверждено только активными пробами и атрибуцией в
-  контейнере/эмуляторе.
+  device acceptance не выполнялась ([v0.6.1](releases/v0.6.1.md#acceptance-status)).
+- Linux lab добавил packet-level capture failover/Always-on (#87) и
+  runtime route-explain (#88) в изолированной сети. macOS #96 добавил
+  BPF-доказательство конкретных guard probes. Эти проверки ограничены
+  своими сценариями и не доказывают отсутствие всех DNS/IPv6 leaks на
+  каждом опубликованном пакете.
 - Dependency audit (`cargo audit`/`cargo deny`) не настроен; есть только Trivy fs
   в Jenkins.
 - Бюджеты recovery/ресурсов и soak ≥24 ч не утверждены.

@@ -1,64 +1,81 @@
-# Состояние проекта и issue — 14 октября 2026
+# Состояние проекта и issue — 21 октября 2026
 
-Сверка: GitHub main `e10cb99d537d6ff9c0e4e69914e286d256a3ff55`.
-Это документационная актуализация; новый runtime, installed-package,
-packet-capture, signing или soak прогон не выполнялся.
+Основание: GitHub main и тег `v0.6.2` —
+`4123160f14969905a68a61395bc5a9d823aaf1f5`; диффы merged PR #77–#108,
+открытые PR [#109](https://github.com/onixus/Rust-trustvpn/pull/109) и
+[#42](https://github.com/onixus/Rust-trustvpn/pull/42), текущие issue и их комментарии.
+Изменения #109 учтены как документационный вход; PR ещё не merged.
+Эта сверка не запускает runtime, CI, installed-package, packet capture,
+signing или soak заново.
 
 ## Исходники и опубликованные пакеты
 
-Workspace 0.6.1, desktop sequence 11, Android 60101 / 0.6.1-preview.1,
-iOS 0.6.1 / 60101. [v0.6.1](releases/v0.6.1.md) опубликован 13 октября
-из `db8796a89e4bef11c524b514557e0db60d4057ec` (annotated tag).
-GitHub assets содержат Android APK, Windows installer, macOS DMG/PKG,
-SHA256SUMS и native source identity/manifest. Самые новые Linux assets
-(Flatpak и `rtrust-host-0.6.0-7`) — в [v0.6.0](releases/v0.6.0.md), iOS — в v0.5.0. Подписи, содержимое артефактов, binding
-source manifest и update-channel latest в этой сверке — **NOT RUN**.
+Workspace **0.6.2**, desktop sequence **12**, Android **0.6.2 / 60202**,
+iOS **0.6.2 / 60202**. [v0.6.2](releases/v0.6.2.md) опубликован
+21 октября по времени Europe/Istanbul (GitHub: 20 октября 23:21 UTC).
+В release assets есть Windows installer, macOS UI Choices DMG с тремя PKG,
+Linux Native/WebView/Both Flatpak и `rtrust-host-0.6.2-12`, Android APK,
+SHA256SUMS и source identity/manifest. iOS assets остаются в v0.5.0.
+Наличие assets сверено; их подписи, содержимое, source binding и
+update-channel latest в этой сверке — **NOT RUN**.
 
-После тега в main вошли:
+## Изменения после состояния на 14 октября
 
-| PR | Реализация | Границы проверки |
+| PR | Что вошло в main и v0.6.2 | Граница доказательств |
 | --- | --- | --- |
-| [#69](https://github.com/onixus/Rust-trustvpn/pull/69), head `3511dca` | H3 data-plane liveness, guarded degraded reconnect, Android retry refund после доказанной доставки | GitHub CI Linux/macOS/Windows PASS на PR. Installed macOS sleep/roam NOT RUN; CONNECT 5xx вне heuristic. |
-| [#72](https://github.com/onixus/Rust-trustvpn/pull/72), head `fed62a2` | Linux TUI поверх общего desktop Controller | PR описывает unit и disposable-container SOCKS/HTTP evidence. Installed TUI TUN/full, guard и DNS/IPv6 capture NOT RUN. [Объём](tui.md). |
-| [#73](https://github.com/onixus/Rust-trustvpn/pull/73), head `a3a3ffe` | Android UI вариант 3, VPN-bound route/DNS/HTTPS checks, темы и foldable layout | GitHub CI Linux/macOS/Windows PASS на PR. В PR описаны точечные physical-device UI observations; это не полная приёмка пакета/lockdown/leaks. Финальный Jenkins gate здесь не перепроверен. |
-| [#74](https://github.com/onixus/Rust-trustvpn/pull/74), head `1100820` | Native/WebView/iOS UI вариант 3 | GitHub CI Linux/macOS/Windows PASS на PR. В body checkbox desktop installed acceptance противоречит фразе «не запускалась»: PASS не установлен. Physical iPhone acceptance NOT RUN. |
+| [#80](https://github.com/onixus/Rust-trustvpn/pull/80), [#83](https://github.com/onixus/Rust-trustvpn/pull/83), [#94](https://github.com/onixus/Rust-trustvpn/pull/94) | macOS Stop с отдельным cleanup supervisor и route snapshot; bounded retry Recover в Windows E2E; Android start/stop lifecycle; проверка распакованных CI tools; обезличенные Stop/reconnect timings | #71/#75/#76 закрыты. #70 остаётся открытым: split-mode timing и сохранность чужих маршрутов требуют приёмки. |
+| [#84](https://github.com/onixus/Rust-trustvpn/pull/84), [#91](https://github.com/onixus/Rust-trustvpn/pull/91), [#96](https://github.com/onixus/Rust-trustvpn/pull/96) | DNS/guard/transport system probes; cancellation fence, TTL 30 с; macOS BPF tap с контрольным кадром | Для `7bfb564` описаны installed guard/DNS positive/negative tests; это не универсальное доказательство отсутствия leaks. [Объём](vpn-observations.md#service-system-probes-issue-81). |
+| [#86](https://github.com/onixus/Rust-trustvpn/pull/86), [#89](https://github.com/onixus/Rust-trustvpn/pull/89), [#92](https://github.com/onixus/Rust-trustvpn/pull/92) | Android не пересоздаёт VPN при безвредном добавлении IPv6; sleep recovery и восстановление retry budget | Physical-device upgrade финального APK и overnight acceptance — NOT RUN. |
+| [#87](https://github.com/onixus/Rust-trustvpn/pull/87), [#88](https://github.com/onixus/Rust-trustvpn/pull/88) | Linux packet-level failover/Always-on recovery и runtime route-explain lab | Изолированные namespaces/captures; physical-node и exact-package acceptance этим не заменяются. |
+| [#95](https://github.com/onixus/Rust-trustvpn/pull/95) | После загрузки своего PF guard служба сбрасывает всю таблицу PF states, включая состояния других VPN | Намеренный системный эффект: существующие PF-tracked соединения могут прерваться. Чужие rules/anchors/tables не удаляются. |
+| [#100](https://github.com/onixus/Rust-trustvpn/pull/100), [#103](https://github.com/onixus/Rust-trustvpn/pull/103), [#104](https://github.com/onixus/Rust-trustvpn/pull/104) | Wake backlog/reset-handshake cleanup, quiet-flow liveness и bounded reconnect Native SOCKS на том же профиле/порту | Installed system-VPN wake на двух Mac — PASS для `da92864`, см. ниже. Installed SOCKS wake и handoff через сон — NOT RUN. |
+| [#102](https://github.com/onixus/Rust-trustvpn/pull/102) | IPC v7: system probes только при недавнем `viewed` от UI; keepalive один не включает проверки | GUI и служба обновляются вместе. Отдельная app system-path диагностика имеет собственный lifecycle. |
+| [#98](https://github.com/onixus/Rust-trustvpn/pull/98), [#101](https://github.com/onixus/Rust-trustvpn/pull/101), [#105](https://github.com/onixus/Rust-trustvpn/pull/105), [#106](https://github.com/onixus/Rust-trustvpn/pull/106), [#108](https://github.com/onixus/Rust-trustvpn/pull/108) | Состав macOS release, lab/paused-clock test fixes, финальная версия 0.6.2 | Test-only исправления #105/#106 не являются изменением production Stop. |
 
-CI merged PR относится к проверенным PR heads, а не к новому документационному
-commit или опубликованному пакету. Текущий desktop/iOS continuous snapshot
-имеет только transport producer: route/DNS/guard/connectivity без результатов
-не дают зелёный статус. Android UI checks через собственную VPN network доступны
-с Android 12; route — решение таблицы Android, не packet-level attestation.
-Отдельная system-path диагностика desktop не заменяет continuous producers.
+Desktop full-mode теперь имеет service DNS/guard/transport producers; route и
+connectivity без отдельного producer остаются Unknown. В split DNS/guard
+Unsupported. iOS continuous snapshot по-прежнему не доказывает route/DNS/guard.
+Android VPN-bound UI checks доступны с Android 12; route — решение таблицы
+Android, guard — настройка Always-on/lockdown, не packet-level attestation.
 
-## Открытые задачи и следующий gate
+## Приёмка и открытые задачи
 
-| Issue | Подтверждённое состояние | Следующий шаг / владелец |
+[Финальный отчёт #99](https://github.com/onixus/Rust-trustvpn/issues/99#issuecomment-6291062141)
+описывает одинаковый установленный пакет из main `da92864` на двух Mac:
+reconnect за 3–4 с, TCP-ответы в пределах 30 с без ручного Stop/Start;
+на одном Mac HTTPS 200 за 0,16 с. #99 закрыта. Этот результат относится к
+`da92864`, а не к более поздним опубликованным пакетам `4123160`.
+
+| Открытое issue | Текущее состояние | Следующий gate |
 | --- | --- | --- |
-| [#30](https://github.com/onixus/Rust-trustvpn/issues/30) | Первая вертикаль реализована частями; #31/#35 и server #22 закрыты в GitHub. #32/#33/#34/#36 открыты. | Координатор: exact-package приёмка вертикали и пилот с локальными/добровольными метриками. |
-| [#32](https://github.com/onixus/Rust-trustvpn/issues/32) | Shared route decisions/explain, DNS provenance и observed flow decisions существуют. | Routing/test owner: матрица ОС, split/full, IPv4/IPv6, CNAME/CDN/DoH, policy revision и сопоставление объяснения с реальным dataplane. |
-| [#33](https://github.com/onixus/Rust-trustvpn/issues/33) | Desktop system-path DNS/route/interface-bound HTTPS, verdict/actions и recheck существуют; Android UI получил отдельные VPN-bound checks. | Diagnostics/platform owners: installed split/full/IPv6, отказ endpoint/control, stale/cancellation и проверка редактированного отчёта. |
-| [#34](https://github.com/onixus/Rust-trustvpn/issues/34) | Opt-in desktop backup recovery; Always-on backups только Linux/Windows. Android #63 reconnect текущего профиля не равен backup failover. | Platform/test owners: packet-level отсутствие запрещённого direct DNS/IPv4/IPv6 при переходах, budgets и cancellation на точных пакетах; учитывать #62/#70/#75. |
-| [#36](https://github.com/onixus/Rust-trustvpn/issues/36) | Provenance/signature/acceptance tooling и release assets существуют. | Publisher + platform labs: точные hashes/commit/device, подписи, install/update/rollback, recovery и soak ≥24 ч. [Матрица](package-acceptance.md). |
-| [#62](https://github.com/onixus/Rust-trustvpn/issues/62) | #69 добавил heuristic liveness; Lost после первого `_check` сохраняется для endpoint 1.1.0. | macOS lab: воспроизвести sleep/roam и автоматическое восстановление на установленном пакете. Server причина: [tunnel#30](https://github.com/onixus/tunnel/issues/30); slow Stop: #70. |
-| [#70](https://github.com/onixus/Rust-trustvpn/issues/70) | Stop ещё синхронно вызывает release; повторное измерение 23 с не выполнено. | macOS owner/lab: Stop ≤3 с, responsive Status, reconnect до TLS ≤5 с, точное восстановление своего OS state при записанном числе маршрутов. |
-| [#71](https://github.com/onixus/Rust-trustvpn/issues/71) | Windows E2E всё ещё ждёт фиксированные 2 с перед Recover. | Windows test owner: bounded lease-busy retry и 5 повторов с сохранением guard до явного Recover. |
-| [#75](https://github.com/onixus/Rust-trustvpn/issues/75) | Android active/stopping early return и stopSelf без startId остаются. Ожидание cleanup в тесте не исправляет продукт. | Android owner: сохранить/явно отклонить новый start, быстрые toggles, lockdown, TUN/callback lifecycle. |
-| [#76](https://github.com/onixus/Rust-trustvpn/issues/76) | ci/tools.py проверяет archive SHA-256, но не извлечённый executable. | CI owner: corruption/re-extraction regression, bounded retries, сохранённая pinned archive verification. VirtioFS инцидент здесь не воспроизводился. |
+| [#30](https://github.com/onixus/Rust-trustvpn/issues/30) | Вертикаль реализована частями; #31/#35 закрыты | Координатор: exact-package приёмка и пилот с добровольными локальными метриками. |
+| [#32](https://github.com/onixus/Rust-trustvpn/issues/32) | Shared route evaluator и runtime Linux lab (#88) | Routing/test owner: остальные ОС, CNAME/CDN/DoH, реальные split/full IPv4/IPv6 paths. |
+| [#33](https://github.com/onixus/Rust-trustvpn/issues/33) | App system-path diagnostics, verdict/actions и service probes реализованы | Platform labs: installed endpoint/control failures, cancellation и сопоставление diagnostics с traffic evidence. |
+| [#34](https://github.com/onixus/Rust-trustvpn/issues/34) | Desktop backup recovery; Linux packet captures (#87) | Platform labs: физические DNS/IPv4/IPv6 captures переходов на точных пакетах; Always-on backups только Linux/Windows. |
+| [#36](https://github.com/onixus/Rust-trustvpn/issues/36) | Provenance/acceptance tooling и assets v0.6.2 существуют | Publisher/labs: подписи, install/update/rollback, recovery и soak ≥24 ч. [Матрица](package-acceptance.md). |
+| [#62](https://github.com/onixus/Rust-trustvpn/issues/62) | #69/#103 расширили liveness; #99 закрыта с installed wake evidence | macOS/network lab: более широкие roam/failure cases и точные release packages; серверная диагностика — onixus/tunnel. |
+| [#70](https://github.com/onixus/Rust-trustvpn/issues/70) | #80 устранил синхронный Stop; #94 добавил timings. В whole-computer режиме записаны Stop 0,3–0,5 с и reconnect около 3 с | macOS lab: split с SHA/hash/числом маршрутов, Stop ≤3 с, Status во время Stop, reconnect до TLS ≤5 с, точное восстановление своего OS state и сохранность чужого. |
+| [#81](https://github.com/onixus/Rust-trustvpn/issues/81) | System probes и BPF proof реализованы (#84/#91/#96) | Labs: installed Linux/Windows, другие macOS interfaces/drivers, negative guard и stale/cancel cases. |
+| [#90](https://github.com/onixus/Rust-trustvpn/issues/90) | Viewed admission реализован в #102, IPC v7 | Labs: installed visibility/cancellation/timing matrix Linux/macOS/Windows; issue остаётся открытым в GitHub. |
+| [#107](https://github.com/onixus/Rust-trustvpn/issues/107) | Неудачный первичный Start не записывается; macOS events.log ограничен 256 КиБ и очищается при переполнении | Developer/DevSecOps: bounded redacted failed-connect journal с ротацией и хранением ≤7 дней/15 МБ; это требование, ещё не реализация. |
 
-Серверные credentials/enforcement принадлежат
-[onixus/tunnel](https://github.com/onixus/tunnel).
-Закрытый [tunnel#22](https://github.com/onixus/tunnel/issues/22) не заменяет
-приёмку нового клиентского пакета. Merge, release publication и Connected
-transport не закрывают обязательные installed/network gates.
+Закрытые #71/#75/#76 не перечисляются как неисправленные. Открытый macOS
+widget PR #42 не входит в main/v0.6.2: desktop widget описан в PR, Control
+Center toggle имеет известный незавершённый executor path.
 
-## Результат этой сверки
+Серверные credentials/enforcement принадлежат [onixus/tunnel](https://github.com/onixus/tunnel).
+Клиентский merge или Connected transport не закрывает серверные зависимости
+и обязательные network/package gates.
 
-- **PASS:** GitHub состояния issue/PR/tag/assets, статическая сверка затронутых
-  implementation paths; независимые architect/DevSecOps проверки документации.
-- **FAIL:** в исходной документации найдены устаревшие release/download claims;
-  они исправляются этой актуализацией.
-- **NOT RUN:** новые runtime/CI/device/network/signing/latest/soak проверки.
-- **BLOCKED:** закрытие acceptance criteria без соответствующего evidence;
-  доступность устройств и signing credentials заново не инвентаризировалась.
+## Результат сверки
 
-Issue остаются открытыми; чужие изменения основного checkout не включены.
+- **PASS:** статическая сверка исходников/диффов и актуальных GitHub состояний
+  PR, issue, release assets. Существующие результаты привязаны к своим SHA.
+- **FAIL:** обнаруженные устаревшие версии и утверждения о неисправленных
+  #70/#75/#76, отсутствии service producers и Linux captures исправлены.
+- **NOT RUN:** новые runtime/CI/device/network/signing/latest/soak проверки;
+  результаты Jenkins и phone test binaries из #109 отдельно приведены в
+  [release record](releases/v0.6.2.md#acceptance-status) как перенесённые отчёты.
+- **BLOCKED:** полная приёмка опубликованных пакетов без недостающего evidence.
+
+Эта актуализация не меняет состояния issue, не выполняет merge или release.

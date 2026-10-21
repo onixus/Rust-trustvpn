@@ -25,6 +25,27 @@ isolated credential, GUI hide/restore smoke and a Linux D-Bus tray host fixture.
 CI never overwrites a user's profile vault or changes their installed client.
 
 
+## Native SOCKS recovery
+
+Since v0.6.2 (#104), a `Degraded` health result stops the Native app's proxy
+listener before waiting and reconnecting to the same profile and local port.
+Clients see refusal during the wait; no direct path, mode switch or backup
+profile is introduced. The shared recovery budget applies: unproven sessions
+do not restore it, proven sessions restore it only after 30 s, and eight failed
+attempts enter the five-minute cooldown, with bounded jitter.
+
+Cancel, Disconnect and Exit clear recovery; late attempt results are rejected
+by epoch. LocalBind, Profile, Unsupported, Trust and Authentication stop the
+automatic retry. TLS, connect, protocol and timeout failures remain transient.
+Non-degraded health errors still disconnect, and a failed user-initiated Start
+is shown rather than retried. The proxy can bind before a retry's connection
+finishes, so clients may queue and then reset during that attempt.
+
+This behavior belongs to Native SOCKS mode. System VPN has its service-owned
+supervisor; TUI/WebView do not acquire this Native recovery state machine.
+The Native app receives no power events, so sleep does not refund this budget.
+Installed SOCKS sleep/wake and Windows rebind acceptance remain NOT RUN.
+
 ## Login startup
 
 The Settings page provides opt-in application startup for the current OS user.

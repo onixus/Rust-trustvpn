@@ -1,11 +1,14 @@
 # macOS sleep recovery investigation (2026-10-07)
 
 
-Current follow-up (2026-10-14): these are historical observations, not acceptance
-of the latest package. [#62](https://github.com/onixus/Rust-trustvpn/issues/62)
-still needs installed sleep/roam verification after #69's data-plane liveness
-change; [#70](https://github.com/onixus/Rust-trustvpn/issues/70) tracks slow Stop
-and route operations. [Current status](project-status.md).
+Current follow-up (2026-10-21): the investigation below is historical.
+[#99 acceptance](https://github.com/onixus/Rust-trustvpn/issues/99#issuecomment-6291062141)
+records installed packages from main `da92864` on two Macs after #100/#103/#104:
+reconnect in 3–4 s, traffic within 30 s and no manual Stop/Start. #99 is closed.
+This does not establish acceptance of the later `v0.6.2` artifacts (`4123160`),
+network handoff across sleep or installed SOCKS wake. #62 and #70 remain open;
+#70 still needs the split-mode timing/route-ownership matrix. Failed-connect
+logging is tracked by #107. [Current status](project-status.md).
 
 ## Evidence and limits
 

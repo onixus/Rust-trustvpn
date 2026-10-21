@@ -50,51 +50,66 @@ describes what is.
 
 ## Dead-session detection
 
-Before #62 a session could stay "Connected" after a reconnect while no flow got a
-reply, because `_check` alone kept passing. Since main after 0.6.1 (PR #69),
-`Session::health` (`crates/engine/src/lib.rs`) also fails with `Degraded` when the
-session carries no traffic. The check is session-level, so it applies to every
-transport, not only HTTP/3. A session is degraded only when both hold:
+Since v0.6.2, `Session::health` (`crates/engine/src/lib.rs`) evaluates two
+independent liveness verdicts. Both are session-level and apply across engine
+transports, not only HTTP/3. Idle sessions are not degraded merely for being idle.
 
-- outbound data has stayed unanswered for 20 s;
-- within the last 60 s and since the last inbound byte, at least 5 TCP opens
-  failed in transport, or at least 5 were accepted but stayed silent, across at
-  least 3 distinct destinations. The two kinds are counted separately
-  (`crates/engine/src/liveness.rs`).
+- **Silent (A, #69):** outbound demand stays unanswered for 20 s, and within
+  60 s and since the last inbound byte, at least five TCP opens failed in
+  transport or at least five accepted opens stayed silent, across at least
+  three destination buckets. The two kinds are counted separately. Any inbound
+  byte clears this verdict's demand.
+- **Quiet (B, #103):** TCP flows to ports 443/853/8443/80 that wrote first
+  receive no reply after a 10 s grace, or their opens fail with Timeout/Credit.
+  A fixed ring of 5 s slots judges 60 s of mature flows. Degraded requires at
+  least 24 unanswered/failed flows, at least 80% unanswered among judged flows,
+  and six unanswered host buckets not shared with answered buckets. A few
+  successful flows, shared UDP relay traffic or ICMP do not clear this evidence.
 
-These do not count as evidence: an idle tunnel, lost `_check` responses, endpoint
-rejections and authentication or destination errors, shared UDP/ICMP relay
-streams, and one application retrying one or two dead hosts. A failed health
-check ends the data plane and the normal supervisor reconnects.
+Lost `_check` responses, endpoint rejections, authentication errors, server-first
+flows and an application retrying only one or two dead hosts do not by themselves
+establish either verdict. An endpoint that answers `_check` but rejects CONNECT
+with 5xx remains outside this heuristic's coverage. Quiet watches TCP only;
+UDP/QUIC/DNS stalls are left to silent detection. Many plain-HTTP long polls
+across several hosts can trigger a transient quiet verdict.
 
-The exit carries `proven`: whether the session ever delivered an inbound byte.
+The exit is `Degraded { proven, kind: Silent | Quiet }`. For silent detection,
+`proven` means any inbound delivery in that session. Quiet requires a watched
+TCP answer at least 70 s before the verdict (grace plus judged window); a few
+answers just after reconnect do not restore its budget. Desktop and iOS keep
+the existing retry budget: an unproven degraded exit never replenishes it,
+however long the session lasted; a proven session lasting at least 30 s can.
+Android similarly restores its finite per-session budget after 30 s of real
+time unless the session ended degraded and unproven. A long session can still
+replenish the budget on repeated quiet exits; this is not a global lifetime
+retry cap.
 
-- Desktop and iOS: an unproven degraded session never restores the reconnect
-  budget, however long it lasted, so an endpoint that hands out dead sessions
-  reaches the normal blocked cooldown instead of a fast loop
-  (`crates/control/src/recovery.rs`). A proven session connected for at least
-  30 s restores it as before.
-- Android: any session that ended after 30 s of real time restores the
-  finite per-session budget unless it ended degraded without delivering data
-  (`crates/mobile/src/reserves.rs`), so exits over days cannot block the VPN
-  permanently. Unproven or short exits still count.
-- macOS records `transport_degraded proven=<bool> kind=silent|quiet` in the service event log.
+macOS logs `transport_degraded proven=<bool> kind=silent|quiet`. Numeric
+`dataplane_summary` counters include `tcp_opened`, `tcp_answered`, `tcp_quiet`,
+`tcp_open_failed` and `credit_timeout`. H3 request credit and Hysteria stream
+credit have a 10 s deadline and return `Credit`; H2 readiness and response
+share one 10 s deadline and exhaustion can appear as `Timeout`.
 
-Liveness keeps only in-memory counters and a per-session keyed 64-bit host-hash
-set. No destination or address is stored, logged or exposed.
+Liveness keeps only fixed-size in-memory counters, timestamps and per-session
+keyed host-hash bitsets; no destination/address or host hash is logged or exposed.
+Each new session has its own evidence, so old flows cannot prove a new session.
 
-Degradation enters the existing guarded reconnect path without direct fallback.
-Verified by unit tests and `crates/engine/tests/h3_transport.rs`; no installed
-package or device acceptance has been run for it.
+System VPN uses its guarded reconnect path without direct fallback. The Native
+app also reconnects degraded SOCKS sessions on the same profile/port (#104),
+stopping its listener before waiting; other SOCKS health errors still disconnect.
+See [Native SOCKS recovery](desktop-lifecycle.md#native-socks-recovery).
 
-This is a heuristic, not a VPN-bound HTTPS acceptance check. An endpoint that
-returns 200 for `_check` but rejects CONNECT with 5xx remains outside its
-coverage; independent remote failures can also trigger reconnect. Installed
-macOS sleep/wake and roam reproduction remains open in
-[#62](https://github.com/onixus/Rust-trustvpn/issues/62), slow Stop in
-[#70](https://github.com/onixus/Rust-trustvpn/issues/70), and the server cause in
-[onixus/tunnel#30](https://github.com/onixus/tunnel/issues/30).
-These changes were merged after the published v0.6.1 tag.
+Unit tests and in-process H3 fixtures cover both verdicts, thresholds, proof age
+and budget behavior. [Installed acceptance in #99](https://github.com/onixus/Rust-trustvpn/issues/99#issuecomment-6291062141)
+records system-VPN sleep/wake on two Macs at main `da92864`: data within 30 s,
+reconnect in 3–4 s, no manual Stop/Start. #99 is closed. Network handoff across
+sleep, installed SOCKS wake and acceptance of the later v0.6.2 artifacts
+(`4123160`) remain NOT RUN. #62 and slow-Stop #70 remain open; server behavior
+belongs to [onixus/tunnel](https://github.com/onixus/tunnel).
+
+This is a heuristic, not a VPN-bound HTTPS or DNS/IPv6/guard acceptance check.
+Independent remote failures can also trigger reconnect. No new runtime tests
+were run for this documentation refresh.
 
 ## Transport bypass
 

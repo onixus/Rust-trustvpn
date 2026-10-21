@@ -42,10 +42,12 @@ internet access is unavailable. Guard and connectivity observations are separate
 
 Snapshots are scoped to a lease/worker. Reconnect, control loss and Stop
 invalidate its generation. A result captured under an old generation is
-rejected. Successful/configured observations expire after six seconds;
-clock reversal invalidates them as well. A polling gap above six seconds is a
-`lifecycle_gap`, not proof of sleep or a particular network failure. Transport
-stays stale after that gap until a real worker transition.
+rejected. Lifecycle/app observations have a six-second freshness cap;
+`system_probe` rows have a 30-second cap. Clock reversal invalidates them as
+well. A polling gap above six seconds is a `lifecycle_gap`, not proof of sleep
+or a particular network failure. Lifecycle transport stays stale until a real
+worker transition; a fresh service DNS answer from a run started after
+invalidation can independently restore transport proof (see service probes).
 
 ## Native network-change and resume events
 
@@ -57,8 +59,9 @@ lease, `network_changed` and `resumed`, with matching stale reasons:
   (Linux `CLOCK_BOOTTIME − CLOCK_MONOTONIC`, macOS
   `CLOCK_MONOTONIC − CLOCK_UPTIME_RAW`, Windows `GetTickCount64 −
   QueryUnbiasedInterruptTime`). Two seconds or more is reported. Like a gap,
-  transport stays stale until a real worker transition, because the worker may
-  not yet have noticed a dead session.
+  lifecycle transport stays stale until a real worker transition, because the
+  worker may not yet have noticed a dead session. A fresh post-invalidation
+  service DNS run can independently restore transport proof.
 - **Network change** is a change in link state or unicast addresses of any
   interface except loopback and the service's own TUN (`rtrust0`, `utun5254`,
   `RTrustTunnel`). Route edits, including the guard's own, are ignored. Linux
@@ -341,10 +344,11 @@ Windows target compilation does not prove installed WFP/Wintun behavior. Linux
 container unit tests do not establish a physical-node or installed-package gate.
 Existing historical acceptance reports apply to their own commits and packages.
 
-Issue #31 remains open: durable event history if required, installed-package timing/cancellation and
-actual DNS/route/guard/system-connectivity evidence still need acceptance.
-Issue #33 supplies the real-path probe; issue #36 tracks package/device evidence.
-No release is published or promoted by this PR.
+Issue #31 is closed in GitHub. The preceding validation describes its historical
+implementation, not a fresh acceptance of v0.6.2 packages. Issues #33/#81/#90
+retain diagnostics/probe acceptance work, #36 tracks package/device evidence,
+and #107 tracks durable failed-connect logging. This documentation refresh
+does not publish or promote a release.
 
 ### Validation recorded on 2026-10-10
 
@@ -402,15 +406,19 @@ resume and profile switching invalidate pending work. A failed worker exposes
 no active probe token. Only one check can run, with a 30-second cooldown and
 10-second overall budget.
 
-The current implementation checks the first numeric address of the active
-TrustTunnel HTTP/2 profile. It requires a hardware-backed physical interface,
+The Linux implementation checks up to eight distinct configured numeric
+addresses of the active TrustTunnel HTTP/2 profile under one ten-second budget.
+Any successful independently verified address proves an endpoint response.
+Endpoint failure is attributable only after every configured address fails on
+a proven physical path; partial, unpinned, oversized or expired sets remain
+inconclusive. It requires a hardware-backed physical interface,
 TCP destination-port route evidence for the service UID and existing full-mode
 mark where applicable, and verifies interface identity before/after binding and
 again after the check. Every diagnostic socket uses that interface; neither the
 active transport nor routes, DNS or firewall rules are changed. A successful
 result proves this independent endpoint TLS/authenticated `_check` attempt,
 not tunneled egress or OS guard enforcement. Typed connection/TLS/authentication,
-protocol and timeout failures describe this one address attempt only. Missing
+protocol and timeout failures describe this bounded address-set check only. Missing
 pins, virtual interfaces, unsupported transports and stale/cancelled work stay
 unsupported/inconclusive; they do not establish endpoint unavailability.
 Interface identifiers and secrets are excluded from returned facts. macOS and
