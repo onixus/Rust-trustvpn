@@ -27,7 +27,7 @@ v0.6.2 includes SHA256SUMS and its source identity. Their presence is not indepe
 Since v0.6.1, in all v0.6.2 desktop and Android packages:
 
 - **macOS wake reconnect** ([#100](https://github.com/onixus/Rust-trustvpn/pull/100)). After sleep the reconnected tunnel carries traffic again instead of stalling until a manual Stop/Start.
-- **Quiet stalled flows** ([#103](https://github.com/onixus/Rust-trustvpn/pull/103), [#104](https://github.com/onixus/Rust-trustvpn/pull/104)). A few live connections no longer hide hundreds of stalled ones; the session is reported degraded and reconnects, in SOCKS mode too, without a direct path.
+- **Quiet stalled flows** ([#103](https://github.com/onixus/Rust-trustvpn/pull/103), [#104](https://github.com/onixus/Rust-trustvpn/pull/104)). A few live connections no longer hide hundreds of stalled ones; the session is reported degraded and reconnects, in Native SOCKS mode too, without a direct path.
 - **Probes only while viewed** ([#102](https://github.com/onixus/Rust-trustvpn/pull/102)). Desktop system probes run only while a UI window shows the session (control IPC v7).
 
 - **macOS guard proof** ([#96](https://github.com/onixus/Rust-trustvpn/pull/96)). PF drops output silently, so the macOS service proves its kill switch with a read-only BPF tap and a per-run control frame instead of an errno. On the installed package the guard and DNS rows turn green in whole-computer mode, and a broken guard turns them failed.
