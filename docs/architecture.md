@@ -1,6 +1,6 @@
 # Архитектура R-TrustTunnel
 
-Дата актуализации: 2026-10-14. Workspace 0.6.1, desktop sequence 11. Опубликованный тег v0.6.1 и более новый main имеют разный состав; [точные границы и открытые issue](project-status.md).
+Дата актуализации: 2026-10-21. Workspace 0.6.2, desktop sequence 12, control IPC v7. Опубликованный тег v0.6.2 соответствует main `4123160`; [точные границы и открытые issue](project-status.md).
 
 Главные архитектурные добавления 0.6.x: типизированные [наблюдения VPN](vpn-observations.md)
 с generations, [системная диагностика](system-diagnostics.md), защищённое

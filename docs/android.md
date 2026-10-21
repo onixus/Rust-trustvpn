@@ -6,15 +6,19 @@ the desktop client. There is no WebView, CLI subprocess or privileged host servi
 Baseline: Android 10/API 29+, arm64-v8a; x86_64 is also built for emulator testing.
 Acceptance uses Android 16/API 36 x86_64 and physical POCO X3 NFC and Huawei DEL-LX9 phones running Android 12/API 31.
 
-Current published package: [v0.6.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.1),
-versionCode **60101**, versionName **0.6.1-preview.1** ([release record](releases/v0.6.1.md)).
+Current published package: [v0.6.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2),
+versionCode **60202**, versionName **0.6.2** ([release record](releases/v0.6.2.md)).
+The beta was `0.6.2-beta.1` / 60201; the final version has a higher versionCode.
 It is signed with the release key introduced in 0.6.0 (certificate SHA-256
-`4aa431cd…77306af`, checked by `scripts/sign-android.py`): it updates 0.6.0 in
-place, while 0.5.x and older must be reinstalled, which removes their local profiles.
+`4aa431cd…77306af`, checked by `scripts/sign-android.py`): it supports updates over
+0.6.0, 0.6.1 and 0.6.2-beta.1; physical-device upgrade acceptance of the final APK
+is NOT RUN. 0.5.x and older must be reinstalled, which removes their local profiles.
 The previous package, `0.6.0-preview.2` / 60002, passed on a physical Huawei
 DEL-LX9 (Android 12) on 2026-10-13: Wi-Fi ↔ LTE handoff, Always-on with lockdown
 and the metering setting. IPv6 egress and reboot were not run. Installed-device
-acceptance of 0.6.1 itself has not been run.
+acceptance of 0.6.1 itself has not been run. The [0.6.2 release record](releases/v0.6.2.md#acceptance-status)
+reports Jenkins emulator acceptance and physical-phone **test binaries**; neither
+establishes installation, upgrade or overnight acceptance of the published APK.
 
 The older package history (v0.4.0 / 40001 and earlier) is in the release records
 and [Jenkins](jenkins.md).

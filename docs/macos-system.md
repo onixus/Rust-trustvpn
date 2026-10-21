@@ -16,12 +16,19 @@ Sleep invalidates previous observations, and late pre-wake transport completions
 cannot start a session. Transport liveness still does not prove DNS/routes/guard
 or end-to-end availability.
 
-Since main after 0.6.1 (#62) a session that carries no traffic fails its health
+Since v0.6.2 (#69/#103), session liveness includes both silent and predominantly
+quiet TCP flows, even when a few other flows still work. A degraded session fails its health
 check and is reconnected. If it never delivered an inbound byte, its exit does not
 restore the retry budget, however long it lasted, so an endpoint handing out dead
 sessions reaches the five-minute cooldown instead of a fast loop. The service event
 log records `transport_degraded proven=<bool> kind=silent|quiet` without destinations or addresses.
 See [dead-session detection](http3.md#dead-session-detection).
+
+Installed sleep/wake after #100/#103/#104 is recorded for main `da92864`
+on two Macs in [#99 acceptance](https://github.com/onixus/Rust-trustvpn/issues/99#issuecomment-6291062141):
+reconnect 3–4 s and data within 30 s without manual Stop/Start. #99 is closed.
+This does not accept the later v0.6.2 artifacts (`4123160`), network handoff
+across sleep or installed SOCKS wake; those remain untested.
 
 The desktop client keeps a partially read IPC response through sleep and never
 resends the command. Kernel clocks detect suspension without wall-clock assumptions.
