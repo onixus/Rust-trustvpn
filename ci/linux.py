@@ -85,6 +85,7 @@ target/release/rtrust-tui --help >/dev/null
 mkdir -p target/debug
 cp target/release/rtrust-service target/release/rtrust-inspect target/release/rtrust-tun target/debug/
 RTRUST_HYSTERIA_CACHE=/tmp/hysteria python3 ci/hysteria_interop.py
+RTRUST_XRAY_CACHE=/tmp/xray python3 ci/vless_interop.py
 python3 ci/wayland_smoke.py
 python3 scripts/service-interop.py /fixture/trusttunnel_endpoint
 python3 scripts/tun-interop.py /fixture/trusttunnel_endpoint
