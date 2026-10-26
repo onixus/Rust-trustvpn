@@ -321,13 +321,7 @@ async fn run(
                     delay = 1;
                 }
             }
-            Err(
-                rtrust_engine::Error::Authentication
-                | rtrust_engine::Error::Tls
-                | rtrust_engine::Error::Trust
-                | rtrust_engine::Error::Profile
-                | rtrust_engine::Error::Unsupported(_),
-            ) => {
+            Err(error) if rtrust_mobile::permanent(&error) => {
                 FLOWS
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
