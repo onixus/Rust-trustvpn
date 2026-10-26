@@ -30,6 +30,23 @@ const KEEPALIVE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 30 })
 /// After a ping, anything from the server (data, Pong, Ping) must arrive in
 /// this window, or the flow is closed as dead. Shorter in tests.
 const PONG_WAIT: Duration = Duration::from_millis(if cfg!(test) { 500 } else { 15_000 });
+/// Xray answers a ping only when it reads the frame, after everything sent
+/// before it. While uplink data may still be queued for a slow target, a
+/// missing answer is not judged before this long after the last write.
+const DRAIN: Duration = Duration::from_secs(if cfg!(test) { 10 } else { 120 });
+/// One frame write blocked this long means the path stopped taking data.
+const STALL: Duration = Duration::from_millis(if cfg!(test) { 1500 } else { 45_000 });
+/// Consecutive flows the server closed without a byte (as Xray does for an
+/// unknown UUID) before the session delays new flows. Xray closes a flow to
+/// an unreachable target the same way, so the run must also be varied: at
+/// least [`REFUSED_TARGETS`] TCP destinations or [`REFUSED_PAIRS`] UDP
+/// source/destination pairs. One refusing host never stops the session.
+const REFUSED_STREAK: u32 = 8;
+const REFUSED_TARGETS: usize = 4;
+const REFUSED_PAIRS: usize = 8;
+/// Delay of new flows after the streak, doubling per further refusal.
+const BACKOFF_MIN: Duration = Duration::from_millis(if cfg!(test) { 1000 } else { 2000 });
+const BACKOFF_MAX: Duration = Duration::from_millis(if cfg!(test) { 2000 } else { 30_000 });
 /// Uplink bytes read at a time; the first read is sent with the request header.
 const CHUNK: usize = 16 * 1024;
 /// After the local side finished sending, how long to wait for the rest of
@@ -61,6 +78,73 @@ struct Inner {
     /// Last successful upgrade, by monotonic and wall clock: the monotonic
     /// clock may stop while the device sleeps.
     fresh: Mutex<Option<(Instant, SystemTime)>>,
+    refusals: Mutex<Refusals>,
+}
+/// Flows the server ended without sending anything, across the session.
+#[derive(Default)]
+struct Refusals {
+    streak: u32,
+    /// Distinct TCP destinations and UDP pairs in the streak, up to the thresholds.
+    targets: std::collections::HashSet<String>,
+    pairs: std::collections::HashSet<(SocketAddr, SocketAddr)>,
+    /// New flows are not dialed before this.
+    until: Option<Instant>,
+}
+impl Refusals {
+    fn varied(&self) -> bool {
+        self.streak >= REFUSED_STREAK
+            && (self.targets.len() >= REFUSED_TARGETS || self.pairs.len() >= REFUSED_PAIRS)
+    }
+}
+/// What a reported flow went to: a TCP destination or a UDP pair.
+enum Reported<'a> {
+    Tcp(&'a str),
+    Udp(SocketAddr, SocketAddr),
+}
+
+/// When a flow that hears nothing from the server pings, and when an
+/// unanswered ping means the path is gone.
+struct Keepalive {
+    heard: tokio::time::Instant,
+    wrote: tokio::time::Instant,
+    ping: Option<tokio::time::Instant>,
+}
+impl Keepalive {
+    fn new() -> Self {
+        let now = tokio::time::Instant::now();
+        Self {
+            heard: now,
+            wrote: now,
+            ping: None,
+        }
+    }
+    fn heard(&mut self) {
+        self.heard = tokio::time::Instant::now();
+        self.ping = None;
+    }
+    fn wrote(&mut self) {
+        self.wrote = tokio::time::Instant::now();
+    }
+    /// The next ping (`quiet` after the last answer) or, after one, the
+    /// verdict. Data written since the last answer may still be ahead of the
+    /// ping in a slow target's buffers, so both wait for it to drain.
+    fn deadline(&self, quiet: Duration) -> tokio::time::Instant {
+        let base = match self.ping {
+            None => self.heard + quiet,
+            Some(ping) => ping + PONG_WAIT,
+        };
+        if self.wrote > self.heard {
+            base.max(self.wrote + DRAIN)
+        } else {
+            base
+        }
+    }
+}
+/// A frame write that does not finish in [`STALL`] ends the flow.
+async fn put<W: AsyncWrite + Unpin>(io: &mut W, opcode: u8, payload: &[u8]) -> Result<()> {
+    tokio::time::timeout(STALL, ws::send(io, opcode, payload))
+        .await
+        .map_err(|_| Error::Timeout)?
 }
 impl VlessSession {
     pub async fn connect(
@@ -118,6 +202,7 @@ impl VlessSession {
             tcp_slots: Arc::new(tokio::sync::Semaphore::new(TCP_FLOWS)),
             udp_flows: Arc::new(tokio::sync::Semaphore::new(udp::SESSION_FLOWS)),
             fresh: Mutex::new(None),
+            refusals: Mutex::new(Refusals::default()),
         }));
         // Proves TCP, the certificate and the path; no VLESS request is sent.
         let (tls, _) = session.dial().await?;
@@ -127,6 +212,9 @@ impl VlessSession {
     /// A new TLS connection with a completed WebSocket upgrade, and any frame
     /// bytes that arrived with the upgrade answer.
     async fn dial(&self) -> Result<(Tls, BytesMut)> {
+        if self.backing_off() {
+            return Err(Error::Unanswered);
+        }
         let inner = &self.0;
         let count = inner.addresses.len();
         let start = inner.preferred.load(Ordering::Relaxed);
@@ -166,6 +254,45 @@ impl VlessSession {
             Some((Instant::now(), SystemTime::now()));
         Ok((tls, rest))
     }
+    /// A flow's outcome: `answered` when the server sent at least one byte,
+    /// otherwise the server closed it empty. Only these two are reported.
+    fn outcome(&self, flow: Reported<'_>, answered: bool) {
+        let mut r = self.0.refusals.lock().unwrap_or_else(|e| e.into_inner());
+        if answered {
+            *r = Refusals::default();
+            return;
+        }
+        r.streak = r.streak.saturating_add(1);
+        match flow {
+            Reported::Tcp(target) if r.targets.len() < REFUSED_TARGETS => {
+                r.targets.insert(target.to_owned());
+            }
+            Reported::Udp(source, destination) if r.pairs.len() < REFUSED_PAIRS => {
+                r.pairs.insert((source, destination));
+            }
+            _ => {}
+        }
+        if !r.varied() {
+            return;
+        }
+        if let Some(extra) = r.streak.checked_sub(REFUSED_STREAK) {
+            let delay = BACKOFF_MIN
+                .saturating_mul(1 << extra.min(16))
+                .min(BACKOFF_MAX);
+            r.until = Some(Instant::now() + delay);
+        }
+    }
+    fn backing_off(&self) -> bool {
+        let r = self.0.refusals.lock().unwrap_or_else(|e| e.into_inner());
+        r.until.is_some_and(|until| Instant::now() < until)
+    }
+    fn refusing(&self) -> bool {
+        self.0
+            .refusals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .varied()
+    }
     fn fresh(&self) -> bool {
         let fresh = *self.0.fresh.lock().unwrap_or_else(|e| e.into_inner());
         fresh.is_some_and(|(instant, wall)| {
@@ -178,6 +305,10 @@ impl VlessSession {
     /// No connection while a recent upgrade proves the endpoint; otherwise
     /// one bounded probe upgrade.
     pub async fn health(&self) -> Result<()> {
+        // Upgrades still succeed with a revoked UUID; only the empty flows show it.
+        if self.refusing() {
+            return Err(Error::Unanswered);
+        }
         if self.fresh() {
             return Ok(());
         }
@@ -189,8 +320,8 @@ impl VlessSession {
     }
     /// Opens the TLS connection and upgrade inside this future: dropping it
     /// before it returns closes the socket and leaves no task behind.
-    pub async fn open_tcp(&self, target: &str) -> Result<Tunnel> {
-        let target = header::Target::parse(target)?;
+    pub async fn open_tcp(&self, authority: &str) -> Result<Tunnel> {
+        let target = header::Target::parse(authority)?;
         let deadline = tokio::time::Instant::now() + OPEN;
         let permit = tokio::time::timeout_at(deadline, self.0.tcp_slots.clone().acquire_owned())
             .await
@@ -201,9 +332,11 @@ impl VlessSession {
             .map_err(|_| Error::Timeout)??;
         let request = header::request(&self.0.uuid, header::TCP, &target, CHUNK);
         let (io, bridge) = tokio::io::duplex(64 * 1024);
+        let session = self.clone();
+        let authority = authority.to_owned();
         let pump = tokio::spawn(async move {
             let _permit = permit;
-            let _ = tcp(tls, rest, request, bridge).await;
+            let _ = tcp(&session, &authority, tls, rest, request, bridge).await;
         });
         Ok(Tunnel {
             io,
@@ -225,6 +358,8 @@ async fn close(mut tls: Tls) {
     .await;
 }
 async fn tcp(
+    session: &VlessSession,
+    target: &str,
     tls: Tls,
     rest: BytesMut,
     request: Zeroizing<Vec<u8>>,
@@ -242,25 +377,37 @@ async fn tcp(
         Ok(Err(error)) => return Err(error.into()),
         Err(_) => {}
     }
-    ws::send(&mut write, ws::BINARY, &first).await?;
+    put(&mut write, ws::BINARY, &first).await?;
     drop(first);
     let mut response = header::Response::default();
-    // `idle` runs from the last thing the server sent; `probing` while a ping is unanswered.
-    let idle = tokio::time::sleep(if uplink { KEEPALIVE } else { HALF_CLOSE });
+    let mut answered = false;
+    let mut alive = Keepalive::new();
+    alive.wrote();
+    // After the local side finished, the flow waits for the answer, not a ping.
+    let quiet = |uplink: bool| if uplink { KEEPALIVE } else { HALF_CLOSE };
+    let idle = tokio::time::sleep_until(alive.deadline(quiet(uplink)));
     tokio::pin!(idle);
-    let mut probing = false;
     let result = loop {
         tokio::select! {
             event = frames.next() => match event {
                 Err(error) => break Err(error),
                 // A closed flow before any answer means the server refused or
                 // could not reach the target; it is not a protocol failure.
-                Ok(None) => break Ok(()),
+                Ok(None) => {
+                    if !answered {
+                        session.outcome(Reported::Tcp(target), false);
+                    }
+                    break Ok(());
+                }
                 Ok(Some(event)) => {
                     match event {
-                        Event::Ping(payload) => ws::send(&mut write, ws::PONG, &payload).await?,
+                        Event::Ping(payload) => put(&mut write, ws::PONG, &payload).await?,
                         Event::Pong => {}
                         Event::Data(mut data) => {
+                            if !answered {
+                                answered = true;
+                                session.outcome(Reported::Tcp(target), true);
+                            }
                             if !response.done() {
                                 data.advance(response.feed(&data)?);
                             }
@@ -269,38 +416,43 @@ async fn tcp(
                             }
                         }
                         Event::Close => {
-                            let _ = ws::send(&mut write, ws::CLOSE, &[]).await;
+                            if !answered {
+                                session.outcome(Reported::Tcp(target), false);
+                            }
+                            let _ = put(&mut write, ws::CLOSE, &[]).await;
                             break Ok(());
                         }
                     }
-                    probing = false;
-                    let wait = if uplink { KEEPALIVE } else { HALF_CLOSE };
-                    idle.as_mut().reset(tokio::time::Instant::now() + wait);
+                    alive.heard();
+                    idle.as_mut().reset(alive.deadline(quiet(uplink)));
                 }
             },
             read = local_read.read(&mut buf), if uplink => {
                 let n = read?;
                 if n == 0 {
                     uplink = false;
-                    if !probing {
-                        idle.as_mut().reset(tokio::time::Instant::now() + HALF_CLOSE);
-                    }
                 } else {
-                    ws::send(&mut write, ws::BINARY, &buf[..n]).await?;
+                    put(&mut write, ws::BINARY, &buf[..n]).await?;
+                    alive.wrote();
                 }
+                idle.as_mut().reset(alive.deadline(quiet(uplink)));
             }
             _ = &mut idle => {
-                if probing {
-                    // No answer to the ping: the path is gone, even if writes succeed.
+                let deadline = alive.deadline(quiet(uplink));
+                if tokio::time::Instant::now() < deadline {
+                    // Moved by a write since the timer was set.
+                    idle.as_mut().reset(deadline);
+                } else if alive.ping.is_some() {
+                    // No answer to the ping and nothing left to drain: the path is gone.
                     break Err(Error::Timeout);
-                }
-                if !uplink {
-                    let _ = ws::send(&mut write, ws::CLOSE, &[]).await;
+                } else if !uplink {
+                    let _ = put(&mut write, ws::CLOSE, &[]).await;
                     break Ok(());
+                } else {
+                    put(&mut write, ws::PING, &[]).await?;
+                    alive.ping = Some(tokio::time::Instant::now());
+                    idle.as_mut().reset(alive.deadline(quiet(uplink)));
                 }
-                ws::send(&mut write, ws::PING, &[]).await?;
-                probing = true;
-                idle.as_mut().reset(tokio::time::Instant::now() + PONG_WAIT);
             }
         }
     };

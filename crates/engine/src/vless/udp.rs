@@ -197,29 +197,41 @@ async fn carry(
         packet(payload, &mut first);
     }
     drop(queued);
-    ws::send(&mut write, ws::BINARY, &first).await?;
+    put(&mut write, ws::BINARY, &first).await?;
     drop(first);
     let mut response = header::Response::default();
     let mut pending = BytesMut::new();
-    // Runs from the last thing the server sent, as on TCP flows.
-    let idle = tokio::time::sleep(KEEPALIVE);
+    // As on TCP flows; a dead path that keeps being written to is closed by
+    // the relay's rule for flows without answers instead.
+    let mut alive = Keepalive::new();
+    alive.wrote();
+    let idle = tokio::time::sleep_until(alive.deadline(KEEPALIVE));
     tokio::pin!(idle);
-    let mut probing = false;
     loop {
         tokio::select! {
             payload = queue.recv() => {
                 let Some(payload) = payload else { break };
                 let mut out = Vec::with_capacity(payload.len() + 2);
                 packet(&payload, &mut out);
-                ws::send(&mut write, ws::BINARY, &out).await?;
+                put(&mut write, ws::BINARY, &out).await?;
+                alive.wrote();
+                idle.as_mut().reset(alive.deadline(KEEPALIVE));
             }
             event = frames.next() => {
                 match event? {
-                    None | Some(Event::Close) => break,
-                    Some(Event::Ping(payload)) => ws::send(&mut write, ws::PONG, &payload).await?,
+                    None | Some(Event::Close) => {
+                        if !*heard {
+                            session.outcome(Reported::Udp(source, destination), false);
+                        }
+                        break;
+                    }
+                    Some(Event::Ping(payload)) => put(&mut write, ws::PONG, &payload).await?,
                     Some(Event::Pong) => {}
                     Some(Event::Data(mut data)) => {
-                        *heard = true;
+                        if !*heard {
+                            *heard = true;
+                            session.outcome(Reported::Udp(source, destination), true);
+                        }
                         if !response.done() {
                             data.advance(response.feed(&data)?);
                         }
@@ -240,20 +252,24 @@ async fn carry(
                         }
                     }
                 }
-                probing = false;
-                idle.as_mut().reset(tokio::time::Instant::now() + KEEPALIVE);
+                alive.heard();
+                idle.as_mut().reset(alive.deadline(KEEPALIVE));
             }
             _ = &mut idle => {
-                if probing {
+                let deadline = alive.deadline(KEEPALIVE);
+                if tokio::time::Instant::now() < deadline {
+                    idle.as_mut().reset(deadline);
+                } else if alive.ping.is_some() {
                     // No answer to the ping: close; the next datagram opens a new flow.
                     return Err(Error::Timeout);
+                } else {
+                    put(&mut write, ws::PING, &[]).await?;
+                    alive.ping = Some(tokio::time::Instant::now());
+                    idle.as_mut().reset(alive.deadline(KEEPALIVE));
                 }
-                ws::send(&mut write, ws::PING, &[]).await?;
-                probing = true;
-                idle.as_mut().reset(tokio::time::Instant::now() + PONG_WAIT);
             }
         }
     }
-    let _ = ws::send(&mut write, ws::CLOSE, &[]).await;
+    let _ = put(&mut write, ws::CLOSE, &[]).await;
     Ok(())
 }

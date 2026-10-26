@@ -87,6 +87,12 @@ pub enum Error {
     Io,
     #[error("Invalid destination authority")]
     Destination,
+    /// VLESS: the endpoint accepted several streams in a row and closed each
+    /// without sending anything (an unknown or revoked UUID looks like this,
+    /// and so do unreachable targets); new streams wait for a backoff. Nothing
+    /// here proves which, so the text claims only what was seen.
+    #[error("Endpoint closed recent streams without data")]
+    Unanswered,
     /// Outbound traffic stayed unanswered while opens to several destinations
     /// failed or stayed silent, or most TCP flows that wrote first across
     /// several hosts never got an answer. `proven`: the session delivered

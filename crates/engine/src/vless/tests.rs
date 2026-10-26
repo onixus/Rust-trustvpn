@@ -25,6 +25,11 @@ const SILENT: u8 = 7;
 const BIG: u8 = 8;
 /// Upgrades, then closes at once without a byte, as Xray does for an unknown UUID.
 const REVOKED: u8 = 9;
+/// TCP: a target that reads at [`SINK_RATE`] and stays silent until it got
+/// [`SINK_TOTAL`] bytes; pings are answered only when read, as Xray does.
+const SINK: u8 = 10;
+const SINK_RATE: f64 = 256.0 * 1024.0;
+const SINK_TOTAL: usize = 1024 * 1024;
 
 #[derive(Debug)]
 struct Request {
@@ -168,6 +173,7 @@ async fn serve(
     let mut data = vec![];
     let mut answered = false;
     let mut command = None;
+    let mut sunk = 0;
     loop {
         let Some((opcode, payload)) = client_frame(&mut tls).await? else {
             return Ok(());
@@ -178,6 +184,16 @@ async fn serve(
                 return Ok(());
             }
             ws::PING => tls.write_all(&server_frame(ws::PONG, &payload)).await?,
+            ws::BINARY if mode == SINK => {
+                tokio::time::sleep(Duration::from_secs_f64(payload.len() as f64 / SINK_RATE)).await;
+                sunk += payload.len();
+                if sunk >= SINK_TOTAL && !answered {
+                    answered = true;
+                    tls.write_all(&server_frame(ws::BINARY, b"\0\0done"))
+                        .await?;
+                }
+                continue;
+            }
             ws::BINARY => data.extend(payload),
             _ => panic!("unexpected opcode"),
         }
@@ -549,20 +565,80 @@ async fn a_silent_tcp_path_ends_the_flow() {
     let e = endpoint(&[HOST], &[b"http/1.1"]).await;
     let session = Session::connect(&e.profile).await.unwrap();
     e.mode.store(SILENT, Ordering::SeqCst);
+    // Idle flow: the ping after the server's silence goes unanswered.
+    let mut tunnel = session.open_tcp("192.0.2.1:80").await.unwrap();
+    tunnel.write_all(b"a").await.unwrap();
+    assert_eq!(tunnel.read_u8().await.unwrap(), b'a');
+    let mut rest = vec![];
+    let ended = tokio::time::timeout(Duration::from_secs(5), tunnel.read_to_end(&mut rest)).await;
+    assert!(ended.is_ok(), "idle flow still open");
+    // Uploading flow: the server stops reading, the uplink stops moving.
     let tunnel = session.open_tcp("192.0.2.1:80").await.unwrap();
     let (mut read, mut write) = tokio::io::split(tunnel);
     write.write_all(b"a").await.unwrap();
     assert_eq!(read.read_u8().await.unwrap(), b'a');
-    // Writes keep succeeding locally; the unanswered ping ends the flow anyway.
     let writer = tokio::spawn(async move {
-        while write.write_all(b"more").await.is_ok() {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        let chunk = vec![0u8; 64 * 1024];
+        while write.write_all(&chunk).await.is_ok() {}
     });
-    let mut rest = vec![];
-    let ended = tokio::time::timeout(Duration::from_secs(5), read.read_to_end(&mut rest)).await;
-    assert!(ended.is_ok(), "flow still open");
+    let ended = tokio::time::timeout(Duration::from_secs(10), read.read_to_end(&mut rest)).await;
+    assert!(ended.is_ok(), "stalled flow still open");
     writer.abort();
+}
+
+#[tokio::test]
+async fn a_slow_silent_target_keeps_its_upload() {
+    let e = endpoint(&[HOST], &[b"http/1.1"]).await;
+    let session = Session::connect(&e.profile).await.unwrap();
+    e.mode.store(SINK, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let tunnel = session.open_tcp("192.0.2.1:80").await.unwrap();
+    let (mut read, mut write) = tokio::io::split(tunnel);
+    let upload = tokio::spawn(async move {
+        write.write_all(&vec![7u8; SINK_TOTAL]).await.unwrap();
+        write
+    });
+    // The server is silent for far longer than a ping and its answer window,
+    // and answers the ping only after reading the data queued before it.
+    let mut done = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(20), read.read_exact(&mut done))
+        .await
+        .expect("answer in time")
+        .expect("flow kept open");
+    assert_eq!(&done, b"done");
+    assert!(started.elapsed() > KEEPALIVE + PONG_WAIT * 2);
+    drop(upload.await.unwrap());
+}
+
+#[tokio::test]
+async fn refused_flows_back_off_across_the_session() {
+    let e = endpoint(&[HOST], &[b"http/1.1"]).await;
+    let session = Session::connect(&e.profile).await.unwrap();
+    e.mode.store(REVOKED, Ordering::SeqCst);
+    let before = e.accepted.load(Ordering::SeqCst);
+    let mut tunnel = session.open_udp().await.unwrap();
+    // A resolver: a new source port for every query.
+    for port in 0..100 {
+        send_udp(
+            &mut tunnel,
+            &format!("10.0.0.2:{}", 40000 + port),
+            "192.0.2.9:9000",
+            vec![1],
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let dials = e.accepted.load(Ordering::SeqCst) - before;
+    // The streak (8 varied pairs) plus at most a couple in flight.
+    assert!(dials <= 10, "{dials}");
+    // A recent upgrade does not make the session look healthy.
+    assert!(matches!(session.health().await, Err(Error::Unanswered)));
+    // Once the server answers again, flows work after the backoff window.
+    e.mode.store(ECHO, Ordering::SeqCst);
+    tokio::time::sleep(BACKOFF_MAX + Duration::from_millis(300)).await;
+    send_udp(&mut tunnel, "10.0.0.2:39000", "192.0.2.9:9000", vec![2]).await;
+    assert_eq!(answer(&mut tunnel).await.expect("answered").payload, [2]);
+    session.health().await.unwrap();
 }
 
 #[tokio::test]
@@ -646,4 +722,52 @@ async fn udp_flows_expire_when_idle_and_drop_on_a_full_queue() {
         .unwrap()
         .unwrap();
     assert_eq!(e.requests.lock().unwrap().len(), 2);
+}
+
+async fn refused_tcp(session: &Session, target: &str) {
+    let mut tunnel = session.open_tcp(target).await.unwrap();
+    tunnel.write_all(b"x").await.unwrap();
+    let mut rest = vec![];
+    tokio::time::timeout(Duration::from_secs(5), tunnel.read_to_end(&mut rest))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(rest.is_empty());
+}
+
+#[tokio::test]
+async fn a_few_refusing_targets_do_not_stop_the_session() {
+    // Xray closes a flow to an unreachable target without a byte, as for a revoked UUID.
+    for targets in [
+        vec!["192.0.2.1:80", "192.0.2.2:80", "192.0.2.3:80"],
+        vec!["192.0.2.4:80"; 12],
+    ] {
+        let e = endpoint(&[HOST], &[b"http/1.1"]).await;
+        let session = Session::connect(&e.profile).await.unwrap();
+        e.mode.store(REVOKED, Ordering::SeqCst);
+        for target in targets {
+            refused_tcp(&session, target).await;
+        }
+        session.health().await.unwrap();
+        // New flows are dialed at once.
+        e.mode.store(ECHO, Ordering::SeqCst);
+        let mut tunnel = session.open_tcp("192.0.2.5:80").await.unwrap();
+        tunnel.write_all(b"y").await.unwrap();
+        assert_eq!(tunnel.read_u8().await.unwrap(), b'y');
+    }
+}
+
+#[tokio::test]
+async fn varied_refusing_tcp_targets_back_off_the_session() {
+    let e = endpoint(&[HOST], &[b"http/1.1"]).await;
+    let session = Session::connect(&e.profile).await.unwrap();
+    e.mode.store(REVOKED, Ordering::SeqCst);
+    for n in 0..8 {
+        refused_tcp(&session, &format!("192.0.2.{}:80", 1 + n % 4)).await;
+    }
+    assert!(matches!(session.health().await, Err(Error::Unanswered)));
+    assert!(matches!(
+        session.open_tcp("192.0.2.9:80").await,
+        Err(Error::Unanswered)
+    ));
 }

@@ -67,12 +67,25 @@ other JSON-only fields are reported as losses.
   datagram opens a new one. Only answers count: outgoing datagrams do not
   keep a flow alive.
 - **Dead paths.** After 30 s without anything from the server a flow sends a
-  WebSocket ping; if nothing arrives within 15 s more, the flow is closed. A
-  path that died without FIN or RST therefore ends a TCP flow, and a UDP flow
-  is replaced by the next datagram.
+  WebSocket ping. Xray answers it only when it reads the frame, after all data
+  sent before it, so a slow target can delay the answer for as long as its
+  buffers take to drain. The flow is therefore closed as dead only when the
+  ping is unanswered for 15 s **and** nothing was written to the server in the
+  last 120 s; a single frame write that cannot complete for 45 s also ends the
+  flow. An idle path that died without FIN or RST ends a TCP flow within about
+  45 s, and a blocked upload within 45 s. A flow that keeps writing small
+  amounts into a dead path is left to TCP's own retransmission timeout; a UDP
+  flow in that state is replaced after 60 s without answers (see above).
 - **Refused flows back off.** A UDP flow whose handshake fails, or which the
-  server closes without sending a byte (an unknown UUID), waits 2 s before the
-  pair may dial again; datagrams in between are dropped.
+  server closes without sending a byte, waits 2 s before the same pair may
+  dial again. Xray closes a flow to an unreachable or refusing target the same
+  way as a flow with a revoked UUID, so the session reacts only to a varied
+  run: at least 8 flows in a row (TCP or UDP) closed without a byte, covering
+  at least 4 TCP destinations or 8 UDP source/destination pairs (a resolver
+  with a new source port per query counts as many pairs). Then new flows are
+  not dialed for 2 s, doubling up to 30 s with each further such flow; the
+  first flow that receives data resets this. One host that keeps refusing, or
+  a few dead hosts, never delays the session.
 - **UDP size.** Xray's buffers carry 8190 payload bytes with the 2-byte length
   prefix. Larger downlink packets are dropped silently and larger uplink ones
   are split, which breaks datagram boundaries, so the client drops datagrams
@@ -82,13 +95,17 @@ other JSON-only fields are reported as losses.
   flow open for the answer until the server closes or 10 s pass without data.
   Xray's outbound closes 1 s after the uplink ends.
 - **No open confirmation.** VLESS has no CONNECT answer: the response header
-  arrives only with the first downlink data. A wrong UUID gives a successful
-  WebSocket upgrade followed by a close, so it shows up as flows that open and
-  stay empty, not as an authentication error. A wrong path is an HTTP 404 at
-  upgrade time; redirects are not followed.
-- **Health.** A WebSocket upgrade in the last 30 s (by both the monotonic and
-  the wall clock, so device sleep counts) proves the endpoint; otherwise one
-  probe upgrade without a VLESS request is made.
+  arrives only with the first downlink data. A wrong path is an HTTP 404 at
+  upgrade time; redirects are not followed. A wrong or revoked UUID gives a
+  successful WebSocket upgrade followed by a close, so connecting succeeds
+  and the status can show "connected" while new flows close empty. After the
+  varied run above the session backs off, and health reports "Endpoint closed
+  recent streams without data" rather than an authentication error, because
+  the client cannot tell a revoked UUID from unreachable targets.
+- **Health.** That varied run fails health. Otherwise a WebSocket upgrade in the
+  last 30 s (by both the monotonic and the wall clock, so device sleep counts)
+  proves the endpoint; without one, one probe upgrade without a VLESS request
+  is made.
 
 ## Privacy
 
@@ -99,9 +116,12 @@ and summaries, and kept in the encrypted vault.
 
 ## Known limitations
 
-- The kill switch admits TCP to the endpoint addresses. CDN addresses are
-  shared, and other sites on the same addresses are unreachable while the full
-  guard is on (follow-up).
+- The kill switch admits TCP to the endpoint addresses, and CDN addresses are
+  shared with other sites (follow-up). On macOS (PF `pass … user root`) and
+  Windows (WFP filter by the service's `ALE_APP_ID`) only the tunnel service
+  may reach those addresses, so other sites on the same CDN addresses are
+  unreachable while the full guard is on. On Linux, unmarked traffic to those
+  addresses is routed into the tunnel, and such sites stay reachable.
 - Older client versions cannot read a vault that contains a VLESS profile.
 - Android and iOS do not register the `vless` URL scheme yet; pasted text,
   files and Android QR codes go through the shared parser.
