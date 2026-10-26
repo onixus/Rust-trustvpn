@@ -10,6 +10,7 @@ pub mod fragments;
 pub mod ipv6;
 pub mod packet;
 pub mod policy;
+pub mod reason;
 pub mod stack;
 pub mod stats;
 

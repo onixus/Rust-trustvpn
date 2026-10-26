@@ -248,6 +248,13 @@ impl HysteriaSession {
             udp,
         })))
     }
+    pub fn closed(&self) -> Option<crate::Close> {
+        self.0
+            .connection
+            .close_reason()
+            .as_ref()
+            .map(crate::quic_close)
+    }
     pub async fn health(&self) -> Result<()> {
         if self.0.connection.close_reason().is_some() {
             Err(Error::Connect)

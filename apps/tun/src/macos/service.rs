@@ -201,6 +201,8 @@ async fn guarded_connect<T>(
 }
 struct Workers {
     tunnel: Option<tokio::task::JoinHandle<RunResult>>,
+    /// `Session::transport_name` of the running data plane, for events.
+    transport: &'static str,
     reconnect: Option<tokio::task::JoinHandle<Result<device::Prepared, String>>>,
 }
 impl Drop for Workers {
@@ -246,8 +248,7 @@ impl Workers {
                         device::Prepared::reconnect(&profile, device),
                     )
                     .await
-                    .map_err(|_| "Reconnect timed out".to_owned())?
-                    .map_err(|e| format!("Reconnect failed: {e}"))
+                    .map_err(|_| "stage=attempt reason=timeout".to_owned())?
                 },
             )
             .await;
@@ -797,6 +798,7 @@ async fn start(
     };
     let device = prepared.device();
     let workers = Workers {
+        transport: prepared.transport(),
         tunnel: Some(tokio::spawn(prepared.run())),
         reconnect: None,
     };
@@ -977,12 +979,16 @@ async fn connected(
                     let stalled = result.as_ref().ok().and_then(crate::dataplane::degraded_kind);
                     let degraded = stalled.map(|(proven, _)| proven);
                     if let Some((proven, kind)) = stalled { events::record(&crate::dataplane::degraded_event(proven, kind)); }
+                    // Classes and numeric codes only; no endpoint data.
+                    let reason = match &result {
+                        Ok(result) => crate::reason::stopped(result),
+                        Err(_) => "reason=worker_failed".into(),
+                    };
                     last_failure = match result {
-                        Ok(Err(_)) => "VPN transport stopped".into(),
-                        Ok(Ok(())) => "VPN transport stopped".into(),
+                        Ok(_) => "VPN transport stopped".into(),
                         Err(_) => "VPN transport worker failed".into(),
                     };
-                    events::record(&last_failure);
+                    events::record(&crate::reason::stopped_event(&last_failure, &reason, workers.transport, millis(connected_since)));
                     state = State::Blocked;
                     // A flapping endpoint must not reset the backoff indefinitely.
                     monitor.transition(false, rtrust_control::observations::now_ms());
@@ -1000,7 +1006,8 @@ async fn connected(
                     match &result {
                         Ok(Err(error)) => {
                             last_failure = "VPN reconnect failed".into();
-                            // Fixed reason strings from device.rs only; no endpoint data.
+                            // `stage=.. reason=..` classes from device.rs and
+                            // fixed route-guard strings only; no endpoint data.
                             events::record(&format!("{last_failure}: {error}"));
                         }
                         Err(_) => last_failure = "VPN reconnect worker failed".into(),
@@ -1010,6 +1017,7 @@ async fn connected(
                         // Baseline before the data plane runs: its backlog
                         // discard must land inside the summary window.
                         summary = Some(summary_after("reconnect"));
+                        workers.transport = prepared.transport();
                         workers.tunnel = Some(tokio::spawn(prepared.run()));
                         connected_since = Instant::now();
                         state = State::Connected;
@@ -1288,6 +1296,7 @@ mod tests {
                 probe: None,
             },
             Workers {
+                transport: "test",
                 tunnel: Some(worker),
                 reconnect: None,
             },
@@ -1700,6 +1709,7 @@ mod tests {
                     probe: None,
                 },
                 Workers {
+                    transport: "test",
                     tunnel: None,
                     reconnect: Some(worker),
                 },
@@ -1790,6 +1800,7 @@ mod tests {
                     probe: None,
                 },
                 Workers {
+                    transport: "test",
                     tunnel: Some(tokio::spawn(std::future::pending())),
                     reconnect: None,
                 },
@@ -2012,6 +2023,7 @@ mod tests {
                     probe: None,
                 },
                 Workers {
+                    transport: "test",
                     tunnel: Some(tunnel),
                     reconnect: Some(worker),
                 },
@@ -2108,6 +2120,7 @@ mod tests {
                 probe: None,
             },
             Workers {
+                transport: "test",
                 tunnel: Some(tunnel),
                 reconnect: Some(reconnect),
             },
@@ -2165,6 +2178,7 @@ mod tests {
         let supervisor = tokio::spawn(connected(
             server,
             Workers {
+                transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
             },
@@ -2240,6 +2254,7 @@ mod tests {
         let supervisor = tokio::spawn(connected(
             server,
             Workers {
+                transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
             },
@@ -2310,6 +2325,7 @@ mod tests {
         let supervisor = tokio::spawn(connected(
             server,
             Workers {
+                transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
             },
@@ -2410,6 +2426,7 @@ mod tests {
         let supervisor = tokio::spawn(connected(
             server,
             Workers {
+                transport: "test",
                 tunnel: None,
                 reconnect: Some(worker),
             },
@@ -2938,6 +2955,7 @@ mod tests {
                 probe: Some(fake),
             },
             Workers {
+                transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
             },
@@ -3144,6 +3162,7 @@ mod tester_summary_tests {
         let supervisor = tokio::spawn(connected(
             server,
             Workers {
+                transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
             },

@@ -47,6 +47,9 @@ impl Prepared {
             device: Arc::new(device),
         })
     }
+    pub fn transport(&self) -> &'static str {
+        self.session.transport_name()
+    }
     pub fn device(&self) -> Arc<tun_rs::AsyncDevice> {
         self.device.clone()
     }
@@ -54,17 +57,18 @@ impl Prepared {
         profile: &rtrust_profile::Profile,
         device: Arc<tun_rs::AsyncDevice>,
     ) -> Result<Self, String> {
+        use crate::reason::{Stage, reconnect};
         let session = Session::connect(profile)
             .await
-            .map_err(|_| "Cannot reconnect endpoint")?;
+            .map_err(|e| reconnect(Stage::Connect, &e))?;
         session
             .health()
             .await
-            .map_err(|_| "Endpoint health check failed")?;
+            .map_err(|e| reconnect(Stage::Health, &e))?;
         let udp = session
             .open_udp()
             .await
-            .map_err(|_| "UDP transport unavailable")?;
+            .map_err(|e| reconnect(Stage::Udp, &e))?;
         Ok(Self {
             session,
             udp,
