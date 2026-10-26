@@ -627,15 +627,44 @@ async fn wrong_uuid_udp_does_not_storm_the_server() {
     let single = counter.count() - probe;
     println!("wrong UUID, one source, ~300 packets in 6 s: {single} server connections");
     assert!(single <= 5, "{single} connections for one refused flow");
-    // Many sources: each is its own flow and costs at least one connection.
+    // Resolver-like: a new source port every 50 ms. After a streak of empty
+    // flows across many pairs the session backs off as a whole.
     let before = counter.count();
     for n in 0..100u16 {
         let source = format!("10.0.0.2:{}", 40_000 + n);
         send(&mut stream, &datagram(&source, &udp_target, vec![8; 32])).await;
+        assert!(
+            receive(&mut stream, Duration::from_millis(50))
+                .await
+                .is_none(),
+            "answer with a wrong UUID"
+        );
+    }
+    let paced = counter.count() - before;
+    let health = session.health().await;
+    println!("wrong UUID, 100 sources over 5 s: {paced} server connections; health {health:?}");
+    assert!(paced <= 12, "{paced} connections for 100 refused sources");
+    let error = health.expect_err("health Ok while the server refuses every flow");
+    assert!(matches!(error, Error::Unanswered), "{error:?}");
+    canary(&error, &link);
+    // TCP flows are held back as well while the session backs off.
+    let tcp = format!("127.0.0.1:{}", env("RTRUST_VLESS_TCP"));
+    let before = counter.count();
+    let held = session.open_tcp(&tcp).await.err();
+    println!(
+        "wrong UUID, TCP open during back-off: {held:?}, {} connections",
+        counter.count() - before
+    );
+    // A burst: every new pair dials before any refusal is known.
+    let before = counter.count();
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    for n in 0..100u16 {
+        let source = format!("10.0.0.4:{}", 40_000 + n);
+        send(&mut stream, &datagram(&source, &udp_target, vec![8; 32])).await;
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
     println!(
-        "wrong UUID, 100 sources: {} server connections",
+        "wrong UUID, burst of 100 sources after back-off expiry: {} server connections",
         counter.count() - before
     );
     drop(stream);
@@ -674,4 +703,128 @@ async fn xhttp_is_unsupported_without_connecting() {
     canary(&error, &link);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(counter.count(), 0, "XHTTP profile reached the server");
+}
+
+/// A long upload to a target that reads slowly and says nothing until the
+/// end: back-pressure and a silent downlink must not close the flow.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run through ci/vless_interop.py"]
+async fn slow_silent_upload_survives_keepalive() {
+    if mode() != "open" {
+        return;
+    }
+    let link = env("RTRUST_VLESS_LINK");
+    let target = format!("127.0.0.1:{}", env("RTRUST_VLESS_SLOW"));
+    let session = Session::connect(&profile(&link)).await.unwrap();
+    let mut tunnel = session.open_tcp(&target).await.unwrap();
+    // 0xFF ends the upload in-band: VLESS over WebSocket has no half-close.
+    let chunk: Vec<u8> = payload(16 * 1024, 11).iter().map(|b| b % 255).collect();
+    let started = Instant::now();
+    let (mut sent, mut stall) = (0usize, Duration::ZERO);
+    while started.elapsed() < Duration::from_secs(90) {
+        // Back-pressure blocks writes for a while; a closed flow fails them.
+        let write = Instant::now();
+        match tokio::time::timeout(Duration::from_secs(60), tunnel.write_all(&chunk)).await {
+            Ok(Ok(())) => sent += chunk.len(),
+            Ok(Err(error)) => panic!(
+                "flow closed after {:?} and {sent} bytes: {error:?}",
+                started.elapsed()
+            ),
+            Err(_) => panic!("write blocked 60 s after {:?}", started.elapsed()),
+        }
+        stall = stall.max(write.elapsed());
+    }
+    tunnel.write_all(&[0xff]).await.unwrap();
+    let mut answer = vec![];
+    tokio::time::timeout(Duration::from_secs(60), tunnel.read_to_end(&mut answer))
+        .await
+        .expect("no answer after the upload")
+        .unwrap();
+    println!(
+        "slow upload: {sent} bytes, longest blocked write {stall:?}, answer after {:?}",
+        started.elapsed()
+    );
+    assert_eq!(String::from_utf8_lossy(&answer), sent.to_string());
+}
+
+/// A TCP flow without any traffic for 80 s still carries data afterwards.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run through ci/vless_interop.py"]
+async fn idle_flow_survives_80_seconds() {
+    if mode() != "open" {
+        return;
+    }
+    let link = env("RTRUST_VLESS_LINK");
+    let tcp = format!("127.0.0.1:{}", env("RTRUST_VLESS_TCP"));
+    let session = Session::connect(&profile(&link)).await.unwrap();
+    let mut tunnel = session.open_tcp(&tcp).await.unwrap();
+    let mut back = [0; 6];
+    tunnel.write_all(b"before").await.unwrap();
+    tunnel.read_exact(&mut back).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(80)).await;
+    tunnel
+        .write_all(b"after!")
+        .await
+        .expect("idle flow closed for writing");
+    tokio::time::timeout(Duration::from_secs(10), tunnel.read_exact(&mut back))
+        .await
+        .expect("no echo after 80 s idle")
+        .expect("idle flow closed");
+    assert_eq!(&back, b"after!");
+}
+
+/// Refused targets on a working UUID: a few closed ports in a row are normal
+/// and must not hold back the next flow or fail health.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run through ci/vless_interop.py"]
+async fn few_dead_targets_do_not_back_off() {
+    if mode() != "open" {
+        return;
+    }
+    let link = env("RTRUST_VLESS_LINK");
+    let tcp = format!("127.0.0.1:{}", env("RTRUST_VLESS_TCP"));
+    let session = Session::connect(&profile(&link)).await.unwrap();
+    tcp_echo(&session, &tcp, b"warm").await;
+    for _ in 0..3 {
+        let dead = closed_port();
+        let mut tunnel = session.open_tcp(&dead).await.unwrap();
+        tunnel.write_all(b"nobody").await.unwrap();
+        let mut back = vec![];
+        let _ = tokio::time::timeout(Duration::from_secs(15), tunnel.read_to_end(&mut back))
+            .await
+            .expect("flow to a closed port stayed open");
+        assert!(back.is_empty());
+    }
+    let started = Instant::now();
+    tcp_echo(&session, &tcp, b"right away").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "next flow took {:?}",
+        started.elapsed()
+    );
+    session.health().await.unwrap();
+
+    // Observation: a longer streak to varied closed ports, as a scanner or a
+    // page full of dead links makes, on the same working UUID.
+    for _ in 0..8 {
+        let dead = closed_port();
+        if let Ok(mut tunnel) = session.open_tcp(&dead).await {
+            let _ = tunnel.write_all(b"nobody").await;
+            let mut back = vec![];
+            let _ =
+                tokio::time::timeout(Duration::from_secs(15), tunnel.read_to_end(&mut back)).await;
+        }
+    }
+    let health = session.health().await;
+    let next = session.open_tcp(&tcp).await.err();
+    println!(
+        "working UUID after 11 empty flows to closed ports: health {health:?}, next open error {next:?}"
+    );
+}
+/// A loopback port nothing listens on.
+fn closed_port() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    drop(listener);
+    address
 }

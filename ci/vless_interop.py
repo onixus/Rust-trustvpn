@@ -76,7 +76,8 @@ class Echo:
             self.accepted+=1;threading.Thread(target=self.exchange,args=(c,),daemon=True).start()
     def exchange(self,c):
         with c:
-            c.settimeout(30)
+            # Longer than any client keepalive: an idle flow must outlive its pings.
+            c.settimeout(300)
             try:
                 while (data:=c.recv(65536)):self.tcp_bytes+=len(data);c.sendall(data)
             except OSError:pass
@@ -85,6 +86,37 @@ class Echo:
             try:data,addr=sock.recvfrom(65535);self.udp_seen.append(len(data));sock.sendto(data,addr)
             except OSError:return
     def close(self):self.tcp.close();self.udp.close();self.udp2.close()
+
+class Slow:
+    """TCP target that reads about 32 KiB/s and answers nothing until it reads
+    the end marker 0xFF, then the number of bytes before it. The client sees
+    steady back-pressure and no downlink traffic for as long as the upload lasts.
+    VLESS over WebSocket carries no TCP half-close, so the end is in-band.
+    After SLOW_FOR seconds it reads at full speed, so buffered bytes drain quickly."""
+    RATE=32*1024;SLOW_FOR=95
+    def __init__(self):
+        self.tcp=socket.socket();self.tcp.setsockopt(socket.SOL_SOCKET,socket.SO_RCVBUF,32*1024);self.tcp.bind(('127.0.0.1',0));self.tcp.listen()
+        threading.Thread(target=self.serve,daemon=True).start()
+    port=property(lambda self:self.tcp.getsockname()[1])
+    def serve(self):
+        while True:
+            try:c,_=self.tcp.accept()
+            except OSError:return
+            threading.Thread(target=self.exchange,args=(c,),daemon=True).start()
+    def exchange(self,c):
+        with c:
+            c.settimeout(300);start=time.monotonic();total=0
+            try:
+                while True:
+                    slow=time.monotonic()-start<self.SLOW_FOR
+                    data=c.recv(4096 if slow else 262144)
+                    if not data:return
+                    if (end:=data.find(b'\xff'))>=0:total+=end;break
+                    total+=len(data)
+                    if slow:time.sleep(len(data)/self.RATE)
+                c.sendall(str(total).encode())
+            except OSError:pass
+    def close(self):self.tcp.close()
 
 class Stand:
     def __init__(self,executable,work,mode,name=None):
@@ -233,7 +265,7 @@ def main():
     parser.add_argument('--mode',choices=('open','private','both'),default='both');args=parser.parse_args()
     # SIGTERM (CI abort) unwinds like Ctrl-C, so Xray and the temporary keys are removed.
     signal.signal(signal.SIGTERM,lambda *_:sys.exit(143))
-    executable=binary();echo=Echo()
+    executable=binary();echo=Echo();slow=Slow()
     with tempfile.TemporaryDirectory(prefix='rtrust-vless-') as temporary:
         work=pathlib.Path(temporary);certificates(work)
         try:
@@ -243,7 +275,7 @@ def main():
             for mode in modes:
                 stand=Stand(executable,work,mode);extra=[]
                 try:
-                    env={'RTRUST_VLESS_LINK':stand.link,'RTRUST_VLESS_CA':str(work/'ca.pem'),'RTRUST_VLESS_TCP':str(echo.ports[0]),'RTRUST_VLESS_UDP':str(echo.ports[1]),'RTRUST_VLESS_UDP2':str(echo.udp2.getsockname()[1]),'RTRUST_VLESS_MODE':mode}
+                    env={'RTRUST_VLESS_LINK':stand.link,'RTRUST_VLESS_CA':str(work/'ca.pem'),'RTRUST_VLESS_TCP':str(echo.ports[0]),'RTRUST_VLESS_UDP':str(echo.ports[1]),'RTRUST_VLESS_UDP2':str(echo.udp2.getsockname()[1]),'RTRUST_VLESS_SLOW':str(slow.port),'RTRUST_VLESS_MODE':mode}
                     if args.serve_only:
                         print('\n'.join(f"export {k}='{v}'" for k,v in env.items()),flush=True);print('Serving on 127.0.0.1; Ctrl-C to stop',flush=True)
                         try:
@@ -256,11 +288,11 @@ def main():
                         env.update({'RTRUST_VLESS_RESTART_LINK':restart.link,'RTRUST_VLESS_RESTART_PID':str(restart.process.pid),'RTRUST_VLESS_RESTART_CONFIG':str(restart.config),'RTRUST_VLESS_XRAY':str(executable)})
                     before=(echo.accepted,len(echo.udp_seen))
                     # One test at a time: the socket-release test counts this process's descriptors.
-                    subprocess.run(['cargo','test','--locked','-p','rtrust-engine','--test','vless_fixture','--','--ignored','--nocapture','--test-threads=1'],cwd=ROOT,env={**os.environ,**env},check=True,timeout=600)
+                    subprocess.run(['cargo','test','--locked','-p','rtrust-engine','--test','vless_fixture','--','--ignored','--nocapture','--test-threads=1'],cwd=ROOT,env={**os.environ,**env},check=True,timeout=1200)
                     # Independent of the client: blocked targets never saw a packet.
                     if mode=='private' and (echo.accepted,len(echo.udp_seen))!=before:raise SystemExit(f'FAIL private mode reached the echo: {before} -> {(echo.accepted,len(echo.udp_seen))}')
                     print(f'PASS official Xray-core {RELEASE} VLESS ws+tls, mode {mode}')
                 finally:
                     for s in [stand,*extra]:s.close()
-        finally:echo.close()
+        finally:echo.close();slow.close()
 if __name__=='__main__':main()
