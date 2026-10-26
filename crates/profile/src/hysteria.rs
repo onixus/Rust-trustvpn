@@ -8,6 +8,7 @@ pub enum Protocol {
     Hysteria2,
     #[serde(rename = "amneziawg")]
     AmneziaWg,
+    Vless,
 }
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

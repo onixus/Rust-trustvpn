@@ -471,3 +471,21 @@ async fn h2_opens_past_the_stream_limit_end_within_the_deadline() {
     drop(held);
     server.abort();
 }
+
+#[tokio::test]
+async fn vless_profiles_never_fall_back_to_trusttunnel() {
+    // Synthetic link; the gate rejects it before any socket is opened.
+    let p = Profile::import("vless://11111111-2222-4333-8444-555555555555@127.0.0.1:9?encryption=none&security=tls&sni=cdn.example.com&type=ws&path=%2Fsynthetic").unwrap();
+    assert!(matches!(
+        rtrust_engine::check_capabilities(&p),
+        Err(Error::Unsupported("VLESS transport"))
+    ));
+    assert!(matches!(
+        Session::connect(&p).await,
+        Err(Error::Unsupported("VLESS transport"))
+    ));
+    assert!(matches!(
+        rtrust_engine::H2Session::connect(&p).await,
+        Err(Error::Unsupported("VLESS transport"))
+    ));
+}

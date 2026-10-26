@@ -713,6 +713,8 @@ fn badge(p: &Profile, tk: Tokens) -> (&'static str, Color, Color) {
         rtrust_profile::Protocol::TrustTunnel => ("TT", tk.blue, tk.blue_soft),
         rtrust_profile::Protocol::Hysteria2 => ("H2", tk.violet, tk.violet_soft),
         rtrust_profile::Protocol::AmneziaWg => ("AW", tk.orange, tk.orange_soft),
+        // Placeholder until the VLESS transport and its badge land.
+        rtrust_profile::Protocol::Vless => ("VL", tk.blue, tk.blue_soft),
     }
 }
 

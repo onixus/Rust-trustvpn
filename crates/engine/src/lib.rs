@@ -123,6 +123,10 @@ impl From<std::io::Error> for Error {
 /// All unsupported security-sensitive fields fail closed. Routes are not applied by diagnostic mode.
 pub fn check_capabilities(p: &Profile) -> Result<()> {
     p.validate().map_err(|_| Error::Profile)?;
+    // Every connect path starts here: VLESS profiles import but cannot connect yet.
+    if p.protocol == rtrust_profile::Protocol::Vless {
+        return Err(Error::Unsupported("VLESS transport"));
+    }
     let e = &p.endpoint;
     if e.skip_verification {
         return Err(Error::Unsupported("disabled certificate verification"));

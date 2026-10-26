@@ -463,7 +463,7 @@ fn main() {
         }
     };
     if let Some(input) = std::env::args().nth(1).filter(|s| !s.starts_with("--")) {
-        let result = if ["tt://", "hy2://", "hysteria2://"]
+        let result = if rtrust_profile::LINK_SCHEMES
             .iter()
             .any(|scheme| input.starts_with(scheme))
         {
