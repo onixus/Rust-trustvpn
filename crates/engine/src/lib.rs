@@ -96,6 +96,9 @@ pub enum Error {
     /// `kind`: which evidence judged it.
     #[error("Tunnel carries no traffic")]
     Degraded { proven: bool, kind: Stall },
+    /// The connection under the session closed; returned by `Session::health`.
+    #[error("Tunnel connection closed")]
+    Closed(Close),
 }
 /// Which liveness evidence ended a session as degraded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +115,109 @@ impl Stall {
             Self::Silent => "silent",
             Self::Quiet => "quiet",
         }
+    }
+}
+/// Why the connection under a session closed: a class and numeric protocol
+/// codes only. Endpoint-supplied text (GOAWAY debug data, QUIC reason
+/// phrases) is never kept, so the value is safe for event logs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Close {
+    /// The endpoint closed the TCP/TLS stream (EOF) without GOAWAY.
+    PeerClosed,
+    /// HTTP/2 GOAWAY. `remote`: sent by the endpoint, else raised by h2 here.
+    GoAway { code: u32, remote: bool },
+    /// QUIC CONNECTION_CLOSE with an HTTP/3 application code from the endpoint.
+    QuicApplication(u64),
+    /// QUIC CONNECTION_CLOSE with a transport code. `remote` as for GOAWAY.
+    QuicTransport { code: u64, remote: bool },
+    /// QUIC idle timeout: nothing from the endpoint despite keepalives.
+    IdleTimeout,
+    /// QUIC stateless reset: the endpoint no longer knows the connection.
+    StatelessReset,
+    /// TLS record or alert failure on an established connection.
+    Tls,
+    /// Socket error on the connection.
+    Io(std::io::ErrorKind),
+    /// Closed by this client.
+    Local,
+}
+impl Close {
+    /// Stable `reason=<class>[ key=value]...` tokens for event logs.
+    pub fn fields(self) -> String {
+        let by = |remote: bool| if remote { "peer" } else { "local" };
+        match self {
+            Self::PeerClosed => "reason=peer_closed".into(),
+            Self::GoAway { code, remote } => format!("reason=goaway code={code} by={}", by(remote)),
+            Self::QuicApplication(code) => {
+                format!("reason=quic_close layer=app code={code} by=peer")
+            }
+            // 0x100..=0x1ff carry a TLS alert (RFC 9001 section 4.8).
+            Self::QuicTransport { code, remote } if (0x100..0x200).contains(&code) => {
+                format!("reason=tls_error alert={} by={}", code - 0x100, by(remote))
+            }
+            Self::QuicTransport { code, remote } => {
+                format!(
+                    "reason=quic_close layer=transport code={code} by={}",
+                    by(remote)
+                )
+            }
+            Self::IdleTimeout => "reason=idle_timeout".into(),
+            Self::StatelessReset => "reason=stateless_reset".into(),
+            Self::Tls => "reason=tls_error".into(),
+            Self::Io(kind) => format!("reason=io_error kind={}", io_kind(kind)),
+            Self::Local => "reason=local_stop".into(),
+        }
+    }
+}
+/// `ErrorKind` as a snake_case token (`ConnectionReset` -> `connection_reset`).
+pub fn io_kind(kind: std::io::ErrorKind) -> String {
+    let mut token = String::new();
+    for c in format!("{kind:?}")
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+    {
+        if c.is_ascii_uppercase() && !token.is_empty() {
+            token.push('_');
+        }
+        token.push(c.to_ascii_lowercase());
+    }
+    token
+}
+/// Connection-level h2 failures only; stream resets say nothing about the
+/// connection. Synthetic `BrokenPipe` is h2's marker for a peer EOF, and
+/// tokio-rustls reports TLS record failures as `InvalidData`.
+fn h2_close(error: &h2::Error) -> Option<Close> {
+    if error.is_go_away() {
+        return Some(Close::GoAway {
+            code: error.reason().map_or(0, u32::from),
+            remote: error.is_remote(),
+        });
+    }
+    Some(match error.get_io()?.kind() {
+        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof => Close::PeerClosed,
+        std::io::ErrorKind::InvalidData => Close::Tls,
+        kind => Close::Io(kind),
+    })
+}
+fn quic_close(error: &quinn::ConnectionError) -> Close {
+    use quinn::ConnectionError as E;
+    match error {
+        E::ApplicationClosed(close) => Close::QuicApplication(close.error_code.into_inner()),
+        E::ConnectionClosed(close) => Close::QuicTransport {
+            code: u64::from(close.error_code),
+            remote: true,
+        },
+        E::TransportError(error) => Close::QuicTransport {
+            code: u64::from(error.code),
+            remote: false,
+        },
+        E::TimedOut => Close::IdleTimeout,
+        E::Reset => Close::StatelessReset,
+        E::LocallyClosed => Close::Local,
+        E::VersionMismatch | E::CidsExhausted => Close::QuicTransport {
+            code: 0,
+            remote: false,
+        },
     }
 }
 impl From<std::io::Error> for Error {
@@ -289,6 +395,24 @@ impl Session {
         .map_err(|_| Error::Timeout)??;
         Ok(Self::new(Transport::H2(session), p.endpoint.has_ipv6))
     }
+    /// Why the underlying connection closed, once it has.
+    pub fn closed(&self) -> Option<Close> {
+        match &self.0 {
+            Transport::H2(s) => s.0.closed.get().copied(),
+            Transport::H3(s) => s.closed(),
+            Transport::Hysteria(s) => s.closed(),
+            Transport::Amnezia(_) => None,
+        }
+    }
+    /// Stable transport token for event logs.
+    pub fn transport_name(&self) -> &'static str {
+        match &self.0 {
+            Transport::H2(_) => "h2",
+            Transport::H3(_) => "h3",
+            Transport::Hysteria(_) => "hysteria2",
+            Transport::Amnezia(_) => "amneziawg",
+        }
+    }
     /// False when the endpoint has no IPv6 egress; IPv6 flows must fail locally.
     pub fn ipv6(&self) -> bool {
         self.1
@@ -296,12 +420,16 @@ impl Session {
     /// Fails when the endpoint stopped answering, and also when outbound
     /// traffic has stayed unanswered while opens to several destinations failed
     /// or stayed silent.
+    /// A failure on a closed connection is `Error::Closed` with its reason.
     pub async fn health(&self) -> Result<()> {
-        match &self.0 {
-            Transport::H2(s) => s.health().await?,
-            Transport::H3(s) => s.health().await?,
-            Transport::Hysteria(s) => s.health().await?,
-            Transport::Amnezia(s) => s.health().await?,
+        let checked = match &self.0 {
+            Transport::H2(s) => s.health().await,
+            Transport::H3(s) => s.health().await,
+            Transport::Hysteria(s) => s.health().await,
+            Transport::Amnezia(s) => s.health().await,
+        };
+        if let Err(error) = checked {
+            return Err(self.closed().map_or(error, Error::Closed));
         }
         match self.2.degraded() {
             None => Ok(()),
@@ -373,6 +501,8 @@ struct Inner {
     sender: h2::client::SendRequest<Bytes>,
     auth: http::HeaderValue,
     driver: tokio::task::JoinHandle<()>,
+    /// First connection-level failure, from the driver or a request.
+    closed: Arc<std::sync::OnceLock<Close>>,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -450,14 +580,39 @@ impl H2Session {
         ));
         let mut auth = http::HeaderValue::from_str(&auth_text).map_err(|_| Error::Profile)?;
         auth.set_sensitive(true);
+        let closed = Arc::new(std::sync::OnceLock::new());
+        let record = closed.clone();
+        // Aborted with `Inner`, so this handle never outlives the session.
+        let mut streams = sender.clone();
         let driver = tokio::spawn(async move {
-            let _ = connection.await;
+            let ended = connection.await;
+            // The streams keep the first connection error: a GOAWAY stays
+            // visible there although the driver ends `Ok` on the EOF after it.
+            let seen = std::future::poll_fn(|cx| {
+                Poll::Ready(match streams.poll_ready(cx) {
+                    Poll::Ready(Err(error)) => h2_close(&error),
+                    _ => None,
+                })
+            })
+            .await;
+            let close = seen
+                .or_else(|| ended.as_ref().err().and_then(h2_close))
+                .unwrap_or(Close::PeerClosed);
+            let _ = record.set(close);
         });
         Ok(Self(Arc::new(Inner {
             sender,
             auth,
             driver,
+            closed,
         })))
+    }
+    /// Records a connection-level failure; the caller's error stays `Protocol`.
+    fn lost(&self, error: h2::Error) -> Error {
+        if let Some(close) = h2_close(&error) {
+            let _ = self.0.closed.set(close);
+        }
+        Error::Protocol
     }
     async fn stream(&self, authority: &str) -> Result<(h2::RecvStream, h2::SendStream<Bytes>)> {
         let uri = http::Uri::builder()
@@ -480,14 +635,14 @@ impl H2Session {
         let mut sender = tokio::time::timeout_at(deadline, self.0.sender.clone().ready())
             .await
             .map_err(|_| Error::Credit)?
-            .map_err(|_| Error::Protocol)?;
+            .map_err(|e| self.lost(e))?;
         let (response, send) = sender
             .send_request(request, authority == "_check")
-            .map_err(|_| Error::Protocol)?;
+            .map_err(|e| self.lost(e))?;
         let response = tokio::time::timeout_at(deadline, response)
             .await
             .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::Protocol)?;
+            .map_err(|e| self.lost(e))?;
         match response.status() {
             StatusCode::OK => Ok((response.into_body(), send)),
             StatusCode::PROXY_AUTHENTICATION_REQUIRED => Err(Error::Authentication),

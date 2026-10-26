@@ -178,6 +178,9 @@ impl H3Session {
         .await
         .map_err(|_| Error::Timeout)?
     }
+    pub fn closed(&self) -> Option<Close> {
+        self.0.connection.close_reason().as_ref().map(quic_close)
+    }
     /// A `_check` finished without its response still proves a live,
     /// authenticated session once a first check returned 200; the endpoint
     /// received and answered it on this connection.

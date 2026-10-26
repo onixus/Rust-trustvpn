@@ -40,6 +40,23 @@ and starts no new mutation before the old worker has drained.
 - Keep bounded, redacted lifecycle diagnostics at
   `/private/var/run/rtrust/events.log` (root-owned, desktop-readable, 256 KiB cap).
   Never record profiles, credentials, request bodies or packet content.
+- Transport stops and failed reconnects carry a reason class
+  (`apps/tun/src/reason.rs`): only `key=value` tokens with lowercase classes and
+  numbers, never addresses, host names, URLs or endpoint-supplied text.
+  - `VPN transport stopped reason=<class> [code=<n>|kind=<io>|by=peer|local]
+    transport=h2|h3|hysteria2|amneziawg uptime_ms=<n>`. Classes: `peer_closed`
+    (EOF without GOAWAY), `goaway` (HTTP/2 code), `quic_close` (`layer=app|transport`
+    code), `tls_error`, `idle_timeout` (QUIC), `stateless_reset`, `io_error`,
+    `keepalive_timeout` (`_check` unanswered for 10 s), `degraded`, `protocol`,
+    `http_status`, `auth_rejected`, `device_io`, `device_timeout`, `worker_stopped`,
+    `worker_failed`. Sleep and Stop cancel the worker and log `power_event`/`stop_timing`
+    instead.
+  - `VPN reconnect failed: stage=connect|health|udp|attempt reason=<class>`.
+    Classes: `connect_timeout`, `connect_refused`, `connect_io kind=<io>`,
+    `connect_failed`, `tls_handshake`, `tls_trust`, `protocol`, `auth_rejected`,
+    `http_status code=<n>`, `stream_credit`, `timeout`, plus the close classes above.
+    Endpoint addresses are numeric on macOS, so no DNS class applies. Route-guard
+    failures keep their fixed strings.
 
 References: Apple's [QA1340](https://developer.apple.com/library/archive/qa/qa1340/_index.html)
 and the SDK IOPMLib.h IORegisterForSystemPower contract. The service no longer uses
@@ -165,7 +182,8 @@ defects showed on 2026-10-18/19:
   pending attempt that sleep cancels is refunded (`Budget::interrupted`); a
   cooldown already entered is kept. Wake-to-wake flapping still keeps the
   backoff (`repeated_power_events_preserve_retry_budget_and_stale_evidence`).
-  `VPN reconnect failed` now carries its fixed reason string.
+  `VPN reconnect failed` now carries its fixed reason string (since replaced
+  by the `stage=`/`reason=` classes above).
 
 Installed-package sleep/wake acceptance on a real Mac remains required before
 the issue is closed.
