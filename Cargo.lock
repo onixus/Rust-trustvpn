@@ -5603,6 +5603,7 @@ dependencies = [
  "quinn-proto",
  "rand 0.9.5",
  "rcgen",
+ "ring",
  "rtrust-engine",
  "rtrust-profile",
  "rustls",
