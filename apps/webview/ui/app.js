@@ -42,12 +42,12 @@ const T={en:{
  'profiles.hint':'Select a profile to see its actions. Connect uses the selected profile; automatic connection uses the default.',
  'profiles.empty':'No profiles yet. Add a file or link to get started.','profiles.no_match':'Nothing found.',
  'row.active':'active','row.selected':'selected','row.idle':'not active','badge.default':'Default','badge.backup':'Backup',
- 'detail.server':'Server','detail.protocol':'Protocol','detail.role':'Role','detail.connection':'Connection','role.default':'default','role.backup':'backup','role.none':'—',
+ 'detail.server':'Server','detail.protocol':'Protocol','detail.fingerprint':'TLS fingerprint','detail.fingerprint_note':'Browser TLS fingerprint is not emulated','detail.role':'Role','detail.connection':'Connection','role.default':'default','role.backup':'backup','role.none':'—',
  'detail.select':'Use for Connect','detail.selected':'Selected for Connect','detail.make_default':'Make default','detail.is_default':'Default profile',
  'detail.export':'Export…','detail.export_note':'The exported file includes VPN credentials.','detail.upload':'Upload to server…',
  'detail.delete':'Delete…','detail.confirm_delete':'Delete: click again','detail.none':'Select a profile.',
- 'add.title':'New profile','add.file_title':'Open a profile file','add.file_detail':'TrustTunnel, Hysteria 2 or AmneziaWG: TOML, YAML, JSON or .conf','add.file':'Choose file…',
- 'add.paste_title':'Link or configuration text','add.paste_hint':'tt://, hy2:// or TOML / YAML / JSON','add.preview':'Preview import',
+ 'add.title':'New profile','add.file_title':'Open a profile file','add.file_detail':'TrustTunnel, Hysteria 2 or AmneziaWG: TOML, YAML, JSON or .conf; VLESS: a vless:// link','add.file':'Choose file…',
+ 'add.paste_title':'Link or configuration text','add.paste_hint':'tt://, hy2://, vless:// or TOML / YAML / JSON','add.preview':'Preview import',
  'add.paste_note':'First we show what will be imported. A link never connects automatically.',
  'add.portal':'Connect to a server','add.portal_detail':'One-time code from the panel; profiles arrive by sync',
  'add.preview_title':'Import preview','add.preview_empty':'Choose a file or paste a link to see what will be imported.','add.import':'Import','add.name':'Name',
@@ -103,12 +103,12 @@ const T={en:{
  'profiles.hint':'Выберите профиль, чтобы увидеть действия. «Подключить» использует выбранный профиль, автоподключение — профиль по умолчанию.',
  'profiles.empty':'Профилей пока нет. Добавьте файл или ссылку.','profiles.no_match':'Ничего не найдено.',
  'row.active':'активен','row.selected':'выбран','row.idle':'не активен','badge.default':'По умолчанию','badge.backup':'Резерв',
- 'detail.server':'Сервер','detail.protocol':'Протокол','detail.role':'Роль','detail.connection':'Подключение','role.default':'по умолчанию','role.backup':'резерв','role.none':'—',
+ 'detail.server':'Сервер','detail.protocol':'Протокол','detail.fingerprint':'Отпечаток TLS','detail.fingerprint_note':'Отпечаток TLS браузера не эмулируется','detail.role':'Роль','detail.connection':'Подключение','role.default':'по умолчанию','role.backup':'резерв','role.none':'—',
  'detail.select':'Выбрать для подключения','detail.selected':'Выбран для подключения','detail.make_default':'Сделать профилем по умолчанию','detail.is_default':'Профиль по умолчанию',
  'detail.export':'Экспортировать…','detail.export_note':'Экспортированный файл содержит учётные данные VPN.','detail.upload':'Загрузить на сервер…',
  'detail.delete':'Удалить…','detail.confirm_delete':'Удалить — нажмите ещё раз','detail.none':'Выберите профиль.',
- 'add.title':'Новый профиль','add.file_title':'Открыть файл профиля','add.file_detail':'TrustTunnel, Hysteria 2 или AmneziaWG: TOML, YAML, JSON или .conf','add.file':'Выбрать файл…',
- 'add.paste_title':'Ссылка или текст конфигурации','add.paste_hint':'tt://, hy2:// или TOML / YAML / JSON','add.preview':'Показать импорт',
+ 'add.title':'Новый профиль','add.file_title':'Открыть файл профиля','add.file_detail':'TrustTunnel, Hysteria 2 или AmneziaWG: TOML, YAML, JSON или .conf; VLESS: ссылка vless://','add.file':'Выбрать файл…',
+ 'add.paste_title':'Ссылка или текст конфигурации','add.paste_hint':'tt://, hy2://, vless:// или TOML / YAML / JSON','add.preview':'Показать импорт',
  'add.paste_note':'Сначала покажем, что будет импортировано. Ссылка никогда не подключает автоматически.',
  'add.portal':'Подключить к серверу','add.portal_detail':'Одноразовый код из панели — профили приходят синхронизацией',
  'add.preview_title':'Предпросмотр импорта','add.preview_empty':'Выберите файл или вставьте ссылку, чтобы увидеть, что будет импортировано.','add.import':'Импортировать','add.name':'Имя',
@@ -148,8 +148,10 @@ document.querySelectorAll('[name=theme-choice]').forEach(r=>r.onchange=()=>{try{
 /* ---------- Helpers ---------- */
 function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;}
 function button(text,action,cls){const b=el('button',cls||'btn',text);b.type='button';b.onclick=()=>run(action);return b;}
-function code(p){const s=String(p?.protocol||'');return /hysteria/i.test(s)?'H2':/amnezia|wireguard/i.test(s)?'AW':'TT';}
-function avatarClass(p){return {H2:'violet',AW:'orange',TT:'blue'}[code(p)];}
+function code(p){const s=String(p?.protocol||'');return /hysteria/i.test(s)?'H2':/amnezia|wireguard/i.test(s)?'AW':/vless/i.test(s)?'VL':'TT';}
+function avatarClass(p){return {H2:'violet',AW:'orange',VL:'teal',TT:'blue'}[code(p)];}
+// Rows of a profile summary; the fingerprint note appears only when it applies.
+function protocolRows(p){return p.fingerprint_unemulated?[[t('detail.fingerprint'),t('detail.fingerprint_note')]]:[];}
 function setAvatar(node,p){node.textContent=p?code(p):'—';node.className='avatar '+(p?avatarClass(p):'');}
 // The profile the session really runs on: after failover the service may use a backup.
 function live(){
@@ -297,7 +299,7 @@ function renderDetail(){
  head.append(av,names);
  const rows=el('div','kv');
  const role=p.default?t('role.default'):backupNames().includes(p.name)?t('role.backup'):t('role.none');
- for(const [k,v] of [[t('detail.server'),p.hostname],[t('detail.protocol'),p.protocol],[t('detail.role'),role],[t('detail.connection'),rowStatus(index)[1]]]){const r=el('div','kv-row');r.append(el('span','muted',k),el('b','',v));rows.append(r);}
+ for(const [k,v] of [[t('detail.server'),p.hostname],[t('detail.protocol'),p.protocol],[t('detail.role'),role],[t('detail.connection'),rowStatus(index)[1]],...protocolRows(p)]){const r=el('div','kv-row');r.append(el('span','muted',k),el('b','',v));rows.append(r);}
  const actions=el('div','detail-actions');
  const select=el('button','btn wide',t(index===selected?'detail.selected':'detail.select'));select.type='button';select.dataset.off=index===selected?'1':'0';
  select.onclick=()=>{selected=index;renderProfiles();renderHome();renderStatus();};
@@ -315,7 +317,7 @@ function preview(p){
  const box=$('preview');box.replaceChildren();
  if(!p){box.append(el('p','muted',t('add.preview_empty')));return;}
  const rows=el('div','kv');
- for(const [k,v] of [[t('add.name'),p.name],[t('detail.server'),p.hostname],[t('detail.protocol'),p.protocol]]){const r=el('div','kv-row');r.append(el('span','muted',k),el('b','',v));rows.append(r);}
+ for(const [k,v] of [[t('add.name'),p.name],[t('detail.server'),p.hostname],[t('detail.protocol'),p.protocol],...protocolRows(p)]){const r=el('div','kv-row');r.append(el('span','muted',k),el('b','',v));rows.append(r);}
  const row=el('div','row');row.append(button(t('add.import'),async()=>{await invoke('commit_import',{revision:state.revision});preview(null)},'btn primary'));
  box.append(rows,row);
 }

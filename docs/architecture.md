@@ -26,13 +26,14 @@
 
 ```mermaid
 flowchart LR
-  I[File / tt:// / hy2:// / hysteria2:// / awg-quick] --> P[crates/profile]
+  I[File / tt:// / hy2:// / hysteria2:// / vless:// / awg-quick] --> P[crates/profile]
   P --> UI[Native iced / WebView / Android / iOS]
   UI --> C[crates/control + platform integration]
   C --> E[crates/engine]
   E --> TT[TrustTunnel H2/H3]
   E --> HY[Hysteria 2 QUIC/H3]
   E --> AWG[AmneziaWG 3]
+  E --> VL[VLESS WS+TLS via CDN]
   C --> TUN[TUN / Wintun / utun / VpnService / Network Extension]
   UI --> S[crates/store encrypted vault]
   UI --> PORTAL[crates/portal client API]
@@ -44,7 +45,7 @@ flowchart LR
 Фактические Rust workspace members задаются корневым `Cargo.toml`:
 
 - `crates/profile` — parsing, normalization, validation и export профилей;
-- `crates/engine` — TrustTunnel/Hysteria/AmneziaWG transport/data plane;
+- `crates/engine` — TrustTunnel/Hysteria/AmneziaWG/VLESS transport/data plane ([VLESS](vless.md));
 - `crates/store` — encrypted profile storage;
 - `crates/control` — control-plane types/lifecycle;
 - `crates/desktop` — общая desktop application logic;

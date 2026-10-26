@@ -29,7 +29,7 @@
     <string name="portal_upload_warning">"Отправить этот профиль вместе с учётными данными на зарегистрированный сервер? Будет создан новый внешний профиль; учётные данные VPN-сервера не изменятся."</string>
     <string name="portal_uploaded">"Профиль сохранён в серверном UI."</string>
     <string name="qr_import">"Импорт QR-кода"</string>
-    <string name="qr_prompt">"Наведите камеру на QR-код профиля или ссылки tt:// / hy2://"</string>
+    <string name="qr_prompt">"Наведите камеру на QR-код профиля или ссылки tt:// / hy2:// / vless://"</string>
     <string name="qr_failed">"Не удалось прочитать QR-код. Выберите чёткое изображение размером до 12 МиБ."</string>
     <string name="export_failed">"Не удалось экспортировать профиль."</string>
     <string name="export_expired">"Время экспорта истекло. Выберите профиль и повторите экспорт."</string>
@@ -69,7 +69,8 @@
     <string name="export_contains_credentials">"Экспорт содержит учётные данные"</string>
     <string name="endpoint_toml">"TOML сервера"</string>
     <string name="cli_toml">"TOML CLI"</string>
-    <string name="tt_link">"Ссылка tt:// / hy2://"</string>
+    <string name="tt_link">"Ссылка tt:// / hy2:// / vless://"</string>
+    <string name="tls_fingerprint_not_emulated">Отпечаток TLS браузера не эмулируется</string>
     <string name="save_unencrypted_credentials">"Сохранить незашифрованные учётные данные?"</string>
     <string name="anyone_with_this_file_can_use">"Любой обладатель этого файла сможет использовать профиль. "</string>
     <string name="choose_file">"Выбрать файл"</string>
@@ -193,7 +194,7 @@
     <string name="v3_qr_photo">QR из фото</string>
     <string name="v3_file">Файл</string>
     <string name="v3_paste_title">Ссылка или текст конфигурации</string>
-    <string name="v3_paste_hint">tt://, hy2:// или TOML / YAML / JSON</string>
+    <string name="v3_paste_hint">tt://, hy2://, vless:// или TOML / YAML / JSON</string>
     <string name="v3_paste_note">Сначала покажем, что будет импортировано: имя, сервер, протокол и предупреждения.</string>
     <string name="v3_portal">Подключить к серверу</string>
     <string name="v3_portal_detail">Одноразовый код из панели — профили приходят синхронизацией</string>

@@ -2,7 +2,7 @@
 
 [English](Readme.md) · [Русский](readme_ru.md)
 
-R-TrustTunnel is a native VPN client written in Rust for **TrustTunnel**, **Hysteria 2** and **AmneziaWG 3**. The repository contains Windows/Linux desktop clients, macOS desktop/system-VPN packaging, Android VpnService, an iOS Network Extension preview, shared Rust transport/profile/storage/mobile crates and privileged desktop tunnel services.
+R-TrustTunnel is a native VPN client written in Rust for **TrustTunnel**, **Hysteria 2**, **AmneziaWG 3** and **VLESS over a CDN** (WebSocket + TLS, preview). The repository contains Windows/Linux desktop clients, macOS desktop/system-VPN packaging, Android VpnService, an iOS Network Extension preview, shared Rust transport/profile/storage/mobile crates and privileged desktop tunnel services.
 
 The client implements its own transport and does **not** wrap the official TrustTunnel or Hysteria CLI.
 
@@ -61,7 +61,7 @@ Route groups are desktop-only. Android/iOS use the routing policy embedded in th
 
 - Native Rust/iced desktop UI, an optional Tauri WebView frontend and, on Linux, a terminal client in main.
 - Native Android application using VpnService plus the shared Rust core.
-- Import of endpoint TOML, full client TOML, R-TrustTunnel JSON, Hysteria YAML/JSON, AmneziaWG `awg-quick` files, tt://, hy2:// and hysteria2://.
+- Import of endpoint TOML, full client TOML, R-TrustTunnel JSON, Hysteria YAML/JSON, AmneziaWG `awg-quick` files, tt://, hy2://, hysteria2:// and vless://.
 - Preview and validation before profile replacement.
 - Automatic encrypted profile persistence. Desktop stores the encryption key in the OS credential store; Android uses Android Keystore. There is no plaintext fallback.
 - System tray, startup options, autoconnect preference, diagnostics and explicit recovery flows.
@@ -93,6 +93,8 @@ Unsupported or intentionally rejected options include insecure TLS, ECH, Hysteri
 See [Hysteria 2 support and limits](docs/hysteria2.md).
 
 AmneziaWG 3 `awg-quick` configurations select an in-process WireGuard transport with the AmneziaWG obfuscation layer (junk and signature packets, prefixes, type ranges, header protection, padding). It is verified against the official `amneziawg-go` 3.1 on loopback only; see [supported options and limits](docs/amneziawg.md).
+
+`vless://` links from the server's CDN panel select VLESS over WebSocket and TLS (Xray-core behind a CDN): TCP and UDP up to 8190 bytes, one TLS connection per flow, no ICMP. XHTTP imports but does not connect yet, and the browser TLS fingerprint (`fp=chrome`) is not emulated; see [VLESS support and limits](docs/vless.md).
 
 ## Platform status
 
@@ -157,7 +159,7 @@ Run the GUI as a normal desktop user. System VPN on desktop requires the privile
 
 ### Desktop
 
-1. Import a profile file (TrustTunnel TOML, Hysteria YAML, AmneziaWG `.conf`, JSON) or open/paste a tt://, hy2:// or hysteria2:// link.
+1. Import a profile file (TrustTunnel TOML, Hysteria YAML, AmneziaWG `.conf`, JSON) or open/paste a tt://, hy2://, hysteria2:// or vless:// link.
 2. Review the parsed profile and add or replace it.
 3. Select the profile to connect and the connection mode.
 4. For system VPN, install the matching platform service first.
@@ -230,7 +232,7 @@ Overview:
 - [Project status and open issues](docs/project-status.md) · [Implementation status](docs/implementation.md) · [Architecture](docs/architecture.md) · [Delivery and acceptance](docs/delivery.md) · [Technical debt](docs/technical-debt.md)
 - [Release records](docs/releases/) · [Package acceptance](docs/package-acceptance.md) · [Secure updates](docs/secure-updates.md) · [Evidence](docs/evidence.md)
 
-Protocols: [HTTP/3](docs/http3.md) · [Hysteria 2](docs/hysteria2.md) · [AmneziaWG](docs/amneziawg.md)
+Protocols: [HTTP/3](docs/http3.md) · [Hysteria 2](docs/hysteria2.md) · [AmneziaWG](docs/amneziawg.md) · [VLESS](docs/vless.md)
 
 Connection behaviour: [VPN observations](docs/vpn-observations.md) · [System diagnostics](docs/system-diagnostics.md) · [Route explain](docs/route-explain.md) · [Routing policy](docs/routing-policy.md) · [Failover](docs/failover.md) · [Recovery](docs/recovery.md) · [Always-on](docs/always-on.md) · [Desktop lifecycle](docs/desktop-lifecycle.md)
 

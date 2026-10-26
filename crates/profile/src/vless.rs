@@ -317,6 +317,7 @@ mod tests {
                 assert!(!p.endpoint.has_ipv6);
                 assert_eq!(p.name, "CDN-alice");
                 assert_eq!(p.transport_name(), "VLESS WS");
+                assert!(p.tls_fingerprint_unemulated());
                 assert!(!p.udp_transport());
                 let v = p.vless.as_ref().unwrap();
                 assert_eq!((v.path.expose(), v.fingerprint.as_str()), (PATH, "chrome"));
@@ -355,6 +356,7 @@ mod tests {
         assert_eq!(p.endpoint.addresses, ["cdn.example.com:443"]);
         assert_eq!(p.name, "cdn.example.com");
         assert!(p.vless.as_ref().unwrap().fingerprint.is_empty());
+        assert!(!p.tls_fingerprint_unemulated());
         // Host defaults to the SNI and WebSocket always negotiates HTTP/1.1.
         assert_eq!(
             p.export(Format::Link).unwrap().content,

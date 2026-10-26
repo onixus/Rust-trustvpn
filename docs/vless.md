@@ -1,0 +1,92 @@
+# VLESS over a CDN (WebSocket + TLS) preview
+
+The shared Rust engine imports `vless://` links issued by the CDN panel of the
+server ([onixus/tunnel](https://github.com/onixus/tunnel), `cdn.py`
+`render_client`) and connects through Xray-core behind a CDN with VLESS over
+WebSocket and TLS. The saved profile carries the explicit `vless` protocol
+discriminator; TrustTunnel, Hysteria 2 and AmneziaWG profiles are unaffected.
+The client runs no Xray binary: the WebSocket and VLESS layers are in-process
+(`crates/engine/src/vless`).
+
+## Link and profile
+
+The server issues:
+
+```text
+vless://<uuid>@<address>:<port>?encryption=none&security=tls&sni=<domain>&host=<domain>&fp=chrome&type=ws&path=<path>&alpn=http%2F1.1#<name>
+```
+
+XHTTP links carry `type=xhttp&mode=auto` instead of `alpn`. The profile stores:
+
+| Link | Profile |
+| --- | --- |
+| `<uuid>` | `endpoint.password` (canonical lower-case UUID; `endpoint.username` is `vless`) |
+| `<address>:<port>` | `endpoint.addresses` (one entry; IPv6 in brackets; the port is required) |
+| `sni`, `host` | `endpoint.hostname` (a DNS name, never an IP; `host` must be empty or equal to `sni`) |
+| `type`, `path`, `fp`, `mode` | `vless.transport`, `vless.path` (secret), `vless.fingerprint`, `vless.xhttp_mode` |
+| `#<name>` | `name` (control and bidi characters removed; the SNI when empty) |
+
+`endpoint.has_ipv6` is `false`: the CDN origin container has no IPv6 egress, so
+IPv6 flows fail locally instead of disappearing in the tunnel.
+
+Import fails closed: only `encryption=none` and `security=tls` are accepted, and
+unknown options, duplicates, REALITY (`pbk`, `sid`, `spx`, `pqv`), `flow`,
+`allowInsecure`/`insecure`, `headerType`, `serviceName`, `authority`, `ech`,
+`extra`, `fp` other than `chrome`, a non-canonical UUID and paths with
+controls, spaces, `%`, `?` or `#` (including `?ed=`) are rejected. Errors name
+the field, never its value.
+
+Export: R-TrustTunnel JSON and the link, in the server's own field order, so a
+server link round-trips byte for byte. Policy, a custom CA, DNS upstreams and
+other JSON-only fields are reported as losses.
+
+## What connects
+
+| Supported | Not supported |
+| --- | --- |
+| WebSocket over TLS (ALPN `http/1.1`) | XHTTP: imports and exports, connecting reports `VLESS XHTTP transport` as unsupported |
+| TCP flows to IPv4, IPv6 and domain targets | mux / XUDP, early data (`ed`), uTLS / browser fingerprints |
+| UDP up to 8190 bytes per datagram | ICMP relay |
+
+- **Fingerprint.** `fp=chrome` is kept for export, but the TLS handshake is the
+  client's own (rustls). The profile details say "Browser TLS fingerprint is not
+  emulated".
+- **One connection per flow.** Each TCP flow and each UDP source/destination
+  pair is its own TLS connection and WebSocket upgrade (at most 256 TCP flows
+  per session; 64 UDP flows per tunnel, 1024 per session, closed after 60 s
+  without traffic). There is no shared multiplexed session. Every flow socket
+  is marked or protected before connect; the endpoint name is resolved once
+  when the session starts, never per flow.
+- **UDP size.** Xray's buffers carry 8190 payload bytes with the 2-byte length
+  prefix. Larger downlink packets are dropped silently and larger uplink ones
+  are split, which breaks datagram boundaries, so the client drops uplink
+  datagrams above 8190 bytes.
+- **Half-close.** When the application finishes sending, the client keeps the
+  flow open for the answer until the server closes or 10 s pass without data.
+  Xray's outbound closes 1 s after the uplink ends.
+- **No open confirmation.** VLESS has no CONNECT answer: the response header
+  arrives only with the first downlink data. A wrong UUID gives a successful
+  WebSocket upgrade followed by a close, so it shows up as flows that open and
+  stay empty, not as an authentication error. A wrong path is an HTTP 404 at
+  upgrade time; redirects are not followed.
+- **Health.** A WebSocket upgrade in the last 30 s (by both the monotonic and
+  the wall clock, so device sleep counts) proves the endpoint; otherwise one
+  probe upgrade without a VLESS request is made.
+
+## Privacy
+
+TLS terminates at the CDN. The CDN sees the WebSocket path, the VLESS UUID and
+all tunneled traffic that is not itself encrypted end to end. The path and the
+UUID are secrets of the profile: they are redacted from logs, `Debug`, errors
+and summaries, and kept in the encrypted vault.
+
+## Known limitations
+
+- The kill switch admits TCP to the endpoint addresses. CDN addresses are
+  shared, and other sites on the same addresses are unreachable while the full
+  guard is on (follow-up).
+- Older client versions cannot read a vault that contains a VLESS profile.
+- Android and iOS do not register the `vless` URL scheme yet; pasted text,
+  files and Android QR codes go through the shared parser.
+- Interop against Xray-core 26.10.21 is a separate loopback fixture;
+  installed-package acceptance through a real CDN is not done.

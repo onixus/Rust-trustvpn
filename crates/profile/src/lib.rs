@@ -181,6 +181,13 @@ impl Profile {
             Protocol::TrustTunnel => &self.endpoint.upstream_protocol,
         }
     }
+    /// True when the link asked for a browser TLS fingerprint (`fp=chrome`):
+    /// it is kept for export, but the client's TLS handshake is its own.
+    pub fn tls_fingerprint_unemulated(&self) -> bool {
+        self.vless
+            .as_ref()
+            .is_some_and(|v| !v.fingerprint.is_empty())
+    }
     /// True when the transport to the server is UDP (QUIC or WireGuard), so a
     /// kill switch must admit UDP rather than TCP to the endpoint.
     pub fn udp_transport(&self) -> bool {

@@ -239,7 +239,7 @@ struct RootView: View {
             Button(tr("Cancel", "Отмена"), role: .cancel) { renaming = nil }
         }
         .onOpenURL { url in
-            guard ["tt", "hy2", "hysteria2"].contains(url.scheme?.lowercased() ?? ""), url.absoluteString.utf8.count <= 1_048_576 else { return }
+            guard ["tt", "hy2", "hysteria2", "vless"].contains(url.scheme?.lowercased() ?? ""), url.absoluteString.utf8.count <= 1_048_576 else { return }
             incoming = url.absoluteString; add = true
         }
     }
@@ -720,7 +720,7 @@ struct ImportView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(loc("v3.paste.title")).font(.body.weight(.heavy)).foregroundStyle(palette.text)
             HStack(spacing: 8) {
-                SecureField("tt:// · hy2:// · TOML · YAML · JSON · conf", text: $input).focused($inputFocused)
+                SecureField("tt:// · hy2:// · vless:// · TOML · YAML · JSON · conf", text: $input).focused($inputFocused)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .padding(.horizontal, 14).frame(height: 44)
                     .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(palette.field))
@@ -760,7 +760,7 @@ struct ExportView: View {
     @State private var save = false
     @State private var result: ExportResult?
     @State private var error: String?
-    private let formats = ["JSON", "Endpoint TOML", "CLI TOML", "tt:// / hy2://", "Conf"]
+    private let formats = ["JSON", "Endpoint TOML", "CLI TOML", "tt:// / hy2:// / vless://", "Conf"]
     private var suffix: String { ["json", "toml", "toml", "txt", "conf"][format] }
     var body: some View {
         NavigationStack {
