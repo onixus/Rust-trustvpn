@@ -780,14 +780,7 @@ async fn run(
                     .transport_lost(runner_session);
                 connection_ended("connect_failed");
                 state(3, &error.to_string());
-                fatal = matches!(
-                    error,
-                    rtrust_engine::Error::Authentication
-                        | rtrust_engine::Error::Tls
-                        | rtrust_engine::Error::Trust
-                        | rtrust_engine::Error::Unsupported(_)
-                        | rtrust_engine::Error::Profile
-                );
+                fatal = rtrust_mobile::permanent(&error);
             }
         }
         let delay = budget.lock().unwrap_or_else(|p| p.into_inner()).failed(

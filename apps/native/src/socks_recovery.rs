@@ -194,6 +194,11 @@ mod tests {
             Error::Protocol,
             Error::Timeout,
             Error::Io,
+            Error::Closed(rtrust_engine::Close::PeerClosed),
+            Error::Closed(rtrust_engine::Close::GoAway {
+                code: 0,
+                remote: true,
+            }),
         ] {
             assert!(!Failure::from(error).permanent);
         }

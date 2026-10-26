@@ -12,6 +12,48 @@ use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
 
+/// A failed connect or check that retrying the same profile cannot fix:
+/// Android backs off as fatal, iOS stops in state 4. A closed connection
+/// (`Error::Closed`) is transient, and `Session::health` keeps an answered
+/// rejection as such even when the connection closed right behind it.
+pub fn permanent(error: &rtrust_engine::Error) -> bool {
+    use rtrust_engine::Error;
+    matches!(
+        error,
+        Error::Authentication | Error::Tls | Error::Trust | Error::Unsupported(_) | Error::Profile
+    )
+}
+#[cfg(test)]
+mod permanent_tests {
+    use rtrust_engine::{Close, Error};
+    #[test]
+    fn only_profile_credential_and_tls_failures_are_permanent() {
+        for error in [
+            Error::Authentication,
+            Error::Tls,
+            Error::Trust,
+            Error::Unsupported("x"),
+            Error::Profile,
+        ] {
+            assert!(super::permanent(&error), "{error:?}");
+        }
+        for error in [
+            Error::Closed(Close::PeerClosed),
+            Error::Closed(Close::GoAway {
+                code: 0,
+                remote: true,
+            }),
+            Error::Closed(Close::QuicApplication(0x100)),
+            Error::Protocol,
+            Error::Timeout,
+            Error::Rejected(503),
+            Error::Connect,
+        ] {
+            assert!(!super::permanent(&error), "{error:?}");
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct Plan {
     pub flow: rtrust_engine::routing::Policy,

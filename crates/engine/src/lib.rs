@@ -199,6 +199,79 @@ fn h2_close(error: &h2::Error) -> Option<Close> {
         kind => Close::Io(kind),
     })
 }
+/// A failed check on a connection that has closed reports the close, but only
+/// for failures the close explains. An answer the endpoint gave (407, another
+/// status) or a local TLS/profile failure keeps its error: callers treat
+/// those as permanent.
+fn on_closed(error: Error, closed: Option<Close>) -> Error {
+    let transport = matches!(
+        error,
+        Error::Protocol
+            | Error::Connect
+            | Error::ConnectIo(_)
+            | Error::Io
+            | Error::Credit
+            | Error::Timeout
+    );
+    match closed {
+        Some(close) if transport => Error::Closed(close),
+        _ => error,
+    }
+}
+#[cfg(test)]
+mod on_closed_tests {
+    use super::*;
+    #[test]
+    fn only_transport_failures_become_the_close() {
+        let closes = [
+            Close::PeerClosed,
+            Close::GoAway {
+                code: 0xb,
+                remote: true,
+            },
+            Close::QuicApplication(0x100),
+            Close::StatelessReset,
+        ];
+        for close in closes {
+            // H2/H3 checks fail with these on a closed connection; Hysteria
+            // with `Connect`.
+            for error in [
+                Error::Protocol,
+                Error::Connect,
+                Error::ConnectIo(std::io::ErrorKind::BrokenPipe),
+                Error::Io,
+                Error::Credit,
+                Error::Timeout,
+            ] {
+                assert!(matches!(on_closed(error, Some(close)), Error::Closed(c) if c == close));
+            }
+            for error in [
+                Error::Authentication,
+                Error::Rejected(407),
+                Error::Rejected(503),
+                Error::Tls,
+                Error::Trust,
+                Error::Profile,
+                Error::Unsupported("x"),
+                Error::Destination,
+            ] {
+                let kept = format!("{error:?}");
+                assert_eq!(format!("{:?}", on_closed(error, Some(close))), kept);
+            }
+        }
+        assert!(matches!(on_closed(Error::Protocol, None), Error::Protocol));
+    }
+}
+/// The first connection-level error h2 recorded, if any. h2 keeps it for
+/// every handle and never overwrites it, so a GOAWAY stays visible after the
+/// EOF behind it. One poll with a no-op waker: it only reads that state.
+fn connection_close(sender: &h2::client::SendRequest<Bytes>) -> Option<Close> {
+    let mut probe = sender.clone();
+    match probe.poll_ready(&mut Context::from_waker(std::task::Waker::noop())) {
+        Poll::Ready(Err(error)) => h2_close(&error),
+        _ => None,
+    }
+}
 fn quic_close(error: &quinn::ConnectionError) -> Close {
     use quinn::ConnectionError as E;
     match error {
@@ -420,7 +493,8 @@ impl Session {
     /// Fails when the endpoint stopped answering, and also when outbound
     /// traffic has stayed unanswered while opens to several destinations failed
     /// or stayed silent.
-    /// A failure on a closed connection is `Error::Closed` with its reason.
+    /// A transport failure on a closed connection is `Error::Closed` with
+    /// its reason.
     pub async fn health(&self) -> Result<()> {
         let checked = match &self.0 {
             Transport::H2(s) => s.health().await,
@@ -429,7 +503,7 @@ impl Session {
             Transport::Amnezia(s) => s.health().await,
         };
         if let Err(error) = checked {
-            return Err(self.closed().map_or(error, Error::Closed));
+            return Err(on_closed(error, self.closed()));
         }
         match self.2.degraded() {
             None => Ok(()),
@@ -582,20 +656,12 @@ impl H2Session {
         auth.set_sensitive(true);
         let closed = Arc::new(std::sync::OnceLock::new());
         let record = closed.clone();
-        // Aborted with `Inner`, so this handle never outlives the session.
-        let mut streams = sender.clone();
+        // Aborted with `Inner`, which aborts the driver before its own sender
+        // drops, so this handle changes nothing about how the connection ends.
+        let streams = sender.clone();
         let driver = tokio::spawn(async move {
             let ended = connection.await;
-            // The streams keep the first connection error: a GOAWAY stays
-            // visible there although the driver ends `Ok` on the EOF after it.
-            let seen = std::future::poll_fn(|cx| {
-                Poll::Ready(match streams.poll_ready(cx) {
-                    Poll::Ready(Err(error)) => h2_close(&error),
-                    _ => None,
-                })
-            })
-            .await;
-            let close = seen
+            let close = connection_close(&streams)
                 .or_else(|| ended.as_ref().err().and_then(h2_close))
                 .unwrap_or(Close::PeerClosed);
             let _ = record.set(close);
@@ -608,8 +674,10 @@ impl H2Session {
         })))
     }
     /// Records a connection-level failure; the caller's error stays `Protocol`.
+    /// The connection's own first error wins over the stream's: an open
+    /// stream ends with `BrokenPipe` on the EOF that follows a GOAWAY.
     fn lost(&self, error: h2::Error) -> Error {
-        if let Some(close) = h2_close(&error) {
+        if let Some(close) = connection_close(&self.0.sender).or_else(|| h2_close(&error)) {
             let _ = self.0.closed.set(close);
         }
         Error::Protocol
