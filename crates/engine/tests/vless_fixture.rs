@@ -484,3 +484,194 @@ async fn server_crash_and_restart() {
     session.health().await.unwrap();
     tcp_echo(&session, &tcp, &payload(128 * 1024, 6)).await;
 }
+
+/// A TCP relay in front of Xray that counts the connections the client makes.
+struct Counter {
+    port: u16,
+    accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Counter {
+    async fn start(link: &str) -> Self {
+        let upstream = server(link);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = accepted.clone();
+        let task = tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let upstream = upstream.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut outbound) = tokio::net::TcpStream::connect(upstream).await {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                    }
+                });
+            }
+        });
+        Self {
+            port,
+            accepted,
+            task,
+        }
+    }
+    fn count(&self) -> usize {
+        self.accepted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// The link through this relay.
+    fn link(&self, link: &str) -> String {
+        link.replacen(&server(link), &format!("127.0.0.1:{}", self.port), 1)
+    }
+}
+impl Drop for Counter {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+fn server(link: &str) -> String {
+    link[link.find('@').unwrap() + 1..link.find('?').unwrap()].to_owned()
+}
+
+/// Resolver-like load: every query from a new source port is its own flow,
+/// far more than the tunnel's flow table holds; all are answered.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run through ci/vless_interop.py"]
+async fn many_udp_sources_are_all_answered() {
+    if mode() != "open" {
+        return;
+    }
+    let link = env("RTRUST_VLESS_LINK");
+    let udp_target = format!("127.0.0.1:{}", env("RTRUST_VLESS_UDP"));
+    let counter = Counter::start(&link).await;
+    let session = Session::connect(&profile(&counter.link(&link)))
+        .await
+        .unwrap();
+    let baseline = descriptors();
+    let mut stream = session.open_udp().await.unwrap();
+    let started = Instant::now();
+    for n in 0..240u16 {
+        let source = format!("10.0.0.2:{}", 20_000 + n);
+        let query = payload(40 + (n as usize % 60), n as u8);
+        send(&mut stream, &datagram(&source, &udp_target, query.clone())).await;
+        let reply = receive(&mut stream, Duration::from_secs(10))
+            .await
+            .unwrap_or_else(|| panic!("query {n} unanswered"));
+        assert_eq!(
+            (reply.payload, reply.destination.to_string()),
+            (query, source)
+        );
+    }
+    // Live flows stay bounded by the table, not by the number of sources:
+    // each flow holds its socket plus both relay sockets of the counter.
+    let live = descriptors().saturating_sub(baseline);
+    println!(
+        "240 sequential sources answered in {:?}; {} server connections; {live} extra descriptors",
+        started.elapsed(),
+        counter.count()
+    );
+    assert!(
+        live <= 3 * (64 + 8),
+        "{live} descriptors held for 240 sources"
+    );
+    // A burst within the table size is answered too.
+    for n in 0..48u16 {
+        let source = format!("10.0.0.3:{}", 30_000 + n);
+        send(
+            &mut stream,
+            &datagram(&source, &udp_target, vec![n as u8; 64]),
+        )
+        .await;
+    }
+    let mut answered = std::collections::HashSet::new();
+    while answered.len() < 48 {
+        let reply = receive(&mut stream, Duration::from_secs(10))
+            .await
+            .unwrap_or_else(|| panic!("burst: {} of 48 answered", answered.len()));
+        answered.insert(reply.destination.port());
+    }
+}
+
+/// An unknown UUID: Xray closes every UDP flow without a byte. The client
+/// backs off instead of reconnecting per packet, and the right link still works.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run through ci/vless_interop.py"]
+async fn wrong_uuid_udp_does_not_storm_the_server() {
+    if mode() != "open" {
+        return;
+    }
+    let link = env("RTRUST_VLESS_LINK");
+    let udp_target = format!("127.0.0.1:{}", env("RTRUST_VLESS_UDP"));
+    let counter = Counter::start(&link).await;
+    let user = &link["vless://".len()..link.find('@').unwrap()];
+    let wrong = counter
+        .link(&link)
+        .replacen(user, "00000000-0000-4000-8000-0000000000a2", 1);
+    let session = Session::connect(&profile(&wrong)).await.unwrap();
+    let probe = counter.count();
+    let mut stream = session.open_udp().await.unwrap();
+    // One source, a packet every 20 ms for 6 s.
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(6) {
+        send(
+            &mut stream,
+            &datagram("10.0.0.2:12000", &udp_target, vec![7; 32]),
+        )
+        .await;
+        assert!(
+            receive(&mut stream, Duration::from_millis(20))
+                .await
+                .is_none(),
+            "answer with a wrong UUID"
+        );
+    }
+    let single = counter.count() - probe;
+    println!("wrong UUID, one source, ~300 packets in 6 s: {single} server connections");
+    assert!(single <= 5, "{single} connections for one refused flow");
+    // Many sources: each is its own flow and costs at least one connection.
+    let before = counter.count();
+    for n in 0..100u16 {
+        let source = format!("10.0.0.2:{}", 40_000 + n);
+        send(&mut stream, &datagram(&source, &udp_target, vec![8; 32])).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    println!(
+        "wrong UUID, 100 sources: {} server connections",
+        counter.count() - before
+    );
+    drop(stream);
+
+    let session = Session::connect(&profile(&counter.link(&link)))
+        .await
+        .unwrap();
+    let mut stream = session.open_udp().await.unwrap();
+    let sent = datagram("10.0.0.2:12000", &udp_target, payload(1000, 9));
+    send(&mut stream, &sent).await;
+    let reply = receive(&mut stream, Duration::from_secs(10))
+        .await
+        .expect("right link unanswered after the wrong one");
+    assert_eq!(reply.payload, sent.payload);
+}
+
+/// XHTTP links import but never connect: no fallback to WebSocket or anything else.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run through ci/vless_interop.py"]
+async fn xhttp_is_unsupported_without_connecting() {
+    if mode() != "open" {
+        return;
+    }
+    let link = env("RTRUST_VLESS_LINK");
+    let counter = Counter::start(&link).await;
+    let through = counter.link(&link);
+    let xhttp = replace_query(&through, "type", "xhttp")
+        .replacen(&format!("&alpn={}", query(&through, "alpn")), "", 1)
+        .replacen("#", "&mode=auto#", 1);
+    let p = profile(&xhttp);
+    assert_eq!(p.transport_name(), "VLESS XHTTP");
+    let started = Instant::now();
+    let error = Session::connect(&p).await.err().expect("XHTTP connected");
+    assert!(matches!(error, Error::Unsupported(_)), "{error:?}");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    canary(&error, &link);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(counter.count(), 0, "XHTTP profile reached the server");
+}
