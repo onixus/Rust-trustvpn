@@ -24,8 +24,14 @@ const OPEN: Duration = Duration::from_secs(10);
 const ADDRESS: Duration = Duration::from_secs(4);
 /// A recent upgrade proves the endpoint without a new connection.
 const FRESH: Duration = Duration::from_secs(30);
-/// Ping after this long without traffic, so CDNs keep the connection.
-const KEEPALIVE: Duration = Duration::from_secs(30);
+/// Ping after this long without anything from the server. Outgoing data does
+/// not count: a path that died without FIN or RST still accepts writes.
+const KEEPALIVE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 30 });
+/// After a ping, anything from the server (data, Pong, Ping) must arrive in
+/// this window, or the flow is closed as dead. Shorter in tests.
+const PONG_WAIT: Duration = Duration::from_millis(if cfg!(test) { 500 } else { 15_000 });
+/// Uplink bytes read at a time; the first read is sent with the request header.
+const CHUNK: usize = 16 * 1024;
 /// After the local side finished sending, how long to wait for the rest of
 /// the answer. Xray's freedom outbound closes 1 s after the uplink ends; a
 /// `Close` frame sent at once would cut the reply.
@@ -193,7 +199,7 @@ impl VlessSession {
         let (tls, rest) = tokio::time::timeout_at(deadline, self.dial())
             .await
             .map_err(|_| Error::Timeout)??;
-        let request = header::request(&self.0.uuid, header::TCP, &target);
+        let request = header::request(&self.0.uuid, header::TCP, &target, CHUNK);
         let (io, bridge) = tokio::io::duplex(64 * 1024);
         let pump = tokio::spawn(async move {
             let _permit = permit;
@@ -227,7 +233,7 @@ async fn tcp(
     let (read, mut write) = tokio::io::split(tls);
     let mut frames = ws::Reader::new(read, rest);
     let (mut local_read, mut local_write) = tokio::io::split(bridge);
-    let mut buf = vec![0u8; 16 * 1024];
+    let mut buf = vec![0u8; CHUNK];
     let mut uplink = true;
     let mut first = request;
     match tokio::time::timeout(FIRST_PAYLOAD, local_read.read(&mut buf)).await {
@@ -239,8 +245,10 @@ async fn tcp(
     ws::send(&mut write, ws::BINARY, &first).await?;
     drop(first);
     let mut response = header::Response::default();
+    // `idle` runs from the last thing the server sent; `probing` while a ping is unanswered.
     let idle = tokio::time::sleep(if uplink { KEEPALIVE } else { HALF_CLOSE });
     tokio::pin!(idle);
+    let mut probing = false;
     let result = loop {
         tokio::select! {
             event = frames.next() => match event {
@@ -248,18 +256,24 @@ async fn tcp(
                 // A closed flow before any answer means the server refused or
                 // could not reach the target; it is not a protocol failure.
                 Ok(None) => break Ok(()),
-                Ok(Some(Event::Close)) => {
-                    let _ = ws::send(&mut write, ws::CLOSE, &[]).await;
-                    break Ok(());
-                }
-                Ok(Some(Event::Ping(payload))) => ws::send(&mut write, ws::PONG, &payload).await?,
-                Ok(Some(Event::Data(mut data))) => {
-                    if !response.done() {
-                        data.advance(response.feed(&data)?);
+                Ok(Some(event)) => {
+                    match event {
+                        Event::Ping(payload) => ws::send(&mut write, ws::PONG, &payload).await?,
+                        Event::Pong => {}
+                        Event::Data(mut data) => {
+                            if !response.done() {
+                                data.advance(response.feed(&data)?);
+                            }
+                            if !data.is_empty() {
+                                local_write.write_all(&data).await?;
+                            }
+                        }
+                        Event::Close => {
+                            let _ = ws::send(&mut write, ws::CLOSE, &[]).await;
+                            break Ok(());
+                        }
                     }
-                    if !data.is_empty() {
-                        local_write.write_all(&data).await?;
-                    }
+                    probing = false;
                     let wait = if uplink { KEEPALIVE } else { HALF_CLOSE };
                     idle.as_mut().reset(tokio::time::Instant::now() + wait);
                 }
@@ -268,19 +282,25 @@ async fn tcp(
                 let n = read?;
                 if n == 0 {
                     uplink = false;
-                    idle.as_mut().reset(tokio::time::Instant::now() + HALF_CLOSE);
+                    if !probing {
+                        idle.as_mut().reset(tokio::time::Instant::now() + HALF_CLOSE);
+                    }
                 } else {
                     ws::send(&mut write, ws::BINARY, &buf[..n]).await?;
-                    idle.as_mut().reset(tokio::time::Instant::now() + KEEPALIVE);
                 }
             }
             _ = &mut idle => {
+                if probing {
+                    // No answer to the ping: the path is gone, even if writes succeed.
+                    break Err(Error::Timeout);
+                }
                 if !uplink {
                     let _ = ws::send(&mut write, ws::CLOSE, &[]).await;
                     break Ok(());
                 }
                 ws::send(&mut write, ws::PING, &[]).await?;
-                idle.as_mut().reset(tokio::time::Instant::now() + KEEPALIVE);
+                probing = true;
+                idle.as_mut().reset(tokio::time::Instant::now() + PONG_WAIT);
             }
         }
     };

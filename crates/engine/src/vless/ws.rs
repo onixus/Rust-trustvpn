@@ -106,9 +106,10 @@ pub(super) async fn upgrade<S: AsyncRead + AsyncWrite + Unpin>(
     Ok(rest)
 }
 
-/// One client frame: FIN set, masked with a fresh random key.
-pub(super) fn frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(payload.len() + 14);
+/// One client frame: FIN set, masked with a fresh random key. The mask is in
+/// the frame, so a masked VLESS header is as secret as the plain one.
+pub(super) fn frame(opcode: u8, payload: &[u8]) -> zeroize::Zeroizing<Vec<u8>> {
+    let mut out = zeroize::Zeroizing::new(Vec::with_capacity(payload.len() + 14));
     out.push(0x80 | opcode);
     match payload.len() {
         n @ 0..=125 => out.push(0x80 | n as u8),
@@ -141,6 +142,8 @@ pub(super) enum Event {
     /// Payload bytes of binary frames, in order, in arbitrary chunks.
     Data(Bytes),
     Ping(Bytes),
+    /// Answer to our keepalive ping: proof that the path still carries data.
+    Pong,
     Close,
 }
 /// Cancel-safe frame decoder: state lives here and reads only fill `buf`, so
@@ -226,7 +229,7 @@ impl<R: AsyncRead + Unpin> Reader<R> {
                     match opcode {
                         CLOSE => return Ok(Some(Event::Close)),
                         PING => return Ok(Some(Event::Ping(payload))),
-                        _ => {}
+                        _ => return Ok(Some(Event::Pong)),
                     }
                 }
                 // The tunnel is binary only.
@@ -301,7 +304,8 @@ mod tests {
         assert_eq!(all[0], Event::Data(Bytes::from_static(b"he")));
         assert_eq!(all[1], Event::Ping(Bytes::from_static(b"p")));
         assert_eq!(all[2], Event::Data(Bytes::from(vec![b'y'; 300])));
-        assert_eq!(all[3], Event::Close);
+        assert_eq!(all[3], Event::Pong);
+        assert_eq!(all[4], Event::Close);
         // One byte at a time gives the same stream.
         let (mut tx, rx) = tokio::io::duplex(1);
         let writer = tokio::spawn(async move { tx.write_all(&wire).await });
@@ -311,7 +315,7 @@ mod tests {
             match event {
                 Event::Data(d) => data.extend(d),
                 Event::Close => break,
-                Event::Ping(_) => {}
+                Event::Ping(_) | Event::Pong => {}
             }
         }
         writer.await.unwrap().unwrap();

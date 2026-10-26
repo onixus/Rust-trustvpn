@@ -27,7 +27,9 @@ XHTTP links carry `type=xhttp&mode=auto` instead of `alpn`. The profile stores:
 | `#<name>` | `name` (control and bidi characters removed; the SNI when empty) |
 
 `endpoint.has_ipv6` is `false`: the CDN origin container has no IPv6 egress, so
-IPv6 flows fail locally instead of disappearing in the tunnel.
+IPv6 flows fail locally instead of disappearing in the tunnel. The field is
+not forced: setting `has_ipv6: true` in R-TrustTunnel JSON makes sense only
+when the server does have IPv6 egress.
 
 Import fails closed: only `encryption=none` and `security=tls` are accepted, and
 unknown options, duplicates, REALITY (`pbk`, `sid`, `spx`, `pqv`), `flow`,
@@ -53,14 +55,29 @@ other JSON-only fields are reported as losses.
   emulated".
 - **One connection per flow.** Each TCP flow and each UDP source/destination
   pair is its own TLS connection and WebSocket upgrade (at most 256 TCP flows
-  per session; 64 UDP flows per tunnel, 1024 per session, closed after 60 s
-  without traffic). There is no shared multiplexed session. Every flow socket
-  is marked or protected before connect; the endpoint name is resolved once
-  when the session starts, never per flow.
+  per session; 64 UDP flows per tunnel and 1024 per session). There is no
+  shared multiplexed session. Every flow socket is marked or protected before
+  connect; the endpoint name is resolved once when the session starts, never
+  per flow.
+- **UDP flow table.** A full table evicts the least recently active flow
+  (DNS flows that already got their answer first) instead of dropping new
+  datagrams, so a resolver that takes a new source port per query cannot lock
+  UDP out. DNS flows (destination port 53) close 5 s after their last packet;
+  any UDP flow the server has not answered for 60 s is closed, and the next
+  datagram opens a new one. Only answers count: outgoing datagrams do not
+  keep a flow alive.
+- **Dead paths.** After 30 s without anything from the server a flow sends a
+  WebSocket ping; if nothing arrives within 15 s more, the flow is closed. A
+  path that died without FIN or RST therefore ends a TCP flow, and a UDP flow
+  is replaced by the next datagram.
+- **Refused flows back off.** A UDP flow whose handshake fails, or which the
+  server closes without sending a byte (an unknown UUID), waits 2 s before the
+  pair may dial again; datagrams in between are dropped.
 - **UDP size.** Xray's buffers carry 8190 payload bytes with the 2-byte length
   prefix. Larger downlink packets are dropped silently and larger uplink ones
-  are split, which breaks datagram boundaries, so the client drops uplink
-  datagrams above 8190 bytes.
+  are split, which breaks datagram boundaries, so the client drops datagrams
+  above 8190 bytes in both directions and counts them; the rest of the tunnel
+  is unaffected.
 - **Half-close.** When the application finishes sending, the client keeps the
   flow open for the answer until the server closes or 10 s pass without data.
   Xray's outbound closes 1 s after the uplink ends.

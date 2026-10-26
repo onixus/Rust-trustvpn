@@ -32,9 +32,16 @@ impl Target {
     }
 }
 
-/// `0 | uuid | 0 (no addons) | command | port | type | address`.
-pub(super) fn request(uuid: &[u8; 16], command: u8, target: &Target) -> Zeroizing<Vec<u8>> {
-    let mut out = Zeroizing::new(Vec::with_capacity(22 + 256));
+/// `0 | uuid | 0 (no addons) | command | port | type | address`. `payload`
+/// reserves room for the bytes sent with it, so appending them never
+/// reallocates and leaves an unzeroized copy of the UUID behind.
+pub(super) fn request(
+    uuid: &[u8; 16],
+    command: u8,
+    target: &Target,
+    payload: usize,
+) -> Zeroizing<Vec<u8>> {
+    let mut out = Zeroizing::new(Vec::with_capacity(22 + 256 + payload));
     out.push(0);
     out.extend_from_slice(uuid);
     out.push(0);
@@ -115,12 +122,14 @@ mod tests {
     const UUID: [u8; 16] = [0x11; 16];
     #[test]
     fn request_layout_matches_xray() {
-        let v4 = request(&UUID, TCP, &Target::parse("192.0.2.1:443").unwrap());
+        let v4 = request(&UUID, TCP, &Target::parse("192.0.2.1:443").unwrap(), 0);
         let mut expected = vec![0];
         expected.extend(UUID);
         expected.extend([0, 1, 0x01, 0xbb, 1, 192, 0, 2, 1]);
         assert_eq!(*v4, expected);
-        let v6 = request(&UUID, UDP, &Target::parse("[2001:db8::1]:53").unwrap());
+        let reserved = request(&UUID, TCP, &Target::parse("192.0.2.1:443").unwrap(), 1000);
+        assert!(reserved.capacity() >= reserved.len() + 1000);
+        let v6 = request(&UUID, UDP, &Target::parse("[2001:db8::1]:53").unwrap(), 0);
         assert_eq!(v6[17..22], [0, 2, 0, 53, 3]);
         assert_eq!(
             v6[22..],
@@ -129,7 +138,7 @@ mod tests {
                 .unwrap()
                 .octets()
         );
-        let domain = request(&UUID, TCP, &Target::parse("example.com:80").unwrap());
+        let domain = request(&UUID, TCP, &Target::parse("example.com:80").unwrap(), 0);
         assert_eq!(domain[17..23], [0, 1, 0, 80, 2, 11]);
         assert_eq!(&domain[23..], b"example.com");
         let long = format!("{}.com:80", "a".repeat(251));

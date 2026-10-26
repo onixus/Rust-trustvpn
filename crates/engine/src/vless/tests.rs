@@ -19,6 +19,12 @@ const HANG: u8 = 4;
 const LATE: u8 = 5;
 /// Answers the upgrade after 300 ms, then echoes.
 const SLOW: u8 = 6;
+/// Echoes the first payload, then neither reads nor answers, and never closes.
+const SILENT: u8 = 7;
+/// UDP: answers every packet with a 65535-byte packet first, then echoes.
+const BIG: u8 = 8;
+/// Upgrades, then closes at once without a byte, as Xray does for an unknown UUID.
+const REVOKED: u8 = 9;
 
 #[derive(Debug)]
 struct Request {
@@ -30,6 +36,8 @@ struct Endpoint {
     profile: Profile,
     mode: Arc<AtomicU8>,
     accepted: Arc<AtomicUsize>,
+    /// Most connections the server held open at once.
+    peak: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<Request>>>,
     /// One signal per connection the server saw end.
     closed: tokio::sync::mpsc::UnboundedReceiver<()>,
@@ -64,14 +72,18 @@ async fn endpoint(names: &[&str], alpn: &[&[u8]]) -> Endpoint {
     profile.endpoint.certificate = certified.cert.pem();
     let mode = Arc::new(AtomicU8::new(ECHO));
     let accepted = Arc::new(AtomicUsize::new(0));
+    let (open, peak) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     let requests = Arc::new(Mutex::new(vec![]));
     let (closed_tx, closed) = tokio::sync::mpsc::unbounded_channel();
     let task = {
         let (mode, accepted, requests) = (mode.clone(), accepted.clone(), requests.clone());
+        let peak = peak.clone();
         tokio::spawn(async move {
             loop {
                 let (tcp, _) = listener.accept().await.unwrap();
                 accepted.fetch_add(1, Ordering::SeqCst);
+                peak.fetch_max(open.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                let open = open.clone();
                 let (acceptor, mode, requests, closed) = (
                     acceptor.clone(),
                     mode.load(Ordering::SeqCst),
@@ -79,11 +91,11 @@ async fn endpoint(names: &[&str], alpn: &[&[u8]]) -> Endpoint {
                     closed_tx.clone(),
                 );
                 tokio::spawn(async move {
-                    let Ok(tls) = acceptor.accept(tcp).await else {
-                        return;
-                    };
-                    let _ = serve(tls, mode, requests).await;
-                    let _ = closed.send(());
+                    if let Ok(tls) = acceptor.accept(tcp).await {
+                        let _ = serve(tls, mode, requests).await;
+                        let _ = closed.send(());
+                    }
+                    open.fetch_sub(1, Ordering::SeqCst);
                 });
             }
         })
@@ -92,6 +104,7 @@ async fn endpoint(names: &[&str], alpn: &[&[u8]]) -> Endpoint {
         profile,
         mode,
         accepted,
+        peak,
         requests,
         closed,
         task,
@@ -148,6 +161,10 @@ async fn serve(
     if !reply.starts_with("HTTP/1.1 101") || mode == BAD_ACCEPT {
         return Ok(());
     }
+    if mode == REVOKED {
+        tls.write_all(&server_frame(ws::CLOSE, &[3, 232])).await?;
+        return Ok(());
+    }
     let mut data = vec![];
     let mut answered = false;
     let mut command = None;
@@ -193,6 +210,11 @@ async fn serve(
                 continue;
             }
         }
+        if mode == BIG && command == Some(header::UDP) {
+            let mut big = vec![0xff, 0xff];
+            big.resize(2 + 65535, 1);
+            out.splice(0..0, big);
+        }
         if !answered {
             // Response header with two bytes of addons, then the echo.
             out.splice(0..0, [0, 2, 7, 7]);
@@ -204,6 +226,10 @@ async fn serve(
         tls.write_all(&server_frame(ws::BINARY, &last)).await?;
         if mode == LATE {
             tls.write_all(&server_frame(ws::CLOSE, &[])).await?;
+        }
+        if mode == SILENT {
+            // A path that died without FIN or RST: the socket stays open.
+            std::future::pending::<()>().await;
         }
     }
 }
@@ -257,9 +283,12 @@ fn server_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = vec![0x80 | opcode];
     if payload.len() < 126 {
         out.push(payload.len() as u8);
-    } else {
+    } else if payload.len() <= 0xffff {
         out.push(126);
         out.extend((payload.len() as u16).to_be_bytes());
+    } else {
+        out.push(127);
+        out.extend((payload.len() as u64).to_be_bytes());
     }
     out.extend(payload);
     out
@@ -446,25 +475,133 @@ async fn udp_flows_echo_and_respect_limits() {
         vec![1; udp::VLESS_UDP_MAX + 1],
     )
     .await;
-    // Many destinations: no more flows than the per-tunnel limit open.
-    for port in 1000..1100 {
+    send_udp(&mut tunnel, "10.0.0.2:5000", "192.0.2.53:53", vec![5]).await;
+    // Only the small datagram comes back: the oversized one never left.
+    let answer = tokio::time::timeout(Duration::from_secs(5), crate::udp::read(&mut tunnel))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(answer.payload, [5]);
+    assert!(udp::OVERSIZE.load(Ordering::Relaxed) > before);
+}
+
+async fn answer(tunnel: &mut Tunnel) -> Option<Datagram> {
+    tokio::time::timeout(Duration::from_secs(5), crate::udp::read(tunnel))
+        .await
+        .ok()
+        .and_then(|d| d.ok())
+}
+
+#[tokio::test]
+async fn fresh_source_ports_never_exhaust_the_flow_table() {
+    let e = endpoint(&[HOST], &[b"http/1.1"]).await;
+    let session = Session::connect(&e.profile).await.unwrap();
+    let mut tunnel = session.open_udp().await.unwrap();
+    // A stub resolver uses a new source port per query; so may any other client.
+    for (destination, ports) in [
+        ("192.0.2.53:53", 20000..20200),
+        ("192.0.2.9:5353", 30000..30200),
+    ] {
+        for port in ports {
+            send_udp(
+                &mut tunnel,
+                &format!("10.0.0.2:{port}"),
+                destination,
+                vec![7],
+            )
+            .await;
+            let d = answer(&mut tunnel).await.expect("every query is answered");
+            assert_eq!(d.destination.port(), port);
+        }
+    }
+    assert_eq!(e.requests.lock().unwrap().len(), 400);
+    // Evicted flows close: the server never held many more than the table size.
+    let peak = e.peak.load(Ordering::SeqCst);
+    assert!(peak <= udp::TUNNEL_FLOWS + 8, "{peak}");
+}
+
+#[tokio::test]
+async fn a_silent_udp_path_is_replaced_by_a_new_flow() {
+    let e = endpoint(&[HOST], &[b"http/1.1"]).await;
+    let session = Session::connect(&e.profile).await.unwrap();
+    e.mode.store(SILENT, Ordering::SeqCst);
+    let mut tunnel = session.open_udp().await.unwrap();
+    send_udp(&mut tunnel, "10.0.0.2:6000", "192.0.2.9:6000", vec![1]).await;
+    assert!(answer(&mut tunnel).await.is_some());
+    // The client keeps sending into a path that no longer answers.
+    let mut answers = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    while tokio::time::Instant::now() < deadline {
+        send_udp(&mut tunnel, "10.0.0.2:6000", "192.0.2.9:6000", vec![2]).await;
+        if let Ok(Ok(_)) =
+            tokio::time::timeout(Duration::from_millis(100), crate::udp::read(&mut tunnel)).await
+        {
+            answers += 1;
+        }
+    }
+    // Each replacement flow answers its first packet once.
+    assert!(e.requests.lock().unwrap().len() >= 2);
+    assert!(answers >= 1);
+}
+
+#[tokio::test]
+async fn a_silent_tcp_path_ends_the_flow() {
+    let e = endpoint(&[HOST], &[b"http/1.1"]).await;
+    let session = Session::connect(&e.profile).await.unwrap();
+    e.mode.store(SILENT, Ordering::SeqCst);
+    let tunnel = session.open_tcp("192.0.2.1:80").await.unwrap();
+    let (mut read, mut write) = tokio::io::split(tunnel);
+    write.write_all(b"a").await.unwrap();
+    assert_eq!(read.read_u8().await.unwrap(), b'a');
+    // Writes keep succeeding locally; the unanswered ping ends the flow anyway.
+    let writer = tokio::spawn(async move {
+        while write.write_all(b"more").await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+    let mut rest = vec![];
+    let ended = tokio::time::timeout(Duration::from_secs(5), read.read_to_end(&mut rest)).await;
+    assert!(ended.is_ok(), "flow still open");
+    writer.abort();
+}
+
+#[tokio::test]
+async fn oversized_answers_are_dropped_alone() {
+    let e = endpoint(&[HOST], &[b"http/1.1"]).await;
+    let session = Session::connect(&e.profile).await.unwrap();
+    e.mode.store(BIG, Ordering::SeqCst);
+    let mut tunnel = session.open_udp().await.unwrap();
+    let before = udp::OVERSIZE.load(Ordering::Relaxed);
+    for port in [7000, 7001] {
         send_udp(
             &mut tunnel,
-            "10.0.0.2:5000",
+            "10.0.0.2:7000",
             &format!("192.0.2.9:{port}"),
-            vec![1],
+            vec![3],
         )
         .await;
+        let d = answer(&mut tunnel).await.expect("the small answer arrives");
+        assert_eq!((d.source.port(), d.payload.as_slice()), (port, &[3][..]));
     }
-    let mut answers = 0;
-    while let Ok(Ok(_)) =
-        tokio::time::timeout(Duration::from_secs(2), crate::udp::read(&mut tunnel)).await
-    {
-        answers += 1;
+    assert!(udp::OVERSIZE.load(Ordering::Relaxed) >= before + 2);
+    // The first flow is still usable.
+    send_udp(&mut tunnel, "10.0.0.2:7000", "192.0.2.9:7000", vec![4]).await;
+    assert_eq!(answer(&mut tunnel).await.unwrap().payload, [4]);
+}
+
+#[tokio::test]
+async fn refused_flows_back_off_instead_of_redialing_per_packet() {
+    let e = endpoint(&[HOST], &[b"http/1.1"]).await;
+    let session = Session::connect(&e.profile).await.unwrap();
+    e.mode.store(REVOKED, Ordering::SeqCst);
+    let before = e.accepted.load(Ordering::SeqCst);
+    let mut tunnel = session.open_udp().await.unwrap();
+    for _ in 0..100 {
+        send_udp(&mut tunnel, "10.0.0.2:8000", "192.0.2.9:8000", vec![1]).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(udp::OVERSIZE.load(Ordering::Relaxed) > before);
-    assert_eq!(answers, udp::TUNNEL_FLOWS - 1);
-    assert_eq!(e.requests.lock().unwrap().len(), udp::TUNNEL_FLOWS);
+    let dials = e.accepted.load(Ordering::SeqCst) - before;
+    assert!((1..=2).contains(&dials), "{dials}");
 }
 
 #[tokio::test]
