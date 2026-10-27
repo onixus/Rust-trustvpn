@@ -30,6 +30,9 @@ const REVOKED: u8 = 9;
 const SINK: u8 = 10;
 const SINK_RATE: f64 = 256.0 * 1024.0;
 const SINK_TOTAL: usize = 1024 * 1024;
+/// UDP: takes the request and every packet but never answers, as Xray now and
+/// then does on a fresh connection; the socket stays open.
+const MUTE: u8 = 11;
 
 #[derive(Debug)]
 struct Request {
@@ -204,6 +207,10 @@ async fn serve(
             data.drain(..used);
             command = Some(parsed.command);
             requests.lock().unwrap().push(parsed);
+        }
+        if mode == MUTE {
+            data.clear();
+            continue;
         }
         let mut out = vec![];
         if command == Some(header::TCP) {
@@ -558,6 +565,41 @@ async fn a_silent_udp_path_is_replaced_by_a_new_flow() {
     // Each replacement flow answers its first packet once.
     assert!(e.requests.lock().unwrap().len() >= 2);
     assert!(answers >= 1);
+}
+
+/// Nothing comes back within the first-answer window and a bit more.
+async fn quiet(tunnel: &mut Tunnel) -> bool {
+    tokio::time::timeout(Duration::from_millis(400), crate::udp::read(tunnel))
+        .await
+        .is_err()
+}
+
+#[tokio::test]
+async fn a_fresh_flow_without_any_answer_is_reopened_once() {
+    let e = endpoint(&[HOST], &[b"http/1.1"]).await;
+    let session = Session::connect(&e.profile).await.unwrap();
+    e.mode.store(MUTE, Ordering::SeqCst);
+    let mut tunnel = session.open_udp().await.unwrap();
+    let pair = ("10.0.0.2:7000", "192.0.2.9:7000");
+    send_udp(&mut tunnel, pair.0, pair.1, vec![1]).await;
+    assert!(quiet(&mut tunnel).await);
+    // Past the first-answer window the next datagram reopens the flow, once:
+    // a target that stays silent costs one extra connection, not one per packet.
+    for _ in 0..3 {
+        send_udp(&mut tunnel, pair.0, pair.1, vec![2]).await;
+        assert!(quiet(&mut tunnel).await);
+    }
+    let requests = |e: &Endpoint| e.requests.lock().unwrap().len();
+    assert_eq!(requests(&e), 2);
+    // An answered flow is never reopened for silence.
+    e.mode.store(ECHO, Ordering::SeqCst);
+    let pair = ("10.0.0.2:7001", "192.0.2.9:7001");
+    for _ in 0..2 {
+        send_udp(&mut tunnel, pair.0, pair.1, vec![3]).await;
+        assert!(answer(&mut tunnel).await.is_some());
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    assert_eq!(requests(&e), 3);
 }
 
 #[tokio::test]

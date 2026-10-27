@@ -20,6 +20,13 @@ pub(super) const SESSION_FLOWS: usize = 1024;
 const IDLE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 60 });
 /// DNS flows are one query and its answer: closed soon after the last packet.
 const DNS_IDLE: Duration = Duration::from_millis(if cfg!(test) { 500 } else { 5000 });
+/// Xray occasionally never relays any answer of a fresh UDP connection (seen
+/// with a plain client too). A flow that heard nothing this long after it
+/// opened is reopened by its next datagram, once per pair until it is answered,
+/// so a target that is silent by design costs one extra connection, not a storm.
+const FIRST_ANSWER: Duration = Duration::from_millis(if cfg!(test) { 300 } else { 2000 });
+/// Pairs reopened for a missing first answer; more are left as they are.
+const REOPENED: usize = 256;
 const SWEEP: Duration = Duration::from_millis(if cfg!(test) { 100 } else { 1000 });
 /// Packets waiting for one flow; more are dropped, as on a full link.
 pub(super) const QUEUE: usize = 32;
@@ -41,6 +48,9 @@ struct Flow {
     answered: Instant,
     /// A DNS flow that already got its answer goes first when the table is full.
     resolved: bool,
+    /// When the flow opened, and whether the server answered it at all.
+    opened: Instant,
+    heard: bool,
     task: tokio::task::JoinHandle<()>,
     /// Held here, not by the task, so eviction frees the slot at once.
     _permit: tokio::sync::OwnedSemaphorePermit,
@@ -82,6 +92,7 @@ async fn relay(session: VlessSession, bridge: DuplexStream) -> Result<()> {
     let (mut read, mut write) = tokio::io::split(bridge);
     let (back, mut answers) = tokio::sync::mpsc::channel::<Datagram>(128);
     let mut flows: HashMap<Key, Flow> = HashMap::new();
+    let mut reopened: std::collections::HashSet<Key> = Default::default();
     let mut request = Box::pin(outgoing(&mut read));
     let mut sweep = tokio::time::interval(SWEEP);
     loop {
@@ -96,7 +107,10 @@ async fn relay(session: VlessSession, bridge: DuplexStream) -> Result<()> {
                     continue;
                 }
                 let key = (d.source, d.destination);
-                if flows.get(&key).is_some_and(|flow| flow.packets.is_closed() || expired(&key, flow)) {
+                let unheard = flows.get(&key).is_some_and(|flow| !flow.heard && flow.opened.elapsed() >= FIRST_ANSWER);
+                if flows.get(&key).is_some_and(|flow| flow.packets.is_closed() || expired(&key, flow))
+                    || (unheard && reopened.len() < REOPENED && reopened.insert(key))
+                {
                     flows.remove(&key);
                 }
                 if !flows.contains_key(&key) {
@@ -117,7 +131,7 @@ async fn relay(session: VlessSession, bridge: DuplexStream) -> Result<()> {
                     let (packets, queue) = tokio::sync::mpsc::channel(QUEUE);
                     let task = tokio::spawn(flow(session.clone(), key, queue, back.clone()));
                     let now = Instant::now();
-                    flows.insert(key, Flow { packets, active: now, answered: now, resolved: false, task, _permit: permit });
+                    flows.insert(key, Flow { packets, active: now, answered: now, resolved: false, opened: now, heard: false, task, _permit: permit });
                 }
                 let flow = flows.get_mut(&key).expect("inserted above");
                 flow.active = Instant::now();
@@ -130,7 +144,9 @@ async fn relay(session: VlessSession, bridge: DuplexStream) -> Result<()> {
                     flow.active = Instant::now();
                     flow.answered = flow.active;
                     flow.resolved = dns(&key);
+                    flow.heard = true;
                 }
+                reopened.remove(&key);
                 // The tunnel side of `_udp2` carries no application name. Flows
                 // drop oversized answers; one that still fails costs only itself.
                 let Ok(mut frame) = crate::udp::encode(&d, "") else { continue };
