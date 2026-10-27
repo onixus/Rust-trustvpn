@@ -5,8 +5,11 @@
 use super::*;
 use std::sync::Arc;
 
-/// Answers every authenticated CONNECT (including `_check`) with 200.
+/// Synthetic TLS endpoint, authenticates CONNECT (including `_check`).
 async fn endpoint() -> Profile {
+    endpoint_status(200).await
+}
+async fn endpoint_status(status: u16) -> Profile {
     let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
@@ -30,9 +33,19 @@ async fn endpoint() -> Profile {
                 let Ok(mut conn) = h2::server::handshake(tls).await else {
                     return;
                 };
-                while let Some(Ok((_, mut response))) = conn.accept().await {
+                while let Some(Ok((request, mut response))) = conn.accept().await {
+                    let status = if request
+                        .headers()
+                        .get("proxy-authorization")
+                        .map(|value| value.as_bytes())
+                        == Some(b"Basic ZGVtbzpzeW50aGV0aWM=".as_slice())
+                    {
+                        status
+                    } else {
+                        407
+                    };
                     let _ = response.send_response(
-                        http::Response::builder().status(200).body(()).unwrap(),
+                        http::Response::builder().status(status).body(()).unwrap(),
                         true,
                     );
                 }
@@ -44,6 +57,103 @@ async fn endpoint() -> Profile {
         certified.cert.pem()
     ))
     .unwrap()
+}
+
+#[test]
+fn journal_metadata_from_real_loopback_failures_and_epoch_fencing() {
+    use rtrust_journal::{Budget, Class, Path, Transport};
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    runtime.block_on(async {
+        let profile = endpoint().await;
+        let retry = socks_recovery::Retry {
+            delay: std::time::Duration::ZERO,
+            cooling: true,
+            attempt: 1,
+        };
+        let mut wrong = profile.clone();
+        wrong.endpoint.password = rtrust_profile::Secret::new("token-canary");
+        let authentication = socks_recovery::attempt_with_metadata(wrong, 0, retry)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(authentication.class, Class::Authentication);
+        let record = authentication.record.unwrap();
+        assert_eq!(
+            (record.path, record.transport, record.attempt, record.budget),
+            (Path::SocksRecovery, Transport::H2, 1, Budget::Cooldown)
+        );
+        let mut wrong = profile.clone();
+        wrong.endpoint.hostname = "sni-canary.invalid".into();
+        assert_eq!(
+            socks_recovery::attempt_with_metadata(wrong, 0, retry)
+                .await
+                .err()
+                .unwrap()
+                .class,
+            Class::Tls
+        );
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        assert_eq!(
+            socks_recovery::attempt_with_metadata(
+                profile.clone(),
+                occupied.local_addr().unwrap().port(),
+                retry
+            )
+            .await
+            .err()
+            .unwrap()
+            .class,
+            Class::LocalBind
+        );
+        let mut unreachable = profile.clone();
+        unreachable.endpoint.addresses = vec![occupied.local_addr().unwrap().to_string()];
+        drop(occupied);
+        assert_eq!(
+            socks_recovery::attempt_with_metadata(unreachable, 0, retry)
+                .await
+                .err()
+                .unwrap()
+                .class,
+            Class::EndpointUnreachable
+        );
+        let rejected = endpoint_status(503).await;
+        assert_eq!(
+            socks_recovery::attempt_with_metadata(rejected, 0, retry)
+                .await
+                .err()
+                .unwrap()
+                .class,
+            Class::Protocol
+        );
+        let mut invalid = profile.clone();
+        invalid.endpoint.skip_verification = true;
+        assert_eq!(
+            socks_recovery::attempt_with_metadata(invalid, 0, retry)
+                .await
+                .err()
+                .unwrap()
+                .class,
+            Class::Profile
+        );
+
+        let mut app = tests::app();
+        app.mode = Mode::Socks;
+        app.connecting = true;
+        app.socks_recovery = Some(socks_recovery::Recovery::new(profile, 0));
+        let epoch = app.connection_epoch;
+        socks_recovery::take_records();
+        let _ = app.update(Message::SocksAttempt(
+            epoch.wrapping_sub(1),
+            Err(authentication.clone()),
+        ));
+        assert!(socks_recovery::take_records().is_empty());
+        let _ = app.update(Message::SocksAttempt(epoch, Err(authentication.clone())));
+        assert_eq!(socks_recovery::take_records(), vec![record]);
+        let _ = app.update(Message::SocksAttempt(epoch, Err(authentication)));
+        assert!(socks_recovery::take_records().is_empty());
+        app.disconnect();
+    });
 }
 
 #[test]

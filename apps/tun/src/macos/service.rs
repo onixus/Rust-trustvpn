@@ -88,6 +88,17 @@ fn supervise(
 const ACCESS_EXPIRED: &str = "Access confirmation expired; synchronize the portal";
 // Expiry asks the user to synchronize; other preparation failures keep the
 // localized message instead of internal resolver/transport strings.
+// Freshness fence over a typed preparation error: expiry is not a journaled
+// connection failure, and the typed error keeps its journal class.
+enum Fenced<E> {
+    Expired,
+    Failed(E),
+}
+impl<E> From<String> for Fenced<E> {
+    fn from(_: String) -> Self {
+        Self::Expired
+    }
+}
 fn localized<'a>(error: &'a str, fallback: &'a str) -> &'a str {
     if error == ACCESS_EXPIRED {
         error
@@ -263,11 +274,11 @@ fn summary_after(
 fn millis(since: Instant) -> u64 {
     u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
-async fn guarded_connect<T>(
+async fn guarded_connect<T, E: From<String>>(
     lease: Lease,
     refresh: impl Fn() -> Result<(), String>,
-    connect: impl std::future::Future<Output = Result<T, String>>,
-) -> Result<T, String> {
+    connect: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, E> {
     // block_in_place lets IPC tasks run while fixed system tools execute. Unlike
     // detached spawn_blocking work, abort + join drains this task before Stop
     // releases the guard. Retain the lease even if the owning IPC task exits.
@@ -281,7 +292,7 @@ struct Workers {
     tunnel: Option<tokio::task::JoinHandle<RunResult>>,
     /// `Session::transport_name` of the running data plane, for events.
     transport: &'static str,
-    reconnect: Option<tokio::task::JoinHandle<Result<device::Prepared, String>>>,
+    reconnect: Option<tokio::task::JoinHandle<Result<device::Prepared, crate::failover::Failure>>>,
 }
 impl Drop for Workers {
     fn drop(&mut self) {
@@ -308,9 +319,12 @@ impl Workers {
         let guard = guard.clone();
         let lease = lease.clone();
         let wait = delay.next_delay(rand::random());
+        let attempt = delay.attempt();
+        let budget = rtrust_journal::Budget::from_cooling(delay.cooling());
+        let transport = rtrust_engine::planned_transport(&profile);
         self.reconnect = Some(tokio::spawn(async move {
             freshness
-                .during(async {
+                .during_result(async {
                     tokio::time::sleep(wait).await;
                     let started = Instant::now();
                     let refresh_ms = std::sync::atomic::AtomicU64::new(0);
@@ -334,7 +348,9 @@ impl Workers {
                                 device::Prepared::reconnect(&profile, device),
                             )
                             .await
-                            .map_err(|_| "stage=attempt reason=timeout".to_owned())?
+                            .map_err(|_| {
+                                crate::failover::Failure::timeout("stage=attempt reason=timeout")
+                            })?
                         },
                     )
                     .await;
@@ -346,7 +362,17 @@ impl Workers {
                         millis(started),
                         result.is_ok()
                     ));
-                    result
+                    result.map_err(|mut e: crate::failover::Failure| {
+                        e.record = Some(rtrust_journal::Record::failure(
+                            rtrust_journal::Path::Reconnect,
+                            e.class,
+                            transport,
+                            attempt,
+                            budget,
+                            started.elapsed(),
+                        ));
+                        e
+                    })
                 })
                 .await
         }));
@@ -744,6 +770,27 @@ async fn prepare<T>(
     }
 }
 
+// Shared by the actual Start pin/connect stages and the isolated caller harness.
+// Cancellation leaves the real RAII guard armed as Cancelled; typed failures
+// update it before any GUI string conversion. No test-only guard implementation.
+async fn prepare_start_attempt<T, E>(
+    future: impl std::future::Future<Output = Result<T, E>>,
+    journal: &mut rtrust_journal::Attempt,
+    classify: impl FnOnce(&mut rtrust_journal::Attempt, E) -> String,
+    initial: &mut oneshot::Sender<Response>,
+    commands: &mut mpsc::Receiver<Envelope>,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<T, String> {
+    journal.cancelled();
+    prepare(
+        async { future.await.map_err(|error| classify(journal, error)) },
+        initial,
+        commands,
+        shutdown,
+    )
+    .await
+}
+
 async fn start(
     request: Request,
     uid: u32,
@@ -762,6 +809,18 @@ async fn start(
         return Ok(());
     }
     power.borrow_and_update();
+    let transport = match &request.command {
+        Command::Start { profile, .. } | Command::StartFull { profile, .. } => {
+            rtrust_engine::planned_transport(profile)
+        }
+        _ => rtrust_journal::Transport::Unknown,
+    };
+    let mut journal = crate::failover::journal_attempt(
+        rtrust_journal::Path::Start,
+        transport,
+        1,
+        rtrust_journal::Budget::Burst,
+    );
     let (profile, selection, dns, split_dns, fallbacks) = match request.command {
         Command::Start {
             profile,
@@ -777,6 +836,7 @@ async fn start(
                 exclude_lan,
             };
             if let Err(error) = selection.validate() {
+                journal.class(rtrust_journal::Class::Profile);
                 return publish(&mut initial, State::Error, &error).await;
             }
             (profile, selection, None, dns, fallbacks)
@@ -801,12 +861,20 @@ async fn start(
     // Both modes pin IPv4 endpoint addresses: PF blocks selected networks
     // outside the tunnel, so the endpoint must be known and left out of them.
     // Every allowed backup is pinned now: the guard covers all candidates.
-    let mut failover = match prepare(
-        freshness.during(crate::failover::Failover::pin(
-            *profile,
-            fallbacks,
-            crate::failover::Pin::Ipv4,
-        )),
+    let mut failover = match prepare_start_attempt(
+        freshness.during_result(async {
+            crate::failover::Failover::pin(*profile, fallbacks, crate::failover::Pin::Ipv4)
+                .await
+                .map_err(Fenced::Failed)
+        }),
+        &mut journal,
+        |journal, error| match error {
+            Fenced::Expired => ACCESS_EXPIRED.to_owned(),
+            Fenced::Failed(error) => {
+                journal.class(error.class());
+                error.to_string()
+            }
+        },
         initial.as_mut().unwrap(),
         &mut commands,
         &mut shutdown,
@@ -819,6 +887,7 @@ async fn start(
             return publish(&mut initial, State::Error, message).await;
         }
     };
+    journal.class(rtrust_journal::Class::Other);
     let profile = failover.guard_profile();
     let endpoints = match state::endpoints(&profile) {
         Ok(e) => e,
@@ -845,10 +914,12 @@ async fn start(
     let resolver = dns.or(rtrust_control::tunneled_resolver(&networks, split_dns)
         .filter(|_| super::dns::preflight().is_ok()));
     if let Err(error) = freshness.check() {
+        journal.cancelled();
         return publish(&mut initial, State::Error, &error).await;
     }
     if let Err(error) = Guard::preflight(&networks, full, resolver) {
-        return publish(&mut initial, State::Error, &error).await;
+        journal.class(error.class);
+        return publish(&mut initial, State::Error, &error.message).await;
     }
     if !power.borrow().awake {
         return publish(
@@ -859,15 +930,24 @@ async fn start(
         .await;
     }
     if let Err(error) = freshness.check() {
+        journal.cancelled();
         return publish(&mut initial, State::Error, &error).await;
     }
-    let prepared = match prepare(
-        freshness.during(async {
+    let prepared = match prepare_start_attempt(
+        freshness.during_result(async {
             failover
                 .connect_initial(|profile| async move { device::Prepared::connect(&profile).await })
                 .await
-                .map_err(|_| "Initial connection failed".to_owned())
+                .map_err(Fenced::Failed)
         }),
+        &mut journal,
+        |journal, error| match error {
+            Fenced::Expired => ACCESS_EXPIRED.to_owned(),
+            Fenced::Failed(e) => {
+                e.annotate(journal, |e| e.class);
+                "Initial connection failed".to_owned()
+            }
+        },
         initial.as_mut().unwrap(),
         &mut commands,
         &mut shutdown,
@@ -886,6 +966,7 @@ async fn start(
     if shutdown_requested(&shutdown) || initial.as_ref().is_some_and(oneshot::Sender::is_closed) {
         return Ok(());
     }
+    journal.class(rtrust_journal::Class::Other);
     let permits = failover.permits()?;
     let probe = resolver.filter(|_| full).map(|dns| {
         Probe::Host(super::probe::Plan {
@@ -896,6 +977,7 @@ async fn start(
         })
     });
     if let Err(error) = freshness.check() {
+        journal.cancelled();
         return publish(&mut initial, State::Error, &error).await;
     }
     let guard = match Guard::install(uid, networks, full, resolver, endpoints, &permits) {
@@ -905,8 +987,10 @@ async fn start(
     // Installation may outlast the lease. Retain the installed journal/guard,
     // drop the prepared transport, and never publish Connected in that case.
     if let Err(error) = freshness.check() {
+        journal.cancelled();
         return publish(&mut initial, State::Blocked, &error).await;
     }
+    journal.success();
     let device = prepared.device();
     let workers = Workers {
         transport: prepared.transport(),
@@ -1049,6 +1133,7 @@ async fn connected(
     let mut netwatch = crate::netwatch::Watch::new(super::device::DEVICE);
     let mut last_failure = String::new();
     let mut restart_pending = false;
+    let mut wake_reconnect = false;
     let mut awake = power.borrow().awake;
     let mut probes = crate::sysprobe::Runner::default();
     let mut access_expired = false;
@@ -1133,6 +1218,7 @@ async fn connected(
                     workers.cancel();
                     probes.cancel();
                     restart_pending = true;
+                    wake_reconnect = true;
                     state = State::Blocked;
                     last_failure = if awake { "Восстановление VPN после сна" } else { "VPN приостановлен на время сна" }.into();
                     if awake { monitor.resumed(rtrust_control::observations::now_ms()); }
@@ -1177,14 +1263,21 @@ async fn connected(
                     // A task can complete just before abort. Do not resurrect
                     // its pre-wake transport even if its result was successful.
                     if restart_pending || access_expired || freshness.check().is_err() { continue; }
+                    let path = if wake_reconnect { rtrust_journal::Path::WakeReconnect } else { rtrust_journal::Path::Reconnect };
                     match &result {
                         Ok(Err(error)) => {
+                            let mut record = error.record.unwrap_or_else(|| rtrust_journal::Record::failure(path, error.class, rtrust_engine::planned_transport(failover.current()), retry_delay.attempt(), rtrust_journal::Budget::from_cooling(retry_delay.cooling()), Duration::ZERO));
+                            record.path = path;
+                            crate::failover::journal_failure(record);
                             last_failure = "VPN reconnect failed".into();
                             // `stage=.. reason=..` classes from device.rs and
                             // fixed route-guard strings only; no endpoint data.
                             events::record(&format!("{last_failure}: {error}"));
                         }
-                        Err(_) => last_failure = "VPN reconnect worker failed".into(),
+                        Err(error) => {
+                            crate::failover::journal_failure(rtrust_journal::Record::failure(path, if error.is_cancelled() { rtrust_journal::Class::Cancelled } else { rtrust_journal::Class::Other }, rtrust_engine::planned_transport(failover.current()), retry_delay.attempt(), rtrust_journal::Budget::from_cooling(retry_delay.cooling()), Duration::ZERO));
+                            last_failure = "VPN reconnect worker failed".into();
+                        },
                         _ => {},
                     }
                     if let Ok(Ok(prepared)) = result {
@@ -1197,6 +1290,7 @@ async fn connected(
                         state = State::Connected;
                         probes.cancel();
                         monitor.transition(true, rtrust_control::observations::now_ms());
+                        wake_reconnect = false;
                         events::record("reconnect_complete");
                         continue;
                     }
@@ -2016,7 +2110,7 @@ mod tests {
                 wait.lock().unwrap().recv().unwrap();
                 Ok(())
             },
-            std::future::pending::<Result<device::Prepared, String>>(),
+            std::future::pending::<Result<device::Prepared, crate::failover::Failure>>(),
         ));
         entered.notified().await;
         let (actor, commands) = mpsc::channel(16);
@@ -2092,7 +2186,7 @@ mod tests {
                     wait.lock().unwrap().recv().unwrap();
                     Ok(())
                 },
-                std::future::pending::<Result<device::Prepared, String>>(),
+                std::future::pending::<Result<device::Prepared, crate::failover::Failure>>(),
             ));
             entered.notified().await;
             let (actor, commands) = mpsc::channel(16);
@@ -2380,7 +2474,7 @@ mod tests {
                 wait.lock().unwrap().recv().unwrap();
                 Ok(())
             },
-            std::future::pending::<Result<device::Prepared, String>>(),
+            std::future::pending::<Result<device::Prepared, crate::failover::Failure>>(),
         ));
         entered.notified().await;
         let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2507,7 +2601,7 @@ mod tests {
         let stop_entered = StopEntered(cancelled.clone());
         let reconnect = tokio::spawn(async move {
             let _stop_entered = stop_entered;
-            std::future::pending::<Result<device::Prepared, String>>().await
+            std::future::pending::<Result<device::Prepared, crate::failover::Failure>>().await
         });
         let (actor, commands) = mpsc::channel(16);
         let (shutdown, shutdown_events) = tokio::sync::watch::channel(false);
@@ -2805,6 +2899,220 @@ mod tests {
         supervisor.await.unwrap().unwrap();
     }
 
+    #[tokio::test]
+    async fn start_pin_and_connect_cancellation_drop_real_guard_once() {
+        async fn cancelled<T, E>(
+            future: impl std::future::Future<Output = Result<T, E>>,
+            classify: impl FnOnce(&mut rtrust_journal::Attempt, E) -> String,
+        ) {
+            crate::failover::take_records();
+            let mut journal = crate::failover::journal_attempt(
+                rtrust_journal::Path::Start,
+                rtrust_journal::Transport::H2,
+                1,
+                rtrust_journal::Budget::Burst,
+            );
+            let (mut initial, receiver) = oneshot::channel();
+            let (_commands, mut commands) = mpsc::channel(1);
+            let (_shutdown, mut shutdown) = tokio::sync::watch::channel(false);
+            let (entered, waiting) = oneshot::channel();
+            let result = {
+                let mut prepared = Box::pin(prepare_start_attempt(
+                    async {
+                        let _ = entered.send(());
+                        future.await
+                    },
+                    &mut journal,
+                    classify,
+                    &mut initial,
+                    &mut commands,
+                    &mut shutdown,
+                ));
+                tokio::select! { _=&mut prepared=>panic!("pending stage completed"),_=waiting=>{} }
+                drop(receiver);
+                prepared.await
+            };
+            assert!(result.is_err());
+            drop(journal);
+            let records = crate::failover::take_records();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].path, rtrust_journal::Path::Start);
+            assert_eq!(records[0].class, rtrust_journal::Class::Cancelled);
+        }
+        cancelled(
+            std::future::pending::<Result<(), crate::failover::PinError>>(),
+            |guard, error| {
+                guard.class(error.class());
+                error.to_string()
+            },
+        )
+        .await;
+        let mut candidates = failover().await;
+        cancelled(
+            candidates.connect_initial(|_| {
+                std::future::pending::<Result<(), crate::failover::Failure>>()
+            }),
+            |guard, error| {
+                error.annotate(guard, |error| error.class);
+                "Initial connection failed".into()
+            },
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn start_pin_typed_failures_and_success_use_actual_preparation_and_guard() {
+        use crate::failover::PinError;
+        for error in [
+            PinError::Timeout,
+            PinError::Resolve,
+            PinError::TooManyAddresses,
+        ] {
+            crate::failover::take_records();
+            let mut journal = crate::failover::journal_attempt(
+                rtrust_journal::Path::Start,
+                rtrust_journal::Transport::H2,
+                1,
+                rtrust_journal::Budget::Burst,
+            );
+            let (mut initial, _receiver) = oneshot::channel();
+            let (_commands, mut commands) = mpsc::channel(1);
+            let (_shutdown, mut shutdown) = tokio::sync::watch::channel(false);
+            assert!(
+                prepare_start_attempt(
+                    async { Err::<(), _>(error) },
+                    &mut journal,
+                    |guard, error| {
+                        guard.class(error.class());
+                        error.to_string()
+                    },
+                    &mut initial,
+                    &mut commands,
+                    &mut shutdown
+                )
+                .await
+                .is_err()
+            );
+            drop(journal);
+            let records = crate::failover::take_records();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].class, error.class());
+        }
+        let mut journal = crate::failover::journal_attempt(
+            rtrust_journal::Path::Start,
+            rtrust_journal::Transport::H2,
+            1,
+            rtrust_journal::Budget::Burst,
+        );
+        let (mut initial, _receiver) = oneshot::channel();
+        let (_commands, mut commands) = mpsc::channel(1);
+        let (_shutdown, mut shutdown) = tokio::sync::watch::channel(false);
+        prepare_start_attempt(
+            async { Ok::<_, PinError>(()) },
+            &mut journal,
+            |guard, error| {
+                guard.class(error.class());
+                error.to_string()
+            },
+            &mut initial,
+            &mut commands,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        journal.success();
+        drop(journal);
+        assert!(crate::failover::take_records().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconnect_journal_publishes_once_after_admission_and_discards_pre_wake_worker() {
+        use rtrust_journal::{Budget, Class, Path, Record, Transport};
+        for waking in [false, true] {
+            crate::failover::take_records();
+            let record = Record::failure(
+                Path::Reconnect,
+                Class::Authentication,
+                Transport::H3,
+                3,
+                Budget::Burst,
+                Duration::from_millis(17),
+            );
+            let failure = move || {
+                let mut failure =
+                    crate::failover::Failure::from(rtrust_engine::Error::Authentication);
+                failure.record = Some(record);
+                failure
+            };
+            let worker = if waking {
+                tokio::spawn(std::future::pending())
+            } else {
+                tokio::spawn(async move { Err(failure()) })
+            };
+            let (mut client, server) = tokio::io::duplex(4096);
+            let (power, power_events) = tokio::sync::watch::channel(power::State::default());
+            let mut delivered = false;
+            let supervisor = tokio::spawn(connected(
+                server,
+                Workers {
+                    transport: "test",
+                    tunnel: None,
+                    reconnect: Some(worker),
+                },
+                false,
+                power_events,
+                failover().await,
+                move |workers, _, _| {
+                    workers.reconnect = Some(if waking && !delivered {
+                        delivered = true;
+                        tokio::spawn(async move { Err(failure()) })
+                    } else {
+                        tokio::spawn(std::future::pending())
+                    });
+                },
+                || Ok(()),
+            ));
+            let _: Response = read(&mut client).await.unwrap();
+            if waking {
+                power.send_modify(|state| state.generation += 1);
+            }
+            let records = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let records = crate::failover::take_records();
+                    if !records.is_empty() {
+                        break records;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(
+                records[0],
+                Record {
+                    path: if waking {
+                        Path::WakeReconnect
+                    } else {
+                        Path::Reconnect
+                    },
+                    ..record
+                }
+            );
+            write(
+                &mut client,
+                &Request {
+                    version: VERSION,
+                    command: Command::Stop,
+                },
+            )
+            .await
+            .unwrap();
+            let _: Response = read(&mut client).await.unwrap();
+            supervisor.await.unwrap().unwrap();
+            assert!(crate::failover::take_records().is_empty());
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wake_during_route_refresh_keeps_real_supervisor_responsive() {
         let lease = Arc::new(Mutex::new(()));
@@ -2820,7 +3128,7 @@ mod tests {
                 wait.lock().unwrap().recv().unwrap();
                 Ok(())
             },
-            std::future::pending::<Result<device::Prepared, String>>(),
+            std::future::pending::<Result<device::Prepared, crate::failover::Failure>>(),
         ));
         entered.notified().await;
         let retries = Arc::new(std::sync::atomic::AtomicUsize::new(0));

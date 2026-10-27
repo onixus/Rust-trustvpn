@@ -88,7 +88,7 @@ async fn expiry_during_os_mutation_keeps_status_responsive_and_stop_waits_for_dr
             finished.fetch_add(1, SeqCst);
             Ok(())
         },
-        std::future::pending::<Result<device::Prepared, String>>(),
+        std::future::pending::<Result<device::Prepared, crate::failover::Failure>>(),
     ));
     entry.await.unwrap();
 

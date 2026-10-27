@@ -1266,6 +1266,9 @@ impl App {
             Message::SocksAttempt(epoch, result)
                 if epoch == self.connection_epoch && self.connecting =>
             {
+                if let Err(failure) = &result {
+                    socks_recovery::record_failure(failure);
+                }
                 match result {
                     Ok(session) => return self.update(Message::Connected(epoch, Ok(session))),
                     // Retrying cannot fix it: end recovery, as a user start would.
@@ -2106,7 +2109,7 @@ impl App {
         let (task, handle) = Task::perform(
             async move {
                 tokio::time::sleep(retry.delay).await;
-                socks_recovery::attempt(profile, port).await
+                socks_recovery::attempt_with_metadata(profile, port, retry).await
             },
             move |r| Message::SocksAttempt(epoch, r),
         )

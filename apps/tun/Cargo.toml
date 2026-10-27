@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 rtrust-profile.workspace = true
 rtrust-engine.workspace = true
+rtrust-journal.workspace = true
 tokio = { workspace = true, features = ["signal", "process"] }
 smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp"] }
 futures-util = "0.3"

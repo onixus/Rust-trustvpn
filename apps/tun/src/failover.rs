@@ -8,6 +8,160 @@
 use rtrust_profile::Profile;
 use std::time::{Duration, Instant};
 
+#[derive(Debug)]
+pub struct InitialFailure<E> {
+    pub last: Option<E>,
+    pub transport: rtrust_journal::Transport,
+    pub attempts: u32,
+}
+impl<E> InitialFailure<E> {
+    pub fn annotate(
+        &self,
+        journal: &mut rtrust_journal::Attempt,
+        classify: impl FnOnce(&E) -> rtrust_journal::Class,
+    ) {
+        journal.metadata(self.transport, self.attempts);
+        journal.class(
+            self.last
+                .as_ref()
+                .map_or(rtrust_journal::Class::Timeout, classify),
+        );
+    }
+}
+pub fn journal_attempt(
+    path: rtrust_journal::Path,
+    transport: rtrust_journal::Transport,
+    attempt: u32,
+    budget: rtrust_journal::Budget,
+) -> rtrust_journal::Attempt {
+    #[cfg(not(test))]
+    {
+        rtrust_journal::Attempt::new(path, transport, attempt, budget)
+    }
+    #[cfg(test)]
+    {
+        rtrust_journal::Attempt::with_recorder(path, transport, attempt, budget, journal_failure)
+    }
+}
+// Inspect only the single envelope accepted by freshness::start. Lease validation
+// remains there; this guard must also cover its early authentication rejection.
+#[cfg(any(target_os = "linux", windows, test))]
+pub fn start_journal(command: &rtrust_control::Command) -> Option<rtrust_journal::Attempt> {
+    use rtrust_control::Command;
+    let command = match command {
+        Command::StartLeased { command, .. } => command.as_ref(),
+        command => command,
+    };
+    match command {
+        Command::Start { profile, .. } | Command::StartFull { profile, .. } => {
+            Some(journal_attempt(
+                rtrust_journal::Path::Start,
+                rtrust_engine::planned_transport(profile),
+                1,
+                rtrust_journal::Budget::Burst,
+            ))
+        }
+        _ => None,
+    }
+}
+pub fn journal_failure(record: rtrust_journal::Record) {
+    #[cfg(not(test))]
+    rtrust_journal::service().submit(record);
+    #[cfg(test)]
+    TEST_RECORDS.with(|records| records.borrow_mut().push(record));
+}
+#[cfg(test)]
+thread_local! { static TEST_RECORDS: std::cell::RefCell<Vec<rtrust_journal::Record>> = const { std::cell::RefCell::new(Vec::new()) }; }
+#[cfg(test)]
+pub fn take_records() -> Vec<rtrust_journal::Record> {
+    TEST_RECORDS.with(|records| std::mem::take(&mut *records.borrow_mut()))
+}
+// Metadata only: resume while a healthy tunnel survives cannot label an
+// unrelated future outage. Callers snapshot path when an attempt is scheduled;
+// a resume never relabels an already-running pre-wake worker.
+#[cfg(any(target_os = "linux", windows, test))]
+#[derive(Default)]
+pub struct RecoveryLabels {
+    wake_episode: bool,
+}
+#[cfg(any(target_os = "linux", windows, test))]
+impl RecoveryLabels {
+    pub fn resumed(&mut self, recovering: bool) {
+        self.wake_episode = recovering;
+    }
+    pub fn connected(&mut self) {
+        self.wake_episode = false;
+    }
+    pub fn path(&self) -> rtrust_journal::Path {
+        if self.wake_episode {
+            rtrust_journal::Path::WakeReconnect
+        } else {
+            rtrust_journal::Path::Reconnect
+        }
+    }
+}
+/// GUI text stays separate from the closed journal classification.
+#[derive(Debug)]
+pub struct Failure {
+    pub message: String,
+    pub class: rtrust_journal::Class,
+    // Linux/macOS workers carry deferred accepted-attempt metadata; Windows
+    // records its synchronous attempt at the supervisor instead.
+    #[cfg(not(windows))]
+    pub record: Option<rtrust_journal::Record>,
+}
+impl Failure {
+    #[cfg(target_os = "macos")]
+    pub fn engine(error: rtrust_engine::Error, message: impl Into<String>) -> Self {
+        Self {
+            class: rtrust_journal::classify(&error),
+            message: message.into(),
+            #[cfg(not(windows))]
+            record: None,
+        }
+    }
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            class: rtrust_journal::Class::Timeout,
+            #[cfg(not(windows))]
+            record: None,
+        }
+    }
+}
+impl From<rtrust_engine::Error> for Failure {
+    fn from(error: rtrust_engine::Error) -> Self {
+        let class = rtrust_journal::classify(&error);
+        Self {
+            class,
+            message: error.to_string(),
+            #[cfg(not(windows))]
+            record: None,
+        }
+    }
+}
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            class: rtrust_journal::Class::Other,
+            #[cfg(not(windows))]
+            record: None,
+        }
+    }
+}
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for Failure {}
+
 /// Consecutive failed connection attempts before trying the next candidate.
 pub const SWITCH_AFTER: u32 = 2;
 /// Minimum time between two switches, against oscillation.
@@ -30,8 +184,42 @@ pub enum Pin {
 /// Per candidate; candidates resolve concurrently.
 pub const PIN_LIMIT: Duration = Duration::from_secs(10);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinError {
+    Resolve,
+    Timeout,
+    TooManyAddresses,
+    NoAddresses,
+    TooManyProfiles,
+}
+impl PinError {
+    pub fn class(self) -> rtrust_journal::Class {
+        match self {
+            Self::Timeout => rtrust_journal::Class::Timeout,
+            Self::Resolve | Self::NoAddresses => rtrust_journal::Class::EndpointUnreachable,
+            Self::TooManyAddresses | Self::TooManyProfiles => rtrust_journal::Class::Profile,
+        }
+    }
+}
+impl std::fmt::Display for PinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Resolve => "Cannot resolve endpoint",
+            Self::Timeout => "Endpoint resolution timed out",
+            Self::TooManyAddresses => "Too many endpoint addresses",
+            Self::NoAddresses => "Endpoint has no addresses",
+            Self::TooManyProfiles => "Too many backup profiles",
+        })
+    }
+}
+impl std::error::Error for PinError {}
+impl From<PinError> for String {
+    fn from(error: PinError) -> Self {
+        error.to_string()
+    }
+}
 /// Freeze DNS answers for this lease so reconnect cannot route into itself.
-pub async fn pin_endpoint(mut profile: Profile, mode: Pin) -> Result<Profile, String> {
+pub async fn pin_endpoint(mut profile: Profile, mode: Pin) -> Result<Profile, PinError> {
     if mode == Pin::Unresolved {
         return Ok(profile);
     }
@@ -39,13 +227,13 @@ pub async fn pin_endpoint(mut profile: Profile, mode: Pin) -> Result<Profile, St
     for address in &profile.endpoint.addresses {
         for address in tokio::net::lookup_host(address)
             .await
-            .map_err(|_| "Cannot resolve endpoint")?
+            .map_err(|_| PinError::Resolve)?
         {
             if mode == Pin::Ipv4 && !address.is_ipv4() {
                 continue;
             }
             if addresses.len() >= 64 {
-                return Err("Too many endpoint addresses".into());
+                return Err(PinError::TooManyAddresses);
             }
             let address = address.to_string();
             if !addresses.contains(&address) {
@@ -54,7 +242,7 @@ pub async fn pin_endpoint(mut profile: Profile, mode: Pin) -> Result<Profile, St
         }
     }
     if addresses.is_empty() {
-        return Err("Endpoint has no addresses".into());
+        return Err(PinError::NoAddresses);
     }
     profile.endpoint.addresses = addresses;
     Ok(profile)
@@ -86,16 +274,20 @@ impl Failover {
     /// Pins every candidate concurrently, each within its own limit. The
     /// requested profile must pin; a backup that cannot is left out, so a
     /// slow or broken backup never prevents the requested connection.
-    pub async fn pin(primary: Profile, fallbacks: Vec<Profile>, mode: Pin) -> Result<Self, String> {
+    pub async fn pin(
+        primary: Profile,
+        fallbacks: Vec<Profile>,
+        mode: Pin,
+    ) -> Result<Self, PinError> {
         if fallbacks.len() > rtrust_control::MAX_FALLBACKS {
-            return Err("Too many backup profiles".into());
+            return Err(PinError::TooManyProfiles);
         }
         let mut results =
             futures_util::future::join_all(std::iter::once(primary).chain(fallbacks).map(
                 |profile| async move {
                     tokio::time::timeout(PIN_LIMIT, pin_endpoint(profile, mode))
                         .await
-                        .unwrap_or_else(|_| Err("Endpoint resolution timed out".into()))
+                        .unwrap_or_else(|_| Err(PinError::Timeout))
                 },
             ))
             .await
@@ -116,7 +308,7 @@ impl Failover {
         failover.indices = indices;
         // The platform guards accept at most 64 pinned endpoint addresses.
         if failover.endpoint_addresses().len() > 64 {
-            return Err("Too many endpoint addresses".into());
+            return Err(PinError::TooManyAddresses);
         }
         Ok(failover)
     }
@@ -192,7 +384,10 @@ impl Failover {
     /// Startup has one 30 s budget shared by every candidate. Each candidate
     /// gets two attempts before moving on, without extending the IPC deadline.
     /// Cancellation drops the pending attempt. No routes or guard are changed.
-    pub async fn connect_initial<T, E, F, Fut>(&mut self, mut connect: F) -> Result<T, String>
+    pub async fn connect_initial<T, E, F, Fut>(
+        &mut self,
+        mut connect: F,
+    ) -> Result<T, InitialFailure<E>>
     where
         F: FnMut(Profile) -> Fut,
         Fut: std::future::Future<Output = Result<T, E>>,
@@ -204,21 +399,30 @@ impl Failover {
             SWITCH_AFTER
         };
         let budget = Duration::from_secs(30) / (self.candidates.len() as u32 * attempts);
+        let mut failure = InitialFailure {
+            last: None,
+            transport: rtrust_journal::Transport::Unknown,
+            attempts: 0,
+        };
         for index in 0..self.candidates.len() {
             for _ in 0..attempts {
-                if let Ok(Ok(connected)) =
-                    tokio::time::timeout(budget, connect(self.candidates[index].clone())).await
-                {
-                    self.active = index;
-                    self.failures = 0;
-                    if index != 0 {
-                        self.last_switch = Some(Instant::now());
+                failure.attempts += 1;
+                failure.transport = rtrust_engine::planned_transport(&self.candidates[index]);
+                match tokio::time::timeout(budget, connect(self.candidates[index].clone())).await {
+                    Ok(Ok(connected)) => {
+                        self.active = index;
+                        self.failures = 0;
+                        if index != 0 {
+                            self.last_switch = Some(Instant::now());
+                        }
+                        return Ok(connected);
                     }
-                    return Ok(connected);
+                    Ok(Err(error)) => failure.last = Some(error),
+                    Err(_) => failure.last = None,
                 }
             }
         }
-        Err("No allowed VPN endpoint connected within the startup budget".into())
+        Err(failure)
     }
     pub fn endpoint_addresses(&self) -> Vec<String> {
         let mut addresses = Vec::new();
@@ -250,8 +454,166 @@ impl Failover {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    fn start_command(full: bool) -> rtrust_control::Command {
+        let profile = Box::new(profile("synthetic.example", "192.0.2.1:443"));
+        if full {
+            rtrust_control::Command::StartFull {
+                profile,
+                dns: "198.18.0.53".parse().unwrap(),
+                fallbacks: vec![],
+            }
+        } else {
+            rtrust_control::Command::Start {
+                profile,
+                networks: vec!["198.18.0.0/24".parse().unwrap()],
+                exclude: vec![],
+                exclude_lan: false,
+                dns: None,
+                fallbacks: vec![],
+            }
+        }
+    }
+    fn leased(command: rtrust_control::Command, expired: bool) -> rtrust_control::Command {
+        let now = rtrust_control::freshness::now();
+        rtrust_control::Command::StartLeased {
+            lease: if expired {
+                rtrust_control::freshness::Lease {
+                    issued_at_ms: 1,
+                    expires_at_ms: 2,
+                }
+            } else {
+                rtrust_control::freshness::Lease {
+                    issued_at_ms: now.saturating_sub(1000),
+                    expires_at_ms: now + 60_000,
+                }
+            },
+            command: Box::new(command),
+        }
+    }
+    #[test]
+    fn start_guard_covers_plain_and_single_leased_start_shapes_only() {
+        use rtrust_journal::{Budget, Class, Path, Transport};
+        take_records();
+        for full in [false, true] {
+            for wrapped in [false, true] {
+                let command = start_command(full);
+                let command = if wrapped {
+                    leased(command, false)
+                } else {
+                    command
+                };
+                let guard = start_journal(&command).unwrap();
+                assert!(rtrust_control::freshness::start(command).is_ok());
+                drop(guard);
+                let records = take_records();
+                assert_eq!(records.len(), 1);
+                assert_eq!(
+                    (
+                        records[0].path,
+                        records[0].transport,
+                        records[0].attempt,
+                        records[0].budget,
+                        records[0].class
+                    ),
+                    (Path::Start, Transport::H2, 1, Budget::Burst, Class::Other)
+                );
+            }
+        }
+        assert!(start_journal(&rtrust_control::Command::Capabilities).is_none());
+        let invalid = leased(leased(start_command(false), false), false);
+        assert!(start_journal(&invalid).is_none());
+        assert!(rtrust_control::freshness::start(invalid).is_err());
+        assert!(take_records().is_empty());
+    }
+
+    // Type-checked on macOS too, but only native Linux/Windows module tests can
+    // invoke the actual platform serve handlers. No replacement handler is used.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub async fn assert_start_serve_failures<F, Fut>(mut serve: F)
+    where
+        F: FnMut(tokio::io::DuplexStream) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    {
+        use rtrust_control::{Command, Request, Response, State, VERSION};
+        use rtrust_journal::{Budget, Class, Path, Transport};
+        for full in [false, true] {
+            // Plain and valid leased starts fail pure validation; expired leases
+            // must take precedence over the same deliberately invalid inner input.
+            for mode in 0..3 {
+                take_records();
+                let mut command = start_command(full);
+                match &mut command {
+                    Command::Start { networks, .. } => networks.clear(),
+                    Command::StartFull { dns, .. } => *dns = std::net::Ipv4Addr::UNSPECIFIED,
+                    _ => unreachable!(),
+                }
+                let expired = mode == 2;
+                if mode != 0 {
+                    command = leased(command, expired);
+                }
+                let expected_message = if expired {
+                    "Access confirmation expired; synchronize the portal".to_owned()
+                } else if full {
+                    rtrust_control::validate_dns(std::net::Ipv4Addr::UNSPECIFIED).unwrap_err()
+                } else {
+                    rtrust_control::Selection {
+                        include: vec![],
+                        exclude: vec![],
+                        exclude_lan: false,
+                    }
+                    .validate()
+                    .unwrap_err()
+                };
+                let (mut client, server) = tokio::io::duplex(1 << 16);
+                let service = tokio::spawn(serve(server));
+                let response = tokio::time::timeout(Duration::from_secs(2), async {
+                    rtrust_control::write(
+                        &mut client,
+                        &Request {
+                            version: VERSION,
+                            command,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    rtrust_control::read::<Response>(&mut client).await.unwrap()
+                })
+                .await
+                .expect("Start must return a bounded error response");
+                tokio::time::timeout(Duration::from_secs(2), service)
+                    .await
+                    .expect("serve must finish")
+                    .expect("serve must not panic")
+                    .expect("error response must complete normally");
+                assert_eq!(response.version, VERSION);
+                assert_eq!(response.state, State::Error);
+                assert_eq!(response.message, expected_message);
+                let records = take_records();
+                assert_eq!(records.len(), 1, "each failed Start must emit exactly once");
+                assert_eq!(
+                    (
+                        records[0].path,
+                        records[0].transport,
+                        records[0].attempt,
+                        records[0].budget
+                    ),
+                    (Path::Start, Transport::H2, 1, Budget::Burst)
+                );
+                assert_eq!(
+                    records[0].class,
+                    if expired {
+                        Class::Authentication
+                    } else {
+                        Class::Profile
+                    }
+                );
+                assert!(take_records().is_empty());
+            }
+        }
+    }
 
     fn profile(host: &str, address: &str) -> Profile {
         Profile::import(&format!(
@@ -268,6 +630,45 @@ mod tests {
         )
     }
 
+    #[test]
+    fn recovery_labels_snapshot_pre_wake_workers_and_do_not_linger_after_healthy_resume() {
+        use rtrust_journal::Path::*;
+        let mut labels = RecoveryLabels::default();
+        labels.resumed(false);
+        assert_eq!(
+            labels.path(),
+            Reconnect,
+            "healthy tunnel survived wake; later outage is unrelated"
+        );
+        let pre_wake_attempt = labels.path();
+        labels.resumed(true);
+        assert_eq!(pre_wake_attempt, Reconnect);
+        assert_eq!(labels.path(), WakeReconnect);
+        labels.connected();
+        assert_eq!(labels.path(), Reconnect);
+    }
+    #[test]
+    fn real_start_raii_guard_uses_injected_typed_sink_without_service_files() {
+        use rtrust_journal::{Budget, Class, Path, Transport};
+        take_records();
+        for class in [
+            Class::Cancelled,
+            PinError::Timeout.class(),
+            PinError::TooManyAddresses.class(),
+            PinError::Resolve.class(),
+        ] {
+            let mut guard = journal_attempt(Path::Start, Transport::H2, 1, Budget::Burst);
+            guard.class(class);
+            drop(guard);
+            let records = take_records();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].class, class);
+        }
+        let mut guard = journal_attempt(Path::Start, Transport::H2, 1, Budget::Burst);
+        guard.success();
+        drop(guard);
+        assert!(take_records().is_empty());
+    }
     #[test]
     fn a_fixed_profile_is_never_substituted() {
         let mut f = failover(1);
@@ -396,6 +797,37 @@ mod tests {
                 .is_err()
         );
         assert_eq!(fixed.active(), None);
+    }
+
+    #[tokio::test]
+    async fn startup_failure_retains_typed_final_cause_attempts_and_planned_transport() {
+        let mut f = failover(2);
+        f.candidates[1].endpoint.upstream_protocol = "http3".into();
+        let failure = f
+            .connect_initial(|_| async { Err::<(), _>(rtrust_engine::Error::Authentication) })
+            .await
+            .unwrap_err();
+        assert_eq!(failure.attempts, 4);
+        assert_eq!(failure.transport, rtrust_journal::Transport::H3);
+        assert_eq!(
+            rtrust_journal::classify(failure.last.as_ref().unwrap()),
+            rtrust_journal::Class::Authentication
+        );
+        assert_eq!(f.active(), Some(0)); // Failed startup never admits a backup.
+        take_records();
+        let mut guard = journal_attempt(
+            rtrust_journal::Path::Start,
+            rtrust_journal::Transport::H2,
+            1,
+            rtrust_journal::Budget::Burst,
+        );
+        failure.annotate(&mut guard, rtrust_journal::classify);
+        drop(guard);
+        let records = take_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].class, rtrust_journal::Class::Authentication);
+        assert_eq!(records[0].transport, rtrust_journal::Transport::H3);
+        assert_eq!(records[0].attempt, 4);
     }
 
     #[test]
