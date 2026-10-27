@@ -708,6 +708,23 @@ async fn oversized_answers_are_dropped_alone() {
 }
 
 #[tokio::test]
+async fn a_refused_flow_in_its_retry_window_is_not_reopened_for_silence() {
+    let e = endpoint(&[HOST], &[b"http/1.1"]).await;
+    let session = Session::connect(&e.profile).await.unwrap();
+    e.mode.store(REVOKED, Ordering::SeqCst);
+    let before = e.accepted.load(Ordering::SeqCst);
+    let mut tunnel = session.open_udp().await.unwrap();
+    // Well past the first-answer window but inside one RETRY window: the
+    // refused flow waits it out; a missing answer must not redial it.
+    let started = std::time::Instant::now();
+    while started.elapsed() < udp::RETRY / 2 {
+        send_udp(&mut tunnel, "10.0.0.2:8100", "192.0.2.9:8100", vec![1]).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(e.accepted.load(Ordering::SeqCst) - before, 1);
+}
+
+#[tokio::test]
 async fn refused_flows_back_off_instead_of_redialing_per_packet() {
     let e = endpoint(&[HOST], &[b"http/1.1"]).await;
     let session = Session::connect(&e.profile).await.unwrap();

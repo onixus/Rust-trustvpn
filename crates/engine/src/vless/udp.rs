@@ -51,6 +51,9 @@ struct Flow {
     /// When the flow opened, and whether the server answered it at all.
     opened: Instant,
     heard: bool,
+    /// Its connection is up and carrying: only such a flow is reopened for a
+    /// missing first answer. A refused flow waiting out [`RETRY`] is not.
+    carrying: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
     /// Held here, not by the task, so eviction frees the slot at once.
     _permit: tokio::sync::OwnedSemaphorePermit,
@@ -107,7 +110,9 @@ async fn relay(session: VlessSession, bridge: DuplexStream) -> Result<()> {
                     continue;
                 }
                 let key = (d.source, d.destination);
-                let unheard = flows.get(&key).is_some_and(|flow| !flow.heard && flow.opened.elapsed() >= FIRST_ANSWER);
+                let unheard = flows.get(&key).is_some_and(|flow| {
+                    !flow.heard && flow.opened.elapsed() >= FIRST_ANSWER && flow.carrying.load(Ordering::Relaxed)
+                });
                 if flows.get(&key).is_some_and(|flow| flow.packets.is_closed() || expired(&key, flow))
                     || (unheard && reopened.len() < REOPENED && reopened.insert(key))
                 {
@@ -129,9 +134,10 @@ async fn relay(session: VlessSession, bridge: DuplexStream) -> Result<()> {
                         Err(_) => continue,
                     };
                     let (packets, queue) = tokio::sync::mpsc::channel(QUEUE);
-                    let task = tokio::spawn(flow(session.clone(), key, queue, back.clone()));
+                    let carrying = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let task = tokio::spawn(flow(session.clone(), key, queue, back.clone(), carrying.clone()));
                     let now = Instant::now();
-                    flows.insert(key, Flow { packets, active: now, answered: now, resolved: false, opened: now, heard: false, task, _permit: permit });
+                    flows.insert(key, Flow { packets, active: now, answered: now, resolved: false, opened: now, heard: false, carrying, task, _permit: permit });
                 }
                 let flow = flows.get_mut(&key).expect("inserted above");
                 flow.active = Instant::now();
@@ -171,9 +177,11 @@ async fn flow(
     (source, destination): Key,
     mut queue: tokio::sync::mpsc::Receiver<Vec<u8>>,
     back: tokio::sync::mpsc::Sender<Datagram>,
+    carrying: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut heard = false;
     if let Ok(Ok((tls, rest))) = tokio::time::timeout(OPEN, session.dial()).await {
+        carrying.store(true, Ordering::Relaxed);
         let _ = carry(
             &session,
             tls,
@@ -184,6 +192,7 @@ async fn flow(
             &mut heard,
         )
         .await;
+        carrying.store(false, Ordering::Relaxed);
     }
     if !heard {
         tokio::time::sleep(RETRY).await;
