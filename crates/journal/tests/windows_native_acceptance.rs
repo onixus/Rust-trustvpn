@@ -291,6 +291,15 @@ fn snapshot(path: &Path) -> Snapshot {
         }
     }
 }
+// NTFS keeps OI|CI only on containers; file ACEs carry no inheritance flags.
+fn inheritance(directory: bool) -> u8 {
+    if directory { 3 } else { 0 }
+}
+fn grants(aces: &[Ace]) -> Vec<(&[u8], u32)> {
+    aces.iter()
+        .map(|ace| (ace.owner.as_slice(), ace.mask))
+        .collect()
+}
 fn canonical(path: &Path, directory: bool) {
     let value = snapshot(path);
     require(value.owner == sid_bytes(sid(SY).0) && value.protected);
@@ -306,7 +315,11 @@ fn canonical(path: &Path, directory: bool) {
             .iter()
             .zip([(SY, 0x1f01ff), (BA, 0x1f01ff), (BU, 0x1200a9)])
     {
-        require(actual.owner == sid_bytes(sid(name).0) && actual.mask == mask && actual.flags == 3);
+        require(
+            actual.owner == sid_bytes(sid(name).0)
+                && actual.mask == mask
+                && actual.flags == inheritance(directory),
+        );
     }
 }
 fn secure_directory(path: &Path, text: &str) {
@@ -503,7 +516,7 @@ fn system_matrix() {
         let repaired = snapshot(&leaf);
         require(repaired.owner == sid_bytes(sid(BA).0) && repaired.protected);
         let root_file = snapshot(&leaf.join("events.log"));
-        require(repaired.aces == root_file.aces);
+        require(grants(&repaired.aces) == grants(&root_file.aces));
         canonical(&leaf.join("events.log"), false);
         require(snapshot(leaf.parent().unwrap()).dacl == parent.dacl);
     }
@@ -658,13 +671,18 @@ fn system_matrix() {
         Owner::CurrentUser,
         "socks-events.log",
     ));
-    for path in [&private, &private.join("socks-events.log")] {
-        let meta = snapshot(path);
+    for (path, directory) in [
+        (private.clone(), true),
+        (private.join("socks-events.log"), false),
+    ] {
+        let meta = snapshot(&path);
         require(meta.protected && meta.owner == sid_bytes(sid(SY).0));
         require(
             !meta.aces.is_empty()
                 && meta.aces.iter().all(|ace| {
-                    ace.owner == sid_bytes(sid(SY).0) && ace.mask == 0x1f01ff && ace.flags == 3
+                    ace.owner == sid_bytes(sid(SY).0)
+                        && ace.mask == 0x1f01ff
+                        && ace.flags == inheritance(directory)
                 }),
         );
     }
@@ -682,7 +700,9 @@ fn system_private(path: &Path, directory: bool) {
     require(
         !meta.aces.is_empty()
             && meta.aces.iter().all(|ace| {
-                ace.owner == sid_bytes(sid(SY).0) && ace.mask == 0x1f01ff && ace.flags == 3
+                ace.owner == sid_bytes(sid(SY).0)
+                    && ace.mask == 0x1f01ff
+                    && ace.flags == inheritance(directory)
             }),
     );
 }
