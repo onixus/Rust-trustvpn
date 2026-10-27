@@ -146,6 +146,7 @@ pub struct Attempt {
     record: Option<Record>,
     started: Instant,
     sink: Option<Arc<Journal>>,
+    recorder: Option<fn(Record)>,
 }
 impl Attempt {
     pub fn new(path: Path, transport: Transport, attempt: u32, budget: Budget) -> Self {
@@ -160,7 +161,22 @@ impl Attempt {
             )),
             started: Instant::now(),
             sink: None,
+            recorder: None,
         }
+    }
+    /// Inject a typed, nonblocking recorder (for isolated caller harnesses).
+    /// The recorder must not panic or perform filesystem I/O. Default guards
+    /// still exclusively submit to the bounded, best-effort service queue.
+    pub fn with_recorder(
+        path: Path,
+        transport: Transport,
+        attempt: u32,
+        budget: Budget,
+        recorder: fn(Record),
+    ) -> Self {
+        let mut guard = Self::new(path, transport, attempt, budget);
+        guard.recorder = Some(recorder);
+        guard
     }
     pub fn with_sink(
         path: Path,
@@ -196,7 +212,11 @@ impl Drop for Attempt {
         if let Some(mut r) = self.record.take() {
             r.time = now_ms();
             r.duration_ms = self.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-            self.sink.as_deref().unwrap_or_else(|| service()).submit(r);
+            if let Some(recorder) = self.recorder {
+                recorder(r);
+            } else {
+                self.sink.as_deref().unwrap_or_else(|| service()).submit(r);
+            }
         }
     }
 }

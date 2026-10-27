@@ -80,9 +80,8 @@ impl Store {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
-        for (_, name, _) in self.segments()? {
+        for (sequence, name, _) in self.segments()? {
             let mut bytes = Vec::new();
-            // Reserving replacement space may have evicted a later cached entry.
             // Skip only confirmed absence, never permission/unsafe-object errors.
             let file = match self.dir.file(&name, false) {
                 Ok(file) => file,
@@ -103,7 +102,7 @@ impl Store {
                     .next()
                     .and_then(|b| std::str::from_utf8(b).ok())
                     .and_then(|s| s.parse::<u64>().ok());
-                if time.is_some_and(|t| t <= now && now.saturating_sub(t) <= AGE) {
+                if time.is_some_and(|t| now.saturating_sub(t) <= AGE) {
                     kept.extend_from_slice(line);
                 }
             }
@@ -113,21 +112,21 @@ impl Store {
             if kept.is_empty() {
                 self.dir.remove(&name)?;
             } else {
-                // Temporary data also counts towards the disk cap. Evict oldest
-                // *other* segments before allocating the atomic replacement.
+                // Temporary data also counts towards the disk cap. Only evict
+                // older segments; if insufficient, discard this target rather
+                // than sacrificing any newer history for its temporary copy.
                 let entries = self.segments()?;
                 let mut size: u64 = entries.iter().map(|e| e.2).sum();
-                for (_, other, len) in entries {
-                    if size + kept.len() as u64 <= self.total {
+                for (other_sequence, other, len) in entries {
+                    if size + kept.len() as u64 <= self.total || other_sequence >= sequence {
                         break;
                     }
-                    if other != name {
-                        self.dir.remove(&other)?;
-                        size -= len;
-                    }
+                    self.dir.remove(&other)?;
+                    size -= len;
                 }
                 if size + kept.len() as u64 > self.total {
-                    return Err(invalid());
+                    self.dir.remove(&name)?;
+                    continue;
                 }
                 self.dir.replace(&name, &kept)?;
             }
@@ -238,10 +237,21 @@ mod tests {
             .unwrap();
         assert!(!s.segments().unwrap().iter().any(|e| e.1 == "events.log.9"));
         s.prune(1).unwrap();
+        let mut rollback = String::new();
+        s.dir
+            .file("events.log", false)
+            .unwrap()
+            .read_to_string(&mut rollback)
+            .unwrap();
+        assert!(
+            rollback.contains("fresh"),
+            "RTC rollback must preserve future-dated history"
+        );
+        s.prune(AGE * 3 + 103).unwrap();
         assert!(s.segments().unwrap().is_empty());
     }
     #[test]
-    fn near_cap_mixed_segments_can_evict_cached_entry_without_losing_append() {
+    fn near_cap_mixed_rewrite_discards_oldest_target_never_newer_history() {
         let (_tmp, mut s) = store();
         s.segment = 200;
         s.total = 600;
@@ -257,7 +267,14 @@ mod tests {
         }
         s.append(&format!("{now} newest\n"), now).unwrap();
         assert!(s.segments().unwrap().iter().map(|e| e.2).sum::<u64>() <= 600);
-        assert!(s.dir.file("events.log.2", false).is_err());
+        assert!(s.dir.file("events.log.1", false).is_err());
+        let mut newer = String::new();
+        s.dir
+            .file("events.log.2", false)
+            .unwrap()
+            .read_to_string(&mut newer)
+            .unwrap();
+        assert_eq!(newer, fresh);
         let mut text = String::new();
         s.dir
             .file("events.log", false)

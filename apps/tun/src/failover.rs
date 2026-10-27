@@ -14,17 +14,34 @@ pub struct InitialFailure<E> {
     pub transport: rtrust_journal::Transport,
     pub attempts: u32,
 }
+impl<E> InitialFailure<E> {
+    pub fn annotate(
+        &self,
+        journal: &mut rtrust_journal::Attempt,
+        classify: impl FnOnce(&E) -> rtrust_journal::Class,
+    ) {
+        journal.metadata(self.transport, self.attempts);
+        journal.class(
+            self.last
+                .as_ref()
+                .map_or(rtrust_journal::Class::Timeout, classify),
+        );
+    }
+}
 pub fn journal_attempt(
     path: rtrust_journal::Path,
     transport: rtrust_journal::Transport,
     attempt: u32,
     budget: rtrust_journal::Budget,
 ) -> rtrust_journal::Attempt {
-    let mut guard = rtrust_journal::Attempt::new(path, transport, attempt, budget);
-    if cfg!(test) {
-        guard.success();
+    #[cfg(not(test))]
+    {
+        rtrust_journal::Attempt::new(path, transport, attempt, budget)
     }
-    guard
+    #[cfg(test)]
+    {
+        rtrust_journal::Attempt::with_recorder(path, transport, attempt, budget, journal_failure)
+    }
 }
 pub fn journal_failure(record: rtrust_journal::Record) {
     #[cfg(not(test))]
@@ -38,6 +55,30 @@ thread_local! { static TEST_RECORDS: std::cell::RefCell<Vec<rtrust_journal::Reco
 pub fn take_records() -> Vec<rtrust_journal::Record> {
     TEST_RECORDS.with(|records| std::mem::take(&mut *records.borrow_mut()))
 }
+// Metadata only: resume while a healthy tunnel survives cannot label an
+// unrelated future outage. Callers snapshot path when an attempt is scheduled;
+// a resume never relabels an already-running pre-wake worker.
+#[cfg(any(target_os = "linux", windows, test))]
+#[derive(Default)]
+pub struct RecoveryLabels {
+    wake_episode: bool,
+}
+#[cfg(any(target_os = "linux", windows, test))]
+impl RecoveryLabels {
+    pub fn resumed(&mut self, recovering: bool) {
+        self.wake_episode = recovering;
+    }
+    pub fn connected(&mut self) {
+        self.wake_episode = false;
+    }
+    pub fn path(&self) -> rtrust_journal::Path {
+        if self.wake_episode {
+            rtrust_journal::Path::WakeReconnect
+        } else {
+            rtrust_journal::Path::Reconnect
+        }
+    }
+}
 /// GUI text stays separate from the closed journal classification.
 #[derive(Debug)]
 pub struct Failure {
@@ -46,6 +87,7 @@ pub struct Failure {
     pub record: Option<rtrust_journal::Record>,
 }
 impl Failure {
+    #[cfg(target_os = "macos")]
     pub fn engine(error: rtrust_engine::Error, message: impl Into<String>) -> Self {
         Self {
             class: rtrust_journal::classify(&error),
@@ -114,8 +156,42 @@ pub enum Pin {
 /// Per candidate; candidates resolve concurrently.
 pub const PIN_LIMIT: Duration = Duration::from_secs(10);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinError {
+    Resolve,
+    Timeout,
+    TooManyAddresses,
+    NoAddresses,
+    TooManyProfiles,
+}
+impl PinError {
+    pub fn class(self) -> rtrust_journal::Class {
+        match self {
+            Self::Timeout => rtrust_journal::Class::Timeout,
+            Self::Resolve | Self::NoAddresses => rtrust_journal::Class::EndpointUnreachable,
+            Self::TooManyAddresses | Self::TooManyProfiles => rtrust_journal::Class::Profile,
+        }
+    }
+}
+impl std::fmt::Display for PinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Resolve => "Cannot resolve endpoint",
+            Self::Timeout => "Endpoint resolution timed out",
+            Self::TooManyAddresses => "Too many endpoint addresses",
+            Self::NoAddresses => "Endpoint has no addresses",
+            Self::TooManyProfiles => "Too many backup profiles",
+        })
+    }
+}
+impl std::error::Error for PinError {}
+impl From<PinError> for String {
+    fn from(error: PinError) -> Self {
+        error.to_string()
+    }
+}
 /// Freeze DNS answers for this lease so reconnect cannot route into itself.
-pub async fn pin_endpoint(mut profile: Profile, mode: Pin) -> Result<Profile, String> {
+pub async fn pin_endpoint(mut profile: Profile, mode: Pin) -> Result<Profile, PinError> {
     if mode == Pin::Unresolved {
         return Ok(profile);
     }
@@ -123,13 +199,13 @@ pub async fn pin_endpoint(mut profile: Profile, mode: Pin) -> Result<Profile, St
     for address in &profile.endpoint.addresses {
         for address in tokio::net::lookup_host(address)
             .await
-            .map_err(|_| "Cannot resolve endpoint")?
+            .map_err(|_| PinError::Resolve)?
         {
             if mode == Pin::Ipv4 && !address.is_ipv4() {
                 continue;
             }
             if addresses.len() >= 64 {
-                return Err("Too many endpoint addresses".into());
+                return Err(PinError::TooManyAddresses);
             }
             let address = address.to_string();
             if !addresses.contains(&address) {
@@ -138,7 +214,7 @@ pub async fn pin_endpoint(mut profile: Profile, mode: Pin) -> Result<Profile, St
         }
     }
     if addresses.is_empty() {
-        return Err("Endpoint has no addresses".into());
+        return Err(PinError::NoAddresses);
     }
     profile.endpoint.addresses = addresses;
     Ok(profile)
@@ -170,16 +246,20 @@ impl Failover {
     /// Pins every candidate concurrently, each within its own limit. The
     /// requested profile must pin; a backup that cannot is left out, so a
     /// slow or broken backup never prevents the requested connection.
-    pub async fn pin(primary: Profile, fallbacks: Vec<Profile>, mode: Pin) -> Result<Self, String> {
+    pub async fn pin(
+        primary: Profile,
+        fallbacks: Vec<Profile>,
+        mode: Pin,
+    ) -> Result<Self, PinError> {
         if fallbacks.len() > rtrust_control::MAX_FALLBACKS {
-            return Err("Too many backup profiles".into());
+            return Err(PinError::TooManyProfiles);
         }
         let mut results =
             futures_util::future::join_all(std::iter::once(primary).chain(fallbacks).map(
                 |profile| async move {
                     tokio::time::timeout(PIN_LIMIT, pin_endpoint(profile, mode))
                         .await
-                        .unwrap_or_else(|_| Err("Endpoint resolution timed out".into()))
+                        .unwrap_or_else(|_| Err(PinError::Timeout))
                 },
             ))
             .await
@@ -200,7 +280,7 @@ impl Failover {
         failover.indices = indices;
         // The platform guards accept at most 64 pinned endpoint addresses.
         if failover.endpoint_addresses().len() > 64 {
-            return Err("Too many endpoint addresses".into());
+            return Err(PinError::TooManyAddresses);
         }
         Ok(failover)
     }
@@ -365,6 +445,45 @@ mod tests {
     }
 
     #[test]
+    fn recovery_labels_snapshot_pre_wake_workers_and_do_not_linger_after_healthy_resume() {
+        use rtrust_journal::Path::*;
+        let mut labels = RecoveryLabels::default();
+        labels.resumed(false);
+        assert_eq!(
+            labels.path(),
+            Reconnect,
+            "healthy tunnel survived wake; later outage is unrelated"
+        );
+        let pre_wake_attempt = labels.path();
+        labels.resumed(true);
+        assert_eq!(pre_wake_attempt, Reconnect);
+        assert_eq!(labels.path(), WakeReconnect);
+        labels.connected();
+        assert_eq!(labels.path(), Reconnect);
+    }
+    #[test]
+    fn real_start_raii_guard_uses_injected_typed_sink_without_service_files() {
+        use rtrust_journal::{Budget, Class, Path, Transport};
+        take_records();
+        for class in [
+            Class::Cancelled,
+            PinError::Timeout.class(),
+            PinError::TooManyAddresses.class(),
+            PinError::Resolve.class(),
+        ] {
+            let mut guard = journal_attempt(Path::Start, Transport::H2, 1, Budget::Burst);
+            guard.class(class);
+            drop(guard);
+            let records = take_records();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].class, class);
+        }
+        let mut guard = journal_attempt(Path::Start, Transport::H2, 1, Budget::Burst);
+        guard.success();
+        drop(guard);
+        assert!(take_records().is_empty());
+    }
+    #[test]
     fn a_fixed_profile_is_never_substituted() {
         let mut f = failover(1);
         let now = Instant::now();
@@ -509,6 +628,20 @@ mod tests {
             rtrust_journal::Class::Authentication
         );
         assert_eq!(f.active(), Some(0)); // Failed startup never admits a backup.
+        take_records();
+        let mut guard = journal_attempt(
+            rtrust_journal::Path::Start,
+            rtrust_journal::Transport::H2,
+            1,
+            rtrust_journal::Budget::Burst,
+        );
+        failure.annotate(&mut guard, rtrust_journal::classify);
+        drop(guard);
+        let records = take_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].class, rtrust_journal::Class::Authentication);
+        assert_eq!(records[0].transport, rtrust_journal::Transport::H3);
+        assert_eq!(records[0].attempt, 4);
     }
 
     #[test]

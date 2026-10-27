@@ -12,6 +12,12 @@ use std::{
 fn denied() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "unsafe journal object")
 }
+// Root-managed intermediate groups (e.g. root:syslog /var/log 0775)
+// already control that namespace. Never accept foreign owners, other-write,
+// symlinks, or group-write on the final journal directory.
+fn trusted_root_component(uid: u32, mode: u32, leaf: bool) -> bool {
+    uid == 0 && mode & (if leaf { 0o7022 } else { 0o002 }) == 0
+}
 fn c(s: &str) -> io::Result<CString> {
     CString::new(s).map_err(|_| denied())
 }
@@ -21,6 +27,14 @@ fn opened(fd: i32) -> io::Result<File> {
     } else {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
+}
+// Never widen a relocated private object's permissions in a group-managed namespace.
+fn tighten(file: &File, desired: libc::mode_t) -> io::Result<()> {
+    let mode = (file.metadata()?.mode() & desired as u32) as libc::mode_t;
+    if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 pub(crate) struct Directory {
     dir: File,
@@ -77,7 +91,8 @@ impl Directory {
             if fd < 0 && io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
                 let parent = dir.metadata()?;
                 if parent.uid() != uid
-                    || (matches!(owner, Owner::Root) && parent.mode() & 0o022 != 0)
+                    || (matches!(owner, Owner::Root)
+                        && !trusted_root_component(parent.uid(), parent.mode(), false))
                 {
                     return Err(denied());
                 }
@@ -93,17 +108,23 @@ impl Directory {
                 };
             }
             let next = opened(fd)?;
+            let parent = dir.metadata()?;
+            if matches!(owner, Owner::Root)
+                && !trusted_root_component(parent.uid(), parent.mode(), false)
+            {
+                return Err(denied());
+            }
             let meta = next.metadata()?;
-            if matches!(owner, Owner::Root) && (meta.uid() != 0 || meta.mode() & 0o022 != 0) {
+            if matches!(owner, Owner::Root)
+                && !trusted_root_component(meta.uid(), meta.mode(), i + 1 == components.len())
+            {
                 return Err(denied());
             }
             if i + 1 == components.len() {
                 if meta.uid() != uid {
                     return Err(denied());
                 }
-                if unsafe { libc::fchmod(next.as_raw_fd(), dmode) } != 0 {
-                    return Err(io::Error::last_os_error());
-                }
+                tighten(&next, dmode)?;
             }
             dir = next;
         }
@@ -122,12 +143,10 @@ impl Directory {
     }
     fn checked(&self, file: File) -> io::Result<File> {
         let m = file.metadata()?;
-        if !m.is_file() || m.uid() != self.uid || m.nlink() != 1 {
+        if !m.is_file() || m.uid() != self.uid || m.nlink() != 1 || m.mode() & 0o7000 != 0 {
             return Err(denied());
         }
-        if unsafe { libc::fchmod(file.as_raw_fd(), self.mode) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        tighten(&file, self.mode)?;
         Ok(file)
     }
     pub fn file(&self, name: &str, create: bool) -> io::Result<File> {
@@ -261,5 +280,51 @@ impl Directory {
         file.sync_data()?;
         let _target = self.file(name, false)?;
         self.rename_inner(temp, name)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn trusted_root_policy_accepts_group_managed_intermediates_not_leaves() {
+        assert!(trusted_root_component(0, 0o775, false));
+        assert!(trusted_root_component(0, 0o755, true));
+        assert!(trusted_root_component(0, 0o700, true));
+        assert!(!trusted_root_component(0, 0o2755, true));
+        assert!(!trusted_root_component(0, 0o1755, true));
+        assert!(!trusted_root_component(0, 0o4755, true));
+        assert!(!trusted_root_component(0, 0o775, true));
+        assert!(!trusted_root_component(501, 0o755, false));
+        assert!(!trusted_root_component(0, 0o777, false));
+    }
+    #[test]
+    fn relocated_private_objects_are_never_made_more_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let private = tmp.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let dir = File::open(&private).unwrap();
+        tighten(&dir, 0o755).unwrap();
+        assert_eq!(dir.metadata().unwrap().mode() & 0o777, 0o700);
+        let private_file = private.join("events.log");
+        let file = File::create(private_file).unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        tighten(&file, 0o644).unwrap();
+        assert_eq!(file.metadata().unwrap().mode() & 0o777, 0o600);
+    }
+    #[test]
+    fn real_intermediate_permissions_are_not_repaired() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let intermediate = tmp.path().canonicalize().unwrap().join("group-managed");
+        std::fs::create_dir(&intermediate).unwrap();
+        std::fs::set_permissions(&intermediate, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let _dir = Directory::open(&intermediate.join("journal"), Owner::CurrentUser).unwrap();
+        assert_eq!(
+            std::fs::metadata(intermediate).unwrap().mode() & 0o777,
+            0o775
+        );
     }
 }

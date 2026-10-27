@@ -322,6 +322,9 @@ async fn serve(
                 exclude_lan,
             };
             if let Err(error) = selection.validate() {
+                if let Some(journal) = journal.as_mut() {
+                    journal.class(rtrust_journal::Class::Profile);
+                }
                 return reply(pipe, State::Error, &error).await;
             }
             (profile, selection, None, dns, fallbacks)
@@ -365,7 +368,7 @@ async fn serve(
             },
         )
         .await
-        .inspect_err(|_| journal.class(rtrust_journal::Class::EndpointUnreachable))?;
+        .inspect_err(|error| journal.class(error.class()))?;
         journal.class(rtrust_journal::Class::Other);
         let networks = if dns.is_none() {
             selected_routes(&failover.guard_profile(), &selection)?
@@ -373,21 +376,22 @@ async fn serve(
             vec![]
         };
         journal.cancelled();
-        let (session, udp) = rtrust_control::freshness::while_valid(freshness.as_mut(), async {
+        let mut connection_failed = false;
+        let result = rtrust_control::freshness::while_valid(freshness.as_mut(), async {
             failover
                 .connect_initial(|profile| async move { transport(&profile).await })
                 .await
-                .map_err(|e| {
-                    journal.metadata(e.transport, e.attempts);
-                    journal.class(
-                        e.last
-                            .as_ref()
-                            .map_or(rtrust_journal::Class::Timeout, |e| e.class),
-                    );
+                .map_err(|error| {
+                    connection_failed = true;
+                    error.annotate(&mut journal, |error| error.class);
                     "No allowed VPN endpoint connected within the startup budget".to_owned()
                 })
         })
-        .await?;
+        .await;
+        if result.is_err() && !connection_failed {
+            journal.class(rtrust_journal::Class::Authentication);
+        }
+        let (session, udp) = result?;
         journal.class(rtrust_journal::Class::Other);
         Ok::<_, String>((failover, networks, session, udp))
     };
@@ -601,7 +605,8 @@ async fn lease_loop(
             >,
         >;
     let mut reconnecting = false;
-    let mut wake_reconnect = false;
+    let mut labels = crate::failover::RecoveryLabels::default();
+    let mut attempt_path = rtrust_journal::Path::Reconnect;
     let mut attempt_started = std::time::Instant::now();
     loop {
         // Keep partially read frames alive across heartbeat/reconnect events.
@@ -615,7 +620,7 @@ async fn lease_loop(
                     probes.cancel();
                     match change {
                         crate::netwatch::Change::Network => monitor.network_changed(rtrust_control::observations::now_ms()),
-                        crate::netwatch::Change::Resumed => { wake_reconnect = true; monitor.resumed(rtrust_control::observations::now_ms()); },
+                        crate::netwatch::Change::Resumed => { labels.resumed(state == State::Blocked); monitor.resumed(rtrust_control::observations::now_ms()); },
                     }
                 },
                 _ = stop.changed() => return Ok(None),
@@ -629,9 +634,10 @@ async fn lease_loop(
                     retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                 },
                 _ = &mut retry, if state == State::Blocked && !reconnecting && !access_expired => {
+                    attempt_path = labels.path();
                     attempt_started = std::time::Instant::now();
                     if full && full::refresh(device.if_index().map_err(|_| "Missing Wintun interface")?, &full::endpoints(&failover.guard_profile())?).is_err() {
-                        crate::failover::journal_failure(rtrust_journal::Record::failure(if wake_reconnect { rtrust_journal::Path::WakeReconnect } else { rtrust_journal::Path::Reconnect }, rtrust_journal::Class::Other, rtrust_engine::planned_transport(failover.current()), budget.attempt(), rtrust_journal::Budget::from_cooling(budget.cooling()), attempt_started.elapsed()));
+                        crate::failover::journal_failure(rtrust_journal::Record::failure(attempt_path, rtrust_journal::Class::Other, rtrust_engine::planned_transport(failover.current()), budget.attempt(), rtrust_journal::Budget::from_cooling(budget.cooling()), attempt_started.elapsed()));
                         retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                         continue;
                     }
@@ -645,13 +651,13 @@ async fn lease_loop(
                     reconnecting=false;
                     match result {
                         Ok((session,udp)) => {
-                            wake_reconnect = false;
+                            labels.connected();
                             *worker=Worker::new(tokio::spawn(crate::dataplane::run(session,udp,device.clone(),ADDRESS)));
                             probes.cancel();
                             state=State::Connected; monitor.transition(true, rtrust_control::observations::now_ms()); connected_since=std::time::Instant::now();
                         },
                         Err(error) => {
-                            crate::failover::journal_failure(rtrust_journal::Record::failure(if wake_reconnect { rtrust_journal::Path::WakeReconnect } else { rtrust_journal::Path::Reconnect }, error.class, rtrust_engine::planned_transport(failover.current()), budget.attempt(), rtrust_journal::Budget::from_cooling(budget.cooling()), attempt_started.elapsed()));
+                            crate::failover::journal_failure(rtrust_journal::Record::failure(attempt_path, error.class, rtrust_engine::planned_transport(failover.current()), budget.attempt(), rtrust_journal::Budget::from_cooling(budget.cooling()), attempt_started.elapsed()));
                             // The guard already covers every candidate.
                             if failover.failed(std::time::Instant::now()) {
                                 monitor.failed_over(rtrust_control::observations::now_ms());

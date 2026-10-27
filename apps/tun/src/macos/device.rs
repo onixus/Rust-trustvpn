@@ -9,10 +9,13 @@ pub struct Prepared {
     udp: rtrust_engine::Tunnel,
     device: Arc<tun_rs::AsyncDevice>,
 }
-pub fn unused() -> Result<(), String> {
+pub fn unused() -> Result<(), Failure> {
     let name = std::ffi::CString::new(DEVICE).unwrap();
     if unsafe { libc::if_nametoindex(name.as_ptr()) } != 0 {
-        Err("VPN utun interface already exists; refusing to reuse it".into())
+        Err(Failure::engine(
+            rtrust_engine::Error::LocalBind,
+            "VPN utun interface already exists; refusing to reuse it",
+        ))
     } else {
         Ok(())
     }

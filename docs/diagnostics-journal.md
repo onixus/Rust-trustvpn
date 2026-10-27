@@ -24,9 +24,20 @@ writable or grant new networking capabilities. Service logs are shared across
 service instances and serialized with a non-waiting cross-process lock.
 
 Unix opens use directory handles and no-follow operations, check regular files,
-expected ownership and link count, and repair modes only on verified objects.
+expected ownership and link count, and only tighten modes on verified objects:
+existing private 0700 directories/0600 files are never widened to 0755/0644.
+Root-owned intermediate directories may be group-writable (for example a
+root:syslog 0775 `/var/log`), but never other-writable or foreign-owned; no
+ancestor modes are changed. The root-owned journal leaf rejects group/other
+write and setuid/setgid/sticky bits. A trusted intermediate group can still
+rename owned namespace entries or disrupt logging; no permission widening,
+symlink following, or privilege grant is allowed by this compatibility policy.
 Windows rejects reparse points and hardlinks, verifies trusted ownership,
-repairs the protected DACL, and holds parent handles against replacement.
+repairs the protected DACL only on the journal leaf/files (never ancestors),
+and retains parent handles with list access and without share-delete against
+replacement. User-owned directories and every newly created journal file have
+explicit TokenUser ownership, including under elevated tokens; existing foreign
+owners are rejected, not taken over.
 An unsafe object, busy lock, full disk or inaccessible directory disables/drops
 logging for that operation; it does not prevent VPN operation. Do not create
 symlinks, hardlinks or custom directories at journal filenames.
@@ -58,8 +69,13 @@ A failed Start emits one final record, not one per fallback candidate. A success
 Start emits none. Accepted automatic failures emit once; late SOCKS epochs and
 pre-wake macOS worker results emit none. Cancelling an initial preparation emits
 `cancelled`; superseded recovery work is discarded rather than logged as a new
-active failure. A resume marks subsequent recovery failures `wake_reconnect`
-until transport admission. Initial user SOCKS starts are outside this journal's
+active failure. Linux/Windows snapshot the path when scheduling each attempt:
+a pre-wake worker keeps its original label, and a resume while a healthy tunnel
+survives cannot label an unrelated later outage. A resume during recovery marks
+subsequent attempts `wake_reconnect` until transport admission. Selection/pin
+validation is `profile`, DNS pin timeout is `timeout`, local utun contention is
+`local_bind`, and managed-access lease expiry is `authentication`, not a user
+cancellation. Initial user SOCKS starts are outside this journal's
 automatic-recovery scope.
 
 ## Bounded persistence
@@ -69,17 +85,23 @@ monotonically numbered suffixes, e.g. `events.log.12`. Higher suffixes are newer
 gaps are normal. Active is newest. Each segment is at most 1,000,000 bytes. The
 writer evicts oldest managed segments **before** an append or retention rewrite
 would exceed **15,000,000 bytes** (decimal 15 MB), including rewrite temporary
-data. No truncate-and-start-over rotation is used. Empty lock files carry no
-record data. Unknown files in the directory are not managed or deleted.
+data. A mixed retention target is copied only after evicting older segments;
+if older history cannot provide enough temporary space, that oldest target is
+discarded instead of evicting newer segments to preserve it. No
+truncate-and-start-over rotation is used. Empty lock files carry no record data.
+Unknown files in the directory are not managed or deleted.
 
 Every record older than seven days is removed, including expired prefixes of a
 mixed active/rotated file. Pruning runs at writer startup, before each append,
-and every 60 seconds while idle. Malformed, incomplete and future-dated records
-are discarded during pruning. No process can prune while it is stopped; the
-next writer startup performs retention before its first append. Copy logs for
-support before they age out. The journal survives normal service/app restarts
-and is outside runtime-directory cleanup; abrupt power loss may lose buffered
-or queued tail records. This is not an audit or guaranteed-delivery log.
+and every 60 seconds while idle. Malformed and incomplete records are discarded.
+Future-dated records survive an RTC rollback; they remain byte-cap bounded and
+age out once wall time advances beyond their timestamp plus seven days. No
+process can prune while it is stopped; the next writer startup performs retention
+before its first append. Copy logs for support before they age out. Persisted
+records survive normal service/app restarts and runtime-directory cleanup.
+There is no shutdown flush integration: even normal process shutdown can lose
+queued tail records, and abrupt power loss can also lose buffered records.
+This is not an audit or guaranteed-delivery log.
 
 Producers use `try_send` into a bounded 256-entry queue. One dedicated writer
 thread performs path discovery, ACL/mode operations, scans, rotation and writes;

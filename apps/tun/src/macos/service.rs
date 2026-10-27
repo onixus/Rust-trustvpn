@@ -662,6 +662,27 @@ async fn prepare<T>(
     }
 }
 
+// Shared by the actual Start pin/connect stages and the isolated caller harness.
+// Cancellation leaves the real RAII guard armed as Cancelled; typed failures
+// update it before any GUI string conversion. No test-only guard implementation.
+async fn prepare_start_attempt<T, E>(
+    future: impl std::future::Future<Output = Result<T, E>>,
+    journal: &mut rtrust_journal::Attempt,
+    classify: impl FnOnce(&mut rtrust_journal::Attempt, E) -> String,
+    initial: &mut oneshot::Sender<Response>,
+    commands: &mut mpsc::Receiver<Envelope>,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<T, String> {
+    journal.cancelled();
+    prepare(
+        async { future.await.map_err(|error| classify(journal, error)) },
+        initial,
+        commands,
+        shutdown,
+    )
+    .await
+}
+
 async fn start(
     request: Request,
     uid: u32,
@@ -706,6 +727,7 @@ async fn start(
                 exclude_lan,
             };
             if let Err(error) = selection.validate() {
+                journal.class(rtrust_journal::Class::Profile);
                 return publish(&mut initial, State::Error, &error).await;
             }
             (profile, selection, None, dns, fallbacks)
@@ -730,12 +752,12 @@ async fn start(
     // Both modes pin IPv4 endpoint addresses: PF blocks selected networks
     // outside the tunnel, so the endpoint must be known and left out of them.
     // Every allowed backup is pinned now: the guard covers all candidates.
-    journal.cancelled();
-    let mut failover = match prepare(
-        async {
-            crate::failover::Failover::pin(*profile, fallbacks, crate::failover::Pin::Ipv4)
-                .await
-                .inspect_err(|_| journal.class(rtrust_journal::Class::EndpointUnreachable))
+    let mut failover = match prepare_start_attempt(
+        crate::failover::Failover::pin(*profile, fallbacks, crate::failover::Pin::Ipv4),
+        &mut journal,
+        |journal, error| {
+            journal.class(error.class());
+            error.to_string()
         },
         initial.as_mut().unwrap(),
         &mut commands,
@@ -780,7 +802,8 @@ async fn start(
     let resolver = dns.or(rtrust_control::tunneled_resolver(&networks, split_dns)
         .filter(|_| super::dns::preflight().is_ok()));
     if let Err(error) = Guard::preflight(&networks, full, resolver) {
-        return publish(&mut initial, State::Error, &error).await;
+        journal.class(error.class);
+        return publish(&mut initial, State::Error, &error.message).await;
     }
     if !power.borrow().awake {
         return publish(
@@ -790,21 +813,13 @@ async fn start(
         )
         .await;
     }
-    journal.cancelled();
-    let prepared = match prepare(
-        async {
-            failover
-                .connect_initial(|profile| async move { device::Prepared::connect(&profile).await })
-                .await
-                .map_err(|e| {
-                    journal.metadata(e.transport, e.attempts);
-                    journal.class(
-                        e.last
-                            .as_ref()
-                            .map_or(rtrust_journal::Class::Timeout, |e| e.class),
-                    );
-                    "Initial connection failed".to_owned()
-                })
+    let prepared = match prepare_start_attempt(
+        failover
+            .connect_initial(|profile| async move { device::Prepared::connect(&profile).await }),
+        &mut journal,
+        |journal, e| {
+            e.annotate(journal, |e| e.class);
+            "Initial connection failed".to_owned()
         },
         initial.as_mut().unwrap(),
         &mut commands,
@@ -2453,6 +2468,131 @@ mod tests {
             State::Idle
         );
         supervisor.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn start_pin_and_connect_cancellation_drop_real_guard_once() {
+        async fn cancelled<T, E>(
+            future: impl std::future::Future<Output = Result<T, E>>,
+            classify: impl FnOnce(&mut rtrust_journal::Attempt, E) -> String,
+        ) {
+            crate::failover::take_records();
+            let mut journal = crate::failover::journal_attempt(
+                rtrust_journal::Path::Start,
+                rtrust_journal::Transport::H2,
+                1,
+                rtrust_journal::Budget::Burst,
+            );
+            let (mut initial, receiver) = oneshot::channel();
+            let (_commands, mut commands) = mpsc::channel(1);
+            let (_shutdown, mut shutdown) = tokio::sync::watch::channel(false);
+            let (entered, waiting) = oneshot::channel();
+            let result = {
+                let mut prepared = Box::pin(prepare_start_attempt(
+                    async {
+                        let _ = entered.send(());
+                        future.await
+                    },
+                    &mut journal,
+                    classify,
+                    &mut initial,
+                    &mut commands,
+                    &mut shutdown,
+                ));
+                tokio::select! { _=&mut prepared=>panic!("pending stage completed"),_=waiting=>{} }
+                drop(receiver);
+                prepared.await
+            };
+            assert!(result.is_err());
+            drop(journal);
+            let records = crate::failover::take_records();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].path, rtrust_journal::Path::Start);
+            assert_eq!(records[0].class, rtrust_journal::Class::Cancelled);
+        }
+        cancelled(
+            std::future::pending::<Result<(), crate::failover::PinError>>(),
+            |guard, error| {
+                guard.class(error.class());
+                error.to_string()
+            },
+        )
+        .await;
+        let mut candidates = failover().await;
+        cancelled(
+            candidates.connect_initial(|_| {
+                std::future::pending::<Result<(), crate::failover::Failure>>()
+            }),
+            |guard, error| {
+                error.annotate(guard, |error| error.class);
+                "Initial connection failed".into()
+            },
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn start_pin_typed_failures_and_success_use_actual_preparation_and_guard() {
+        use crate::failover::PinError;
+        for error in [
+            PinError::Timeout,
+            PinError::Resolve,
+            PinError::TooManyAddresses,
+        ] {
+            crate::failover::take_records();
+            let mut journal = crate::failover::journal_attempt(
+                rtrust_journal::Path::Start,
+                rtrust_journal::Transport::H2,
+                1,
+                rtrust_journal::Budget::Burst,
+            );
+            let (mut initial, _receiver) = oneshot::channel();
+            let (_commands, mut commands) = mpsc::channel(1);
+            let (_shutdown, mut shutdown) = tokio::sync::watch::channel(false);
+            assert!(
+                prepare_start_attempt(
+                    async { Err::<(), _>(error) },
+                    &mut journal,
+                    |guard, error| {
+                        guard.class(error.class());
+                        error.to_string()
+                    },
+                    &mut initial,
+                    &mut commands,
+                    &mut shutdown
+                )
+                .await
+                .is_err()
+            );
+            drop(journal);
+            let records = crate::failover::take_records();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].class, error.class());
+        }
+        let mut journal = crate::failover::journal_attempt(
+            rtrust_journal::Path::Start,
+            rtrust_journal::Transport::H2,
+            1,
+            rtrust_journal::Budget::Burst,
+        );
+        let (mut initial, _receiver) = oneshot::channel();
+        let (_commands, mut commands) = mpsc::channel(1);
+        let (_shutdown, mut shutdown) = tokio::sync::watch::channel(false);
+        prepare_start_attempt(
+            async { Ok::<_, PinError>(()) },
+            &mut journal,
+            |guard, error| {
+                guard.class(error.class());
+                error.to_string()
+            },
+            &mut initial,
+            &mut commands,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        journal.success();
+        drop(journal);
+        assert!(crate::failover::take_records().is_empty());
     }
 
     #[tokio::test]

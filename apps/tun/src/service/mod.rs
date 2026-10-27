@@ -310,16 +310,23 @@ async fn serve(
                 exclude,
                 exclude_lan,
             };
-            match selection.validate().and_then(|()| {
-                selection.routes(
-                    &[],
-                    &if exclude_lan {
-                        Routes::local()?
-                    } else {
-                        vec![]
-                    },
-                )
-            }) {
+            match selection
+                .validate()
+                .inspect_err(|_| {
+                    if let Some(journal) = journal.as_mut() {
+                        journal.class(rtrust_journal::Class::Profile);
+                    }
+                })
+                .and_then(|()| {
+                    selection.routes(
+                        &[],
+                        &if exclude_lan {
+                            Routes::local()?
+                        } else {
+                            vec![]
+                        },
+                    )
+                }) {
                 Ok(routes) => {
                     let resolver = Routes::resolver(&routes, dns);
                     (profile, routes, None, resolver, fallbacks)
@@ -345,6 +352,7 @@ async fn serve(
     let full = dns.is_some();
     // Full mode pins every allowed candidate: the guard covers them all.
     // Selected mode routes only this user's traffic, so nothing is pinned.
+    journal.cancelled();
     let mut failover = match crate::failover::Failover::pin(
         *profile,
         fallbacks,
@@ -357,8 +365,8 @@ async fn serve(
     .await
     {
         Ok(failover) => failover,
-        Err(_) => {
-            journal.class(rtrust_journal::Class::EndpointUnreachable);
+        Err(error) => {
+            journal.class(error.class());
             return reply(
                 &mut stream,
                 State::Error,
@@ -371,13 +379,18 @@ async fn serve(
     let prepared = {
         let mut unexpected = [0];
         tokio::select! {
-            result = rtrust_control::freshness::while_valid(freshness.as_mut(), async {
-                failover.connect_initial(|profile| async move { crate::linux::Prepared::connect_mode(&profile, routes::DEVICE, routes::ADDRESS.parse().unwrap(), full).await }).await.map_err(|e| {
-                    journal.metadata(e.transport, e.attempts);
-                    journal.class(e.last.as_ref().map_or(rtrust_journal::Class::Timeout, |e| rtrust_journal::classify_boxed(e.as_ref())));
-                    "No allowed VPN endpoint connected within the startup budget".to_owned()
-                })
-            }) => match result {
+            result = async {
+                let mut connection_failed=false;
+                let result=rtrust_control::freshness::while_valid(freshness.as_mut(), async {
+                    failover.connect_initial(|profile| async move { crate::linux::Prepared::connect_mode(&profile, routes::DEVICE, routes::ADDRESS.parse().unwrap(), full).await }).await.map_err(|e| {
+                        connection_failed=true;
+                        e.annotate(&mut journal,|e|rtrust_journal::classify_boxed(e.as_ref()));
+                        "No allowed VPN endpoint connected within the startup budget".to_owned()
+                    })
+                }).await;
+                if result.is_err() && !connection_failed {journal.class(rtrust_journal::Class::Authentication);}
+                result
+            } => match result {
                 Ok(prepared) => prepared,
                 Err(_) => return reply(&mut stream, State::Error, "Не удалось открыть TUN: проверьте профиль, TLS и доступность endpoint").await,
             },
@@ -450,7 +463,8 @@ async fn serve(
             .collect(),
     });
     let mut probes = crate::sysprobe::Runner::default();
-    let mut wake_reconnect = false;
+    let mut labels = crate::failover::RecoveryLabels::default();
+    let mut attempt_path = rtrust_journal::Path::Reconnect;
     loop {
         let mut pending = Box::pin(read::<Request>(&mut stream));
         let request = loop {
@@ -465,7 +479,7 @@ async fn serve(
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     },
                     crate::netwatch::Change::Resumed => {
-                        wake_reconnect = true;
+                        labels.resumed(state == State::Blocked);
                         probes.cancel();
                         monitor.resumed(rtrust_control::observations::now_ms());
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
@@ -483,11 +497,12 @@ async fn serve(
                         monitor.failed_over(rtrust_control::observations::now_ms());
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     }
+                    attempt_path = labels.path();
                     workers.retry(failover.current(), &mut retry_delay, full);
                 }
                 result = async { workers.reconnect.as_mut().unwrap().await }, if workers.reconnect.is_some() => {
                     workers.reconnect = None;
-                    let path = if wake_reconnect { rtrust_journal::Path::WakeReconnect } else { rtrust_journal::Path::Reconnect };
+                    let path = attempt_path;
                     let failure = match &result { Ok(Err(e)) => Some(e.class), Err(e) => Some(if e.is_cancelled() { rtrust_journal::Class::Cancelled } else { rtrust_journal::Class::Other }), _ => None };
                     if let Some(class) = failure {
                         let mut record = match &result { Ok(Err(e)) => e.record, _ => None }.unwrap_or_else(|| rtrust_journal::Record::failure(path, class, rtrust_engine::planned_transport(failover.current()), retry_delay.attempt(), rtrust_journal::Budget::from_cooling(retry_delay.cooling()), Duration::ZERO));
@@ -504,7 +519,7 @@ async fn serve(
                             eprintln!("VPN route reattach failed: {error}");
                         }
                         if reattached.is_ok() {
-                            wake_reconnect = false;
+                            labels.connected();
                             workers.tunnel = Some(tokio::spawn(prepared.run()));
                             endpoint_lease.resume();
                             connected_since = Instant::now();
@@ -519,6 +534,7 @@ async fn serve(
                         monitor.failed_over(rtrust_control::observations::now_ms());
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     }
+                    attempt_path = labels.path();
                     workers.retry(failover.current(), &mut retry_delay, full);
                 }
                 // Started only by this timer while connected in full mode and
