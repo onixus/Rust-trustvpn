@@ -74,7 +74,11 @@ apt-get install -y -qq iproute2 iputils-ping curl python3 libdbus-1-dev nftables
 mkdir -p /usr/local/rustup/downloads
 cp /fixture/CLIPPY_ARCHIVE /usr/local/rustup/downloads/
 rustup component add clippy
-cargo test --workspace --locked --quiet
+# This container runs as root; the current-user umask regressions refuse root
+# by design. Run them as an unprivileged UID instead of skipping them.
+cargo test --workspace --locked --quiet -- --skip current_user_creation_isolated_umasks --skip current_user_retention_preserves_private_active_and_archive --skip current_user_unsafe_objects_and_readonly_files_unchanged
+umask_test=$(cargo test -p rtrust-journal --test umask_acceptance --locked --no-run --message-format=json | python3 -c 'import json,sys; print([m["executable"] for m in map(json.loads,sys.stdin) if m.get("executable")][-1])')
+setpriv --reuid=65534 --regid=65534 --clear-groups env HOME=/tmp TMPDIR=/tmp "$umask_test" --test-threads=1
 cargo test -p rtrust-native --locked desktop_entry_exec_roundtrip -- --ignored
 dbus-run-session -- sh -c 'printf "%s" "rtrust-isolated-ci" | gnome-keyring-daemon --unlock --components=secrets >/tmp/rtrust-keyring-env; cargo test -p rtrust-store --locked os_keyring_restart_roundtrip -- --ignored --exact tests::os_keyring_restart_roundtrip'
 cargo clippy --workspace --all-targets --locked -- -D warnings
