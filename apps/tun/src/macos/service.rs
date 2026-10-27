@@ -85,7 +85,76 @@ fn supervise(
         actor.await;
     })
 }
+const ACCESS_EXPIRED: &str = "Access confirmation expired; synchronize the portal";
+
+// Every worker shares one sticky deadline: rollback observed by any task
+// revokes all tasks. No mutex is held across a poll, await, or OS operation.
+#[derive(Clone, Default)]
+struct Freshness(Option<Arc<std::sync::Mutex<rtrust_control::freshness::Deadline>>>);
+impl Freshness {
+    fn check(&self) -> Result<(), String> {
+        if self.0.as_ref().is_none_or(|deadline| {
+            deadline
+                .lock()
+                .is_ok_and(|mut deadline| deadline.is_valid())
+        }) {
+            Ok(())
+        } else {
+            Err(ACCESS_EXPIRED.into())
+        }
+    }
+    async fn expired(&self) {
+        if self.0.is_none() {
+            return std::future::pending().await;
+        }
+        loop {
+            if self.check().is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    async fn during<T>(
+        &self,
+        future: impl std::future::Future<Output = Result<T, String>>,
+    ) -> Result<T, String> {
+        self.during_result(future).await
+    }
+    // Keep typed dataplane errors intact: recovery uses Degraded::proven as
+    // stability evidence, so stringifying them changes retry/failover policy.
+    async fn during_result<T, E: From<String>>(
+        &self,
+        future: impl std::future::Future<Output = Result<T, E>>,
+    ) -> Result<T, E> {
+        tokio::pin!(future);
+        // Check on EVERY poll, not just the timer tick. After wake a ready
+        // socket must not win over expiry while Tokio's sleep timer is pending.
+        let checked = std::future::poll_fn(|cx| {
+            if let Err(error) = self.check() {
+                return std::task::Poll::Ready(Err(error.into()));
+            }
+            let result = future.as_mut().poll(cx);
+            if result.is_ready()
+                && let Err(error) = self.check()
+            {
+                return std::task::Poll::Ready(Err(error.into()));
+            }
+            result
+        });
+        tokio::select! {
+            biased;
+            _ = self.expired() => Err(ACCESS_EXPIRED.to_owned().into()),
+            result = checked => result,
+        }
+    }
+    fn spawn(&self, prepared: device::Prepared) -> tokio::task::JoinHandle<RunResult> {
+        let freshness = self.clone();
+        tokio::spawn(async move { freshness.during_result(prepared.run()).await })
+    }
+}
+
 struct Control {
+    freshness: Freshness,
     commands: mpsc::Receiver<Envelope>,
     initial: Option<oneshot::Sender<Response>>,
     shutdown: tokio::sync::watch::Receiver<bool>,
@@ -223,44 +292,54 @@ impl Workers {
         device: Arc<tun_rs::AsyncDevice>,
         guard: &Guard,
         lease: &Lease,
+        freshness: &Freshness,
     ) {
+        let freshness = freshness.clone();
         let profile = profile.clone();
         let guard = guard.clone();
         let lease = lease.clone();
         let wait = delay.next_delay(rand::random());
         self.reconnect = Some(tokio::spawn(async move {
-            tokio::time::sleep(wait).await;
-            let started = Instant::now();
-            let refresh_ms = std::sync::atomic::AtomicU64::new(0);
-            // Darwin can discard endpoint host routes during sleep. Restore
-            // them before opening a socket, or split routes send it into utun.
-            let result = guarded_connect(
-                lease,
-                || {
-                    let refresh = Instant::now();
-                    let result = guard.refresh();
-                    refresh_ms.fetch_add(millis(refresh), std::sync::atomic::Ordering::Relaxed);
-                    result
-                },
-                async {
-                    tokio::time::timeout(
-                        Duration::from_secs(30),
-                        device::Prepared::reconnect(&profile, device),
+            freshness
+                .during(async {
+                    tokio::time::sleep(wait).await;
+                    let started = Instant::now();
+                    let refresh_ms = std::sync::atomic::AtomicU64::new(0);
+                    // Refresh is synchronous and cannot be cancelled mid-mutation.
+                    // Fence both edges; expired results never open a new socket.
+                    let result = guarded_connect(
+                        lease,
+                        || {
+                            freshness.check()?;
+                            let refresh = Instant::now();
+                            let result = guard.refresh();
+                            refresh_ms
+                                .fetch_add(millis(refresh), std::sync::atomic::Ordering::Relaxed);
+                            freshness.check()?;
+                            result
+                        },
+                        async {
+                            freshness.check()?;
+                            tokio::time::timeout(
+                                Duration::from_secs(30),
+                                device::Prepared::reconnect(&profile, device),
+                            )
+                            .await
+                            .map_err(|_| "stage=attempt reason=timeout".to_owned())?
+                        },
                     )
-                    .await
-                    .map_err(|_| "stage=attempt reason=timeout".to_owned())?
-                },
-            )
-            .await;
-            // Durations only: no endpoint, route or profile data.
-            events::record(&format!(
-                "reconnect_timing wait_ms={} route_refresh_ms={} total_ms={} ok={}",
-                wait.as_millis(),
-                refresh_ms.into_inner(),
-                millis(started),
-                result.is_ok()
-            ));
-            result
+                    .await;
+                    // Durations only: no endpoint, route or profile data.
+                    events::record(&format!(
+                        "reconnect_timing wait_ms={} route_refresh_ms={} total_ms={} ok={}",
+                        wait.as_millis(),
+                        refresh_ms.into_inner(),
+                        millis(started),
+                        result.is_ok()
+                    ));
+                    result
+                })
+                .await
         }));
     }
     fn cancel(&self) {
@@ -480,7 +559,12 @@ async fn serve(
         )
         .await;
     };
-    match request.command {
+    let (deadline, command) = match rtrust_control::freshness::start(request.command) {
+        Ok(start) => start,
+        Err(error) => return reply(&mut stream, State::Error, &error).await,
+    };
+    let freshness = Freshness(deadline.map(|deadline| Arc::new(std::sync::Mutex::new(deadline))));
+    match command {
         Command::Status { .. } => {
             return reply(
                 &mut stream,
@@ -543,11 +627,15 @@ async fn serve(
     };
     let task = supervise(finish, async move {
         let _ = start(
-            request,
+            Request {
+                version: request.version,
+                command,
+            },
             uid,
             held_lease,
             power,
             Control {
+                freshness,
                 commands,
                 initial: Some(initial),
                 shutdown: shutdown_events,
@@ -655,6 +743,7 @@ async fn start(
     control: Control,
 ) -> Result<(), String> {
     let Control {
+        freshness,
         mut commands,
         mut initial,
         mut shutdown,
@@ -704,7 +793,11 @@ async fn start(
     // outside the tunnel, so the endpoint must be known and left out of them.
     // Every allowed backup is pinned now: the guard covers all candidates.
     let mut failover = match prepare(
-        crate::failover::Failover::pin(*profile, fallbacks, crate::failover::Pin::Ipv4),
+        freshness.during(crate::failover::Failover::pin(
+            *profile,
+            fallbacks,
+            crate::failover::Pin::Ipv4,
+        )),
         initial.as_mut().unwrap(),
         &mut commands,
         &mut shutdown,
@@ -712,14 +805,7 @@ async fn start(
     .await
     {
         Ok(failover) => failover,
-        _ => {
-            return publish(
-                &mut initial,
-                State::Error,
-                "Не удалось разрешить адрес VPN-сервера",
-            )
-            .await;
-        }
+        Err(error) => return publish(&mut initial, State::Error, &error).await,
     };
     let profile = failover.guard_profile();
     let endpoints = match state::endpoints(&profile) {
@@ -746,6 +832,9 @@ async fn start(
     // system resolver cannot take it; full mode still requires it.
     let resolver = dns.or(rtrust_control::tunneled_resolver(&networks, split_dns)
         .filter(|_| super::dns::preflight().is_ok()));
+    if let Err(error) = freshness.check() {
+        return publish(&mut initial, State::Error, &error).await;
+    }
     if let Err(error) = Guard::preflight(&networks, full, resolver) {
         return publish(&mut initial, State::Error, &error).await;
     }
@@ -757,13 +846,16 @@ async fn start(
         )
         .await;
     }
+    if let Err(error) = freshness.check() {
+        return publish(&mut initial, State::Error, &error).await;
+    }
     let prepared = match prepare(
-        async {
+        freshness.during(async {
             failover
                 .connect_initial(|profile| async move { device::Prepared::connect(&profile).await })
                 .await
                 .map_err(|_| "Initial connection failed".to_owned())
-        },
+        }),
         initial.as_mut().unwrap(),
         &mut commands,
         &mut shutdown,
@@ -771,14 +863,7 @@ async fn start(
     .await
     {
         Ok(prepared) => prepared,
-        _ => {
-            return publish(
-                &mut initial,
-                State::Error,
-                "Не удалось открыть TUN: проверьте профиль, TLS и доступность endpoint",
-            )
-            .await;
-        }
+        Err(error) => return publish(&mut initial, State::Error, &error).await,
     };
     if shutdown_requested(&shutdown) || initial.as_ref().is_some_and(oneshot::Sender::is_closed) {
         return Ok(());
@@ -792,20 +877,30 @@ async fn start(
             endpoints: endpoints.iter().map(|e| (*e.ip()).into()).collect(),
         })
     });
+    if let Err(error) = freshness.check() {
+        return publish(&mut initial, State::Error, &error).await;
+    }
     let guard = match Guard::install(uid, networks, full, resolver, endpoints, &permits) {
         Ok(guard) => guard,
         Err(error) => return publish(&mut initial, State::Blocked, &error).await,
     };
+    // Installation may outlast the lease. Retain the installed journal/guard,
+    // drop the prepared transport, and never publish Connected in that case.
+    if let Err(error) = freshness.check() {
+        return publish(&mut initial, State::Blocked, &error).await;
+    }
     let device = prepared.device();
     let workers = Workers {
         transport: prepared.transport(),
-        tunnel: Some(tokio::spawn(prepared.run())),
+        tunnel: Some(freshness.spawn(prepared)),
         reconnect: None,
     };
     let retry_guard = guard.clone();
     let release_lease = held_lease.clone();
+    let retry_freshness = freshness.clone();
     connected(
         Control {
+            freshness: freshness.clone(),
             commands,
             initial,
             shutdown,
@@ -816,7 +911,14 @@ async fn start(
         power,
         failover,
         move |workers, profile, delay| {
-            workers.retry(profile, delay, device.clone(), &retry_guard, &held_lease)
+            workers.retry(
+                profile,
+                delay,
+                device.clone(),
+                &retry_guard,
+                &held_lease,
+                &retry_freshness,
+            )
         },
         move || {
             let _lease = release_lease;
@@ -870,6 +972,7 @@ async fn connected(
     release: impl FnOnce() -> Result<(), String> + Send + 'static,
 ) -> Result<(), String> {
     let Control {
+        freshness,
         mut commands,
         mut initial,
         mut shutdown,
@@ -878,6 +981,10 @@ async fn connected(
     if shutdown_requested(&shutdown) {
         workers.stop().await;
         return Ok(());
+    }
+    if let Err(error) = freshness.check() {
+        workers.stop().await;
+        return publish(&mut initial, State::Blocked, &error).await;
     }
     events::record("tunnel_connected");
     // Numbers only: a bounded data-plane summary after each (re)connect so a
@@ -912,6 +1019,10 @@ async fn connected(
     );
     response.active_profile = failover.active();
     response.observations = monitor.sample(rtrust_control::observations::now_ms());
+    if let Err(error) = freshness.check() {
+        workers.stop().await;
+        return publish(&mut initial, State::Blocked, &error).await;
+    }
     if let Some(initial) = initial.take() {
         let _ = initial.send(response);
     }
@@ -922,6 +1033,8 @@ async fn connected(
     let mut restart_pending = false;
     let mut awake = power.borrow().awake;
     let mut probes = crate::sysprobe::Runner::default();
+    let mut access_expired = false;
+    let mut expiry_stops = Vec::new();
     loop {
         let request = loop {
             // Aborted block_in_place work can still own route mutations. Join
@@ -930,12 +1043,49 @@ async fn connected(
                 workers.stop().await;
                 return Ok(());
             }
-            if awake && workers.idle() {
+            // Fence before scheduling, not merely in select: wake or a ready
+            // reconnect must never resurrect expired authority.
+            if !access_expired && freshness.check().is_err() {
+                access_expired = true;
+                state = State::Blocked;
+                last_failure = ACCESS_EXPIRED.into();
+                restart_pending = false;
+                probes.cancel();
+                summary = None;
+                monitor.transition(false, rtrust_control::observations::now_ms());
+                events::record("access_expired");
+                // Join in-flight route refresh before allowing explicit Stop
+                // to release the guard, but keep IPC responsive while draining.
+                let stopping = workers.stop();
+                tokio::pin!(stopping);
+                loop {
+                    tokio::select! {
+                        _ = &mut stopping => break,
+                        request = commands.recv(), if !commands.is_closed() => {
+                            if let Some(request) = request {
+                                match request.command {
+                                    Command::Stop if expiry_stops.len() < 16 => expiry_stops.push(request.response),
+                                    _ => { let _ = request.response.send(Response::new(State::Blocked, ACCESS_EXPIRED)); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(response) = expiry_stops.pop() {
+                break Envelope {
+                    command: Command::Stop,
+                    response,
+                };
+            }
+            if !access_expired && awake && workers.idle() {
                 events::record("reconnect_scheduled");
                 retry(&mut workers, failover.current(), &mut retry_delay);
                 restart_pending = false;
             }
             tokio::select! {
+                biased;
+                _ = freshness.expired(), if !access_expired => continue,
                 _ = shutting_down(&mut shutdown) => {
                     workers.stop().await;
                     return Ok(());
@@ -946,6 +1096,7 @@ async fn connected(
                     awake = event.awake;
                     events::record(&format!("power_event awake={awake} generation={}", event.generation));
                     summary = None;
+                    if access_expired { continue; }
                     if !awake {
                         // Sleep after a stable session restores the budget as a
                         // natural disconnect would; a pending attempt it cancels
@@ -1002,7 +1153,7 @@ async fn connected(
                     if shutdown_requested(&shutdown) { workers.stop().await; return Ok(()); }
                     // A task can complete just before abort. Do not resurrect
                     // its pre-wake transport even if its result was successful.
-                    if restart_pending { continue; }
+                    if restart_pending || access_expired || freshness.check().is_err() { continue; }
                     match &result {
                         Ok(Err(error)) => {
                             last_failure = "VPN reconnect failed".into();
@@ -1018,7 +1169,7 @@ async fn connected(
                         // discard must land inside the summary window.
                         summary = Some(summary_after("reconnect"));
                         workers.transport = prepared.transport();
-                        workers.tunnel = Some(tokio::spawn(prepared.run()));
+                        workers.tunnel = Some(freshness.spawn(prepared));
                         connected_since = Instant::now();
                         state = State::Connected;
                         probes.cancel();
@@ -1036,6 +1187,7 @@ async fn connected(
                 },
                 _ = tokio::time::sleep_until(summary.map(|s| s.0).unwrap_or_else(tokio::time::Instant::now)), if summary.is_some() => {
                     let (_, after, base) = summary.take().unwrap();
+                    if freshness.check().is_err() { continue; }
                     events::record(&format!(
                         "dataplane_summary after={after} window_s={} {}",
                         SUMMARY_DELAY.as_secs(),
@@ -1045,11 +1197,19 @@ async fn connected(
                 // Started only by this timer while awake, connected and viewed
                 // through the lease; Status never probes.
                 tick = probes.next(), if plan.is_some() => match tick {
-                    crate::sysprobe::Tick::Due => if awake && state == State::Connected && probes.viewing() {
-                        probes.start(monitor.generation(), plan.as_ref().unwrap().collect());
+                    crate::sysprobe::Tick::Due => if !access_expired && freshness.check().is_ok() && awake && state == State::Connected && probes.viewing() {
+                        let collect = plan.as_ref().unwrap().collect();
+                        let deadline = freshness.clone();
+                        probes.start(monitor.generation(), async move {
+                            deadline.during(async { Ok(collect.await) }).await.unwrap_or_else(|_| {
+                                rtrust_control::observations::SystemProbe::unknown(rtrust_control::observations::now_ms())
+                            })
+                        });
                     },
                     crate::sysprobe::Tick::Done(generation, result) => {
-                        monitor.apply_system(generation, result, rtrust_control::observations::now_ms());
+                        if !access_expired && freshness.check().is_ok() {
+                            monitor.apply_system(generation, result, rtrust_control::observations::now_ms());
+                        }
                     },
                 },
             }
@@ -1060,6 +1220,15 @@ async fn connected(
         }
         match request.command {
             Command::Status { viewed } => {
+                // The expiry timer may already be sleeping when Status becomes
+                // ready. Fence the reply and viewing lease before any probe.
+                if freshness.check().is_err() {
+                    state = State::Blocked;
+                    last_failure = ACCESS_EXPIRED.into();
+                    probes.cancel();
+                    summary = None;
+                    monitor.transition(false, rtrust_control::observations::now_ms());
+                }
                 if viewed {
                     probes.viewed(awake && state == State::Connected);
                 }
@@ -1085,6 +1254,7 @@ async fn connected(
                 probes.cancel();
                 monitor.transition(false, rtrust_control::observations::now_ms());
                 let mut waiters = vec![request.response];
+                waiters.append(&mut expiry_stops);
                 {
                     let stopping = workers.stop();
                     tokio::pin!(stopping);
@@ -1189,6 +1359,10 @@ fn slow_release() -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[path = "freshness_tests.rs"]
+mod freshness_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn test_owner() -> Owner {
@@ -1212,6 +1386,7 @@ mod tests {
         let (initial, response) = oneshot::channel();
         let supervisor = tokio::spawn(super::connected(
             Control {
+                freshness: Freshness::default(),
                 commands,
                 initial: Some(initial),
                 shutdown: shutdown_events,
@@ -1269,6 +1444,9 @@ mod tests {
         }
     }
     async fn test_actor() -> TestActor {
+        test_actor_with_freshness(Freshness::default()).await
+    }
+    async fn test_actor_with_freshness(freshness: Freshness) -> TestActor {
         let lease = Arc::new(Mutex::new(()));
         let held = lease.clone().lock_owned().await;
         let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1290,6 +1468,7 @@ mod tests {
         let retry_count = retries.clone();
         let task = tokio::spawn(super::connected(
             Control {
+                freshness,
                 commands,
                 initial: Some(initial),
                 shutdown: shutdown_events,
@@ -1324,6 +1503,118 @@ mod tests {
             retries,
             shutdown: shutdown_signal,
         }
+    }
+
+    fn fresh_for(milliseconds: u64) -> Freshness {
+        let now = rtrust_control::freshness::now();
+        Freshness(Some(Arc::new(std::sync::Mutex::new(
+            rtrust_control::freshness::Deadline::new(rtrust_control::freshness::Lease {
+                issued_at_ms: now - 1,
+                expires_at_ms: now + milliseconds,
+            })
+            .unwrap(),
+        ))))
+    }
+
+    #[tokio::test]
+    async fn freshness_preserves_typed_dataplane_degradation_evidence() {
+        for proven in [false, true] {
+            let result: RunResult = Freshness::default()
+                .during_result(async {
+                    Err::<(), Box<dyn std::error::Error + Send + Sync>>(Box::new(
+                        rtrust_engine::Error::Degraded {
+                            proven,
+                            kind: rtrust_engine::Stall::Quiet,
+                        },
+                    ))
+                })
+                .await;
+            assert_eq!(crate::dataplane::degraded(&result), Some(proven));
+            assert_eq!(
+                crate::dataplane::degraded_kind(&result),
+                Some((proven, rtrust_engine::Stall::Quiet))
+            );
+            assert_eq!(crate::dataplane::unproven(&result), !proven);
+            assert!(
+                result
+                    .unwrap_err()
+                    .downcast_ref::<rtrust_engine::Error>()
+                    .is_some()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn freshness_cancels_preparation_and_fences_ready_results() {
+        let freshness = fresh_for(40);
+        let result = freshness
+            .during(std::future::pending::<Result<(), String>>())
+            .await;
+        assert_eq!(result.unwrap_err(), ACCESS_EXPIRED);
+        let polled = std::sync::atomic::AtomicBool::new(false);
+        let result = freshness
+            .during(async {
+                polled.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .await;
+        assert_eq!(result.unwrap_err(), ACCESS_EXPIRED);
+        assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+        // Both sides of a synchronous guard install/refresh use the same fence.
+        assert!(freshness.check().is_err());
+        assert!(freshness.clone().check().is_err());
+    }
+
+    #[tokio::test]
+    async fn freshness_checks_after_a_synchronous_stage_before_publishing_result() {
+        let freshness = fresh_for(40);
+        let result = freshness
+            .during(async {
+                std::thread::sleep(Duration::from_millis(60));
+                Ok(())
+            })
+            .await;
+        assert_eq!(result.unwrap_err(), ACCESS_EXPIRED);
+    }
+
+    #[tokio::test]
+    async fn expiry_stops_dataplane_retains_guard_and_forbids_wake_retry() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let fixture = test_actor_with_freshness(fresh_for(300)).await;
+        assert_eq!(fixture.initial.await.unwrap().state, State::Connected);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let response = ask(&fixture.actor, Command::Status { viewed: false })
+                    .await
+                    .unwrap();
+                if response.message == ACCESS_EXPIRED && fixture.dropped.load(SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(fixture.dropped.load(SeqCst));
+        assert!(!fixture.released.load(SeqCst));
+        assert!(fixture.lease.try_lock().is_err());
+        for (generation, awake) in [(1, false), (2, true)] {
+            fixture
+                .power
+                .send_replace(power::State { awake, generation });
+            let response = ask(&fixture.actor, Command::Status { viewed: false })
+                .await
+                .unwrap();
+            assert_eq!(response.state, State::Blocked);
+            assert_eq!(response.message, ACCESS_EXPIRED);
+        }
+        assert_eq!(fixture.retries.load(SeqCst), 0);
+        assert_eq!(
+            ask(&fixture.actor, Command::Stop).await.unwrap().state,
+            State::Idle
+        );
+        fixture.task.await.unwrap().unwrap();
+        assert!(fixture.released.load(SeqCst));
     }
 
     #[tokio::test]
@@ -1677,6 +1968,82 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn expiry_drain_keeps_status_responsive_and_defers_explicit_release() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let lease = Arc::new(Mutex::new(()));
+        let held = Arc::new(lease.clone().lock_owned().await);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let signal = entered.clone();
+        let (unblock, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let worker = tokio::spawn(guarded_connect(
+            held.clone(),
+            move || {
+                signal.notify_one();
+                wait.lock().unwrap().recv().unwrap();
+                Ok(())
+            },
+            std::future::pending::<Result<device::Prepared, String>>(),
+        ));
+        entered.notified().await;
+        let (actor, commands) = mpsc::channel(16);
+        let (_shutdown, shutdown) = tokio::sync::watch::channel(false);
+        let (initial, response) = oneshot::channel();
+        let (_power, power) = tokio::sync::watch::channel(power::State::default());
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = released.clone();
+        let failover = failover().await;
+        let task = tokio::spawn(super::connected(
+            Control {
+                freshness: fresh_for(300),
+                commands,
+                initial: Some(initial),
+                shutdown,
+                probe: None,
+            },
+            Workers {
+                transport: "test",
+                tunnel: None,
+                reconnect: Some(worker),
+            },
+            false,
+            power,
+            failover,
+            |_, _, _| panic!("expiry must prohibit reconnect"),
+            move || {
+                drop(held);
+                release.store(true, SeqCst);
+                Ok(())
+            },
+        ));
+        assert_eq!(response.await.unwrap().state, State::Connected);
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        // Always unblock before asserting, so a failed regression cannot leave
+        // a synthetic block_in_place worker hanging in the test runtime.
+        let status = tokio::time::timeout(
+            Duration::from_secs(1),
+            ask(&actor, Command::Status { viewed: false }),
+        )
+        .await;
+        let stopping_actor = actor.clone();
+        let stopping = tokio::spawn(async move { ask(&stopping_actor, Command::Stop).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let stopped_early = stopping.is_finished();
+        let released_early = released.load(SeqCst);
+        let held_during_drain = lease.try_lock().is_err();
+        unblock.send(()).unwrap();
+        assert_eq!(stopping.await.unwrap().unwrap().state, State::Idle);
+        task.await.unwrap().unwrap();
+        let status = status.expect("Status must stay responsive").unwrap();
+        assert_eq!(status.state, State::Blocked);
+        assert_eq!(status.message, ACCESS_EXPIRED);
+        assert!(!stopped_early);
+        assert!(!released_early);
+        assert!(held_during_drain);
+        assert!(released.load(SeqCst));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn actor_stop_and_shutdown_drain_inflight_route_mutations() {
         for shutdown in [false, true] {
             let lease = Arc::new(Mutex::new(()));
@@ -1703,6 +2070,7 @@ mod tests {
             let release = released.clone();
             let task = tokio::spawn(super::connected(
                 Control {
+                    freshness: Freshness::default(),
                     commands,
                     initial: Some(initial),
                     shutdown: shutdown_events,
@@ -1794,6 +2162,7 @@ mod tests {
             let release_device = device_dropped.clone();
             let task = tokio::spawn(super::connected(
                 Control {
+                    freshness: Freshness::default(),
                     commands,
                     initial: Some(initial),
                     shutdown: shutdown_events,
@@ -2017,6 +2386,7 @@ mod tests {
             startup.await.unwrap();
             let result = super::connected(
                 Control {
+                    freshness: Freshness::default(),
                     commands,
                     initial: Some(initial),
                     shutdown: shutdown_events,
@@ -2114,6 +2484,7 @@ mod tests {
         let release = released.clone();
         let task = tokio::spawn(super::connected(
             Control {
+                freshness: Freshness::default(),
                 commands,
                 initial: Some(initial),
                 shutdown: shutdown_events,
@@ -2949,6 +3320,7 @@ mod tests {
         let (initial, response) = oneshot::channel();
         let supervisor = tokio::spawn(super::connected(
             Control {
+                freshness: Freshness::default(),
                 commands,
                 initial: Some(initial),
                 shutdown: shutdown_events,
@@ -3097,6 +3469,7 @@ mod tester_summary_tests {
         let (initial, response) = oneshot::channel();
         let supervisor = tokio::spawn(super::connected(
             Control {
+                freshness: Freshness::default(),
                 commands,
                 initial: Some(initial),
                 shutdown: shutdown_events,
