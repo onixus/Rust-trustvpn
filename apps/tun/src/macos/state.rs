@@ -142,7 +142,7 @@ impl Guard {
         networks: &[rtrust_control::Ipv4Net],
         full: bool,
         resolver: Option<Ipv4Addr>,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::failover::Failure> {
         directory()?;
         if pending() {
             return Err("Recovery is required before connecting".into());
@@ -165,7 +165,7 @@ impl Guard {
                 return Err("System VPN requires IP forwarding disabled; existing settings are left unchanged".into());
             }
         }
-        firewall::preflight()
+        firewall::preflight().map_err(Into::into)
     }
     pub fn install(
         uid: u32,

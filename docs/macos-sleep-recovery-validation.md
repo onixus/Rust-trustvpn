@@ -38,7 +38,9 @@ and starts no new mutation before the old worker has drained.
 - Drain cancelled workers as select events, leaving Status/EOF processing active.
   Ignore any successful result from a worker invalidated by a power event.
 - Keep bounded, redacted lifecycle diagnostics at
-  `/private/var/run/rtrust/events.log` (root-owned, desktop-readable, 256 KiB cap).
+  `/Library/Logs/R-TrustTunnel/events.log` (root-owned, desktop-readable;
+  seven-day retention and 15,000,000-byte total cap including rotated segments
+  and rewrite temporary data). See [journal details](diagnostics-journal.md).
   Never record profiles, credentials, request bodies or packet content.
 - Transport stops and failed reconnects carry a reason class
   (`apps/tun/src/reason.rs`): only `key=value` tokens with lowercase classes and
@@ -76,7 +78,8 @@ suspend-tolerant framed exchange is unchanged.
 ## Required installed acceptance (not yet completed)
 
 1. Disconnect and quit the old app, install the candidate, then reconnect.
-2. Verify `service_started native_power_monitor=registered` in events.log.
+2. Verify `service_started native_power_monitor=registered` in
+   `/Library/Logs/R-TrustTunnel/events.log` (or its retained rotated segments).
 3. Close the lid for at least one minute, wake, and do not reconnect manually.
 4. Record sleep/awake generation, reconnect attempts and reconnect_complete.
 5. Check uncached system DNS, HTTPS, tunnel egress, LAN exclusion and route ownership.

@@ -283,6 +283,10 @@ impl Budget {
         self.exponent = (self.exponent + 1).min(4);
         Duration::from_millis(millis + entropy % (millis / 4 + 1))
     }
+    /// Observes the scheduled attempt without spending or resetting budget.
+    pub fn attempt(&self) -> u32 {
+        u32::from(self.attempts)
+    }
     pub fn cooling(&self) -> bool {
         self.cooling
     }

@@ -347,6 +347,26 @@ enum Transport {
     Amnezia(amnezia::AmneziaSession),
     Vless(vless::VlessSession),
 }
+/// Closed diagnostic vocabulary; never includes the profile's raw transport string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlannedTransport {
+    H2,
+    H3,
+    Hysteria,
+    AmneziaWg,
+    Unknown,
+}
+/// Mirrors connect/connect_marked selection without opening a socket.
+pub fn planned_transport(p: &Profile) -> PlannedTransport {
+    match p.protocol {
+        rtrust_profile::Protocol::AmneziaWg => PlannedTransport::AmneziaWg,
+        rtrust_profile::Protocol::Hysteria2 => PlannedTransport::Hysteria,
+        rtrust_profile::Protocol::TrustTunnel if p.endpoint.upstream_protocol == "http3" => {
+            PlannedTransport::H3
+        }
+        rtrust_profile::Protocol::TrustTunnel => PlannedTransport::H2,
+    }
+}
 impl Session {
     fn new(transport: Transport, ipv6: bool) -> Self {
         Self(

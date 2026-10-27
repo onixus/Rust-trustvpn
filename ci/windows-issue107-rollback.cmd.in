@@ -1,0 +1,127 @@
+@echo off
+rem Render ONLY whitelisted literal paths/hex/PID/nonce into this protected file.
+rem SYSTEM executes OS binaries only. No PowerShell, recovery, ACL reset or reboot.
+setlocal EnableExtensions DisableDelayedExpansion
+set "PATH=@SYSTEM32@"
+set "PATHEXT=.EXE;.COM"
+set "COMSPEC=@SYSTEM32@\cmd.exe"
+set "TEMP=@STAGE@"
+set "TMP=@STAGE@"
+cd /d "@STAGE@" >nul 2>nul
+if errorlevel 1 exit /b 90
+if exist "@STAGE@\armed.request" goto arm
+if not exist "@STAGE@\rollback.ok" goto rollback
+rem A prior receipt alone is not proof that the original remains restored.
+call :hash "@INSTALLED_EXE@" "@ORIGINAL_SHA256@"
+if errorlevel 1 goto rollback
+"@SYSTEM32@\sc.exe" query RTrustTunnel >"@STAGE@\sc-state.txt" 2>nul
+if errorlevel 1 goto rollback
+"@SYSTEM32@\findstr.exe" /r /c:"STATE *: *4 *RUNNING" "@STAGE@\sc-state.txt" >nul 2>nul
+if not errorlevel 1 exit /b 0
+:rollback
+>"@STAGE@\rollback.started" echo @NONCE@
+set "STATE_HUMAN=0"
+if exist "@INSTALL_DIR@\full-state.json" set "STATE_HUMAN=1"
+if exist "@INSTALL_DIR@\always-on.rtrust" set "STATE_HUMAN=1"
+call :hash "@BACKUP@" "@ORIGINAL_SHA256@"
+if errorlevel 1 goto fail_hash
+"@SYSTEM32@\sc.exe" stop RTrustTunnel >nul 2>nul
+set /a COUNT=0
+:wait_stop
+"@SYSTEM32@\sc.exe" query RTrustTunnel >"@STAGE@\sc-state.txt" 2>nul
+if errorlevel 1 goto fail_stop
+"@SYSTEM32@\findstr.exe" /r /c:"STATE *: *1 *STOPPED" "@STAGE@\sc-state.txt" >nul 2>nul
+if not errorlevel 1 goto stopped
+set /a COUNT+=1
+if %COUNT% GEQ 30 goto fail_stop
+"@SYSTEM32@\ping.exe" -n 2 127.0.0.1 >nul 2>nul
+goto wait_stop
+:stopped
+rem SCM STOPPED can precede process/image unmapping. Retry, never delete/rename.
+set /a COUNT=0
+:copy_original
+if not exist "@INSTALLED_EXE@" goto fail_copy
+copy /b /y "@BACKUP@" "@INSTALLED_EXE@" >nul 2>nul
+if errorlevel 1 goto copy_retry
+call :hash "@INSTALLED_EXE@" "@ORIGINAL_SHA256@"
+if not errorlevel 1 goto copied
+:copy_retry
+set /a COUNT+=1
+if %COUNT% GEQ 30 goto fail_copy
+"@SYSTEM32@\ping.exe" -n 2 127.0.0.1 >nul 2>nul
+goto copy_original
+:copied
+"@SYSTEM32@\fsutil.exe" file queryfileid "@INSTALLED_EXE@" >"@STAGE@\restored-id.txt" 2>nul
+if errorlevel 1 goto fail_id
+"@SYSTEM32@\fc.exe" /b "@STAGE@\original-id.txt" "@STAGE@\restored-id.txt" >nul 2>nul
+if errorlevel 1 goto fail_id
+"@SYSTEM32@\icacls.exe" "@INSTALLED_EXE@" >"@STAGE@\restored-acl.txt" 2>nul
+if errorlevel 1 goto fail_acl
+"@SYSTEM32@\fc.exe" /b "@STAGE@\original-acl.txt" "@STAGE@\restored-acl.txt" >nul 2>nul
+if not errorlevel 1 goto acl_ok
+rem Restore the saved exact DACL once. Never repair an ancestor or use /reset.
+"@SYSTEM32@\icacls.exe" "@INSTALL_DIR@" /restore "@STAGE@\original.acl" >nul 2>nul
+if errorlevel 1 goto fail_acl
+"@SYSTEM32@\icacls.exe" "@INSTALLED_EXE@" >"@STAGE@\restored-acl.txt" 2>nul
+if errorlevel 1 goto fail_acl
+"@SYSTEM32@\fc.exe" /b "@STAGE@\original-acl.txt" "@STAGE@\restored-acl.txt" >nul 2>nul
+if errorlevel 1 goto fail_acl
+:acl_ok
+rem Mandatory re-hash immediately before every SCM start.
+call :hash "@INSTALLED_EXE@" "@ORIGINAL_SHA256@"
+if errorlevel 1 goto fail_hash
+"@SYSTEM32@\sc.exe" start RTrustTunnel >nul 2>nul
+if errorlevel 1 goto fail_start
+set /a COUNT=0
+:wait_start
+"@SYSTEM32@\sc.exe" query RTrustTunnel >"@STAGE@\sc-state.txt" 2>nul
+if errorlevel 1 goto fail_start
+"@SYSTEM32@\findstr.exe" /r /c:"STATE *: *4 *RUNNING" "@STAGE@\sc-state.txt" >nul 2>nul
+if not errorlevel 1 goto running
+set /a COUNT+=1
+if %COUNT% GEQ 30 goto fail_start
+"@SYSTEM32@\ping.exe" -n 2 127.0.0.1 >nul 2>nul
+goto wait_start
+:running
+if "%STATE_HUMAN%"=="1" goto fail_state
+>"@STAGE@\rollback.ok" echo @NONCE@
+exit /b 0
+:arm
+call :hash "@BACKUP@" "@ORIGINAL_SHA256@"
+if errorlevel 1 goto fail_hash
+rem Prove localized SCM output is parseable as SYSTEM BEFORE the first stop.
+"@SYSTEM32@\sc.exe" query RTrustTunnel >"@STAGE@\sc-state.txt" 2>nul
+if errorlevel 1 goto fail_start
+"@SYSTEM32@\findstr.exe" /r /c:"STATE *: *4 *RUNNING" "@STAGE@\sc-state.txt" >nul 2>nul
+if errorlevel 1 goto fail_start
+rem Receipt is newly created by SYSTEM, then independently checked by Admin.
+del /q "@STAGE@\armed.request" >nul 2>nul
+if exist "@STAGE@\armed.request" exit /b 91
+>"@STAGE@\watchdog.armed" echo @NONCE@
+exit /b 0
+:hash
+"@SYSTEM32@\certutil.exe" -hashfile "%~1" SHA256 >"@STAGE@\hash.txt" 2>nul
+if errorlevel 1 exit /b 1
+"@SYSTEM32@\findstr.exe" /i /x /c:"%~2" "@STAGE@\hash.txt" >nul 2>nul
+exit /b %ERRORLEVEL%
+:fail_hash
+>"@STAGE@\rollback.failed" echo FAIL_HASH
+exit /b 11
+:fail_stop
+>"@STAGE@\rollback.failed" echo FAIL_STOP
+exit /b 12
+:fail_copy
+>"@STAGE@\rollback.failed" echo FAIL_COPY
+exit /b 13
+:fail_id
+>"@STAGE@\rollback.failed" echo FAIL_ID
+exit /b 14
+:fail_acl
+>"@STAGE@\rollback.failed" echo FAIL_ACL
+exit /b 15
+:fail_start
+>"@STAGE@\rollback.failed" echo FAIL_START
+exit /b 16
+:fail_state
+>"@STAGE@\rollback.failed" echo FAIL_STATE_HUMAN
+exit /b 17

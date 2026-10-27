@@ -168,15 +168,23 @@ fn selected_routes(
 }
 async fn transport(
     profile: &rtrust_profile::Profile,
-) -> Result<(Session, rtrust_engine::Tunnel), String> {
+) -> Result<(Session, rtrust_engine::Tunnel), crate::failover::Failure> {
     tokio::time::timeout(Duration::from_secs(30), async {
-        let session = Session::connect(profile).await.map_err(|e| e.to_string())?;
-        session.health().await.map_err(|e| e.to_string())?;
-        let udp = session.open_udp().await.map_err(|e| e.to_string())?;
+        let session = Session::connect(profile)
+            .await
+            .map_err(crate::failover::Failure::from)?;
+        session
+            .health()
+            .await
+            .map_err(crate::failover::Failure::from)?;
+        let udp = session
+            .open_udp()
+            .await
+            .map_err(crate::failover::Failure::from)?;
         Ok((session, udp))
     })
     .await
-    .map_err(|_| "Endpoint connection timed out")?
+    .map_err(|_| crate::failover::Failure::timeout("Endpoint connection timed out"))?
 }
 struct Worker(Option<tokio::task::JoinHandle<RunResult>>);
 impl Worker {
@@ -258,7 +266,16 @@ async fn serve(
         )
         .await;
     };
-    let (mut freshness, command) = rtrust_control::freshness::start(request.command)?;
+    let mut journal = crate::failover::start_journal(&request.command);
+    let (mut freshness, command) = match rtrust_control::freshness::start(request.command) {
+        Ok(start) => start,
+        Err(error) => {
+            if let Some(journal) = journal.as_mut() {
+                journal.class(rtrust_journal::Class::Authentication);
+            }
+            return reply(pipe, State::Error, &error).await;
+        }
+    };
     let (profile, selection, dns, split_dns, fallbacks) = match command {
         Command::PrepareUpdate => {
             // Failures are answered in the caller's version so a previous
@@ -303,6 +320,9 @@ async fn serve(
                 exclude_lan,
             };
             if let Err(error) = selection.validate() {
+                if let Some(journal) = journal.as_mut() {
+                    journal.class(rtrust_journal::Class::Profile);
+                }
                 return reply(pipe, State::Error, &error).await;
             }
             (profile, selection, None, dns, fallbacks)
@@ -312,7 +332,12 @@ async fn serve(
             dns,
             fallbacks,
         } => {
-            rtrust_control::validate_dns(dns)?;
+            if let Err(error) = rtrust_control::validate_dns(dns) {
+                if let Some(journal) = journal.as_mut() {
+                    journal.class(rtrust_journal::Class::Profile);
+                }
+                return reply(pipe, State::Error, &error).await;
+            }
             (profile, Default::default(), Some(dns), None, fallbacks)
         }
         Command::Recover { .. } => {
@@ -321,6 +346,14 @@ async fn serve(
         }
         _ => return reply(pipe, State::Error, "Start required").await,
     };
+    let mut journal = journal.unwrap_or_else(|| {
+        crate::failover::journal_attempt(
+            rtrust_journal::Path::Start,
+            rtrust_engine::planned_transport(&profile),
+            1,
+            rtrust_journal::Budget::Burst,
+        )
+    });
     if full::pending()? {
         return reply(
             pipe,
@@ -330,6 +363,7 @@ async fn serve(
         .await;
     }
     routes::settled_adapter()?;
+    journal.cancelled();
     let setup = async {
         // Every allowed candidate is pinned now: the guard covers them all.
         // WFP full mode pins IPv4 endpoint exceptions: an IPv6 answer of any
@@ -343,31 +377,51 @@ async fn serve(
                 crate::failover::Pin::All
             },
         )
-        .await?;
+        .await
+        .inspect_err(|error| journal.class(error.class()))?;
+        journal.class(rtrust_journal::Class::Other);
         let networks = if dns.is_none() {
             selected_routes(&failover.guard_profile(), &selection)?
         } else {
             vec![]
         };
-        let (session, udp) = rtrust_control::freshness::while_valid(
-            freshness.as_mut(),
-            failover.connect_initial(|profile| async move { transport(&profile).await }),
-        )
-        .await?;
+        journal.cancelled();
+        let mut connection_failed = false;
+        let result = rtrust_control::freshness::while_valid(freshness.as_mut(), async {
+            failover
+                .connect_initial(|profile| async move { transport(&profile).await })
+                .await
+                .map_err(|error| {
+                    connection_failed = true;
+                    error.annotate(&mut journal, |error| error.class);
+                    "No allowed VPN endpoint connected within the startup budget".to_owned()
+                })
+        })
+        .await;
+        if result.is_err() && !connection_failed {
+            journal.class(rtrust_journal::Class::Authentication);
+        }
+        let (session, udp) = result?;
+        journal.class(rtrust_journal::Class::Other);
         Ok::<_, String>((failover, networks, session, udp))
     };
-    let (mut failover, networks, session, udp) = {
+    let setup_result = {
         use tokio::io::AsyncReadExt;
         let mut unexpected = [0];
         tokio::select! {
-            r = tokio::time::timeout(Duration::from_secs(42), setup) => match r {
-                Ok(Ok(v)) => v,
-                Ok(Err(error)) => return reply(pipe, State::Error, &error).await,
-                Err(_) => return reply(pipe, State::Error, "Endpoint connection timed out").await,
-            },
-            _ = pipe.read(&mut unexpected) => return Ok(()),
-            _ = stop.changed() => return Ok(()),
+            r = tokio::time::timeout(Duration::from_secs(42), setup) => Some(r),
+            _ = pipe.read(&mut unexpected) => None,
+            _ = stop.changed() => None,
         }
+    };
+    let (mut failover, networks, session, udp) = match setup_result {
+        Some(Ok(Ok(value))) => value,
+        Some(Ok(Err(error))) => return reply(pipe, State::Error, &error).await,
+        Some(Err(_)) => {
+            journal.class(rtrust_journal::Class::Timeout);
+            return reply(pipe, State::Error, "Endpoint connection timed out").await;
+        }
+        None => return Ok(()),
     };
     // Absolute DLL path inside the admin-owned service installation directory.
     let dll = std::env::current_exe()
@@ -447,6 +501,7 @@ async fn serve(
                 .map_err(|_| "Wintun interface index unavailable")?,
         )?;
     }
+    journal.success();
     let mut worker = Worker::new(tokio::spawn(crate::dataplane::run(
         session,
         udp,
@@ -550,15 +605,19 @@ async fn lease_loop(
     let mut budget = rtrust_control::recovery::Budget::default();
     let mut connected_since = std::time::Instant::now();
     let mut connecting = Box::pin(std::future::pending::<
-        Result<(Session, rtrust_engine::Tunnel), String>,
+        Result<(Session, rtrust_engine::Tunnel), crate::failover::Failure>,
     >())
         as std::pin::Pin<
             Box<
-                dyn std::future::Future<Output = Result<(Session, rtrust_engine::Tunnel), String>>
-                    + Send,
+                dyn std::future::Future<
+                        Output = Result<(Session, rtrust_engine::Tunnel), crate::failover::Failure>,
+                    > + Send,
             >,
         >;
     let mut reconnecting = false;
+    let mut labels = crate::failover::RecoveryLabels::default();
+    let mut attempt_path = rtrust_journal::Path::Reconnect;
+    let mut attempt_started = std::time::Instant::now();
     loop {
         // Keep partially read frames alive across heartbeat/reconnect events.
         let mut pending = Box::pin(read::<Request>(pipe));
@@ -571,7 +630,7 @@ async fn lease_loop(
                     probes.cancel();
                     match change {
                         crate::netwatch::Change::Network => monitor.network_changed(rtrust_control::observations::now_ms()),
-                        crate::netwatch::Change::Resumed => monitor.resumed(rtrust_control::observations::now_ms()),
+                        crate::netwatch::Change::Resumed => { labels.resumed(state == State::Blocked); monitor.resumed(rtrust_control::observations::now_ms()); },
                     }
                 },
                 _ = stop.changed() => return Ok(None),
@@ -585,25 +644,30 @@ async fn lease_loop(
                     retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                 },
                 _ = &mut retry, if state == State::Blocked && !reconnecting && !access_expired => {
+                    attempt_path = labels.path();
+                    attempt_started = std::time::Instant::now();
                     if full && full::refresh(device.if_index().map_err(|_| "Missing Wintun interface")?, &full::endpoints(&failover.guard_profile())?).is_err() {
+                        crate::failover::journal_failure(rtrust_journal::Record::failure(attempt_path, rtrust_journal::Class::Other, rtrust_engine::planned_transport(failover.current()), budget.attempt(), rtrust_journal::Budget::from_cooling(budget.cooling()), attempt_started.elapsed()));
                         retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                         continue;
                     }
                     let profile = failover.current().clone();
                     connecting = Box::pin(async move {
                         tokio::time::timeout(rtrust_control::recovery::ATTEMPT_TIMEOUT, transport(&profile))
-                            .await.map_err(|_| "Reconnect timed out".to_owned())?
+                            .await.map_err(|_| crate::failover::Failure::timeout("Reconnect timed out"))?
                     }); reconnecting=true;
                 },
                 result = &mut connecting, if reconnecting => {
                     reconnecting=false;
                     match result {
                         Ok((session,udp)) => {
+                            labels.connected();
                             *worker=Worker::new(tokio::spawn(crate::dataplane::run(session,udp,device.clone(),ADDRESS)));
                             probes.cancel();
                             state=State::Connected; monitor.transition(true, rtrust_control::observations::now_ms()); connected_since=std::time::Instant::now();
                         },
-                        Err(_) => {
+                        Err(error) => {
+                            crate::failover::journal_failure(rtrust_journal::Record::failure(attempt_path, error.class, rtrust_engine::planned_transport(failover.current()), budget.attempt(), rtrust_journal::Budget::from_cooling(budget.cooling()), attempt_started.elapsed()));
                             // The guard already covers every candidate.
                             if failover.failed(std::time::Instant::now()) {
                                 monitor.failed_over(rtrust_control::observations::now_ms());
@@ -698,6 +762,14 @@ pub(crate) fn boot_active() -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(flavor = "current_thread")]
+    async fn plain_and_leased_start_failures_reply_and_record_once_without_os_io() {
+        crate::failover::tests::assert_start_serve_failures(|mut server| async move {
+            let (_stop, stop) = watch::channel(false);
+            serve(&mut server, Arc::new(Mutex::new(())), stop, None).await
+        })
+        .await;
+    }
     async fn exchange(version: u32, command: Command) -> Response {
         let (mut client, mut server) = tokio::io::duplex(1 << 16);
         let (_stop, stop) = watch::channel(false);

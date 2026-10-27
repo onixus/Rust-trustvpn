@@ -5650,6 +5650,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtrust-journal"
+version = "0.6.2"
+dependencies = [
+ "directories",
+ "libc",
+ "rtrust-engine",
+ "rtrust-profile",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rtrust-mobile"
 version = "0.6.2"
 dependencies = [
@@ -5680,6 +5693,7 @@ dependencies = [
  "rtrust-control",
  "rtrust-desktop",
  "rtrust-engine",
+ "rtrust-journal",
  "rtrust-portal",
  "rtrust-profile",
  "rtrust-store",
@@ -5776,6 +5790,7 @@ dependencies = [
  "rand 0.9.5",
  "rtrust-control",
  "rtrust-engine",
+ "rtrust-journal",
  "rtrust-mobile",
  "rtrust-profile",
  "rtrust-store",

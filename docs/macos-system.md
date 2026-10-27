@@ -188,6 +188,41 @@ with route checks, fresh read-only Status and explicit Recover cleanup.
 This issue's installed-package/device acceptance has NOT RUN; earlier #61
 evidence does not validate the new binary.
 
+## Managed access freshness (local source change)
+
+Managed TUN/full Start carries a finite portal lease. The macOS service now
+accepts `StartLeased` and advertises `managed_access_freshness` only together
+with service-side enforcement; the client still rejects an incompatible helper
+without retrying plain Start. Reinstalling an older package that lacks this
+capability cannot resolve `Service freshness capability required`.
+
+The same sticky deadline covers DNS/transport preparation, guard installation,
+active dataplane and every reconnect. Darwin `CLOCK_MONOTONIC_RAW` includes
+suspended time (`clock_gettime(3)`); observed wall-clock rollback or clock failure
+invalidates access. Wake, GUI detachment and retry do not renew it. Checks fence
+worker polls and synchronous OS-operation boundaries in addition to a 100 ms
+polling timer; this is not a hard real-time termination guarantee.
+Any observed backward wall-clock step, even of milliseconds, latches the
+session invalid. Because the dataplane fence samples the clock on every worker
+poll, a `timed` correction that steps time back after wake revokes an otherwise
+valid lease (Blocked until Stop) far more reliably than the 100 ms timer alone
+would. Device acceptance must therefore include sleep/wake with network time
+synchronization and record whether a valid lease is falsely revoked.
+
+Expiry stops and joins tunnel/reconnect workers, reports Blocked, and retains
+PF/routes/DNS plus the recovery journal. Status remains available while an
+already-started OS mutation drains. Expiry never releases the guard: explicit
+Stop or authorized owner Recover performs cleanup under the existing ownership
+contract. A new portal synchronization and connection are required for fresh
+access; an existing lease is not silently extended.
+
+Synthetic regressions exercise lease validation, expiry, GUI detachment,
+sleep/wake events, clock rollback, stale-result fences and blocked OS mutations.
+Native installed-package acceptance (real sleep/wake and clock behavior,
+IPv4/IPv6/DNS packet enforcement and cleanup in full/selected mode) is **NOT RUN**.
+This describes the local source patch, not a published or installed package;
+managed SOCKS and permanent Always-on remain unsupported.
+
 ## Session owner for Recover (IPC v6)
 
 Peer-uid authentication alone let any process of the desktop user stop a live
