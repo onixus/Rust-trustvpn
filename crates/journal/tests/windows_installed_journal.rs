@@ -357,7 +357,7 @@ fn matrix(objects: &[Object], token: HANDLE) {
             rights.push((FILE_DELETE_CHILD, false));
         }
         for (access, expected) in rights {
-            let mut mapping = GENERIC_MAPPING {
+            let mapping = GENERIC_MAPPING {
                 GenericRead: FILE_GENERIC_READ,
                 GenericWrite: FILE_GENERIC_WRITE,
                 GenericExecute: FILE_GENERIC_EXECUTE,
@@ -373,7 +373,7 @@ fn matrix(objects: &[Object], token: HANDLE) {
                         object.descriptor.0,
                         identification.0,
                         access,
-                        &mut mapping,
+                        &mapping,
                         privileges.as_mut_ptr().cast(),
                         &mut length,
                         &mut granted,
@@ -467,7 +467,7 @@ fn hash(lines: &[String]) -> u64 {
     sorted.sort_unstable();
     sorted
         .iter()
-        .flat_map(|s| s.bytes().chain([b'\n']))
+        .flat_map(|s| s.bytes().chain(*b"\n"))
         .fold(0xcbf29ce484222325, |h, b| {
             (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
         })
