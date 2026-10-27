@@ -4,7 +4,7 @@
 
 use std::{
     env,
-    ffi::{c_void, OsStr},
+    ffi::{OsStr, c_void},
     fs,
     mem::zeroed,
     os::windows::ffi::OsStrExt,

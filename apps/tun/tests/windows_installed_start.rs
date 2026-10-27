@@ -6,12 +6,12 @@ use rtrust_control::{Capabilities, Command, Request, Response, Selection, State,
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::PathBuf, ptr, time::Duration};
 use windows_sys::{
-    core::GUID,
     Win32::{
         Foundation::HANDLE,
         NetworkManagement::{IpHelper::*, WindowsFilteringPlatform::*},
         Networking::WinSock::{AF_INET, AF_INET6, SOCKADDR_INET},
     },
+    core::GUID,
 };
 
 // Keep identical to apps/tun/src/windows/firewall.rs. The orchestrator also
@@ -66,7 +66,7 @@ impl Drop for Engine {
 struct Enumeration<'a>(&'a Engine, HANDLE);
 impl Drop for Enumeration<'_> {
     fn drop(&mut self) {
-        unsafe { FwpmFilterDestroyEnumHandle0(self.0 .0, self.1) };
+        unsafe { FwpmFilterDestroyEnumHandle0(self.0.0, self.1) };
     }
 }
 fn provider(engine: &Engine, mut key: GUID) -> (bool, u32) {
