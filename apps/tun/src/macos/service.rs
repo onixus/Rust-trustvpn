@@ -86,6 +86,15 @@ fn supervise(
     })
 }
 const ACCESS_EXPIRED: &str = "Access confirmation expired; synchronize the portal";
+// Expiry asks the user to synchronize; other preparation failures keep the
+// localized message instead of internal resolver/transport strings.
+fn localized<'a>(error: &'a str, fallback: &'a str) -> &'a str {
+    if error == ACCESS_EXPIRED {
+        error
+    } else {
+        fallback
+    }
+}
 
 // Every worker shares one sticky deadline: rollback observed by any task
 // revokes all tasks. No mutex is held across a poll, await, or OS operation.
@@ -805,7 +814,10 @@ async fn start(
     .await
     {
         Ok(failover) => failover,
-        Err(error) => return publish(&mut initial, State::Error, &error).await,
+        Err(error) => {
+            let message = localized(&error, "Не удалось разрешить адрес VPN-сервера");
+            return publish(&mut initial, State::Error, message).await;
+        }
     };
     let profile = failover.guard_profile();
     let endpoints = match state::endpoints(&profile) {
@@ -863,7 +875,13 @@ async fn start(
     .await
     {
         Ok(prepared) => prepared,
-        Err(error) => return publish(&mut initial, State::Error, &error).await,
+        Err(error) => {
+            let message = localized(
+                &error,
+                "Не удалось открыть TUN: проверьте профиль, TLS и доступность endpoint",
+            );
+            return publish(&mut initial, State::Error, message).await;
+        }
     };
     if shutdown_requested(&shutdown) || initial.as_ref().is_some_and(oneshot::Sender::is_closed) {
         return Ok(());
@@ -1034,6 +1052,8 @@ async fn connected(
     let mut awake = power.borrow().awake;
     let mut probes = crate::sysprobe::Runner::default();
     let mut access_expired = false;
+    // Expired state and stale observations were published (by either path).
+    let mut revoked = false;
     let mut expiry_stops = Vec::new();
     loop {
         let request = loop {
@@ -1047,12 +1067,15 @@ async fn connected(
             // reconnect must never resurrect expired authority.
             if !access_expired && freshness.check().is_err() {
                 access_expired = true;
-                state = State::Blocked;
-                last_failure = ACCESS_EXPIRED.into();
                 restart_pending = false;
-                probes.cancel();
-                summary = None;
-                monitor.transition(false, rtrust_control::observations::now_ms());
+                if !revoked {
+                    revoked = true;
+                    state = State::Blocked;
+                    last_failure = ACCESS_EXPIRED.into();
+                    probes.cancel();
+                    summary = None;
+                    monitor.transition(false, rtrust_control::observations::now_ms());
+                }
                 events::record("access_expired");
                 // Join in-flight route refresh before allowing explicit Stop
                 // to release the guard, but keep IPC responsive while draining.
@@ -1221,8 +1244,10 @@ async fn connected(
         match request.command {
             Command::Status { viewed } => {
                 // The expiry timer may already be sleeping when Status becomes
-                // ready. Fence the reply and viewing lease before any probe.
-                if freshness.check().is_err() {
+                // ready. Fence the reply and viewing lease before any probe;
+                // observations go stale once, not on every later Status.
+                if !revoked && freshness.check().is_err() {
+                    revoked = true;
                     state = State::Blocked;
                     last_failure = ACCESS_EXPIRED.into();
                     probes.cancel();
@@ -1598,6 +1623,13 @@ mod tests {
         assert!(fixture.dropped.load(SeqCst));
         assert!(!fixture.released.load(SeqCst));
         assert!(fixture.lease.try_lock().is_err());
+        // Observations went stale once; later Status/power events must not
+        // keep advancing their generation.
+        let revoked = ask(&fixture.actor, Command::Status { viewed: false })
+            .await
+            .unwrap()
+            .observations
+            .generation;
         for (generation, awake) in [(1, false), (2, true)] {
             fixture
                 .power
@@ -1607,6 +1639,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.state, State::Blocked);
             assert_eq!(response.message, ACCESS_EXPIRED);
+            assert_eq!(response.observations.generation, revoked);
         }
         assert_eq!(fixture.retries.load(SeqCst), 0);
         assert_eq!(

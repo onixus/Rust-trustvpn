@@ -202,6 +202,12 @@ suspended time (`clock_gettime(3)`); observed wall-clock rollback or clock failu
 invalidates access. Wake, GUI detachment and retry do not renew it. Checks fence
 worker polls and synchronous OS-operation boundaries in addition to a 100 ms
 polling timer; this is not a hard real-time termination guarantee.
+Any observed backward wall-clock step, even of milliseconds, latches the
+session invalid. Because the dataplane fence samples the clock on every worker
+poll, a `timed` correction that steps time back after wake revokes an otherwise
+valid lease (Blocked until Stop) far more reliably than the 100 ms timer alone
+would. Device acceptance must therefore include sleep/wake with network time
+synchronization and record whether a valid lease is falsely revoked.
 
 Expiry stops and joins tunnel/reconnect workers, reports Blocked, and retains
 PF/routes/DNS plus the recovery journal. Status remains available while an
