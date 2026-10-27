@@ -333,7 +333,13 @@ fn secure_directory(path: &Path, text: &str) {
 }
 fn set_security(path: &Path, text: &str) {
     let descriptor = descriptor(text);
-    let handle = checked(open(path, WRITE_OWNER | WRITE_DAC, OPEN_EXISTING));
+    // SetSecurityInfo reads the current descriptor to merge a protected DACL;
+    // without READ_CONTROL it fails with ERROR_ACCESS_DENIED even for SYSTEM.
+    let handle = checked(open(
+        path,
+        READ_CONTROL | WRITE_OWNER | WRITE_DAC,
+        OPEN_EXISTING,
+    ));
     unsafe {
         let mut owner = null_mut();
         let mut acl = null_mut();
