@@ -23,9 +23,24 @@ under its existing `ProtectSystem=strict` policy. It does not make other paths
 writable or grant new networking capabilities. Service logs are shared across
 service instances and serialized with a non-waiting cross-process lock.
 
-Unix opens use directory handles and no-follow operations, check regular files,
-expected ownership and link count, and only tighten modes on verified objects:
-existing private 0700 directories/0600 files are never widened to 0755/0644.
+Unix opens use directory handles and no-follow operations and check regular files,
+expected ownership and link count. Under either service umask (including 0077),
+provably new files receive exact modes only after exclusive creation and fd
+verification. Newly created root directories receive 0755 only under a pinned,
+same-owner immediate parent without group/other write and only when their opened
+mode is a subset of the desired mode. Otherwise they retain private 0700 modes;
+new files inside such a private leaf are 0600. Existing private 0700 directories
+and 0600 files are never widened, including when retention rewrites their content
+into a replacement inode. Newly created intermediates follow the same protected-
+parent rule; existing ancestors are never repaired. User-owned journals remain
+0700/0600. The system-service table describes a fresh journal under a protected
+parent; an existing/private or group-managed-parent fallback can intentionally
+remain unreadable to a non-root GUI. Before fresh-install validation, an
+administrator must check the parent ownership/mode and verify a non-root reader.
+The journal does not repair group-managed parents or migrate existing private
+content; any manual namespace or access change needs separate operator review.
+A retention rewrite's initial creation mode and final exact mode never exceed
+the verified target's existing permissions.
 Root-owned intermediate directories may be group-writable (for example a
 root:syslog 0775 `/var/log`), but never other-writable or foreign-owned; no
 ancestor modes are changed. The root-owned journal leaf rejects group/other
@@ -122,6 +137,18 @@ endpoint refusal, TLS identity mismatch, rejected authentication, protocol
 rejection and occupied local bind, and verify stale/accepted epoch publication.
 Profile/timeout/cancelled/other classification units are controlled typed faults,
 not claims that a real endpoint produced each condition.
+
+Unix mode unit fixtures run in a bounded subprocess with umask 0077; they share
+Root desired creation modes with a current-UID internal policy, not Root
+privilege/authorization. A separate ignored `unix::tests::native_root_umask_gate`
+requires euid 0 and an explicitly supplied `RTRUST_JOURNAL_ROOT_BASE`: an already
+existing root-owned 0755 absolute directory whose ancestors are also root-owned,
+non-symlink 0755 directories. Missing authorization fails with `NOT RUN`, never a
+successful native gate. The test changes umask only in its child, creates/removes
+only a unique fixture subtree, and tests an unrelated numeric reader identity
+with supplementary groups cleared before dropping gid/uid. Run it by its exact
+name with `--ignored`; it is not automatically executed by ordinary tests and
+does not replace installed-package acceptance.
 
 Native Windows ACL/reparse acceptance, native Linux packaged-service acceptance,
 and installed macOS package reboot persistence must still be run on those
