@@ -30,6 +30,8 @@ fn opened(fd: i32) -> io::Result<File> {
 }
 // Never widen a relocated private object's permissions in a group-managed namespace.
 fn tighten(file: &File, desired: libc::mode_t) -> io::Result<()> {
+    // mode_t is u16 on macOS and u32 on Linux; keep this mask portable.
+    #[allow(clippy::unnecessary_cast)]
     let mode = (file.metadata()?.mode() & desired as u32) as libc::mode_t;
     if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
         return Err(io::Error::last_os_error());

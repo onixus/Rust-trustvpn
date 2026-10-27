@@ -43,6 +43,27 @@ pub fn journal_attempt(
         rtrust_journal::Attempt::with_recorder(path, transport, attempt, budget, journal_failure)
     }
 }
+// Inspect only the single envelope accepted by freshness::start. Lease validation
+// remains there; this guard must also cover its early authentication rejection.
+#[cfg(any(target_os = "linux", windows, test))]
+pub fn start_journal(command: &rtrust_control::Command) -> Option<rtrust_journal::Attempt> {
+    use rtrust_control::Command;
+    let command = match command {
+        Command::StartLeased { command, .. } => command.as_ref(),
+        command => command,
+    };
+    match command {
+        Command::Start { profile, .. } | Command::StartFull { profile, .. } => {
+            Some(journal_attempt(
+                rtrust_journal::Path::Start,
+                rtrust_engine::planned_transport(profile),
+                1,
+                rtrust_journal::Budget::Burst,
+            ))
+        }
+        _ => None,
+    }
+}
 pub fn journal_failure(record: rtrust_journal::Record) {
     #[cfg(not(test))]
     rtrust_journal::service().submit(record);
@@ -84,6 +105,9 @@ impl RecoveryLabels {
 pub struct Failure {
     pub message: String,
     pub class: rtrust_journal::Class,
+    // Linux/macOS workers carry deferred accepted-attempt metadata; Windows
+    // records its synchronous attempt at the supervisor instead.
+    #[cfg(not(windows))]
     pub record: Option<rtrust_journal::Record>,
 }
 impl Failure {
@@ -92,6 +116,7 @@ impl Failure {
         Self {
             class: rtrust_journal::classify(&error),
             message: message.into(),
+            #[cfg(not(windows))]
             record: None,
         }
     }
@@ -99,6 +124,7 @@ impl Failure {
         Self {
             message: message.into(),
             class: rtrust_journal::Class::Timeout,
+            #[cfg(not(windows))]
             record: None,
         }
     }
@@ -109,6 +135,7 @@ impl From<rtrust_engine::Error> for Failure {
         Self {
             class,
             message: error.to_string(),
+            #[cfg(not(windows))]
             record: None,
         }
     }
@@ -118,6 +145,7 @@ impl From<String> for Failure {
         Self {
             message,
             class: rtrust_journal::Class::Other,
+            #[cfg(not(windows))]
             record: None,
         }
     }
@@ -426,8 +454,166 @@ impl Failover {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    fn start_command(full: bool) -> rtrust_control::Command {
+        let profile = Box::new(profile("synthetic.example", "192.0.2.1:443"));
+        if full {
+            rtrust_control::Command::StartFull {
+                profile,
+                dns: "198.18.0.53".parse().unwrap(),
+                fallbacks: vec![],
+            }
+        } else {
+            rtrust_control::Command::Start {
+                profile,
+                networks: vec!["198.18.0.0/24".parse().unwrap()],
+                exclude: vec![],
+                exclude_lan: false,
+                dns: None,
+                fallbacks: vec![],
+            }
+        }
+    }
+    fn leased(command: rtrust_control::Command, expired: bool) -> rtrust_control::Command {
+        let now = rtrust_control::freshness::now();
+        rtrust_control::Command::StartLeased {
+            lease: if expired {
+                rtrust_control::freshness::Lease {
+                    issued_at_ms: 1,
+                    expires_at_ms: 2,
+                }
+            } else {
+                rtrust_control::freshness::Lease {
+                    issued_at_ms: now.saturating_sub(1000),
+                    expires_at_ms: now + 60_000,
+                }
+            },
+            command: Box::new(command),
+        }
+    }
+    #[test]
+    fn start_guard_covers_plain_and_single_leased_start_shapes_only() {
+        use rtrust_journal::{Budget, Class, Path, Transport};
+        take_records();
+        for full in [false, true] {
+            for wrapped in [false, true] {
+                let command = start_command(full);
+                let command = if wrapped {
+                    leased(command, false)
+                } else {
+                    command
+                };
+                let guard = start_journal(&command).unwrap();
+                assert!(rtrust_control::freshness::start(command).is_ok());
+                drop(guard);
+                let records = take_records();
+                assert_eq!(records.len(), 1);
+                assert_eq!(
+                    (
+                        records[0].path,
+                        records[0].transport,
+                        records[0].attempt,
+                        records[0].budget,
+                        records[0].class
+                    ),
+                    (Path::Start, Transport::H2, 1, Budget::Burst, Class::Other)
+                );
+            }
+        }
+        assert!(start_journal(&rtrust_control::Command::Capabilities).is_none());
+        let invalid = leased(leased(start_command(false), false), false);
+        assert!(start_journal(&invalid).is_none());
+        assert!(rtrust_control::freshness::start(invalid).is_err());
+        assert!(take_records().is_empty());
+    }
+
+    // Type-checked on macOS too, but only native Linux/Windows module tests can
+    // invoke the actual platform serve handlers. No replacement handler is used.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub async fn assert_start_serve_failures<F, Fut>(mut serve: F)
+    where
+        F: FnMut(tokio::io::DuplexStream) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    {
+        use rtrust_control::{Command, Request, Response, State, VERSION};
+        use rtrust_journal::{Budget, Class, Path, Transport};
+        for full in [false, true] {
+            // Plain and valid leased starts fail pure validation; expired leases
+            // must take precedence over the same deliberately invalid inner input.
+            for mode in 0..3 {
+                take_records();
+                let mut command = start_command(full);
+                match &mut command {
+                    Command::Start { networks, .. } => networks.clear(),
+                    Command::StartFull { dns, .. } => *dns = std::net::Ipv4Addr::UNSPECIFIED,
+                    _ => unreachable!(),
+                }
+                let expired = mode == 2;
+                if mode != 0 {
+                    command = leased(command, expired);
+                }
+                let expected_message = if expired {
+                    "Access confirmation expired; synchronize the portal".to_owned()
+                } else if full {
+                    rtrust_control::validate_dns(std::net::Ipv4Addr::UNSPECIFIED).unwrap_err()
+                } else {
+                    rtrust_control::Selection {
+                        include: vec![],
+                        exclude: vec![],
+                        exclude_lan: false,
+                    }
+                    .validate()
+                    .unwrap_err()
+                };
+                let (mut client, server) = tokio::io::duplex(1 << 16);
+                let service = tokio::spawn(serve(server));
+                let response = tokio::time::timeout(Duration::from_secs(2), async {
+                    rtrust_control::write(
+                        &mut client,
+                        &Request {
+                            version: VERSION,
+                            command,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    rtrust_control::read::<Response>(&mut client).await.unwrap()
+                })
+                .await
+                .expect("Start must return a bounded error response");
+                tokio::time::timeout(Duration::from_secs(2), service)
+                    .await
+                    .expect("serve must finish")
+                    .expect("serve must not panic")
+                    .expect("error response must complete normally");
+                assert_eq!(response.version, VERSION);
+                assert_eq!(response.state, State::Error);
+                assert_eq!(response.message, expected_message);
+                let records = take_records();
+                assert_eq!(records.len(), 1, "each failed Start must emit exactly once");
+                assert_eq!(
+                    (
+                        records[0].path,
+                        records[0].transport,
+                        records[0].attempt,
+                        records[0].budget
+                    ),
+                    (Path::Start, Transport::H2, 1, Budget::Burst)
+                );
+                assert_eq!(
+                    records[0].class,
+                    if expired {
+                        Class::Authentication
+                    } else {
+                        Class::Profile
+                    }
+                );
+                assert!(take_records().is_empty());
+            }
+        }
+    }
 
     fn profile(host: &str, address: &str) -> Profile {
         Profile::import(&format!(

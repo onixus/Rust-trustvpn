@@ -258,18 +258,16 @@ async fn serve(
         )
         .await;
     };
-    let mut journal = match &request.command {
-        Command::Start { profile, .. } | Command::StartFull { profile, .. } => {
-            Some(crate::failover::journal_attempt(
-                rtrust_journal::Path::Start,
-                rtrust_engine::planned_transport(profile),
-                1,
-                rtrust_journal::Budget::Burst,
-            ))
+    let mut journal = crate::failover::start_journal(&request.command);
+    let (mut freshness, command) = match rtrust_control::freshness::start(request.command) {
+        Ok(start) => start,
+        Err(error) => {
+            if let Some(journal) = journal.as_mut() {
+                journal.class(rtrust_journal::Class::Authentication);
+            }
+            return reply(&mut stream, State::Error, &error).await;
         }
-        _ => None,
     };
-    let (mut freshness, command) = rtrust_control::freshness::start(request.command)?;
     let (profile, networks, dns, split_dns, fallbacks) = match command {
         Command::PrepareUpdate => {
             if FullRoutes::pending() || Routes::pending() {
@@ -338,10 +336,25 @@ async fn serve(
             profile,
             dns,
             fallbacks,
-        } => (profile, vec![], Some(dns), None, fallbacks),
+        } => {
+            if let Err(error) = rtrust_control::validate_dns(dns) {
+                if let Some(journal) = journal.as_mut() {
+                    journal.class(rtrust_journal::Class::Profile);
+                }
+                return reply(&mut stream, State::Error, &error).await;
+            }
+            (profile, vec![], Some(dns), None, fallbacks)
+        }
         _ => return reply(&mut stream, State::Error, "Start or Recover required").await,
     };
-    let mut journal = journal.take().expect("Start has a journal guard");
+    let mut journal = journal.unwrap_or_else(|| {
+        crate::failover::journal_attempt(
+            rtrust_journal::Path::Start,
+            rtrust_engine::planned_transport(&profile),
+            1,
+            rtrust_journal::Budget::Burst,
+        )
+    });
     if let Err(error) = if let Some(dns) = dns {
         FullRoutes::preflight(dns)
     } else {
@@ -628,6 +641,13 @@ pub(crate) fn boot_active() -> Result<bool, String> {
 #[cfg(test)]
 mod observation_tests {
     use super::*;
+    #[tokio::test(flavor = "current_thread")]
+    async fn plain_and_leased_start_failures_reply_and_record_once_without_os_io() {
+        crate::failover::tests::assert_start_serve_failures(|server| {
+            serve(server, 1000, Arc::new(Mutex::new(())), None)
+        })
+        .await;
+    }
     #[tokio::test]
     async fn capabilities_do_not_require_or_steal_a_lease() {
         let lease = Arc::new(Mutex::new(()));

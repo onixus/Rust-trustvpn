@@ -266,18 +266,16 @@ async fn serve(
         )
         .await;
     };
-    let mut journal = match &request.command {
-        Command::Start { profile, .. } | Command::StartFull { profile, .. } => {
-            Some(crate::failover::journal_attempt(
-                rtrust_journal::Path::Start,
-                rtrust_engine::planned_transport(profile),
-                1,
-                rtrust_journal::Budget::Burst,
-            ))
+    let mut journal = crate::failover::start_journal(&request.command);
+    let (mut freshness, command) = match rtrust_control::freshness::start(request.command) {
+        Ok(start) => start,
+        Err(error) => {
+            if let Some(journal) = journal.as_mut() {
+                journal.class(rtrust_journal::Class::Authentication);
+            }
+            return reply(pipe, State::Error, &error).await;
         }
-        _ => None,
     };
-    let (mut freshness, command) = rtrust_control::freshness::start(request.command)?;
     let (profile, selection, dns, split_dns, fallbacks) = match command {
         Command::PrepareUpdate => {
             // Failures are answered in the caller's version so a previous
@@ -334,7 +332,12 @@ async fn serve(
             dns,
             fallbacks,
         } => {
-            rtrust_control::validate_dns(dns)?;
+            if let Err(error) = rtrust_control::validate_dns(dns) {
+                if let Some(journal) = journal.as_mut() {
+                    journal.class(rtrust_journal::Class::Profile);
+                }
+                return reply(pipe, State::Error, &error).await;
+            }
             (profile, Default::default(), Some(dns), None, fallbacks)
         }
         Command::Recover { .. } => {
@@ -343,7 +346,14 @@ async fn serve(
         }
         _ => return reply(pipe, State::Error, "Start required").await,
     };
-    let mut journal = journal.take().expect("Start has a journal guard");
+    let mut journal = journal.unwrap_or_else(|| {
+        crate::failover::journal_attempt(
+            rtrust_journal::Path::Start,
+            rtrust_engine::planned_transport(&profile),
+            1,
+            rtrust_journal::Budget::Burst,
+        )
+    });
     if full::pending()? {
         return reply(
             pipe,
@@ -752,6 +762,14 @@ pub(crate) fn boot_active() -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(flavor = "current_thread")]
+    async fn plain_and_leased_start_failures_reply_and_record_once_without_os_io() {
+        crate::failover::tests::assert_start_serve_failures(|mut server| async move {
+            let (_stop, stop) = watch::channel(false);
+            serve(&mut server, Arc::new(Mutex::new(())), stop, None).await
+        })
+        .await;
+    }
     async fn exchange(version: u32, command: Command) -> Response {
         let (mut client, mut server) = tokio::io::duplex(1 << 16);
         let (_stop, stop) = watch::channel(false);
