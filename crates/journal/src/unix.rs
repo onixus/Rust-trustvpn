@@ -352,12 +352,19 @@ mod tests {
     use super::*;
     use std::os::unix::{fs::PermissionsExt, process::CommandExt};
 
+    const UMASK_PASS: &str = "PASS: restrictive umask child completed";
+    const ROOT_PASS: &str =
+        "PASS: opted-in native Root umask fixture and supplementary-group-free reader";
+
     #[test]
     fn restrictive_umask_subprocess() {
-        assert_child(subprocess(
-            "unix::tests::restrictive_umask_child",
-            "RTRUST_JOURNAL_UMASK_FIXTURE",
-        ));
+        assert_child(
+            subprocess(
+                "unix::tests::restrictive_umask_child",
+                "RTRUST_JOURNAL_UMASK_FIXTURE",
+            ),
+            UMASK_PASS,
+        );
     }
     #[test]
     #[ignore = "controlled child fixture, invoked by restrictive_umask_subprocess; not a native root gate"]
@@ -518,6 +525,7 @@ mod tests {
         assert_eq!(mode(&public), 0o700);
         assert_eq!(mode(&public.join("events.log")), 0o600);
         assert_eq!(mode(&public.join("events.lock")), 0o600);
+        println!("{UMASK_PASS}");
     }
     // Share the real creation/mode logic without claiming to emulate Root
     // authorization. Public Root always retains uid=0 and strict traversal.
@@ -661,22 +669,80 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
-    fn assert_child(output: std::process::Output) {
+    fn child_evidence(success: bool, stdout: &str, marker: &str) -> bool {
+        success
+            && stdout.contains("running 1 test")
+            && stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;")
+            && stdout.contains(marker)
+            && !stdout.contains("NOT RUN:")
+    }
+    fn assert_child(output: std::process::Output, marker: &str) {
         assert!(
-            output.status.success(),
-            "child fixture failed:\n{}\n{}",
+            child_evidence(
+                output.status.success(),
+                &String::from_utf8_lossy(&output.stdout),
+                marker,
+            ),
+            "child fixture lacks successful exact-one-test evidence:\n{}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
     }
     #[test]
+    fn child_evidence_rejects_zero_tests_missing_marker_and_failure() {
+        let complete = format!(
+            "running 1 test\n{UMASK_PASS}\ntest result: ok. 1 passed; 0 failed; 0 ignored;"
+        );
+        assert!(child_evidence(true, &complete, UMASK_PASS));
+        assert!(!child_evidence(false, &complete, UMASK_PASS));
+        assert!(!child_evidence(true, &complete, ROOT_PASS));
+        assert!(!child_evidence(
+            true,
+            &format!(
+                "running 0 tests\n{UMASK_PASS}\ntest result: ok. 0 passed; 0 failed; 0 ignored;"
+            ),
+            UMASK_PASS,
+        ));
+        assert!(!child_evidence(
+            true,
+            &format!("{complete}\nNOT RUN:"),
+            UMASK_PASS
+        ));
+        let output = subprocess(
+            "unix::tests::nonexistent_child_filter",
+            "RTRUST_JOURNAL_UNUSED",
+        );
+        assert!(output.status.success());
+        assert!(!child_evidence(
+            true,
+            &String::from_utf8_lossy(&output.stdout),
+            UMASK_PASS
+        ));
+    }
+    fn native_root_ancestor(uid: u32, mode: u32, directory: bool) -> bool {
+        directory && uid == 0 && matches!(mode & 0o7777, 0o555 | 0o755)
+    }
+    #[test]
+    fn native_root_ancestor_accepts_readonly_root_without_repair() {
+        assert!(native_root_ancestor(0, 0o40555, true));
+        assert!(native_root_ancestor(0, 0o40755, true));
+        for mode in [0o775, 0o777, 0o700, 0o1755, 0o4755] {
+            assert!(!native_root_ancestor(0, mode, true));
+        }
+        assert!(!native_root_ancestor(1000, 0o755, true));
+        assert!(!native_root_ancestor(0, 0o755, false));
+    }
+    #[test]
     #[ignore = "native Root fixture: requires explicit pre-existing root-owned 0755 RTRUST_JOURNAL_ROOT_BASE and euid 0"]
     fn native_root_umask_gate() {
         let _base = native_root_base();
-        assert_child(subprocess(
-            "unix::tests::native_root_umask_child",
-            "RTRUST_JOURNAL_NATIVE_ROOT_CHILD",
-        ));
+        assert_child(
+            subprocess(
+                "unix::tests::native_root_umask_child",
+                "RTRUST_JOURNAL_NATIVE_ROOT_CHILD",
+            ),
+            ROOT_PASS,
+        );
     }
     fn native_root_base() -> std::path::PathBuf {
         assert_eq!(
@@ -697,8 +763,8 @@ mod tests {
         for ancestor in base.ancestors() {
             let meta = std::fs::symlink_metadata(ancestor).unwrap();
             assert!(
-                meta.is_dir() && meta.uid() == 0 && meta.mode() & 0o7777 == 0o755,
-                "NOT RUN: base and all ancestors must be existing root-owned, non-symlink 0755 directories"
+                native_root_ancestor(meta.uid(), meta.mode(), meta.is_dir()),
+                "NOT RUN: ancestors must be existing root-owned, non-symlink 0555/0755 directories"
             );
         }
         // Every component is protected against unprivileged renames. Do not
@@ -808,7 +874,7 @@ mod tests {
             }
             assert_eq!(mode(&parent), if group_managed { 0o775 } else { 0o755 });
         }
-        println!("PASS: opted-in native Root umask fixture and supplementary-group-free reader");
+        println!("{ROOT_PASS}");
     }
     #[test]
     fn trusted_root_policy_accepts_group_managed_intermediates_not_leaves() {

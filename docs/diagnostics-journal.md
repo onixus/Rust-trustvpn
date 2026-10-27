@@ -28,8 +28,10 @@ expected ownership and link count. Under either service umask (including 0077),
 provably new files receive exact modes only after exclusive creation and fd
 verification. Newly created root directories receive 0755 only under a pinned,
 same-owner immediate parent without group/other write and only when their opened
-mode is a subset of the desired mode. Otherwise they retain private 0700 modes;
-new files inside such a private leaf are 0600. Existing private 0700 directories
+mode is a subset of the desired mode. Otherwise, under restrictive service umask
+0077, they retain private 0700 modes; new files inside such a leaf are 0600.
+With umask 0022, creation can naturally produce 0755/0644 without widening.
+Existing private 0700 directories
 and 0600 files are never widened, including when retention rewrites their content
 into a replacement inode. Newly created intermediates follow the same protected-
 parent rule; existing ancestors are never repaired. User-owned journals remain
@@ -143,7 +145,7 @@ Root desired creation modes with a current-UID internal policy, not Root
 privilege/authorization. A separate ignored `unix::tests::native_root_umask_gate`
 requires euid 0 and an explicitly supplied `RTRUST_JOURNAL_ROOT_BASE`: an already
 existing root-owned 0755 absolute directory whose ancestors are also root-owned,
-non-symlink 0755 directories. Missing authorization fails with `NOT RUN`, never a
+non-symlink 0555 or 0755 directories. Missing authorization fails with `NOT RUN`, never a
 successful native gate. The test changes umask only in its child, creates/removes
 only a unique fixture subtree, and tests an unrelated numeric reader identity
 with supplementary groups cleared before dropping gid/uid. Run it by its exact
