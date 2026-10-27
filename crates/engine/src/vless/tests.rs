@@ -714,12 +714,19 @@ async fn refused_flows_back_off_instead_of_redialing_per_packet() {
     e.mode.store(REVOKED, Ordering::SeqCst);
     let before = e.accepted.load(Ordering::SeqCst);
     let mut tunnel = session.open_udp().await.unwrap();
+    let started = std::time::Instant::now();
     for _ in 0..100 {
         send_udp(&mut tunnel, "10.0.0.2:8000", "192.0.2.9:8000", vec![1]).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let dials = e.accepted.load(Ordering::SeqCst) - before;
-    assert!((1..=2).contains(&dials), "{dials}");
+    // One dial per RETRY window, not per packet. Coarse timers (Windows
+    // rounds 10 ms sleeps up to ~16 ms) stretch the loop past one window.
+    let windows = (started.elapsed().as_millis() / udp::RETRY.as_millis()) as usize;
+    assert!(
+        (1..=windows + 2).contains(&dials),
+        "{dials} dials in {windows} windows"
+    );
 }
 
 #[tokio::test]

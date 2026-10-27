@@ -34,7 +34,7 @@ pub(super) const QUEUE: usize = 32;
 /// byte (as Xray does for an unknown UUID), the flow drops its packets this
 /// long before the next datagram may open it again, so a refusing endpoint
 /// is not redialed per packet.
-const RETRY: Duration = Duration::from_secs(2);
+pub(super) const RETRY: Duration = Duration::from_secs(2);
 
 /// Datagrams dropped for exceeding [`VLESS_UDP_MAX`] either way, since start.
 pub(crate) static OVERSIZE: AtomicU64 = AtomicU64::new(0);
