@@ -150,7 +150,11 @@ pub struct Capabilities {
 impl Capabilities {
     pub fn current() -> Self {
         Self {
-            managed_access_freshness: cfg!(any(target_os = "linux", target_os = "windows")),
+            managed_access_freshness: cfg!(any(
+                target_os = "linux",
+                target_os = "windows",
+                target_os = "macos"
+            )),
             observations_schema: observations::SCHEMA,
             lifecycle_observations: true,
             // Service-owned DNS/guard/transport probes in whole-computer mode.

@@ -89,7 +89,7 @@ ownership, обязательности профильной политики и
 | Endpoint revoke + active-session SLA | не подтверждено | не подтверждено | зависит от tunnel#22 |
 | QR invitation | JSON paste с origin fence | Android camera/image + confirmation; iOS отложен | short-lived one_time_qr на HTTPS |
 | Portal token renewal | явное продление до expiry | Android: явное продление; iOS отложен | device-only token/renew, ещё действующий токен |
-| Mandatory offline freshness deadline | Linux/Windows TUN/full, IPC v5; SOCKS/постоянный Always-on отклонены | Android: boot/elapsed receipt + блокирующий TUN | offline_freshness v1 |
+| Mandatory offline freshness deadline | Linux/Windows TUN/full; macOS TUN/full — локальное исправление, installed acceptance NOT RUN; совместимые UI/service (текущий IPC v7); SOCKS/постоянный Always-on отклонены | Android: boot/elapsed receipt + блокирующий TUN | offline_freshness v1 |
 
 «Забыть локально» удаляет привязку keyring. Серверное удаление устройства
 отзывает API tokens/grants/routing membership; legacy/shared VPN-пароль
