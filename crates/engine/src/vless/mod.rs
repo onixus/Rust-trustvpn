@@ -35,7 +35,10 @@ const PONG_WAIT: Duration = Duration::from_millis(if cfg!(test) { 500 } else { 1
 /// missing answer is not judged before this long after the last write.
 const DRAIN: Duration = Duration::from_secs(if cfg!(test) { 10 } else { 120 });
 /// One frame write blocked this long means the path stopped taking data.
-const STALL: Duration = Duration::from_millis(if cfg!(test) { 1500 } else { 45_000 });
+/// Behind a slow target one write can wait for megabytes of loopback socket
+/// buffers to drain (up to 90 s measured on Linux at 32 KiB/s), so the
+/// verdict waits as long as [`DRAIN`] does for an answer.
+const STALL: Duration = Duration::from_millis(if cfg!(test) { 1500 } else { 120_000 });
 /// Consecutive flows the server closed without a byte (as Xray does for an
 /// unknown UUID) before the session delays new flows. Xray closes a flow to
 /// an unreachable target the same way, so the run must also be varied: at

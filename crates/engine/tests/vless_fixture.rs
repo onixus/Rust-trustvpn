@@ -769,13 +769,14 @@ async fn slow_silent_upload_survives_keepalive() {
     while started.elapsed() < Duration::from_secs(90) {
         // Back-pressure blocks writes for a while; a closed flow fails them.
         let write = Instant::now();
-        match tokio::time::timeout(Duration::from_secs(60), tunnel.write_all(&chunk)).await {
+        // Longer than the client's own stall verdict: the engine decides, not this timer.
+        match tokio::time::timeout(Duration::from_secs(150), tunnel.write_all(&chunk)).await {
             Ok(Ok(())) => sent += chunk.len(),
             Ok(Err(error)) => panic!(
                 "flow closed after {:?} and {sent} bytes: {error:?}",
                 started.elapsed()
             ),
-            Err(_) => panic!("write blocked 60 s after {:?}", started.elapsed()),
+            Err(_) => panic!("write blocked 150 s after {:?}", started.elapsed()),
         }
         stall = stall.max(write.elapsed());
     }
