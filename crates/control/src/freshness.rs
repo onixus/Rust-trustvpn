@@ -25,7 +25,26 @@ impl Lease {
         Ok(())
     }
 }
-fn uptime() -> u64 {
+fn uptime() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        // Darwin's RAW clock uses mach_continuous_time and includes sleep.
+        // CLOCK_UPTIME_RAW (and Rust Instant) exclude suspended time. Never
+        // fall back to them: a failed clock read must revoke authority.
+        let mut t = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, &mut t) } != 0
+            || t.tv_sec < 0
+            || !(0..1_000_000_000).contains(&t.tv_nsec)
+        {
+            return None;
+        }
+        (t.tv_sec as u64)
+            .checked_mul(1000)?
+            .checked_add(t.tv_nsec as u64 / 1_000_000)
+    }
     #[cfg(target_os = "linux")]
     {
         let mut t = libc::timespec {
@@ -33,20 +52,22 @@ fn uptime() -> u64 {
             tv_nsec: 0,
         };
         if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut t) } == 0 {
-            return t.tv_sec as u64 * 1000 + t.tv_nsec as u64 / 1000000;
+            return Some(t.tv_sec as u64 * 1000 + t.tv_nsec as u64 / 1000000);
         }
     }
     #[cfg(target_os = "windows")]
     {
-        unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() }
+        Some(unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() })
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-        START
-            .get_or_init(std::time::Instant::now)
-            .elapsed()
-            .as_millis() as u64
+        Some(
+            START
+                .get_or_init(std::time::Instant::now)
+                .elapsed()
+                .as_millis() as u64,
+        )
     }
 }
 pub struct Deadline {
@@ -60,7 +81,7 @@ impl Deadline {
     pub fn new(lease: Lease) -> Result<Self, String> {
         let wall = now();
         lease.validate_at(wall)?;
-        let start = uptime();
+        let start = uptime().ok_or("Freshness clock unavailable")?;
         let limit = start
             .checked_add(lease.expires_at_ms - wall)
             .ok_or("Invalid lease")?;
@@ -82,9 +103,23 @@ impl Deadline {
         self.last_wall = self.last_wall.max(wall);
         valid
     }
+    /// Synchronous admission fence, including after blocking OS operations.
+    /// Clock failures and rollback latch invalidity for the entire session.
+    pub fn is_valid(&mut self) -> bool {
+        self.valid_sample(now(), uptime())
+    }
+    fn valid_sample(&mut self, wall: u64, uptime: Option<u64>) -> bool {
+        match uptime {
+            Some(uptime) => self.valid_at(wall, uptime),
+            None => {
+                self.invalid = true;
+                false
+            }
+        }
+    }
     pub async fn expired(&mut self) {
         loop {
-            if !self.valid_at(now(), uptime()) {
+            if !self.is_valid() {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -119,6 +154,74 @@ pub async fn while_valid<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn deadline() -> Deadline {
+        Deadline {
+            lease: Lease {
+                issued_at_ms: 1000,
+                expires_at_ms: 6000,
+            },
+            start: 100,
+            limit: 5100,
+            last_wall: 1000,
+            invalid: false,
+        }
+    }
+    #[test]
+    fn sleep_inclusive_elapsed_expires_even_if_wall_clock_was_frozen() {
+        let mut deadline = deadline();
+        assert!(deadline.valid_sample(2000, Some(1100)));
+        assert!(!deadline.valid_sample(2000, Some(5100)));
+        assert!(!deadline.valid_sample(2001, Some(1200)));
+    }
+    #[test]
+    fn clock_failure_and_monotonic_rollback_are_sticky() {
+        let mut failed = deadline();
+        assert!(!failed.valid_sample(2000, None));
+        assert!(!failed.valid_sample(2001, Some(1100)));
+        let mut rolled_back = deadline();
+        assert!(!rolled_back.valid_sample(2000, Some(99)));
+        assert!(!rolled_back.valid_sample(2001, Some(1100)));
+    }
+    #[test]
+    fn wall_expiry_is_not_extended_by_slow_monotonic_clock() {
+        let mut deadline = deadline();
+        assert!(!deadline.valid_sample(6000, Some(101)));
+        assert!(!deadline.valid_sample(2000, Some(102)));
+    }
+    #[tokio::test]
+    async fn expired_lease_wins_over_ready_preparation() {
+        let mut deadline = deadline();
+        deadline.invalid = true;
+        assert!(
+            while_valid(Some(&mut deadline), async { Ok(()) })
+                .await
+                .is_err()
+        );
+    }
+    #[test]
+    fn leased_start_rejects_non_start_and_nested_leases() {
+        for command in [
+            crate::Command::Stop,
+            crate::Command::StartLeased {
+                lease: Lease {
+                    issued_at_ms: 1000,
+                    expires_at_ms: 6000,
+                },
+                command: Box::new(crate::Command::Status { viewed: false }),
+            },
+        ] {
+            assert!(
+                start(crate::Command::StartLeased {
+                    lease: Lease {
+                        issued_at_ms: 1000,
+                        expires_at_ms: 6000
+                    },
+                    command: Box::new(command),
+                })
+                .is_err()
+            );
+        }
+    }
     #[test]
     fn clock_sleep_and_expiry_cannot_extend_authority() {
         let lease = Lease {
