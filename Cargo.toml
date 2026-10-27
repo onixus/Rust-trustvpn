@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/profile", "crates/desktop", "apps/webview", "crates/update", "crates/portal", "crates/engine", "crates/store", "crates/control", "apps/native", "apps/inspect", "apps/tui", "apps/tun", "apps/codec", "apps/android/core", "apps/ios/core", "crates/mobile"]
+members = ["crates/journal", "crates/profile", "crates/desktop", "apps/webview", "crates/update", "crates/portal", "crates/engine", "crates/store", "crates/control", "apps/native", "apps/inspect", "apps/tui", "apps/tun", "apps/codec", "apps/android/core", "apps/ios/core", "crates/mobile"]
 exclude = ["vendor/h2", "vendor/h3"]
 
 [patch.crates-io]
@@ -14,6 +14,7 @@ rust-version = "1.89"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+rtrust-journal = { path = "crates/journal" }
 rtrust-desktop = { path = "crates/desktop" }
 rtrust-update = { path = "crates/update" }
 rtrust-portal = { path = "crates/portal" }

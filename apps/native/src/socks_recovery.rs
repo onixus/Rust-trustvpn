@@ -25,6 +25,7 @@ pub struct Recovery {
 pub struct Retry {
     pub delay: Duration,
     pub cooling: bool,
+    pub attempt: u32,
 }
 impl Recovery {
     pub fn new(profile: Profile, port: u16) -> Self {
@@ -67,6 +68,7 @@ impl Recovery {
         Retry {
             delay,
             cooling: self.budget.cooling(),
+            attempt: self.budget.attempt(),
         }
     }
 }
@@ -79,11 +81,15 @@ impl Recovery {
 pub struct Failure {
     pub message: String,
     pub permanent: bool,
+    pub class: rtrust_journal::Class,
+    pub record: Option<rtrust_journal::Record>,
 }
 impl From<rtrust_engine::Error> for Failure {
     fn from(error: rtrust_engine::Error) -> Self {
         use rtrust_engine::Error;
         Self {
+            class: rtrust_journal::classify(&error),
+            record: None,
             permanent: matches!(
                 error,
                 Error::LocalBind
@@ -109,6 +115,43 @@ pub async fn attempt(profile: Profile, port: u16) -> Result<crate::Session, Fail
         Ok(started) => started.map(crate::Session::Socks).map_err(Failure::from),
         Err(_) => Err(Failure::from(rtrust_engine::Error::Timeout)),
     }
+}
+/// Metadata is captured after the existing backoff, before the actual attempt.
+/// The caller submits only after its epoch fence admits the result.
+pub async fn attempt_with_metadata(
+    profile: Profile,
+    port: u16,
+    retry: Retry,
+) -> Result<crate::Session, Failure> {
+    let transport = rtrust_engine::planned_transport(&profile);
+    let started = Instant::now();
+    attempt(profile, port).await.map_err(|mut failure| {
+        failure.record = Some(rtrust_journal::Record::failure(
+            rtrust_journal::Path::SocksRecovery,
+            failure.class,
+            transport,
+            retry.attempt,
+            rtrust_journal::Budget::from_cooling(retry.cooling),
+            started.elapsed(),
+        ));
+        failure
+    })
+}
+pub fn record_failure(failure: &Failure) {
+    #[cfg(not(test))]
+    if let Some(record) = failure.record {
+        rtrust_journal::user().submit(record);
+    }
+    #[cfg(test)]
+    if let Some(record) = failure.record {
+        TEST_RECORDS.with(|records| records.borrow_mut().push(record));
+    }
+}
+#[cfg(test)]
+thread_local! { static TEST_RECORDS: std::cell::RefCell<Vec<rtrust_journal::Record>> = const { std::cell::RefCell::new(Vec::new()) }; }
+#[cfg(test)]
+pub fn take_records() -> Vec<rtrust_journal::Record> {
+    TEST_RECORDS.with(|records| std::mem::take(&mut *records.borrow_mut()))
 }
 /// Jitter only; the budget bounds it for any value.
 pub fn entropy() -> u64 {
@@ -151,7 +194,8 @@ mod tests {
             r.degraded(false, now, 0),
             Retry {
                 delay: COOLDOWN,
-                cooling: true
+                cooling: true,
+                attempt: 1,
             }
         );
     }

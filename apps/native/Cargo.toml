@@ -10,6 +10,7 @@ rtrust-update.workspace = true
 rtrust-portal.workspace = true
 rtrust-profile.workspace = true
 rtrust-engine.workspace = true
+rtrust-journal.workspace = true
 rtrust-store.workspace = true
 rtrust-control.workspace = true
 tokio.workspace = true

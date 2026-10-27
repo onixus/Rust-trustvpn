@@ -1,3 +1,4 @@
+use crate::failover::Failure;
 use rtrust_engine::Session;
 use std::{net::Ipv4Addr, sync::Arc};
 pub const DEVICE: &str = "utun5254";
@@ -17,19 +18,19 @@ pub fn unused() -> Result<(), String> {
     }
 }
 impl Prepared {
-    pub async fn connect(profile: &rtrust_profile::Profile) -> Result<Self, String> {
+    pub async fn connect(profile: &rtrust_profile::Profile) -> Result<Self, Failure> {
         unused()?;
         let session = Session::connect(profile)
             .await
-            .map_err(|_| "Cannot authenticate VPN endpoint")?;
+            .map_err(|e| Failure::engine(e, "Cannot authenticate VPN endpoint"))?;
         session
             .health()
             .await
-            .map_err(|_| "VPN endpoint health check failed")?;
+            .map_err(|e| Failure::engine(e, "VPN endpoint health check failed"))?;
         let udp = session
             .open_udp()
             .await
-            .map_err(|_| "VPN UDP transport unavailable")?;
+            .map_err(|e| Failure::engine(e, "VPN UDP transport unavailable"))?;
         let device = tun_rs::DeviceBuilder::new()
             .name(DEVICE)
             .associate_route(false)
@@ -56,19 +57,20 @@ impl Prepared {
     pub async fn reconnect(
         profile: &rtrust_profile::Profile,
         device: Arc<tun_rs::AsyncDevice>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Failure> {
         use crate::reason::{Stage, reconnect};
-        let session = Session::connect(profile)
-            .await
-            .map_err(|e| reconnect(Stage::Connect, &e))?;
-        session
-            .health()
-            .await
-            .map_err(|e| reconnect(Stage::Health, &e))?;
-        let udp = session
-            .open_udp()
-            .await
-            .map_err(|e| reconnect(Stage::Udp, &e))?;
+        let session = Session::connect(profile).await.map_err(|e| {
+            let message = reconnect(Stage::Connect, &e);
+            Failure::engine(e, message)
+        })?;
+        session.health().await.map_err(|e| {
+            let message = reconnect(Stage::Health, &e);
+            Failure::engine(e, message)
+        })?;
+        let udp = session.open_udp().await.map_err(|e| {
+            let message = reconnect(Stage::Udp, &e);
+            Failure::engine(e, message)
+        })?;
         Ok(Self {
             session,
             udp,

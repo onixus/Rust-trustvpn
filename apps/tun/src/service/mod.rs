@@ -41,7 +41,8 @@ use tokio::{
 type RunResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 struct Workers {
     tunnel: Option<tokio::task::JoinHandle<RunResult>>,
-    reconnect: Option<tokio::task::JoinHandle<Result<crate::linux::Prepared, String>>>,
+    reconnect:
+        Option<tokio::task::JoinHandle<Result<crate::linux::Prepared, crate::failover::Failure>>>,
 }
 impl Drop for Workers {
     fn drop(&mut self) {
@@ -62,9 +63,13 @@ impl Workers {
     ) {
         let profile = profile.clone();
         let wait = delay.next_delay(rand::random());
+        let attempt = delay.attempt();
+        let budget = rtrust_journal::Budget::from_cooling(delay.cooling());
+        let transport = rtrust_engine::planned_transport(&profile);
         self.reconnect = Some(tokio::spawn(async move {
             tokio::time::sleep(wait).await;
-            tokio::time::timeout(
+            let started = Instant::now();
+            let result = tokio::time::timeout(
                 Duration::from_secs(30),
                 crate::linux::Prepared::connect_mode(
                     &profile,
@@ -74,8 +79,25 @@ impl Workers {
                 ),
             )
             .await
-            .map_err(|_| "Reconnect timed out".to_owned())?
-            .map_err(|e| format!("Reconnect failed: {e}"))
+            .map_err(|_| crate::failover::Failure::timeout("Reconnect timed out"))
+            .and_then(|r| {
+                r.map_err(|e| crate::failover::Failure {
+                    class: rtrust_journal::classify_boxed(e.as_ref()),
+                    message: format!("Reconnect failed: {e}"),
+                    record: None,
+                })
+            });
+            result.map_err(|mut e| {
+                e.record = Some(rtrust_journal::Record::failure(
+                    rtrust_journal::Path::Reconnect,
+                    e.class,
+                    transport,
+                    attempt,
+                    budget,
+                    started.elapsed(),
+                ));
+                e
+            })
         }));
     }
     async fn stop(&mut self) {
@@ -236,6 +258,17 @@ async fn serve(
         )
         .await;
     };
+    let mut journal = match &request.command {
+        Command::Start { profile, .. } | Command::StartFull { profile, .. } => {
+            Some(crate::failover::journal_attempt(
+                rtrust_journal::Path::Start,
+                rtrust_engine::planned_transport(profile),
+                1,
+                rtrust_journal::Budget::Burst,
+            ))
+        }
+        _ => None,
+    };
     let (mut freshness, command) = rtrust_control::freshness::start(request.command)?;
     let (profile, networks, dns, split_dns, fallbacks) = match command {
         Command::PrepareUpdate => {
@@ -301,6 +334,7 @@ async fn serve(
         } => (profile, vec![], Some(dns), None, fallbacks),
         _ => return reply(&mut stream, State::Error, "Start or Recover required").await,
     };
+    let mut journal = journal.take().expect("Start has a journal guard");
     if let Err(error) = if let Some(dns) = dns {
         FullRoutes::preflight(dns)
     } else {
@@ -324,6 +358,7 @@ async fn serve(
     {
         Ok(failover) => failover,
         Err(_) => {
+            journal.class(rtrust_journal::Class::EndpointUnreachable);
             return reply(
                 &mut stream,
                 State::Error,
@@ -332,16 +367,24 @@ async fn serve(
             .await;
         }
     };
+    journal.cancelled();
     let prepared = {
         let mut unexpected = [0];
         tokio::select! {
-            result = rtrust_control::freshness::while_valid(freshness.as_mut(),failover.connect_initial(|profile| async move { crate::linux::Prepared::connect_mode(&profile, routes::DEVICE, routes::ADDRESS.parse().unwrap(), full).await })) => match result {
+            result = rtrust_control::freshness::while_valid(freshness.as_mut(), async {
+                failover.connect_initial(|profile| async move { crate::linux::Prepared::connect_mode(&profile, routes::DEVICE, routes::ADDRESS.parse().unwrap(), full).await }).await.map_err(|e| {
+                    journal.metadata(e.transport, e.attempts);
+                    journal.class(e.last.as_ref().map_or(rtrust_journal::Class::Timeout, |e| rtrust_journal::classify_boxed(e.as_ref())));
+                    "No allowed VPN endpoint connected within the startup budget".to_owned()
+                })
+            }) => match result {
                 Ok(prepared) => prepared,
                 Err(_) => return reply(&mut stream, State::Error, "Не удалось открыть TUN: проверьте профиль, TLS и доступность endpoint").await,
             },
             _ = stream.read(&mut unexpected) => return Err("IPC closed during connect".into()),
         }
     };
+    journal.class(rtrust_journal::Class::Other);
     let mut routes = match if let Some(dns) = dns {
         FullRoutes::install(uid, dns, &failover.endpoint_addresses()).map(Guard::Full)
     } else {
@@ -350,6 +393,7 @@ async fn serve(
         Ok(routes) => routes,
         Err(error) => return reply(&mut stream, State::Error, &error).await,
     };
+    journal.success();
     let mut workers = Workers {
         tunnel: Some(tokio::spawn(prepared.run())),
         reconnect: None,
@@ -406,6 +450,7 @@ async fn serve(
             .collect(),
     });
     let mut probes = crate::sysprobe::Runner::default();
+    let mut wake_reconnect = false;
     loop {
         let mut pending = Box::pin(read::<Request>(&mut stream));
         let request = loop {
@@ -420,6 +465,7 @@ async fn serve(
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     },
                     crate::netwatch::Change::Resumed => {
+                        wake_reconnect = true;
                         probes.cancel();
                         monitor.resumed(rtrust_control::observations::now_ms());
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
@@ -441,13 +487,24 @@ async fn serve(
                 }
                 result = async { workers.reconnect.as_mut().unwrap().await }, if workers.reconnect.is_some() => {
                     workers.reconnect = None;
+                    let path = if wake_reconnect { rtrust_journal::Path::WakeReconnect } else { rtrust_journal::Path::Reconnect };
+                    let failure = match &result { Ok(Err(e)) => Some(e.class), Err(e) => Some(if e.is_cancelled() { rtrust_journal::Class::Cancelled } else { rtrust_journal::Class::Other }), _ => None };
+                    if let Some(class) = failure {
+                        let mut record = match &result { Ok(Err(e)) => e.record, _ => None }.unwrap_or_else(|| rtrust_journal::Record::failure(path, class, rtrust_engine::planned_transport(failover.current()), retry_delay.attempt(), rtrust_journal::Budget::from_cooling(retry_delay.cooling()), Duration::ZERO));
+                        record.path = path;
+                        crate::failover::journal_failure(record);
+                    }
                     if let Ok(Err(error))=&result { eprintln!("VPN reconnect failed: {error}"); }
                     if let Ok(Ok(prepared)) = result {
                         // Route mutations stay in the lease task, never in the
                         // reconnect worker: Stop/EOF cannot race a late install.
                         let reattached=routes.reattach();
-                        if let Err(error)=&reattached { eprintln!("VPN route reattach failed: {error}"); }
+                        if let Err(error)=&reattached {
+                            crate::failover::journal_failure(rtrust_journal::Record::failure(path, rtrust_journal::Class::Other, rtrust_engine::planned_transport(failover.current()), retry_delay.attempt(), rtrust_journal::Budget::from_cooling(retry_delay.cooling()), Duration::ZERO));
+                            eprintln!("VPN route reattach failed: {error}");
+                        }
                         if reattached.is_ok() {
+                            wake_reconnect = false;
                             workers.tunnel = Some(tokio::spawn(prepared.run()));
                             endpoint_lease.resume();
                             connected_since = Instant::now();

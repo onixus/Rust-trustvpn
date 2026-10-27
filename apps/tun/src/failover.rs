@@ -8,6 +8,90 @@
 use rtrust_profile::Profile;
 use std::time::{Duration, Instant};
 
+#[derive(Debug)]
+pub struct InitialFailure<E> {
+    pub last: Option<E>,
+    pub transport: rtrust_journal::Transport,
+    pub attempts: u32,
+}
+pub fn journal_attempt(
+    path: rtrust_journal::Path,
+    transport: rtrust_journal::Transport,
+    attempt: u32,
+    budget: rtrust_journal::Budget,
+) -> rtrust_journal::Attempt {
+    let mut guard = rtrust_journal::Attempt::new(path, transport, attempt, budget);
+    if cfg!(test) {
+        guard.success();
+    }
+    guard
+}
+pub fn journal_failure(record: rtrust_journal::Record) {
+    #[cfg(not(test))]
+    rtrust_journal::service().submit(record);
+    #[cfg(test)]
+    TEST_RECORDS.with(|records| records.borrow_mut().push(record));
+}
+#[cfg(test)]
+thread_local! { static TEST_RECORDS: std::cell::RefCell<Vec<rtrust_journal::Record>> = const { std::cell::RefCell::new(Vec::new()) }; }
+#[cfg(test)]
+pub fn take_records() -> Vec<rtrust_journal::Record> {
+    TEST_RECORDS.with(|records| std::mem::take(&mut *records.borrow_mut()))
+}
+/// GUI text stays separate from the closed journal classification.
+#[derive(Debug)]
+pub struct Failure {
+    pub message: String,
+    pub class: rtrust_journal::Class,
+    pub record: Option<rtrust_journal::Record>,
+}
+impl Failure {
+    pub fn engine(error: rtrust_engine::Error, message: impl Into<String>) -> Self {
+        Self {
+            class: rtrust_journal::classify(&error),
+            message: message.into(),
+            record: None,
+        }
+    }
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            class: rtrust_journal::Class::Timeout,
+            record: None,
+        }
+    }
+}
+impl From<rtrust_engine::Error> for Failure {
+    fn from(error: rtrust_engine::Error) -> Self {
+        let class = rtrust_journal::classify(&error);
+        Self {
+            class,
+            message: error.to_string(),
+            record: None,
+        }
+    }
+}
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            class: rtrust_journal::Class::Other,
+            record: None,
+        }
+    }
+}
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for Failure {}
+
 /// Consecutive failed connection attempts before trying the next candidate.
 pub const SWITCH_AFTER: u32 = 2;
 /// Minimum time between two switches, against oscillation.
@@ -192,7 +276,10 @@ impl Failover {
     /// Startup has one 30 s budget shared by every candidate. Each candidate
     /// gets two attempts before moving on, without extending the IPC deadline.
     /// Cancellation drops the pending attempt. No routes or guard are changed.
-    pub async fn connect_initial<T, E, F, Fut>(&mut self, mut connect: F) -> Result<T, String>
+    pub async fn connect_initial<T, E, F, Fut>(
+        &mut self,
+        mut connect: F,
+    ) -> Result<T, InitialFailure<E>>
     where
         F: FnMut(Profile) -> Fut,
         Fut: std::future::Future<Output = Result<T, E>>,
@@ -204,21 +291,30 @@ impl Failover {
             SWITCH_AFTER
         };
         let budget = Duration::from_secs(30) / (self.candidates.len() as u32 * attempts);
+        let mut failure = InitialFailure {
+            last: None,
+            transport: rtrust_journal::Transport::Unknown,
+            attempts: 0,
+        };
         for index in 0..self.candidates.len() {
             for _ in 0..attempts {
-                if let Ok(Ok(connected)) =
-                    tokio::time::timeout(budget, connect(self.candidates[index].clone())).await
-                {
-                    self.active = index;
-                    self.failures = 0;
-                    if index != 0 {
-                        self.last_switch = Some(Instant::now());
+                failure.attempts += 1;
+                failure.transport = rtrust_engine::planned_transport(&self.candidates[index]);
+                match tokio::time::timeout(budget, connect(self.candidates[index].clone())).await {
+                    Ok(Ok(connected)) => {
+                        self.active = index;
+                        self.failures = 0;
+                        if index != 0 {
+                            self.last_switch = Some(Instant::now());
+                        }
+                        return Ok(connected);
                     }
-                    return Ok(connected);
+                    Ok(Err(error)) => failure.last = Some(error),
+                    Err(_) => failure.last = None,
                 }
             }
         }
-        Err("No allowed VPN endpoint connected within the startup budget".into())
+        Err(failure)
     }
     pub fn endpoint_addresses(&self) -> Vec<String> {
         let mut addresses = Vec::new();
@@ -396,6 +492,23 @@ mod tests {
                 .is_err()
         );
         assert_eq!(fixed.active(), None);
+    }
+
+    #[tokio::test]
+    async fn startup_failure_retains_typed_final_cause_attempts_and_planned_transport() {
+        let mut f = failover(2);
+        f.candidates[1].endpoint.upstream_protocol = "http3".into();
+        let failure = f
+            .connect_initial(|_| async { Err::<(), _>(rtrust_engine::Error::Authentication) })
+            .await
+            .unwrap_err();
+        assert_eq!(failure.attempts, 4);
+        assert_eq!(failure.transport, rtrust_journal::Transport::H3);
+        assert_eq!(
+            rtrust_journal::classify(failure.last.as_ref().unwrap()),
+            rtrust_journal::Class::Authentication
+        );
+        assert_eq!(f.active(), Some(0)); // Failed startup never admits a backup.
     }
 
     #[test]
