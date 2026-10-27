@@ -365,6 +365,8 @@ pub fn planned_transport(p: &Profile) -> PlannedTransport {
             PlannedTransport::H3
         }
         rtrust_profile::Protocol::TrustTunnel => PlannedTransport::H2,
+        // The journal vocabulary has no VLESS token yet; keep it closed.
+        rtrust_profile::Protocol::Vless => PlannedTransport::Unknown,
     }
 }
 impl Session {

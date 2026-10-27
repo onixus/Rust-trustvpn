@@ -37,6 +37,11 @@ fn planned_transport_uses_closed_engine_dispatch_not_profile_strings() {
         rtrust_engine::planned_transport(&profile),
         Transport::AmneziaWg
     );
+    profile.protocol = rtrust_profile::Protocol::Vless;
+    assert_eq!(
+        rtrust_engine::planned_transport(&profile),
+        Transport::Unknown
+    );
 }
 
 #[test]
@@ -75,6 +80,7 @@ fn typed_classes_and_transport_tokens_never_include_error_payloads() {
             E::Unsupported("token-canary hostname-canary 192.0.2.45 sni-canary profile-canary"),
             Class::Profile,
         ),
+        (E::Unanswered, Class::Other),
     ];
     for (error, class) in cases {
         assert_eq!(classify(&error), class);

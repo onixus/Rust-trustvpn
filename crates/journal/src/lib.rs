@@ -67,7 +67,8 @@ pub fn classify(error: &rtrust_engine::Error) -> Class {
         E::Timeout | E::Closed(Close::IdleTimeout) => Class::Timeout,
         E::Protocol | E::Rejected(_) | E::Credit => Class::Protocol,
         E::Closed(Close::Local) => Class::Cancelled,
-        E::Io | E::Degraded { .. } | E::Closed(_) => Class::Other,
+        // VLESS Unanswered cannot tell a revoked UUID from unreachable targets.
+        E::Io | E::Degraded { .. } | E::Unanswered | E::Closed(_) => Class::Other,
     }
 }
 pub fn classify_boxed(error: &(dyn Error + 'static)) -> Class {
