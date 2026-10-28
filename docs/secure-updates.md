@@ -209,5 +209,6 @@ update_metadata; Linux — repository_signature/update_metadata; Android —
 apk_signature; iOS — apple_distribution. Подпись обновления не доказывает
 подпись издателя. Этот скрипт проверяет привязку и полноту записанных evidence,
 а не самостоятельно подтверждает истинность сетевых измерений или подписи.
-Синтетические fixtures в `ci/test_release_acceptance.py` проверяют отказ gate
-и не считаются приёмкой реального пакета.
+Синтетические fixtures из `ci/release_test_support.py` используются в
+`ci/test_release_acceptance.py` и `ci/test_publish_signed_release.py`; они
+проверяют отказ gate и не считаются приёмкой реального пакета.
