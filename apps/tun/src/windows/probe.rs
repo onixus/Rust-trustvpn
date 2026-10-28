@@ -130,44 +130,111 @@ fn defaults(family: ADDRESS_FAMILY, wintun: u32) -> Option<Vec<u32>> {
     }
     (found.len() <= 8).then_some(found)
 }
-/// Each physical default-route interface refuses an unmarked datagram at
-/// ALE (WSAEACCES). Windows Firewall or another WFP vendor would refuse the
-/// same way; the read-back of our own filters is required as well.
+/// A datagram `sendto` accepted, its socket kept open so the local port is
+/// not reused before the drop events are read.
+struct Pending {
+    _socket: std::net::UdpSocket,
+    port: u16,
+    target: SocketAddr,
+}
+/// Each physical default-route interface must refuse an unmarked datagram:
+/// an errno, or WFP's drop event naming our own block filter, because a UDP
+/// send succeeds even when ALE drops it. Windows Firewall or another vendor
+/// dropping it proves nothing about our guard; the read-back of our own
+/// filters is required as well.
 fn attempts(plan: &Plan, live: &sysprobe::Live) -> Vec<Attempt> {
-    if sysprobe::collides(&plan.endpoints) || !live.get() {
+    // Net event timestamps are FILETIMEs; a second of slack for their clock.
+    let since = firewall::filetime().saturating_sub(10_000_000);
+    let Some(sent) = sends(plan, live) else {
         return vec![Attempt::Unknown];
+    };
+    // BFE records a drop shortly after it; give it up to half a second.
+    let mut dropped = vec![None; sent.len()];
+    for round in 0..6 {
+        if round > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if !live.get() {
+            return vec![Attempt::Unknown];
+        }
+        for ((_, pending), slot) in sent.iter().zip(&mut dropped) {
+            if let Some(p) = pending
+                && *slot != Some(true)
+            {
+                *slot = firewall::drops(p.port, since)
+                    .ok()
+                    .map(|events| wfp::refused(&events, p.port, p.target));
+            }
+        }
+        if sent
+            .iter()
+            .zip(&dropped)
+            .all(|((_, pending), d)| pending.is_none() || *d == Some(true))
+        {
+            break;
+        }
     }
-    let Some(v4) = defaults(AF_INET, plan.index) else {
-        return vec![Attempt::Unknown];
-    };
-    let Some(v6) = defaults(AF_INET6, plan.index) else {
-        return vec![Attempt::Unknown];
-    };
-    let mut attempts = Vec::new();
+    sent.iter()
+        .zip(dropped)
+        .map(|((errno, _), dropped)| wfp::verdict(*errno, dropped))
+        .collect()
+}
+fn sends(plan: &Plan, live: &sysprobe::Live) -> Option<Vec<(Attempt, Option<Pending>)>> {
+    if sysprobe::collides(&plan.endpoints) || !live.get() {
+        return None;
+    }
+    let v4 = defaults(AF_INET, plan.index)?;
+    let v6 = defaults(AF_INET6, plan.index)?;
+    let absent = [WSAENETUNREACH, WSAEHOSTUNREACH, WSAEADDRNOTAVAIL];
+    let mut sent = Vec::new();
     for index in v4 {
         // The run may have been dropped while IP Helper was read.
         if !live.get() {
-            return vec![Attempt::Unknown];
+            return None;
         }
-        attempts.push(match socket(false, index) {
-            Some(socket) => sysprobe::attempt(
-                sysprobe::send(&socket, sysprobe::TARGET_V4),
-                &[WSAEACCES],
-                &[],
-            ),
-            None => Attempt::Unknown,
+        sent.push(match socket(false, index) {
+            Some(socket) => send(socket, sysprobe::TARGET_V4, |result| {
+                sysprobe::attempt(result, &[WSAEACCES], &[])
+            }),
+            None => (Attempt::Unknown, None),
         });
         if !live.get() {
-            return vec![Attempt::Unknown];
+            return None;
         }
-        attempts.push(sysprobe::v6_attempt(
-            v6.contains(&index),
-            socket(true, index).map(|socket| sysprobe::send(&socket, sysprobe::TARGET_V6)),
-            &[WSAEACCES],
-            &[WSAENETUNREACH, WSAEHOSTUNREACH, WSAEADDRNOTAVAIL],
-        ));
+        let default = v6.contains(&index);
+        sent.push(match socket(true, index) {
+            Some(socket) => send(socket, sysprobe::TARGET_V6, |result| {
+                sysprobe::v6_attempt(default, Some(result), &[WSAEACCES], &absent)
+            }),
+            None => (
+                sysprobe::v6_attempt(default, None, &[WSAEACCES], &absent),
+                None,
+            ),
+        });
     }
-    attempts
+    Some(sent)
+}
+/// Only a datagram `sendto` accepted (`Leaked` by errno) waits for WFP.
+fn send(
+    socket: std::net::UdpSocket,
+    target: SocketAddr,
+    errno: impl FnOnce(Result<(), i32>) -> Attempt,
+) -> (Attempt, Option<Pending>) {
+    let errno = errno(sysprobe::send(&socket, target));
+    if errno != Attempt::Leaked {
+        return (errno, None);
+    }
+    match socket.local_addr() {
+        Ok(local) => (
+            errno,
+            Some(Pending {
+                port: local.port(),
+                target,
+                _socket: socket,
+            }),
+        ),
+        Err(_) => (Attempt::Unknown, None),
+    }
 }
 fn wide(text: *const u16) -> Option<String> {
     if text.is_null() {

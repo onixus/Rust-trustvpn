@@ -282,7 +282,8 @@ impl Dns {
     };
 }
 
-/// Linux and Windows refuse with an errno; macOS PF drops silently (see `macos::verdict`).
+/// Linux refuses with an errno. Windows WFP and macOS PF drop silently (see
+/// `wfp::verdict`, `macos::verdict`).
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub fn attempt(sent: Result<(), i32>, blocked: &[i32], absent: &[i32]) -> Attempt {
     match sent {
@@ -356,7 +357,36 @@ pub fn result(facts: Dns, audit: Audit, attempts: &[Attempt], at: u64) -> System
 pub async fn evidence(facts: impl Future<Output = (Dns, Audit, Vec<Attempt>)>) -> SystemProbe {
     let started = now_ms();
     let (dns, audit, attempts) = facts.await;
-    result(dns, audit, &attempts, started)
+    let probe = result(dns, audit, &attempts, started);
+    diagnose(&summary(dns, audit, &attempts, &probe));
+    probe
+}
+/// Which facts gave the verdicts, as enum names only: no address,
+/// interface or count beyond the attempts themselves.
+pub fn summary(dns: Dns, audit: Audit, attempts: &[Attempt], probe: &SystemProbe) -> String {
+    let name = |text: String| text.to_ascii_lowercase();
+    let attempts: Vec<_> = attempts.iter().map(|a| name(format!("{a:?}"))).collect();
+    name(format!(
+        "system_probe guard={:?} audit={audit:?} attempts={} dns={:?} config={:?} path={:?} reply={:?} foreign={:?}",
+        probe.guard.outcome,
+        attempts.join(","),
+        probe.dns.outcome,
+        dns.config,
+        dns.path,
+        dns.reply,
+        dns.foreign,
+    ))
+}
+/// Journals a summary only when it differs from the previous run's.
+fn diagnose(line: &str) {
+    static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let Ok(mut last) = LAST.lock() else {
+        return;
+    };
+    if *last != line {
+        line.clone_into(&mut last);
+        rtrust_journal::service().lifecycle(line);
+    }
 }
 /// A probe target that is also an endpoint would test an exemption.
 pub fn collides(endpoints: &[IpAddr]) -> bool {
@@ -1029,6 +1059,44 @@ pub mod wfp {
             super::Audit::Match
         } else {
             super::Audit::Mismatch
+        }
+    }
+    /// One WFP classify-drop net event, reduced to what names the datagram
+    /// and whether the dropping filter is one of our own outbound blocks.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Drop {
+        pub protocol: Option<u8>,
+        pub local_port: Option<u16>,
+        pub remote: Option<std::net::IpAddr>,
+        pub remote_port: Option<u16>,
+        /// Our provider, our sublayer, a plain block at ALE connect or outbound IP packet.
+        pub ours: bool,
+    }
+    /// Our own block dropped the UDP datagram sent from `port` to `target`.
+    /// An event without the field set (IP-packet layer: no ports) names nothing.
+    pub fn refused(events: &[Drop], port: u16, target: std::net::SocketAddr) -> bool {
+        events.iter().any(|e| {
+            e.ours
+                && e.protocol == Some(17)
+                && e.local_port == Some(port)
+                && e.remote == Some(target.ip())
+                && e.remote_port == Some(target.port())
+        })
+    }
+    /// WFP drops a UDP datagram silently: `sendto` succeeds whether ALE
+    /// connect or outbound IP packet blocks it (Windows 11, 2026-10-28: lab
+    /// block filters for 192.0.2.1 left nothing on the NIC in pktmon; with
+    /// the installed full guard the service's probe was dropped by our ALE
+    /// block. BFE kept the classify-drop events without any audit policy). A
+    /// refusal is an errno or our own filter's drop event for this exact
+    /// datagram. A send without either proves nothing: WFP cannot show that
+    /// the datagram left.
+    pub fn verdict(errno: super::Attempt, dropped: Option<bool>) -> super::Attempt {
+        use super::Attempt::*;
+        match (errno, dropped) {
+            (Leaked, Some(true)) => Blocked,
+            (Leaked, _) => Unknown,
+            (other, _) => other,
         }
     }
     /// `DNS_INTERFACE_SETTINGS.NameServer`: comma or space separated.
@@ -1841,6 +1909,117 @@ mod tests {
         found.push(copy);
         assert_eq!(wfp::audit(found, expected.clone()), Audit::Mismatch);
         assert_eq!(wfp::audit(expected.clone(), expected), Audit::Match);
+    }
+    #[test]
+    fn a_silent_windows_send_is_blocked_only_by_our_own_drop_event() {
+        use Attempt::*;
+        // Windows 11: sendto succeeds while our ALE block drops the datagram.
+        let event = wfp::Drop {
+            protocol: Some(17),
+            local_port: Some(50_000),
+            remote: Some(TARGET_V4.ip()),
+            remote_port: Some(9),
+            ours: true,
+        };
+        assert!(wfp::refused(&[event], 50_000, TARGET_V4));
+        let v6 = wfp::Drop {
+            remote: Some(TARGET_V6.ip()),
+            ..event
+        };
+        assert!(wfp::refused(&[v6], 50_000, TARGET_V6));
+        // Another vendor's filter, another datagram, an IP-packet event
+        // without ports, or nothing at all names nothing.
+        for other in [
+            wfp::Drop {
+                ours: false,
+                ..event
+            },
+            wfp::Drop {
+                local_port: Some(50_001),
+                ..event
+            },
+            wfp::Drop {
+                protocol: Some(6),
+                ..event
+            },
+            wfp::Drop {
+                remote: Some(TARGET_V6.ip()),
+                ..event
+            },
+            wfp::Drop {
+                remote_port: Some(53),
+                ..event
+            },
+            wfp::Drop {
+                protocol: None,
+                local_port: None,
+                remote_port: None,
+                ..event
+            },
+        ] {
+            assert!(!wfp::refused(&[other], 50_000, TARGET_V4), "{other:?}");
+        }
+        assert!(!wfp::refused(&[], 50_000, TARGET_V4));
+        assert!(wfp::refused(
+            &[
+                wfp::Drop {
+                    ours: false,
+                    ..event
+                },
+                event
+            ],
+            50_000,
+            TARGET_V4
+        ));
+
+        let sent = attempt(Ok(()), &[10013], &[]);
+        assert_eq!(wfp::verdict(sent, Some(true)), Blocked);
+        // No event, or events unreadable: inconclusive, never Passed.
+        for dropped in [Some(false), None] {
+            assert_eq!(wfp::verdict(sent, dropped), Unknown);
+            assert_eq!(
+                guard(Audit::Match, &[wfp::verdict(sent, dropped)]),
+                Outcome::Unknown
+            );
+        }
+        // An errno verdict stands whatever the events say.
+        for errno in [Blocked, Absent, Unknown] {
+            for dropped in [Some(true), Some(false), None] {
+                assert_eq!(wfp::verdict(errno, dropped), errno);
+            }
+        }
+        // Exact rules, IPv4 dropped by our filter, IPv6 absent there.
+        assert_eq!(
+            guard(Audit::Match, &[wfp::verdict(sent, Some(true)), Absent]),
+            Outcome::Passed
+        );
+        // A changed rule set still fails whatever the events say.
+        assert_eq!(
+            guard(Audit::Mismatch, &[wfp::verdict(sent, Some(true))]),
+            Outcome::Failed
+        );
+    }
+    #[test]
+    fn the_probe_summary_names_verdicts_and_facts_only() {
+        let facts = Dns {
+            config: Audit::Match,
+            path: Path::Tunnel,
+            reply: Reply::Answered,
+            foreign: Foreign::Present,
+        };
+        let attempts = [Attempt::Leaked, Attempt::Absent];
+        let probe = result(facts, Audit::Match, &attempts, 7);
+        assert_eq!(
+            summary(facts, Audit::Match, &attempts, &probe),
+            "system_probe guard=failed audit=match attempts=leaked,absent dns=failed \
+             config=match path=tunnel reply=answered foreign=present"
+        );
+        let probe = result(Dns::UNKNOWN, Audit::Unknown, &[Attempt::Unknown], 7);
+        assert_eq!(
+            summary(Dns::UNKNOWN, Audit::Unknown, &[Attempt::Unknown], &probe),
+            "system_probe guard=unknown audit=unknown attempts=unknown dns=unknown \
+             config=unknown path=unknown reply=none foreign=unknown"
+        );
     }
     #[test]
     fn tester_guard_verdict_invariants_over_every_combination() {
