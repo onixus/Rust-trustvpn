@@ -644,7 +644,7 @@ pub fn net_events() -> Option<bool> {
         return None;
     }
     let v = unsafe { &*value };
-    let collects = (v.r#type == FWP_UINT32).then(|| unsafe { v.Anonymous.uint32 } != 0);
+    let collects = (v.r#type == FWP_UINT32).then_some(unsafe { v.Anonymous.uint32 } != 0);
     unsafe { FwpmFreeMemory0((&mut value as *mut *mut FWP_VALUE0).cast()) };
     collects
 }
