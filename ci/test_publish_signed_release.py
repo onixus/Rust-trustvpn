@@ -6,8 +6,10 @@ import shutil
 import subprocess
 import unittest
 from unittest.mock import patch
-import test_release_acceptance as fixtures
-acceptance = fixtures.acceptance
+if __package__:
+    from .release_test_support import acceptance, create_release_fixture
+else:
+    from release_test_support import acceptance, create_release_fixture
 
 spec = importlib.util.spec_from_file_location("publisher", pathlib.Path(__file__).resolve().parents[1] / "scripts/publish-signed-release.py")
 publisher = importlib.util.module_from_spec(spec)
@@ -16,9 +18,7 @@ spec.loader.exec_module(publisher)
 
 class PublisherGate(unittest.TestCase):
     def setUp(self):
-        self.fixture = fixtures.AcceptanceGate()
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = create_release_fixture(self.addCleanup)
         self.repo = self.fixture.base
         self.root = self.repo / "dist/signed-releases/42/windows-x86_64"
         self.root.mkdir(parents=True)
