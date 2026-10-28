@@ -19,7 +19,9 @@ vault or VPN session appears in them, and nothing was connected while capturing.
   so the installed app looks slightly different.
 - **WebView.** The real `apps/webview/ui` files in WebKit (`WKWebView`, the engine
   Tauri uses on macOS) at 2×. The Tauri bridge was replaced by a stub that
-  returns synthetic profiles and settings.
+  returns synthetic profiles and settings. The window was on screen while
+  capturing: WebKit does not run CSS transitions in a hidden window, so an
+  offscreen capture keeps the previous tab highlighted.
 
 - **Native** — настоящий `App::view()` из `apps/native`, отрисованный офскрин
   в 2× через `iced_test` с тем же wgpu-рендерером, что на macOS. Состояние
@@ -28,6 +30,8 @@ vault or VPN session appears in them, and nothing was connected while capturing.
   приложение выглядит немного иначе.
 - **WebView** — настоящие файлы `apps/webview/ui` в WebKit (`WKWebView`, движок
   Tauri на macOS) в 2×. Мост Tauri заменён заглушкой с синтетическими данными.
+  Окно было на экране: в скрытом окне WebKit не выполняет CSS-переходы, и при
+  офскрин-съёмке подсветка остаётся на предыдущей вкладке.
 
 These are not window captures of an installed package. The installed client on
 the capture Mac holds real profiles and controls a live VPN session, and a second
@@ -86,15 +90,6 @@ The in-tunnel HTTP request, the system VPN path check (runs on connect and every
 | ![WebView profiles, 0.6.1](webview-profiles-0.6.1.jpg) | ![WebView settings, 0.6.1](webview-settings-0.6.1.jpg) |
 | **Sync** | **Diagnostics** |
 | ![WebView sync, 0.6.1](webview-sync-0.6.1.jpg) | ![WebView diagnostics, 0.6.1](webview-diagnostics-0.6.1.jpg) |
-
-**Known issue.** In WebKit the top tab bar keeps **Profiles** highlighted after
-you switch tabs. The page content changes correctly, but WebKit does not
-recompute the `[aria-current]` style. Chromium shows the correct tab. The
-Settings, Sync and Diagnostics captures show this defect as it is.
-
-**Известный дефект:** в WebKit после переключения вкладок подсветка остаётся на
-**Profiles**, хотя содержимое меняется правильно. В Chromium подсвечивается
-нужная вкладка. На снимках дефект оставлен как есть.
 
 ## Scope / Границы
 
