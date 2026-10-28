@@ -134,6 +134,8 @@ fn defaults(family: ADDRESS_FAMILY, wintun: u32) -> Option<Vec<u32>> {
 /// not reused before the drop events are read.
 struct Pending {
     _socket: std::net::UdpSocket,
+    /// FILETIME just before the send.
+    sent: u64,
     port: u16,
     target: SocketAddr,
 }
@@ -143,8 +145,6 @@ struct Pending {
 /// dropping it proves nothing about our guard; the read-back of our own
 /// filters is required as well.
 fn attempts(plan: &Plan, live: &sysprobe::Live) -> Vec<Attempt> {
-    // Net event timestamps are FILETIMEs; a second of slack for their clock.
-    let since = firewall::filetime().saturating_sub(10_000_000);
     let Some(sent) = sends(plan, live) else {
         return vec![Attempt::Unknown];
     };
@@ -157,13 +157,20 @@ fn attempts(plan: &Plan, live: &sysprobe::Live) -> Vec<Attempt> {
         if !live.get() {
             return vec![Attempt::Unknown];
         }
+        // One read per round for every pending datagram (all go to port 9).
+        let since = sent
+            .iter()
+            .filter_map(|(_, p)| p.as_ref().map(|p| p.sent))
+            .min()
+            .map_or(0, |at| at.saturating_sub(wfp::SLACK));
+        let events = firewall::drops(sysprobe::TARGET_V4.port(), since).ok();
         for ((_, pending), slot) in sent.iter().zip(&mut dropped) {
             if let Some(p) = pending
                 && *slot != Some(true)
             {
-                *slot = firewall::drops(p.port, since)
-                    .ok()
-                    .map(|events| wfp::refused(&events, p.port, p.target));
+                *slot = events
+                    .as_deref()
+                    .map(|events| wfp::refused(events, p.sent, p.port, p.target));
             }
         }
         if sent
@@ -220,6 +227,7 @@ fn send(
     target: SocketAddr,
     errno: impl FnOnce(Result<(), i32>) -> Attempt,
 ) -> (Attempt, Option<Pending>) {
+    let at = firewall::filetime();
     let errno = errno(sysprobe::send(&socket, target));
     if errno != Attempt::Leaked {
         return (errno, None);
@@ -228,6 +236,7 @@ fn send(
         Ok(local) => (
             errno,
             Some(Pending {
+                sent: at,
                 port: local.port(),
                 target,
                 _socket: socket,

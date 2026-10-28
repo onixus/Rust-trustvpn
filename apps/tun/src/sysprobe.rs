@@ -1065,6 +1065,8 @@ pub mod wfp {
     /// and whether the dropping filter is one of our own outbound blocks.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Drop {
+        /// FILETIME of the drop.
+        pub at: u64,
         pub protocol: Option<u8>,
         pub local_port: Option<u16>,
         pub remote: Option<std::net::IpAddr>,
@@ -1072,11 +1074,16 @@ pub mod wfp {
         /// Our provider, our sublayer, a plain block at ALE connect or outbound IP packet.
         pub ours: bool,
     }
-    /// Our own block dropped the UDP datagram sent from `port` to `target`.
-    /// An event without the field set (IP-packet layer: no ports) names nothing.
-    pub fn refused(events: &[Drop], port: u16, target: std::net::SocketAddr) -> bool {
+    /// Slack for the two clocks' granularity; runs are seconds apart.
+    pub const SLACK: u64 = 1_000_000;
+    /// Our own block dropped the UDP datagram sent at `sent` (FILETIME) from
+    /// `port` to `target`. An event without the field set (IP-packet layer:
+    /// no ports) names nothing; nor does a drop before this send, such as an
+    /// earlier run's datagram from the same ephemeral port.
+    pub fn refused(events: &[Drop], sent: u64, port: u16, target: std::net::SocketAddr) -> bool {
         events.iter().any(|e| {
             e.ours
+                && e.at + SLACK >= sent
                 && e.protocol == Some(17)
                 && e.local_port == Some(port)
                 && e.remote == Some(target.ip())
@@ -1914,19 +1921,21 @@ mod tests {
     fn a_silent_windows_send_is_blocked_only_by_our_own_drop_event() {
         use Attempt::*;
         // Windows 11: sendto succeeds while our ALE block drops the datagram.
+        const SENT: u64 = 134_000_000_000_000_000;
         let event = wfp::Drop {
+            at: SENT + 60_000,
             protocol: Some(17),
             local_port: Some(50_000),
             remote: Some(TARGET_V4.ip()),
             remote_port: Some(9),
             ours: true,
         };
-        assert!(wfp::refused(&[event], 50_000, TARGET_V4));
+        assert!(wfp::refused(&[event], SENT, 50_000, TARGET_V4));
         let v6 = wfp::Drop {
             remote: Some(TARGET_V6.ip()),
             ..event
         };
-        assert!(wfp::refused(&[v6], 50_000, TARGET_V6));
+        assert!(wfp::refused(&[v6], SENT, 50_000, TARGET_V6));
         // Another vendor's filter, another datagram, an IP-packet event
         // without ports, or nothing at all names nothing.
         for other in [
@@ -1950,6 +1959,11 @@ mod tests {
                 remote_port: Some(53),
                 ..event
             },
+            // An earlier run's datagram from the same ephemeral port.
+            wfp::Drop {
+                at: SENT - wfp::SLACK - 1,
+                ..event
+            },
             wfp::Drop {
                 protocol: None,
                 local_port: None,
@@ -1957,9 +1971,12 @@ mod tests {
                 ..event
             },
         ] {
-            assert!(!wfp::refused(&[other], 50_000, TARGET_V4), "{other:?}");
+            assert!(
+                !wfp::refused(&[other], SENT, 50_000, TARGET_V4),
+                "{other:?}"
+            );
         }
-        assert!(!wfp::refused(&[], 50_000, TARGET_V4));
+        assert!(!wfp::refused(&[], SENT, 50_000, TARGET_V4));
         assert!(wfp::refused(
             &[
                 wfp::Drop {
@@ -1968,6 +1985,7 @@ mod tests {
                 },
                 event
             ],
+            SENT,
             50_000,
             TARGET_V4
         ));
@@ -1992,6 +2010,12 @@ mod tests {
         assert_eq!(
             guard(Audit::Match, &[wfp::verdict(sent, Some(true)), Absent]),
             Outcome::Passed
+        );
+        // Exact rules but a datagram that got out: WFP cannot show it left,
+        // so a Windows leak is Unknown (never Passed), not Failed.
+        assert_eq!(
+            guard(Audit::Match, &[wfp::verdict(sent, Some(false)), Absent]),
+            Outcome::Unknown
         );
         // A changed rule set still fails whatever the events say.
         assert_eq!(

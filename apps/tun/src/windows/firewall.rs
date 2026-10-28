@@ -298,7 +298,7 @@ fn conditions(
                     port
                 }
                 Condition::LocalPort(port) => condition(
-                    FWPM_CONDITION_IP_LOCAL_PORT,
+                    FWPM_CONDITION_IP_REMOTE_PORT,
                     FWP_UINT16,
                     FWP_CONDITION_VALUE0_0 { uint16: port },
                 ),
@@ -559,9 +559,10 @@ pub fn filetime() -> u64 {
         .unwrap_or_default();
     116_444_736_000_000_000 + (unix.as_nanos() / 100) as u64
 }
-/// Read-only: classify-drop net events since `since` for UDP from local
-/// `port`, each marked whether our own outbound block dropped it. BFE keeps
-/// these without any audit policy; nothing is enabled or changed here.
+/// Read-only: classify-drop net events since `since` for UDP to `port`, each
+/// marked whether our own outbound block dropped it. One engine and one
+/// enumeration serve every pending datagram of a round. BFE keeps these
+/// without any audit policy; nothing is enabled or changed here.
 pub fn drops(port: u16, since: u64) -> Result<Vec<wfp::Drop>, String> {
     let engine = Engine::open()?;
     let time = |t: u64| windows_sys::Win32::Foundation::FILETIME {
@@ -575,7 +576,7 @@ pub fn drops(port: u16, since: u64) -> Result<Vec<wfp::Drop>, String> {
             FWP_CONDITION_VALUE0_0 { uint8: 17 },
         ),
         condition(
-            FWPM_CONDITION_IP_LOCAL_PORT,
+            FWPM_CONDITION_IP_REMOTE_PORT,
             FWP_UINT16,
             FWP_CONDITION_VALUE0_0 { uint16: port },
         ),
@@ -634,7 +635,10 @@ pub fn drops(port: u16, since: u64) -> Result<Vec<wfp::Drop>, String> {
 }
 fn reduce(header: &FWPM_NET_EVENT_HEADER0, ours: bool) -> wfp::Drop {
     let set = |flag| header.flags & flag != 0;
-    let remote = match (set(FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET), header.ipVersion) {
+    let remote = match (
+        set(FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET) && set(FWPM_NET_EVENT_FLAG_IP_VERSION_SET),
+        header.ipVersion,
+    ) {
         (true, FWP_IP_VERSION_V4) => {
             Some(std::net::IpAddr::from(std::net::Ipv4Addr::from(unsafe {
                 header.Anonymous2.remoteAddrV4
@@ -645,7 +649,9 @@ fn reduce(header: &FWPM_NET_EVENT_HEADER0, ours: bool) -> wfp::Drop {
         })),
         _ => None,
     };
+    let at = &header.timeStamp;
     wfp::Drop {
+        at: u64::from(at.dwHighDateTime) << 32 | u64::from(at.dwLowDateTime),
         protocol: set(FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET).then_some(header.ipProtocol),
         local_port: set(FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET).then_some(header.localPort),
         remote,
