@@ -358,7 +358,8 @@ pub async fn evidence(facts: impl Future<Output = (Dns, Audit, Vec<Attempt>)>) -
     let started = now_ms();
     let (dns, audit, attempts) = facts.await;
     let probe = result(dns, audit, &attempts, started);
-    diagnose(&summary(dns, audit, &attempts, &probe));
+    static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    diagnose(&LAST, &summary(dns, audit, &attempts, &probe));
     probe
 }
 /// Which facts gave the verdicts, as enum names only: no address,
@@ -377,15 +378,14 @@ pub fn summary(dns: Dns, audit: Audit, attempts: &[Attempt], probe: &SystemProbe
         dns.foreign,
     ))
 }
-/// Journals a summary only when it differs from the previous run's. Never
-/// from tests: the journal's own `cfg(test)` does not cover this crate's, and
-/// a test run would write into the installed service's log.
-fn diagnose(line: &str) {
+/// Journals a line only when it differs from the previous one in `last`.
+/// Never from tests: the journal's own `cfg(test)` does not cover this
+/// crate's, and a test run would write into the installed service's log.
+pub fn diagnose(last: &std::sync::Mutex<String>, line: &str) {
     if cfg!(test) {
         return;
     }
-    static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
-    let Ok(mut last) = LAST.lock() else {
+    let Ok(mut last) = last.lock() else {
         return;
     };
     if *last != line {
@@ -1079,7 +1079,9 @@ pub mod wfp {
         pub local_port: Option<u16>,
         pub remote: Option<std::net::IpAddr>,
         pub remote_port: Option<u16>,
-        /// Our provider, our sublayer, a plain block at ALE connect or outbound IP packet.
+        /// Our provider, our sublayer, a plain block at ALE connect or
+        /// outbound IP packet. Only ALE events carry the ports `refused`
+        /// needs; an IP-packet event is ours yet names no datagram.
         pub ours: bool,
     }
     /// Slack for the two clocks' granularity; runs are seconds apart.
@@ -1097,6 +1099,15 @@ pub mod wfp {
                 && e.remote == Some(target.ip())
                 && e.remote_port == Some(target.port())
         })
+    }
+    /// Whether BFE collects net events (`FWPM_ENGINE_COLLECT_NET_EVENTS`),
+    /// read when a send stayed unproven: off, no drop can ever be shown.
+    pub fn collection(collects: Option<bool>) -> &'static str {
+        match collects {
+            Some(true) => "system_probe wfp_net_events=on",
+            Some(false) => "system_probe wfp_net_events=off",
+            None => "system_probe wfp_net_events=unknown",
+        }
     }
     /// WFP drops a UDP datagram silently: `sendto` succeeds whether ALE
     /// connect or outbound IP packet blocks it (Windows 11, 2026-10-28: lab
@@ -2052,6 +2063,11 @@ mod tests {
             "system_probe guard=unknown audit=unknown attempts=unknown dns=unknown \
              config=unknown path=unknown reply=none foreign=unknown"
         );
+        assert_eq!(
+            wfp::collection(Some(false)),
+            "system_probe wfp_net_events=off"
+        );
+        assert_eq!(wfp::collection(None), "system_probe wfp_net_events=unknown");
     }
     #[test]
     fn tester_guard_verdict_invariants_over_every_combination() {

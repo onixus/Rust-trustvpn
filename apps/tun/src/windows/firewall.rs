@@ -633,6 +633,21 @@ pub fn drops(port: u16, since: u64) -> Result<Vec<wfp::Drop>, String> {
     unsafe { FwpmNetEventDestroyEnumHandle0(engine.0, enumeration) };
     result.map(|()| found)
 }
+/// Read-only: whether BFE collects net events at all. Policy or another
+/// vendor may turn collection off; then no drop event will ever appear.
+pub fn net_events() -> Option<bool> {
+    let engine = Engine::open().ok()?;
+    let mut value: *mut FWP_VALUE0 = ptr::null_mut();
+    if unsafe { FwpmEngineGetOption0(engine.0, FWPM_ENGINE_COLLECT_NET_EVENTS, &mut value) } != 0
+        || value.is_null()
+    {
+        return None;
+    }
+    let v = unsafe { &*value };
+    let collects = (v.r#type == FWP_UINT32).then(|| unsafe { v.Anonymous.uint32 } != 0);
+    unsafe { FwpmFreeMemory0((&mut value as *mut *mut FWP_VALUE0).cast()) };
+    collects
+}
 fn reduce(header: &FWPM_NET_EVENT_HEADER0, ours: bool) -> wfp::Drop {
     let set = |flag| header.flags & flag != 0;
     let remote = match (

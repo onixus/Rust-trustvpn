@@ -150,41 +150,51 @@ fn attempts(plan: &Plan, live: &sysprobe::Live) -> Vec<Attempt> {
     };
     // BFE records a drop shortly after it; give it up to half a second.
     let mut dropped = vec![None; sent.len()];
-    for round in 0..6 {
-        if round > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        if !live.get() {
-            return vec![Attempt::Unknown];
-        }
-        // One read per round for every pending datagram (all go to port 9).
-        let since = sent
-            .iter()
-            .filter_map(|(_, p)| p.as_ref().map(|p| p.sent))
-            .min()
-            .map_or(0, |at| at.saturating_sub(wfp::SLACK));
-        let events = firewall::drops(sysprobe::TARGET_V4.port(), since).ok();
-        for ((_, pending), slot) in sent.iter().zip(&mut dropped) {
-            if let Some(p) = pending
-                && *slot != Some(true)
-            {
-                *slot = events
-                    .as_deref()
-                    .map(|events| wfp::refused(events, p.sent, p.port, p.target));
+    // One read per round for every pending datagram (all go to port 9);
+    // none at all when every send already has an errno verdict.
+    let since = sent
+        .iter()
+        .filter_map(|(_, p)| p.as_ref().map(|p| p.sent))
+        .min()
+        .map(|at| at.saturating_sub(wfp::SLACK));
+    if let Some(since) = since {
+        for round in 0..6 {
+            if round > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if !live.get() {
+                return vec![Attempt::Unknown];
+            }
+            let events = firewall::drops(sysprobe::TARGET_V4.port(), since).ok();
+            for ((_, pending), slot) in sent.iter().zip(&mut dropped) {
+                if let Some(p) = pending
+                    && *slot != Some(true)
+                {
+                    *slot = events
+                        .as_deref()
+                        .map(|events| wfp::refused(events, p.sent, p.port, p.target));
+                }
+            }
+            if proven(&sent, &dropped) {
+                break;
             }
         }
-        if sent
-            .iter()
-            .zip(&dropped)
-            .all(|((_, pending), d)| pending.is_none() || *d == Some(true))
-        {
-            break;
+        // An unproven send is Unknown either way; say whether BFE collects
+        // drop events at all, so a host that never can prove one is told apart.
+        if !proven(&sent, &dropped) {
+            static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+            sysprobe::diagnose(&LAST, wfp::collection(firewall::net_events()));
         }
     }
     sent.iter()
         .zip(dropped)
         .map(|((errno, _), dropped)| wfp::verdict(*errno, dropped))
         .collect()
+}
+fn proven(sent: &[(Attempt, Option<Pending>)], dropped: &[Option<bool>]) -> bool {
+    sent.iter()
+        .zip(dropped)
+        .all(|((_, pending), d)| pending.is_none() || *d == Some(true))
 }
 fn sends(plan: &Plan, live: &sysprobe::Live) -> Option<Vec<(Attempt, Option<Pending>)>> {
     if sysprobe::collides(&plan.endpoints) || !live.get() {
