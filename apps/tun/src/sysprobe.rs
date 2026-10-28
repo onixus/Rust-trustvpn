@@ -377,8 +377,13 @@ pub fn summary(dns: Dns, audit: Audit, attempts: &[Attempt], probe: &SystemProbe
         dns.foreign,
     ))
 }
-/// Journals a summary only when it differs from the previous run's.
+/// Journals a summary only when it differs from the previous run's. Never
+/// from tests: the journal's own `cfg(test)` does not cover this crate's, and
+/// a test run would write into the installed service's log.
 fn diagnose(line: &str) {
+    if cfg!(test) {
+        return;
+    }
     static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
     let Ok(mut last) = LAST.lock() else {
         return;

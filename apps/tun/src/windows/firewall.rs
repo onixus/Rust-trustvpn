@@ -298,7 +298,7 @@ fn conditions(
                     port
                 }
                 Condition::LocalPort(port) => condition(
-                    FWPM_CONDITION_IP_REMOTE_PORT,
+                    FWPM_CONDITION_IP_LOCAL_PORT,
                     FWP_UINT16,
                     FWP_CONDITION_VALUE0_0 { uint16: port },
                 ),
