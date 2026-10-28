@@ -552,6 +552,151 @@ pub fn read_back(app: &[u8]) -> Result<Option<Vec<Spec>>, String> {
     }
     Ok(Some(specs))
 }
+/// Now as a FILETIME (100 ns since 1601), the clock of WFP net events.
+pub fn filetime() -> u64 {
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    116_444_736_000_000_000 + (unix.as_nanos() / 100) as u64
+}
+/// Read-only: classify-drop net events since `since` for UDP to `port`, each
+/// marked whether our own outbound block dropped it. One engine and one
+/// enumeration serve every pending datagram of a round. BFE keeps these
+/// without any audit policy; nothing is enabled or changed here.
+pub fn drops(port: u16, since: u64) -> Result<Vec<wfp::Drop>, String> {
+    let engine = Engine::open()?;
+    let time = |t: u64| windows_sys::Win32::Foundation::FILETIME {
+        dwLowDateTime: t as u32,
+        dwHighDateTime: (t >> 32) as u32,
+    };
+    let mut conditions = [
+        condition(
+            FWPM_CONDITION_IP_PROTOCOL,
+            FWP_UINT8,
+            FWP_CONDITION_VALUE0_0 { uint8: 17 },
+        ),
+        condition(
+            FWPM_CONDITION_IP_REMOTE_PORT,
+            FWP_UINT16,
+            FWP_CONDITION_VALUE0_0 { uint16: port },
+        ),
+    ];
+    let template = FWPM_NET_EVENT_ENUM_TEMPLATE0 {
+        startTime: time(since),
+        endTime: time(filetime() + 600_000_000),
+        numFilterConditions: conditions.len() as u32,
+        filterCondition: conditions.as_mut_ptr(),
+    };
+    let mut enumeration = ptr::null_mut();
+    check(unsafe { FwpmNetEventCreateEnumHandle0(engine.0, &template, &mut enumeration) })?;
+    let mut owners: Vec<(u64, bool)> = Vec::new();
+    let mut found = Vec::new();
+    let result: Result<(), String> = (|| {
+        // The window is a second or two of one host's drops; bound it anyway.
+        for _ in 0..16 {
+            let mut entries = ptr::null_mut();
+            let mut count = 0;
+            check(unsafe {
+                FwpmNetEventEnum0(engine.0, enumeration, 256, &mut entries, &mut count)
+            })?;
+            if count > 0 {
+                for event in unsafe { std::slice::from_raw_parts(entries, count as usize) } {
+                    let event = unsafe { &**event };
+                    if event.r#type != FWPM_NET_EVENT_TYPE_CLASSIFY_DROP {
+                        continue;
+                    }
+                    let drop = unsafe { event.Anonymous.classifyDrop };
+                    if drop.is_null() {
+                        continue;
+                    }
+                    let id = unsafe { (*drop).filterId };
+                    let ours = match owners.iter().find(|(known, _)| *known == id) {
+                        Some(&(_, ours)) => ours,
+                        None => {
+                            let ours = own_block(&engine, id);
+                            owners.push((id, ours));
+                            ours
+                        }
+                    };
+                    found.push(reduce(&event.header, ours));
+                }
+            }
+            if !entries.is_null() {
+                unsafe { FwpmFreeMemory0((&mut entries as *mut *mut *mut FWPM_NET_EVENT0).cast()) };
+            }
+            if count == 0 {
+                return Ok(());
+            }
+        }
+        Err("WFP net events too many".into())
+    })();
+    unsafe { FwpmNetEventDestroyEnumHandle0(engine.0, enumeration) };
+    result.map(|()| found)
+}
+/// Read-only: whether BFE collects net events at all. Policy or another
+/// vendor may turn collection off; then no drop event will ever appear.
+pub fn net_events() -> Option<bool> {
+    let engine = Engine::open().ok()?;
+    let mut value: *mut FWP_VALUE0 = ptr::null_mut();
+    if unsafe { FwpmEngineGetOption0(engine.0, FWPM_ENGINE_COLLECT_NET_EVENTS, &mut value) } != 0
+        || value.is_null()
+    {
+        return None;
+    }
+    let v = unsafe { &*value };
+    let collects = (v.r#type == FWP_UINT32).then_some(unsafe { v.Anonymous.uint32 } != 0);
+    unsafe { FwpmFreeMemory0((&mut value as *mut *mut FWP_VALUE0).cast()) };
+    collects
+}
+fn reduce(header: &FWPM_NET_EVENT_HEADER0, ours: bool) -> wfp::Drop {
+    let set = |flag| header.flags & flag != 0;
+    let remote = match (
+        set(FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET) && set(FWPM_NET_EVENT_FLAG_IP_VERSION_SET),
+        header.ipVersion,
+    ) {
+        (true, FWP_IP_VERSION_V4) => {
+            Some(std::net::IpAddr::from(std::net::Ipv4Addr::from(unsafe {
+                header.Anonymous2.remoteAddrV4
+            })))
+        }
+        (true, FWP_IP_VERSION_V6) => Some(std::net::IpAddr::from(unsafe {
+            header.Anonymous2.remoteAddrV6.byteArray16
+        })),
+        _ => None,
+    };
+    let at = &header.timeStamp;
+    wfp::Drop {
+        at: u64::from(at.dwHighDateTime) << 32 | u64::from(at.dwLowDateTime),
+        protocol: set(FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET).then_some(header.ipProtocol),
+        local_port: set(FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET).then_some(header.localPort),
+        remote,
+        remote_port: set(FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET).then_some(header.remotePort),
+        ours,
+    }
+}
+/// A plain block of our provider in our sublayer at an outbound layer the
+/// probe datagram crosses. A filter gone since the event is not ours.
+fn own_block(engine: &Engine, id: u64) -> bool {
+    let mut filter = ptr::null_mut();
+    if unsafe { FwpmFilterGetById0(engine.0, id, &mut filter) } != 0 || filter.is_null() {
+        return false;
+    }
+    let f = unsafe { &*filter };
+    let ours = !f.providerKey.is_null()
+        && same(unsafe { &*f.providerKey }, &PROVIDER)
+        && same(&f.subLayerKey, &SUBLAYER)
+        && f.action.r#type == FWP_ACTION_BLOCK
+        && [
+            Layer::ConnectV4,
+            Layer::ConnectV6,
+            Layer::PacketV4,
+            Layer::PacketV6,
+        ]
+        .iter()
+        .any(|&layer| same(&f.layerKey, &layer_key(layer)));
+    unsafe { FwpmFreeMemory0((&mut filter as *mut *mut FWPM_FILTER0).cast()) };
+    ours
+}
 pub fn remove() -> Result<(), String> {
     remove_space(FULL)
 }

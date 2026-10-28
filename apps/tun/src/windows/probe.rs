@@ -130,44 +130,130 @@ fn defaults(family: ADDRESS_FAMILY, wintun: u32) -> Option<Vec<u32>> {
     }
     (found.len() <= 8).then_some(found)
 }
-/// Each physical default-route interface refuses an unmarked datagram at
-/// ALE (WSAEACCES). Windows Firewall or another WFP vendor would refuse the
-/// same way; the read-back of our own filters is required as well.
+/// A datagram `sendto` accepted, its socket kept open so the local port is
+/// not reused before the drop events are read.
+struct Pending {
+    _socket: std::net::UdpSocket,
+    /// FILETIME just before the send.
+    sent: u64,
+    port: u16,
+    target: SocketAddr,
+}
+/// Each physical default-route interface must refuse an unmarked datagram:
+/// an errno, or WFP's drop event naming our own block filter, because a UDP
+/// send succeeds even when ALE drops it. Windows Firewall or another vendor
+/// dropping it proves nothing about our guard; the read-back of our own
+/// filters is required as well.
 fn attempts(plan: &Plan, live: &sysprobe::Live) -> Vec<Attempt> {
-    if sysprobe::collides(&plan.endpoints) || !live.get() {
+    let Some(sent) = sends(plan, live) else {
         return vec![Attempt::Unknown];
+    };
+    // BFE records a drop shortly after it; give it up to half a second.
+    let mut dropped = vec![None; sent.len()];
+    // One read per round for every pending datagram (all go to port 9);
+    // none at all when every send already has an errno verdict.
+    let since = sent
+        .iter()
+        .filter_map(|(_, p)| p.as_ref().map(|p| p.sent))
+        .min()
+        .map(|at| at.saturating_sub(wfp::SLACK));
+    if let Some(since) = since {
+        for round in 0..6 {
+            if round > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if !live.get() {
+                return vec![Attempt::Unknown];
+            }
+            let events = firewall::drops(sysprobe::TARGET_V4.port(), since).ok();
+            for ((_, pending), slot) in sent.iter().zip(&mut dropped) {
+                if let Some(p) = pending
+                    && *slot != Some(true)
+                {
+                    *slot = events
+                        .as_deref()
+                        .map(|events| wfp::refused(events, p.sent, p.port, p.target));
+                }
+            }
+            if proven(&sent, &dropped) {
+                break;
+            }
+        }
+        // An unproven send is Unknown either way; say whether BFE collects
+        // drop events at all, so a host that never can prove one is told apart.
+        if !proven(&sent, &dropped) {
+            static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+            sysprobe::diagnose(&LAST, wfp::collection(firewall::net_events()));
+        }
     }
-    let Some(v4) = defaults(AF_INET, plan.index) else {
-        return vec![Attempt::Unknown];
-    };
-    let Some(v6) = defaults(AF_INET6, plan.index) else {
-        return vec![Attempt::Unknown];
-    };
-    let mut attempts = Vec::new();
+    sent.iter()
+        .zip(dropped)
+        .map(|((errno, _), dropped)| wfp::verdict(*errno, dropped))
+        .collect()
+}
+fn proven(sent: &[(Attempt, Option<Pending>)], dropped: &[Option<bool>]) -> bool {
+    sent.iter()
+        .zip(dropped)
+        .all(|((_, pending), d)| pending.is_none() || *d == Some(true))
+}
+fn sends(plan: &Plan, live: &sysprobe::Live) -> Option<Vec<(Attempt, Option<Pending>)>> {
+    if sysprobe::collides(&plan.endpoints) || !live.get() {
+        return None;
+    }
+    let v4 = defaults(AF_INET, plan.index)?;
+    let v6 = defaults(AF_INET6, plan.index)?;
+    let absent = [WSAENETUNREACH, WSAEHOSTUNREACH, WSAEADDRNOTAVAIL];
+    let mut sent = Vec::new();
     for index in v4 {
         // The run may have been dropped while IP Helper was read.
         if !live.get() {
-            return vec![Attempt::Unknown];
+            return None;
         }
-        attempts.push(match socket(false, index) {
-            Some(socket) => sysprobe::attempt(
-                sysprobe::send(&socket, sysprobe::TARGET_V4),
-                &[WSAEACCES],
-                &[],
-            ),
-            None => Attempt::Unknown,
+        sent.push(match socket(false, index) {
+            Some(socket) => send(socket, sysprobe::TARGET_V4, |result| {
+                sysprobe::attempt(result, &[WSAEACCES], &[])
+            }),
+            None => (Attempt::Unknown, None),
         });
         if !live.get() {
-            return vec![Attempt::Unknown];
+            return None;
         }
-        attempts.push(sysprobe::v6_attempt(
-            v6.contains(&index),
-            socket(true, index).map(|socket| sysprobe::send(&socket, sysprobe::TARGET_V6)),
-            &[WSAEACCES],
-            &[WSAENETUNREACH, WSAEHOSTUNREACH, WSAEADDRNOTAVAIL],
-        ));
+        let default = v6.contains(&index);
+        sent.push(match socket(true, index) {
+            Some(socket) => send(socket, sysprobe::TARGET_V6, |result| {
+                sysprobe::v6_attempt(default, Some(result), &[WSAEACCES], &absent)
+            }),
+            None => (
+                sysprobe::v6_attempt(default, None, &[WSAEACCES], &absent),
+                None,
+            ),
+        });
     }
-    attempts
+    Some(sent)
+}
+/// Only a datagram `sendto` accepted (`Leaked` by errno) waits for WFP.
+fn send(
+    socket: std::net::UdpSocket,
+    target: SocketAddr,
+    errno: impl FnOnce(Result<(), i32>) -> Attempt,
+) -> (Attempt, Option<Pending>) {
+    let at = firewall::filetime();
+    let errno = errno(sysprobe::send(&socket, target));
+    if errno != Attempt::Leaked {
+        return (errno, None);
+    }
+    match socket.local_addr() {
+        Ok(local) => (
+            errno,
+            Some(Pending {
+                sent: at,
+                port: local.port(),
+                target,
+                _socket: socket,
+            }),
+        ),
+        Err(_) => (Attempt::Unknown, None),
+    }
 }
 fn wide(text: *const u16) -> Option<String> {
     if text.is_null() {
