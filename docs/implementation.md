@@ -1,7 +1,12 @@
-# Состояние реализации — 21 октября 2026
+# Состояние реализации — 28 октября 2026
 
-Workspace: **0.6.2** (desktop update sequence 12, Android
-0.6.2 / 60202, iOS 0.6.2 / 60202). [v0.6.2](releases/v0.6.2.md) опубликован 21 октября из `4123160`:
+Workspace: **0.7.0** (desktop update sequence 13, Android
+0.7.0 / 70001, iOS 0.7.0 / 70001). Готовится релиз [v0.7.0](releases/v0.7.0.md):
+VLESS через CDN (#112), журнал неудачных подключений (#114), причины остановки
+транспорта на macOS (#113), managed access freshness на macOS (#115) и
+проверка guard на Windows (#116).
+
+[v0.6.2](releases/v0.6.2.md) опубликован 21 октября из `4123160`:
 Windows, macOS (UI Choices DMG), Linux (Flatpak, `rtrust-host-0.6.2-12`) и Android.
 
 Тег `v0.6.2` соответствует main `4123160`; в него вошли UI v3, Linux TUI,
