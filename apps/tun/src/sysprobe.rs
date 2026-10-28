@@ -457,13 +457,16 @@ pub async fn exchange(socket: std::net::UdpSocket, server: SocketAddr) -> Reply 
     let Ok(socket) = tokio::net::UdpSocket::from_std(socket) else {
         return Reply::None;
     };
+    // Public resolvers answer `.` NS without EDNS with ~800 bytes (13 NS and
+    // their glue). Windows fails a receive into a smaller buffer with
+    // WSAEMSGSIZE instead of truncating, so take any datagram whole.
+    let mut buffer = vec![0u8; 65_535];
     for _ in 0..2 {
         let id = rand::random::<u16>();
         if socket.send_to(&query(id), server).await.is_err() {
             return Reply::None;
         }
         let answer = tokio::time::timeout(ATTEMPT, async {
-            let mut buffer = [0u8; 512];
             loop {
                 let (len, from) = socket.recv_from(&mut buffer).await.ok()?;
                 if from == server {
@@ -2340,6 +2343,26 @@ mod tests {
             server.send_to(&empty, from).await.unwrap();
         });
         assert_eq!(exchange(client, address).await, Reply::Responded);
+        task.await.unwrap();
+    }
+    /// Windows 11, 2026-10-28: 1.1.1.1 answered the probe with 800 bytes and a
+    /// 512-byte receive failed with WSAEMSGSIZE, so DNS stayed `reply=none`.
+    #[tokio::test]
+    async fn exchange_takes_an_answer_larger_than_512_bytes() {
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let client = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let task = tokio::spawn(async move {
+            let mut buffer = [0u8; 512];
+            let (_, from) = server.recv_from(&mut buffer).await.unwrap();
+            let id = u16::from_be_bytes([buffer[0], buffer[1]]);
+            let mut full = tester_reply(id, [0x81, 0x80], [1, 1, 0, 0], &ROOT_NS_IN);
+            full.extend(TESTER_RECORD);
+            // Trailing additional-section bytes, as a real root NS answer has.
+            full.resize(800, 0);
+            server.send_to(&full, from).await.unwrap();
+        });
+        assert_eq!(exchange(client, address).await, Reply::Answered);
         task.await.unwrap();
     }
     #[tokio::test]
