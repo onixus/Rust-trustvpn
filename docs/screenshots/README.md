@@ -19,8 +19,10 @@ and nothing was connected while capturing.
 - **Native.** The real `App::view()` of `apps/native` at 1180×780, rendered
   offscreen at 2× by `iced_test` with the wgpu renderer used on macOS. The app
   state was built the same way as in the unit tests, so no keyring, vault or
-  service was touched. The offscreen renderer uses the Fira Sans font and has no
-  macOS glass material, so the installed app looks slightly different.
+  service was touched. Text uses the app's own settings (Helvetica Neue, 14 pt).
+  Offscreen there is no desktop behind the window, so the macOS glass material
+  is off: with glass on, the installed app shows the desktop and colour fields
+  through the window.
 - **WebView.** The real `apps/webview/ui` files in an on-screen `WKWebView`
   window (the engine Tauri uses on macOS) at 1180×780, 2×. The Tauri bridge was
   replaced by a stub that returns the JSON of a real `rtrust_desktop::Controller`
@@ -29,8 +31,9 @@ and nothing was connected while capturing.
 - **Native** — настоящий `App::view()` из `apps/native` в окне 1180×780,
   отрисованный офскрин в 2× через `iced_test` с тем же wgpu-рендерером, что на
   macOS. Состояние собрано как в unit-тестах, поэтому Keychain, хранилище и
-  служба не использовались. Шрифт Fira Sans, без стеклянного фона macOS —
-  установленное приложение выглядит немного иначе.
+  служба не использовались. Текст — с настройками приложения (Helvetica Neue,
+  14 pt). Офскрин за окном нет рабочего стола, поэтому стекло macOS выключено:
+  со стеклом установленное приложение просвечивает рабочий стол и цветовые поля.
 - **WebView** — настоящие файлы `apps/webview/ui` в видимом окне `WKWebView`
   (движок Tauri на macOS) 1180×780 в 2×. Мост Tauri заменён заглушкой, которая
   возвращает JSON настоящего `rtrust_desktop::Controller` с теми же
@@ -38,12 +41,17 @@ and nothing was connected while capturing.
 
 These are not window captures of an installed package: the installed client on
 the capture Mac holds real profiles and controls a live VPN session. Both UIs are
-shown disconnected, so the Checks rows read "no data"; a connected session is
-not staged.
+shown disconnected, so the Checks rows read "no data" and the portal actions are
+enabled; while a VPN session runs, sync actions are disabled and the status line
+shows the latest check. Dark is shown for every page; the installed app follows
+the system theme unless one is chosen in Settings.
 
 Это не снимки окна установленного пакета: установленный клиент на этом Mac
 содержит реальные профили и управляет активным VPN. Оба интерфейса сняты без
-подключения, поэтому строки проверок показывают «нет данных».
+подключения: строки проверок показывают «нет данных», действия с панелью
+доступны. Во время VPN-сессии синхронизация недоступна, а строка статуса
+показывает последнюю проверку. Все страницы сняты в тёмной теме; установленное
+приложение следует теме системы, если тема не выбрана в настройках.
 
 ## Native
 
