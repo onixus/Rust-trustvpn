@@ -7,8 +7,8 @@ android {
         applicationId (project.findProperty('rtrustApplicationId') ?: 'org.rtrusttunnel.android').toString()
         minSdk 29
         targetSdk 36
-        versionCode = (project.findProperty('rtrustVersionCode') ?: '60202').toInteger()
-        versionName '0.6.2'
+        versionCode = (project.findProperty('rtrustVersionCode') ?: '70001').toInteger()
+        versionName '0.7.0'
         ndk { abiFilters 'arm64-v8a', 'x86_64' }
         testInstrumentationRunner 'org.rtrusttunnel.android.SmokeInstrumentation'
     }

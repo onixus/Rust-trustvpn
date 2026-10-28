@@ -6,9 +6,9 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 
 Клиент реализует транспорт самостоятельно и **не является оболочкой** над официальными CLI TrustTunnel или Hysteria.
 
-> **Статус проекта: development preview, 21 октября 2026 года.**
+> **Статус проекта: development preview, 28 октября 2026 года.**
 >
-> Workspace — **0.6.2**, update sequence 12. [v0.6.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2) (21 октября, `4123160`) — последний релиз с пакетами для Windows, macOS, Linux и Android; изменения перечислены [ниже](#что-нового-в-062), простым языком — в [docs/releases/v0.6.2.md](docs/releases/v0.6.2.md). Публикация не доказывает приёмку установленного пакета или production-ready статус. См. [текущее состояние и открытые gates](docs/project-status.md). Архивы iOS есть только в [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0).
+> Workspace — **0.7.0**, update sequence 13. Готовится релиз **v0.7.0**; изменения перечислены [ниже](#что-нового-в-070), простым языком — в [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md). [v0.6.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2) (21 октября, `4123160`) — последний опубликованный релиз с пакетами для Windows, macOS, Linux и Android; его изменения перечислены [ниже](#что-нового-в-062). Публикация не доказывает приёмку установленного пакета или production-ready статус. См. [текущее состояние и открытые gates](docs/project-status.md). Архивы iOS есть только в [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0).
 
 ## Скачать
 
@@ -21,6 +21,16 @@ R-TrustTunnel — нативный VPN-клиент на Rust с поддерж�
 | iOS arm64 / Simulator | Архивы из [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0) | В v0.6.x нет iOS assets. Device archive требует Apple signing и не является готовым IPA. |
 
 В v0.6.2 есть SHA256SUMS и описание исходников сборки. Наличие файлов не заменяет проверку подписи, provenance или канала обновлений. Объём релизов: [v0.6.2](docs/releases/v0.6.2.md), [v0.6.1](docs/releases/v0.6.1.md).
+
+## Что нового в 0.7.0
+
+По сравнению с v0.6.2:
+
+- **VLESS через CDN, предварительная версия** ([#112](https://github.com/onixus/Rust-trustvpn/pull/112)). Ссылки `vless://` из CDN-панели сервера импортируются как профили и подключаются через WebSocket + TLS без программы Xray. XHTTP и эмуляция отпечатка браузера пока не поддерживаются; хранилище с профилем VLESS не читается версиями 0.6.x. См. [VLESS](docs/vless.md).
+- **Журнал неудачных подключений** ([#114](https://github.com/onixus/Rust-trustvpn/pull/114)). Службы desktop и автоматическое восстановление SOCKS ведут локальный ограниченный (7 дней, 15 МБ) журнал неудачных подключений и переподключений без адресов и учётных данных. См. [журнал диагностики](docs/diagnostics-journal.md).
+- **Причины остановки транспорта на macOS** ([#113](https://github.com/onixus/Rust-trustvpn/pull/113)). В журнале службы видно, кто закрыл транспорт и на каком шаге не удалось переподключиться.
+- **Managed access freshness на macOS** ([#115](https://github.com/onixus/Rust-trustvpn/pull/115)). Управляемые профили с ограниченным сроком доступа снова подключаются в режиме «весь компьютер»; срок контролирует сама служба.
+- **Проверка guard на Windows** ([#116](https://github.com/onixus/Rust-trustvpn/pull/116)). Пробный пакет, остановленный нашим WFP-фильтром, теперь доказывает работу guard, и «Защита» и «DNS» больше не показывают ложную ошибку.
 
 ## Что нового в 0.6.2
 
@@ -185,7 +195,7 @@ SOCKS5 не меняет системные маршруты и DNS. BIND, SOCKS
 5. Для fail-closed поведения после гибели процесса включите в Android **Always-on VPN** и **Block connections without VPN**.
 6. Server profiles можно регистрировать и синхронизировать через portal integration.
 
-В текущих исходниках заданы Android minSdk 29, targetSdk 36, versionCode 60202 и versionName 0.6.2 ([v0.6.2](docs/releases/v0.6.2.md)); APK подписывается релизным ключом, введённым в v0.6.0, и не обновляет установки 0.5.0 и старше.
+В текущих исходниках заданы Android minSdk 29, targetSdk 36, versionCode 70001 и versionName 0.7.0 ([v0.7.0](docs/releases/v0.7.0.md)); APK подписывается релизным ключом, введённым в v0.6.0, и не обновляет установки 0.5.0 и старше.
 
 См. [Android](docs/android.md) и [обмен профилями](docs/portal.md).
 

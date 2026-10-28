@@ -6,9 +6,9 @@ R-TrustTunnel is a native VPN client written in Rust for **TrustTunnel**, **Hyst
 
 The client implements its own transport and does **not** wrap the official TrustTunnel or Hysteria CLI.
 
-> **Project status: development preview, October 21, 2026.**
+> **Project status: development preview, October 28, 2026.**
 >
-> The source workspace is **0.6.2**, update sequence 12. [v0.6.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2) (October 21, `4123160`) is the latest release, with packages for Windows, macOS, Linux and Android; changes are listed [below](#whats-new-in-062) and in plain language in [docs/releases/v0.6.2.md](docs/releases/v0.6.2.md). Publication does not establish installed-package acceptance or production readiness. See [current implementation and open gates](docs/project-status.md). iOS archives are only in [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0).
+> The source workspace is **0.7.0**, update sequence 13. The **v0.7.0** release is being prepared; its changes are listed [below](#whats-new-in-070) and in plain language in [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md). [v0.6.2](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2) (October 21, `4123160`) is the latest published release, with packages for Windows, macOS, Linux and Android; its changes are listed [below](#whats-new-in-062). Publication does not establish installed-package acceptance or production readiness. See [current implementation and open gates](docs/project-status.md). iOS archives are only in [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0).
 
 ## Download
 
@@ -21,6 +21,16 @@ The client implements its own transport and does **not** wrap the official Trust
 | iOS arm64 / Simulator | Archives from [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0) | No iOS assets in v0.6.x. Device archive requires Apple signing and is not an installable IPA. |
 
 v0.6.2 includes SHA256SUMS and its source identity. Their presence is not independent signature, provenance or update-channel verification. Release scope: [v0.6.2](docs/releases/v0.6.2.md), [v0.6.1](docs/releases/v0.6.1.md).
+
+## What's new in 0.7.0
+
+Since v0.6.2:
+
+- **VLESS over a CDN, preview** ([#112](https://github.com/onixus/Rust-trustvpn/pull/112)). `vless://` links from the server's CDN panel import as profiles and connect over WebSocket + TLS without an Xray binary. XHTTP and browser fingerprints are not supported yet, and a vault with a VLESS profile cannot be read by 0.6.x. See [VLESS](docs/vless.md).
+- **Connection failure journal** ([#114](https://github.com/onixus/Rust-trustvpn/pull/114)). The desktop services and automatic SOCKS recovery keep a local, bounded (7 days, 15 MB) journal of failed connects and reconnects without addresses or credentials. See [diagnostics journal](docs/diagnostics-journal.md).
+- **Transport stop reasons on macOS** ([#113](https://github.com/onixus/Rust-trustvpn/pull/113)). The service journal names who closed the transport and which reconnect step failed.
+- **macOS managed access freshness** ([#115](https://github.com/onixus/Rust-trustvpn/pull/115)). Managed profiles with a finite lease connect in whole-computer mode again; the service enforces the lease itself.
+- **Windows guard probe** ([#116](https://github.com/onixus/Rust-trustvpn/pull/116)). A probe datagram dropped by our own WFP filter now proves the guard, so Protection and DNS no longer show a false failure.
 
 ## What's new in 0.6.2
 
@@ -185,7 +195,7 @@ See [desktop lifecycle](docs/desktop-lifecycle.md) and [Always-on](docs/always-o
 5. For fail-closed behaviour after process death, enable Android **Always-on VPN** and **Block connections without VPN**.
 6. Server profiles can be enrolled and synchronized through the portal integration.
 
-The source tree currently declares Android minSdk 29, targetSdk 36, versionCode 60202 and versionName 0.6.2 ([v0.6.2](docs/releases/v0.6.2.md)), signed with the release key introduced in v0.6.0 (it does not update APKs from v0.5.0 or earlier).
+The source tree currently declares Android minSdk 29, targetSdk 36, versionCode 70001 and versionName 0.7.0 ([v0.7.0](docs/releases/v0.7.0.md)), signed with the release key introduced in v0.6.0 (it does not update APKs from v0.5.0 or earlier).
 
 See [Android documentation](docs/android.md) and [profile exchange](docs/portal.md).
 
