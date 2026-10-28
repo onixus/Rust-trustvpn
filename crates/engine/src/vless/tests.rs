@@ -33,6 +33,8 @@ const SINK_TOTAL: usize = 1024 * 1024;
 /// UDP: takes the request and every packet but never answers, as Xray now and
 /// then does on a fresh connection; the socket stays open.
 const MUTE: u8 = 11;
+/// Answers the upgrade after 700 ms, past the test DNS idle limit, then echoes.
+const SLUGGISH: u8 = 12;
 
 #[derive(Debug)]
 struct Request {
@@ -137,8 +139,10 @@ async fn serve(
         .unwrap()
         .to_owned();
     assert!(head.contains(&format!("Host: {HOST}\r\n")));
-    if mode == SLOW {
-        tokio::time::sleep(Duration::from_millis(300)).await;
+    match mode {
+        SLOW => tokio::time::sleep(Duration::from_millis(300)).await,
+        SLUGGISH => tokio::time::sleep(Duration::from_millis(700)).await,
+        _ => {}
     }
     let reply = match mode {
         HANG => {
@@ -516,6 +520,19 @@ async fn answer(tunnel: &mut Tunnel) -> Option<Datagram> {
 }
 
 #[tokio::test]
+async fn a_dns_query_outlives_a_slow_dial() {
+    let e = endpoint(&[HOST], &[b"http/1.1"]).await;
+    let session = Session::connect(&e.profile).await.unwrap();
+    let mut tunnel = session.open_udp().await.unwrap();
+    // The dial takes longer than the DNS idle limit: the query is still answered.
+    e.mode.store(SLUGGISH, Ordering::SeqCst);
+    send_udp(&mut tunnel, "10.0.0.2:5000", "192.0.2.53:53", vec![3]).await;
+    let d = answer(&mut tunnel).await.expect("the query is answered");
+    assert_eq!(d.payload, [3]);
+    assert_eq!(e.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn fresh_source_ports_never_exhaust_the_flow_table() {
     let e = endpoint(&[HOST], &[b"http/1.1"]).await;
     let session = Session::connect(&e.profile).await.unwrap();
@@ -533,7 +550,9 @@ async fn fresh_source_ports_never_exhaust_the_flow_table() {
                 vec![7],
             )
             .await;
-            let d = answer(&mut tunnel).await.expect("every query is answered");
+            let d = answer(&mut tunnel)
+                .await
+                .unwrap_or_else(|| panic!("query from port {port} is answered"));
             assert_eq!(d.destination.port(), port);
         }
     }

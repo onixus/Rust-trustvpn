@@ -18,7 +18,9 @@ pub(super) const SESSION_FLOWS: usize = 1024;
 /// A flow the server has not answered for this long is closed; the next
 /// datagram opens a new one. Xray answers a blocked target with silence.
 const IDLE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 60 });
-/// DNS flows are one query and its answer: closed soon after the last packet.
+/// DNS flows are one query and its answer: closed soon after the last packet
+/// once answered. An unanswered one waits [`IDLE`], so a slow dial does not
+/// close it before its answer arrives.
 const DNS_IDLE: Duration = Duration::from_millis(if cfg!(test) { 500 } else { 5000 });
 /// Xray occasionally never relays any answer of a fresh UDP connection (seen
 /// with a plain client too). A flow that heard nothing this long after it
@@ -66,8 +68,8 @@ impl Drop for Flow {
 fn dns(key: &Key) -> bool {
     key.1.port() == 53
 }
-fn expired(key: &Key, flow: &Flow) -> bool {
-    flow.answered.elapsed() >= IDLE || (dns(key) && flow.active.elapsed() >= DNS_IDLE)
+fn expired(flow: &Flow) -> bool {
+    flow.answered.elapsed() >= IDLE || (flow.resolved && flow.active.elapsed() >= DNS_IDLE)
 }
 /// Removes the flow to give up first: answered DNS, then the least recently active.
 fn evict(flows: &mut HashMap<Key, Flow>) -> bool {
@@ -100,7 +102,7 @@ async fn relay(session: VlessSession, bridge: DuplexStream) -> Result<()> {
     let mut sweep = tokio::time::interval(SWEEP);
     loop {
         tokio::select! {
-            _ = sweep.tick() => flows.retain(|key, flow| !expired(key, flow)),
+            _ = sweep.tick() => flows.retain(|_, flow| !expired(flow)),
             datagram = &mut request => {
                 let d = datagram?;
                 drop(request);
@@ -113,7 +115,7 @@ async fn relay(session: VlessSession, bridge: DuplexStream) -> Result<()> {
                 let unheard = flows.get(&key).is_some_and(|flow| {
                     !flow.heard && flow.opened.elapsed() >= FIRST_ANSWER && flow.carrying.load(Ordering::Relaxed)
                 });
-                if flows.get(&key).is_some_and(|flow| flow.packets.is_closed() || expired(&key, flow))
+                if flows.get(&key).is_some_and(|flow| flow.packets.is_closed() || expired(flow))
                     || (unheard && reopened.len() < REOPENED && reopened.insert(key))
                 {
                     flows.remove(&key);
