@@ -8,6 +8,7 @@ mod liveness;
 pub mod proxy;
 pub mod routing;
 pub mod udp;
+mod vless;
 use base64::Engine;
 use bytes::Bytes;
 use http::{Request, StatusCode};
@@ -86,6 +87,12 @@ pub enum Error {
     Io,
     #[error("Invalid destination authority")]
     Destination,
+    /// VLESS: the endpoint accepted several streams in a row and closed each
+    /// without sending anything (an unknown or revoked UUID looks like this,
+    /// and so do unreachable targets); new streams wait for a backoff. Nothing
+    /// here proves which, so the text claims only what was seen.
+    #[error("Endpoint closed recent streams without data")]
+    Unanswered,
     /// Outbound traffic stayed unanswered while opens to several destinations
     /// failed or stayed silent, or most TCP flows that wrote first across
     /// several hosts never got an answer. `proven`: the session delivered
@@ -302,6 +309,10 @@ impl From<std::io::Error> for Error {
 /// All unsupported security-sensitive fields fail closed. Routes are not applied by diagnostic mode.
 pub fn check_capabilities(p: &Profile) -> Result<()> {
     p.validate().map_err(|_| Error::Profile)?;
+    // XHTTP links import for export, but only the WebSocket transport connects.
+    if p.vless.as_ref().is_some_and(|v| v.transport != "ws") {
+        return Err(Error::Unsupported("VLESS XHTTP transport"));
+    }
     let e = &p.endpoint;
     if e.skip_verification {
         return Err(Error::Unsupported("disabled certificate verification"));
@@ -334,6 +345,7 @@ enum Transport {
     H3(h3transport::H3Session),
     Hysteria(hysteria::HysteriaSession),
     Amnezia(amnezia::AmneziaSession),
+    Vless(vless::VlessSession),
 }
 /// Closed diagnostic vocabulary; never includes the profile's raw transport string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -353,6 +365,8 @@ pub fn planned_transport(p: &Profile) -> PlannedTransport {
             PlannedTransport::H3
         }
         rtrust_profile::Protocol::TrustTunnel => PlannedTransport::H2,
+        // The journal vocabulary has no VLESS token yet; keep it closed.
+        rtrust_profile::Protocol::Vless => PlannedTransport::Unknown,
     }
 }
 impl Session {
@@ -372,29 +386,23 @@ impl Session {
     pub async fn connect(p: &Profile) -> Result<Self> {
         check_capabilities(p)?;
         tokio::time::timeout(Duration::from_secs(20), async {
-            if p.protocol == rtrust_profile::Protocol::AmneziaWg {
-                return Ok(Self::new(
-                    Transport::Amnezia(amnezia::AmneziaSession::connect(p, None, None).await?),
-                    p.endpoint.has_ipv6,
-                ));
-            }
-            if p.protocol == rtrust_profile::Protocol::Hysteria2 {
-                return Ok(Self::new(
-                    Transport::Hysteria(hysteria::HysteriaSession::connect(p, None, None).await?),
-                    p.endpoint.has_ipv6,
-                ));
-            }
-            if p.endpoint.upstream_protocol == "http3" {
-                Ok(Self::new(
-                    Transport::H3(h3transport::H3Session::connect(p, None, None).await?),
-                    p.endpoint.has_ipv6,
-                ))
-            } else {
-                Ok(Self::new(
-                    Transport::H2(H2Session::connect(p).await?),
-                    p.endpoint.has_ipv6,
-                ))
-            }
+            use rtrust_profile::Protocol;
+            let transport = match p.protocol {
+                Protocol::AmneziaWg => {
+                    Transport::Amnezia(amnezia::AmneziaSession::connect(p, None, None).await?)
+                }
+                Protocol::Hysteria2 => {
+                    Transport::Hysteria(hysteria::HysteriaSession::connect(p, None, None).await?)
+                }
+                Protocol::Vless => {
+                    Transport::Vless(vless::VlessSession::connect(p, None, None).await?)
+                }
+                Protocol::TrustTunnel if p.endpoint.upstream_protocol == "http3" => {
+                    Transport::H3(h3transport::H3Session::connect(p, None, None).await?)
+                }
+                Protocol::TrustTunnel => Transport::H2(H2Session::connect(p).await?),
+            };
+            Ok(Self::new(transport, p.endpoint.has_ipv6))
         })
         .await
         .map_err(|_| Error::Timeout)?
@@ -403,90 +411,72 @@ impl Session {
     #[cfg(target_os = "linux")]
     pub async fn connect_marked(p: &Profile, mark: u32) -> Result<Self> {
         check_capabilities(p)?;
-        if p.protocol == rtrust_profile::Protocol::AmneziaWg && mark != 0 {
-            return tokio::time::timeout(
-                Duration::from_secs(20),
-                amnezia::AmneziaSession::connect(p, Some(mark), None),
-            )
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map(|s| Self::new(Transport::Amnezia(s), p.endpoint.has_ipv6));
-        }
-        if p.protocol == rtrust_profile::Protocol::Hysteria2 && mark != 0 {
-            return tokio::time::timeout(
-                Duration::from_secs(20),
-                hysteria::HysteriaSession::connect(p, Some(mark), None),
-            )
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map(|s| Self::new(Transport::Hysteria(s), p.endpoint.has_ipv6));
-        }
         if mark == 0 {
             return Err(Error::Unsupported("marked transport requires a mark"));
         }
-        if p.endpoint.upstream_protocol == "http3" {
-            return tokio::time::timeout(
-                Duration::from_secs(20),
-                h3transport::H3Session::connect(p, Some(mark), None),
-            )
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map(|s| Self::new(Transport::H3(s), p.endpoint.has_ipv6));
-        }
-        let session = tokio::time::timeout(
-            Duration::from_secs(20),
-            H2Session::connect_inner(p, Some(mark), None),
-        )
+        tokio::time::timeout(Duration::from_secs(20), async {
+            use rtrust_profile::Protocol;
+            let mark = Some(mark);
+            let transport = match p.protocol {
+                Protocol::AmneziaWg => {
+                    Transport::Amnezia(amnezia::AmneziaSession::connect(p, mark, None).await?)
+                }
+                Protocol::Hysteria2 => {
+                    Transport::Hysteria(hysteria::HysteriaSession::connect(p, mark, None).await?)
+                }
+                Protocol::Vless => {
+                    Transport::Vless(vless::VlessSession::connect(p, mark, None).await?)
+                }
+                Protocol::TrustTunnel if p.endpoint.upstream_protocol == "http3" => {
+                    Transport::H3(h3transport::H3Session::connect(p, mark, None).await?)
+                }
+                Protocol::TrustTunnel => {
+                    Transport::H2(H2Session::connect_inner(p, mark, None).await?)
+                }
+            };
+            Ok(Self::new(transport, p.endpoint.has_ipv6))
+        })
         .await
-        .map_err(|_| Error::Timeout)??;
-        Ok(Self::new(Transport::H2(session), p.endpoint.has_ipv6))
+        .map_err(|_| Error::Timeout)?
     }
     #[cfg(unix)]
     pub async fn connect_protected(p: &Profile, protector: &SocketProtector) -> Result<Self> {
         check_capabilities(p)?;
-        if p.protocol == rtrust_profile::Protocol::AmneziaWg {
-            return tokio::time::timeout(
-                Duration::from_secs(20),
-                amnezia::AmneziaSession::connect(p, None, Some(protector)),
-            )
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map(|s| Self::new(Transport::Amnezia(s), p.endpoint.has_ipv6));
-        }
-        if p.protocol == rtrust_profile::Protocol::Hysteria2 {
-            return tokio::time::timeout(
-                Duration::from_secs(20),
-                hysteria::HysteriaSession::connect(p, None, Some(protector)),
-            )
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map(|s| Self::new(Transport::Hysteria(s), p.endpoint.has_ipv6));
-        }
-        if p.endpoint.upstream_protocol == "http3" {
-            return tokio::time::timeout(
-                Duration::from_secs(20),
-                h3transport::H3Session::connect(p, None, Some(protector)),
-            )
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map(|s| Self::new(Transport::H3(s), p.endpoint.has_ipv6));
-        }
-        if p.endpoint
-            .addresses
-            .iter()
-            .any(|address| address.parse::<std::net::SocketAddr>().is_err())
+        use rtrust_profile::Protocol;
+        if p.protocol == Protocol::TrustTunnel
+            && p.endpoint.upstream_protocol != "http3"
+            && p.endpoint
+                .addresses
+                .iter()
+                .any(|address| address.parse::<std::net::SocketAddr>().is_err())
         {
             return Err(Error::Unsupported(
                 "resolve endpoint on the underlying network before VPN setup",
             ));
         }
-        let session = tokio::time::timeout(
-            Duration::from_secs(20),
-            H2Session::connect_inner(p, None, Some(protector)),
-        )
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let protector = Some(protector);
+            let transport = match p.protocol {
+                Protocol::AmneziaWg => {
+                    Transport::Amnezia(amnezia::AmneziaSession::connect(p, None, protector).await?)
+                }
+                Protocol::Hysteria2 => Transport::Hysteria(
+                    hysteria::HysteriaSession::connect(p, None, protector).await?,
+                ),
+                Protocol::Vless => {
+                    Transport::Vless(vless::VlessSession::connect(p, None, protector).await?)
+                }
+                Protocol::TrustTunnel if p.endpoint.upstream_protocol == "http3" => {
+                    Transport::H3(h3transport::H3Session::connect(p, None, protector).await?)
+                }
+                Protocol::TrustTunnel => {
+                    Transport::H2(H2Session::connect_inner(p, None, protector).await?)
+                }
+            };
+            Ok(Self::new(transport, p.endpoint.has_ipv6))
+        })
         .await
-        .map_err(|_| Error::Timeout)??;
-        Ok(Self::new(Transport::H2(session), p.endpoint.has_ipv6))
+        .map_err(|_| Error::Timeout)?
     }
     /// Why the underlying connection closed, once it has.
     pub fn closed(&self) -> Option<Close> {
@@ -495,6 +485,8 @@ impl Session {
             Transport::H3(s) => s.closed(),
             Transport::Hysteria(s) => s.closed(),
             Transport::Amnezia(_) => None,
+            // No session-wide connection: every VLESS flow has its own.
+            Transport::Vless(_) => None,
         }
     }
     /// Stable transport token for event logs.
@@ -504,6 +496,7 @@ impl Session {
             Transport::H3(_) => "h3",
             Transport::Hysteria(_) => "hysteria2",
             Transport::Amnezia(_) => "amneziawg",
+            Transport::Vless(_) => "vless",
         }
     }
     /// False when the endpoint has no IPv6 egress; IPv6 flows must fail locally.
@@ -521,6 +514,7 @@ impl Session {
             Transport::H3(s) => s.health().await,
             Transport::Hysteria(s) => s.health().await,
             Transport::Amnezia(s) => s.health().await,
+            Transport::Vless(s) => s.health().await,
         };
         if let Err(error) = checked {
             return Err(on_closed(error, self.closed()));
@@ -540,6 +534,7 @@ impl Session {
             Transport::H3(s) => s.open(target).await,
             Transport::Hysteria(s) => s.open_tcp(target).await,
             Transport::Amnezia(s) => s.open_tcp(target).await,
+            Transport::Vless(s) => s.open_tcp(target).await,
         };
         self.track(opened, Some((target, started)))
     }
@@ -551,6 +546,7 @@ impl Session {
                 return Err(Error::Unsupported("Hysteria does not relay ICMP"));
             }
             Transport::Amnezia(_) => return Err(Error::Unsupported("ICMP relay over AmneziaWG")),
+            Transport::Vless(_) => return Err(Error::Unsupported("ICMP relay over VLESS")),
         };
         self.track(opened, None)
     }
@@ -560,6 +556,7 @@ impl Session {
             Transport::H3(s) => s.open("_udp2").await,
             Transport::Hysteria(s) => s.open_udp().await,
             Transport::Amnezia(s) => s.open_udp().await,
+            Transport::Vless(s) => s.open_udp().await,
         };
         self.track(opened, None)
     }
@@ -608,6 +605,12 @@ pub struct H2Session(Arc<Inner>);
 impl H2Session {
     pub async fn connect(p: &Profile) -> Result<Self> {
         check_capabilities(p)?;
+        // Credentials of another protocol are never sent as TrustTunnel CONNECT auth.
+        if p.protocol != rtrust_profile::Protocol::TrustTunnel {
+            return Err(Error::Unsupported(
+                "TrustTunnel transport for another protocol",
+            ));
+        }
         tokio::time::timeout(Duration::from_secs(20), Self::connect_inner(p, None, None))
             .await
             .map_err(|_| Error::Timeout)?
@@ -642,18 +645,7 @@ impl H2Session {
         }
         let tcp = connected.ok_or(failure)?;
         tcp.set_nodelay(true)?;
-        let tls = connector.connect(name, tcp).await.map_err(|error| {
-            // EOF/reset while an endpoint restarts is a transport failure, not
-            // evidence of an invalid certificate. Never log the error payload.
-            if error
-                .get_ref()
-                .is_some_and(|cause| cause.is::<rustls::Error>())
-            {
-                Error::Tls
-            } else {
-                Error::ConnectIo(error.kind())
-            }
-        })?;
+        let tls = connector.connect(name, tcp).await.map_err(tls_failure)?;
         if tls.get_ref().1.alpn_protocol() != Some(b"h2".as_slice()) {
             return Err(Error::Protocol);
         }
@@ -893,6 +885,18 @@ pub async fn probe_http(p: &Profile, destination: &str) -> Result<String> {
     .map_err(|_| Error::Timeout)?
 }
 
+/// EOF/reset while an endpoint restarts is a transport failure, not evidence
+/// of an invalid certificate. Never log the error payload.
+fn tls_failure(error: std::io::Error) -> Error {
+    if error
+        .get_ref()
+        .is_some_and(|cause| cause.is::<rustls::Error>())
+    {
+        Error::Tls
+    } else {
+        Error::ConnectIo(error.kind())
+    }
+}
 fn tls_config(p: &Profile) -> Result<rustls::ClientConfig> {
     tls_config_with_ca(&p.endpoint.certificate)
 }

@@ -6,3 +6,12 @@ useDefault = true
 [[allowlists]]
 description = "CI tool cache and generated SHA-256 source manifest only"
 paths = ['''^\.ci-tools/''', '''^source-manifest\.json$''']
+
+# Pinned official Xray-core release SHA-256 digests in the VLESS interop
+# fixture match the generic JFrog token pattern; they are public checksums.
+[[allowlists]]
+description = "Xray-core release SHA-256 digests in the VLESS interop fixture"
+condition = "AND"
+targetRules = ["jfrog-identity-token"]
+paths = ['''^ci/vless_interop\.py$''']
+regexes = ['''^[0-9a-f]{64}$''']

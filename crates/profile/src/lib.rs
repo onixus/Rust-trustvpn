@@ -3,15 +3,19 @@ pub mod amnezia;
 pub mod hysteria;
 mod link;
 pub mod routing;
+pub mod vless;
 pub use amnezia::AmneziaWg;
 pub use hysteria::{Hysteria2, Protocol};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, fmt};
+pub use vless::Vless;
 use zeroize::Zeroize;
 
 pub const MAX_INPUT: usize = 1024 * 1024;
 pub const MAX_LINK: usize = 64 * 1024;
+/// Link schemes `Profile::import` accepts, for callers that tell links from file paths.
+pub const LINK_SCHEMES: [&str; 4] = ["tt://", "hy2://", "hysteria2://", "vless://"];
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
@@ -103,6 +107,8 @@ pub struct Profile {
     pub hysteria2: Option<Hysteria2>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amneziawg: Option<AmneziaWg>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vless: Option<Vless>,
     pub name: String,
     pub endpoint: Endpoint,
     #[serde(default)]
@@ -168,14 +174,26 @@ impl Profile {
         match self.protocol {
             Protocol::Hysteria2 => "Hysteria 2",
             Protocol::AmneziaWg => "AmneziaWG",
+            Protocol::Vless => match self.vless.as_ref().map(|v| v.transport.as_str()) {
+                Some("xhttp") => "VLESS XHTTP",
+                _ => "VLESS WS",
+            },
             Protocol::TrustTunnel => &self.endpoint.upstream_protocol,
         }
+    }
+    /// True when the link asked for a browser TLS fingerprint (`fp=chrome`):
+    /// it is kept for export, but the client's TLS handshake is its own.
+    pub fn tls_fingerprint_unemulated(&self) -> bool {
+        self.vless
+            .as_ref()
+            .is_some_and(|v| !v.fingerprint.is_empty())
     }
     /// True when the transport to the server is UDP (QUIC or WireGuard), so a
     /// kill switch must admit UDP rather than TCP to the endpoint.
     pub fn udp_transport(&self) -> bool {
         match self.protocol {
             Protocol::Hysteria2 | Protocol::AmneziaWg => true,
+            Protocol::Vless => false,
             Protocol::TrustTunnel => self.endpoint.upstream_protocol == "http3",
         }
     }
@@ -190,7 +208,7 @@ impl Profile {
     }
     pub fn formats(&self) -> &'static [Format] {
         match self.protocol {
-            Protocol::Hysteria2 => &[Format::Json, Format::Link],
+            Protocol::Hysteria2 | Protocol::Vless => &[Format::Json, Format::Link],
             Protocol::AmneziaWg => &[Format::Json, Format::Conf],
             Protocol::TrustTunnel => &Format::ALL,
         }
@@ -201,6 +219,7 @@ impl Profile {
             protocol: Protocol::TrustTunnel,
             hysteria2: None,
             amneziawg: None,
+            vless: None,
             name,
             endpoint,
             policy: Value::Null,
@@ -209,7 +228,26 @@ impl Profile {
             unknown_tlv: vec![],
         }
     }
+    /// Imports any supported format. Line breaks and bidi overrides, which can
+    /// disguise a name in lists and logs, are removed from imported names; stored
+    /// profiles are not rejected for them, so an older vault still opens.
     pub fn import(input: &str) -> Result<Self> {
+        let mut p = Self::parse(input)?;
+        let name: String = p
+            .name
+            .chars()
+            .filter(|c| !c.is_control() && !vless::bidi(*c))
+            .collect();
+        if name != p.name {
+            p.name = match name.trim() {
+                "" => p.endpoint.hostname.clone(),
+                name => name.to_owned(),
+            };
+            p.validate()?;
+        }
+        Ok(p)
+    }
+    fn parse(input: &str) -> Result<Self> {
         if input.len() > MAX_INPUT {
             return Err(Error::TooLarge);
         }
@@ -219,6 +257,9 @@ impl Profile {
         }
         if input.starts_with("tt://") {
             return link::decode(input);
+        }
+        if input.starts_with("vless://") {
+            return vless::link(input);
         }
         if !input.starts_with('{') && amnezia::detect(input) {
             return amnezia::conf(input);
@@ -361,19 +402,42 @@ impl Profile {
         if self.schema_version != 1 {
             return Err(Error::Version);
         }
-        match (&self.protocol, &self.hysteria2, &self.amneziawg) {
-            (Protocol::TrustTunnel, None, None) => {}
-            (Protocol::Hysteria2, Some(options), None) => {
+        match (
+            &self.protocol,
+            &self.hysteria2,
+            &self.amneziawg,
+            &self.vless,
+        ) {
+            (Protocol::TrustTunnel, None, None, None) => {}
+            (Protocol::Hysteria2, Some(options), None, None) => {
                 options.validate()?;
                 if self.endpoint.upstream_protocol != "http3" || self.original_cli.is_some() {
                     return Err(Error::Field("protocol"));
                 }
             }
-            (Protocol::AmneziaWg, None, Some(options)) => {
+            (Protocol::AmneziaWg, None, Some(options), None) => {
                 options.validate()?;
                 amnezia::key(self.endpoint.password.expose(), "private key")?;
                 // Several addresses are the resolved addresses of the one peer.
                 if self.endpoint.upstream_protocol != "http3" || self.original_cli.is_some() {
+                    return Err(Error::Field("protocol"));
+                }
+            }
+            (Protocol::Vless, None, None, Some(options)) => {
+                options.validate()?;
+                let e = &self.endpoint;
+                // The UUID is the credential; SNI and Host are the one DNS name.
+                let id = e.password.expose();
+                if !vless::canonical_uuid(id)
+                    || id.bytes().any(|b| b.is_ascii_uppercase())
+                    || e.username.expose() != vless::USERNAME
+                {
+                    return Err(Error::Field("uuid"));
+                }
+                if !vless::dns_name(&e.hostname) || !e.custom_sni.is_empty() {
+                    return Err(Error::Field("sni"));
+                }
+                if e.upstream_protocol != "http2" || self.original_cli.is_some() {
                     return Err(Error::Field("protocol"));
                 }
             }
@@ -449,86 +513,90 @@ impl Profile {
         if format == Format::Conf && self.protocol != Protocol::AmneziaWg {
             return Err(Error::Field("only AmneziaWG profiles export a config"));
         }
-        if self.protocol == Protocol::AmneziaWg {
-            return match format {
-                Format::Json => Ok(Export {
-                    content: serde_json::to_string_pretty(self).map_err(|_| Error::Syntax)?,
-                    losses: vec![],
-                }),
-                Format::Conf => {
-                    let mut losses = vec![];
-                    if !self.policy.is_null() {
-                        losses.push("Routing policy is only preserved in JSON");
-                    }
-                    if !self.extensions.is_empty()
-                        || !self.endpoint.extra.is_empty()
-                        || !self.endpoint.dns_upstreams.is_empty()
-                    {
-                        losses.push("Additional profile fields are only preserved in JSON");
-                    }
-                    Ok(Export {
-                        content: amnezia::encode(self)?,
-                        losses,
-                    })
-                }
-                _ => Err(Error::Field(
-                    "AmneziaWG exports require JSON or an AmneziaWG config",
-                )),
-            };
-        }
-        if self.protocol == Protocol::Hysteria2 {
-            return match format {
-                Format::Json => Ok(Export {
-                    content: serde_json::to_string_pretty(self).map_err(|_| Error::Syntax)?,
-                    losses: vec![],
-                }),
-                Format::Link => {
-                    let mut losses = vec![];
-                    if !self.policy.is_null() {
-                        losses.push("Routing policy is only preserved in JSON");
-                    }
-                    if !self.endpoint.certificate.is_empty() {
-                        losses.push("Custom CA certificate is only preserved in JSON");
-                    }
-                    if !self.endpoint.dns_upstreams.is_empty() {
-                        losses.push("DNS upstreams are only preserved in JSON");
-                    }
-                    if !self.endpoint.has_ipv6 {
-                        losses.push("IPv6 restriction is only preserved in JSON");
-                    }
-                    if let Some(h) = &self.hysteria2 {
-                        if h.hop_interval_min_ms != 0 {
-                            losses.push("Port hopping interval is only preserved in JSON");
+        match self.protocol {
+            Protocol::AmneziaWg => {
+                return match format {
+                    Format::Json => Ok(Export {
+                        content: serde_json::to_string_pretty(self).map_err(|_| Error::Syntax)?,
+                        losses: vec![],
+                    }),
+                    Format::Conf => {
+                        let mut losses = vec![];
+                        if !self.policy.is_null() {
+                            losses.push("Routing policy is only preserved in JSON");
                         }
-                        if h.up_bps != 0
-                            || h.down_bps != 0
-                            || !h.congestion.is_empty()
-                            || h.quic != Default::default()
+                        if !self.extensions.is_empty()
+                            || !self.endpoint.extra.is_empty()
+                            || !self.endpoint.dns_upstreams.is_empty()
                         {
-                            losses.push("Bandwidth, congestion and QUIC settings are only preserved in JSON");
+                            losses.push("Additional profile fields are only preserved in JSON");
                         }
-                        if !h.client_certificate.is_empty() {
-                            losses.push("Client certificate is only preserved in JSON");
-                        }
-                        if h.gecko.as_ref().is_some_and(|g| *g != Default::default()) {
-                            losses.push("Gecko packet sizes are only preserved in JSON");
-                        }
+                        Ok(Export {
+                            content: amnezia::encode(self)?,
+                            losses,
+                        })
                     }
-                    if !self.extensions.is_empty()
-                        || !self.endpoint.extra.is_empty()
-                        || !self.unknown_tlv.is_empty()
-                    {
-                        losses.push("Additional profile fields are only preserved in JSON");
+                    _ => Err(Error::Field(
+                        "AmneziaWG exports require JSON or an AmneziaWG config",
+                    )),
+                };
+            }
+            Protocol::Hysteria2 => {
+                return match format {
+                    Format::Json => Ok(Export {
+                        content: serde_json::to_string_pretty(self).map_err(|_| Error::Syntax)?,
+                        losses: vec![],
+                    }),
+                    Format::Link => {
+                        let mut losses = vec![];
+                        if !self.policy.is_null() {
+                            losses.push("Routing policy is only preserved in JSON");
+                        }
+                        if !self.endpoint.certificate.is_empty() {
+                            losses.push("Custom CA certificate is only preserved in JSON");
+                        }
+                        if !self.endpoint.dns_upstreams.is_empty() {
+                            losses.push("DNS upstreams are only preserved in JSON");
+                        }
+                        if !self.endpoint.has_ipv6 {
+                            losses.push("IPv6 restriction is only preserved in JSON");
+                        }
+                        if let Some(h) = &self.hysteria2 {
+                            if h.hop_interval_min_ms != 0 {
+                                losses.push("Port hopping interval is only preserved in JSON");
+                            }
+                            if h.up_bps != 0
+                                || h.down_bps != 0
+                                || !h.congestion.is_empty()
+                                || h.quic != Default::default()
+                            {
+                                losses.push("Bandwidth, congestion and QUIC settings are only preserved in JSON");
+                            }
+                            if !h.client_certificate.is_empty() {
+                                losses.push("Client certificate is only preserved in JSON");
+                            }
+                            if h.gecko.as_ref().is_some_and(|g| *g != Default::default()) {
+                                losses.push("Gecko packet sizes are only preserved in JSON");
+                            }
+                        }
+                        if !self.extensions.is_empty()
+                            || !self.endpoint.extra.is_empty()
+                            || !self.unknown_tlv.is_empty()
+                        {
+                            losses.push("Additional profile fields are only preserved in JSON");
+                        }
+                        Ok(Export {
+                            content: hysteria::encode(self)?,
+                            losses,
+                        })
                     }
-                    Ok(Export {
-                        content: hysteria::encode(self)?,
-                        losses,
-                    })
-                }
-                _ => Err(Error::Field(
-                    "Hysteria 2 exports require JSON or a hy2 link",
-                )),
-            };
+                    _ => Err(Error::Field(
+                        "Hysteria 2 exports require JSON or a hy2 link",
+                    )),
+                };
+            }
+            Protocol::Vless => return self.export_vless(format),
+            Protocol::TrustTunnel => {}
         }
         let mut losses = vec![];
         if format != Format::Json {
@@ -585,6 +653,44 @@ impl Profile {
             return Err(Error::TooLarge);
         }
         Ok(Export { content, losses })
+    }
+    fn export_vless(&self, format: Format) -> Result<Export> {
+        match format {
+            Format::Json => Ok(Export {
+                content: serde_json::to_string_pretty(self).map_err(|_| Error::Syntax)?,
+                losses: vec![],
+            }),
+            Format::Link => {
+                let e = &self.endpoint;
+                let mut losses = vec![];
+                if !self.policy.is_null() {
+                    losses.push("Routing policy is only preserved in JSON");
+                }
+                if !e.certificate.is_empty() {
+                    losses.push("Custom CA certificate is only preserved in JSON");
+                }
+                if !e.dns_upstreams.is_empty() {
+                    losses.push("DNS upstreams are only preserved in JSON");
+                }
+                if e.has_ipv6 {
+                    losses.push("IPv6 setting is only preserved in JSON");
+                }
+                if e.skip_verification
+                    || e.anti_dpi
+                    || !e.client_random_prefix.is_empty()
+                    || !e.extra.is_empty()
+                    || !self.extensions.is_empty()
+                    || !self.unknown_tlv.is_empty()
+                {
+                    losses.push("Additional profile fields are only preserved in JSON");
+                }
+                Ok(Export {
+                    content: vless::encode(self)?,
+                    losses,
+                })
+            }
+            _ => Err(Error::Field("VLESS exports require JSON or a vless link")),
+        }
     }
 }
 

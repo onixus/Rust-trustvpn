@@ -104,3 +104,25 @@ fn udp_transport_follows_the_profile_transport() {
     profile.protocol = rtrust_profile::Protocol::AmneziaWg;
     assert!(profile.udp_transport());
 }
+
+#[test]
+fn imported_names_drop_line_breaks_and_bidi_overrides() {
+    let p = Profile::import(
+        "hostname='vpn.example'\naddresses=['192.0.2.1:443']\nusername='user'\npassword='pass'\n",
+    )
+    .unwrap();
+    let mut named = p.clone();
+    named.name = "Home\n\u{202e}gpj.exe\u{2066}".into();
+    // Stored profiles stay valid; only imports are cleaned.
+    named.validate().unwrap();
+    for format in [Format::Link, Format::Json, Format::EndpointToml] {
+        let content = named.export(format).unwrap().content.clone();
+        assert_eq!(
+            Profile::import(&content).unwrap().name,
+            "Homegpj.exe",
+            "{format}"
+        );
+    }
+    let hy2 = Profile::import("hy2://secret@vpn.example:443/#%0A%E2%80%AE").unwrap();
+    assert_eq!(hy2.name, "vpn.example");
+}

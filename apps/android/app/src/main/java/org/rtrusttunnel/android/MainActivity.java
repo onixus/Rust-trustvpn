@@ -692,6 +692,7 @@ public class MainActivity extends Activity {
         int fg, bgColor; String letters;
         if ("Hysteria 2".equals(info.protocol)) { letters = "H2"; fg = p.light ? 0xFF5B48C9 : 0xFFB9A6FF; bgColor = p.light ? 0xFFE6E0FF : 0xFF2A2340; }
         else if ("AmneziaWG".equals(info.protocol)) { letters = "AW"; fg = p.light ? 0xFF9A4A0C : 0xFFFFB27A; bgColor = p.light ? 0xFFFFE6D3 : 0xFF3A2A1C; }
+        else if ("VLESS".equals(info.protocol)) { letters = "VL"; fg = p.light ? 0xFF0B6E63 : 0xFF5FD4C4; bgColor = p.light ? 0xFFD4F2EE : 0xFF14302D; }
         else { letters = "TT"; fg = p.blueText; bgColor = p.blueSoft; }
         TextView badge = text(letters, 13, fg, true); badge.setGravity(Gravity.CENTER); badge.setBackground(round(bgColor, dp(15)));
         badge.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -1267,6 +1268,9 @@ public class MainActivity extends Activity {
             String existing = duplicateOf(vault.read(), profile);
             if (existing != null) { error(getString(R.string.v3_duplicate, existing)); return; }
             String warning = endpoint.optBoolean("skip_verification") ? getString(R.string.nwarning_certificate_verification_is_disabled_in) : "";
+            // A VLESS link may ask for a browser TLS fingerprint that this client does not imitate.
+            JSONObject vless = profile.optJSONObject("vless");
+            if (vless != null && !vless.optString("fingerprint").isEmpty()) warning += "\n" + getString(R.string.tls_fingerprint_not_emulated);
             new AlertDialog.Builder(this).setTitle(getString(R.string.import_profile_text)).setMessage(profile.optString("name", "") + "\n" + endpoint.getString("hostname") + " · " + protocolName(profile) + warning + getString(R.string.ncredentials_will_be_encrypted_on_this))
                 .setNegativeButton(getString(R.string.cancel), null).setPositiveButton(getString(R.string.import_confirm), (d, w) -> {
                     try {
@@ -1308,20 +1312,21 @@ public class MainActivity extends Activity {
     }
     private static String protocolName(JSONObject profile) {
         String protocol = profile.optString("protocol");
-        return "hysteria2".equals(protocol) ? "Hysteria 2" : "amneziawg".equals(protocol) ? "AmneziaWG" : "TrustTunnel";
+        return "hysteria2".equals(protocol) ? "Hysteria 2" : "amneziawg".equals(protocol) ? "AmneziaWG" : "vless".equals(protocol) ? "VLESS" : "TrustTunnel";
     }
     private void export(String raw) {
         final String protocol;
         try {protocol=new JSONObject(raw).optString("protocol");}catch(Exception e){error(getString(R.string.could_not_export_this_profile));return;}
-        final boolean hysteria="hysteria2".equals(protocol),amnezia="amneziawg".equals(protocol);
-        String[] formats=hysteria?new String[]{"JSON",getString(R.string.tt_link)}:amnezia?new String[]{"JSON","AmneziaWG .conf"}:new String[]{"JSON",getString(R.string.endpoint_toml),getString(R.string.cli_toml),getString(R.string.tt_link)};
+        // Hysteria 2 and VLESS export JSON or their own link.
+        final boolean link="hysteria2".equals(protocol)||"vless".equals(protocol),amnezia="amneziawg".equals(protocol);
+        String[] formats=link?new String[]{"JSON",getString(R.string.tt_link)}:amnezia?new String[]{"JSON","AmneziaWG .conf"}:new String[]{"JSON",getString(R.string.endpoint_toml),getString(R.string.cli_toml),getString(R.string.tt_link)};
         Sheet sheet = new Sheet(this, getString(R.string.export_contains_credentials), getString(R.string.export_detail));
-        for (int index = 0; index < formats.length; index++) { final int choice = index; sheet.item(R.drawable.ic_file, formats[index], null, () -> exportAs(raw, choice, hysteria, amnezia)); }
+        for (int index = 0; index < formats.length; index++) { final int choice = index; sheet.item(R.drawable.ic_file, formats[index], null, () -> exportAs(raw, choice, link, amnezia)); }
         sheet.show();
     }
-    private void exportAs(String raw, int choice, boolean hysteria, boolean amnezia) {
+    private void exportAs(String raw, int choice, boolean link, boolean amnezia) {
         // Rust codec format indices: 3 is a link, 4 an AmneziaWG config.
-        int format=choice==1?(hysteria?3:amnezia?4:1):choice;
+        int format=choice==1?(link?3:amnezia?4:1):choice;
         try {
             JSONObject output = new JSONObject(NativeCore.INSTANCE.export(raw, format));
             if (!output.getBoolean("ok")) { error(output.optString("message")); return; }

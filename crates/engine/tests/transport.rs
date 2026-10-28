@@ -471,3 +471,25 @@ async fn h2_opens_past_the_stream_limit_end_within_the_deadline() {
     drop(held);
     server.abort();
 }
+
+#[tokio::test]
+async fn vless_profiles_never_fall_back_to_trusttunnel() {
+    // Synthetic link; nothing listens on the discard port.
+    let mut p = Profile::import("vless://11111111-2222-4333-8444-555555555555@127.0.0.1:9?encryption=none&security=tls&sni=cdn.example.com&type=ws&path=%2Fsynthetic").unwrap();
+    rtrust_engine::check_capabilities(&p).unwrap();
+    // The UUID is never offered as TrustTunnel CONNECT credentials.
+    assert!(matches!(
+        rtrust_engine::H2Session::connect(&p).await,
+        Err(Error::Unsupported(_))
+    ));
+    // VLESS dials its own transport and fails as a connection, not as HTTP/2.
+    assert!(matches!(
+        Session::connect(&p).await,
+        Err(Error::ConnectIo(_) | Error::Connect | Error::Timeout)
+    ));
+    p.vless.as_mut().unwrap().transport = "xhttp".into();
+    assert!(matches!(
+        rtrust_engine::check_capabilities(&p),
+        Err(Error::Unsupported("VLESS XHTTP transport"))
+    ));
+}

@@ -12,7 +12,7 @@ use rtrust_desktop::Controller;
 use rtrust_store::{ConnectionSettings, Mode};
 use zeroize::Zeroizing;
 
-pub const LINK_SCHEMES: [&str; 3] = ["tt://", "hy2://", "hysteria2://"];
+use rtrust_profile::LINK_SCHEMES;
 
 pub fn tr(ru: bool, russian: &'static str, english: &'static str) -> &'static str {
     if ru { russian } else { english }

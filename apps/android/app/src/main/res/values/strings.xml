@@ -29,7 +29,7 @@
     <string name="portal_upload_warning">"Send this profile, including credentials, to the registered server? A new external profile will be created; VPN server credentials are not changed."</string>
     <string name="portal_uploaded">"Profile saved in server UI."</string>
     <string name="qr_import">"Import QR code"</string>
-    <string name="qr_prompt">"Scan a profile or tt:// / hy2:// QR code"</string>
+    <string name="qr_prompt">"Scan a profile or tt:// / hy2:// / vless:// QR code"</string>
     <string name="qr_failed">"Could not read QR code. Choose a clear image up to 12 MiB."</string>
     <string name="export_failed">"Could not export this profile."</string>
     <string name="export_expired">"Export expired. Select the profile and export again."</string>
@@ -69,7 +69,8 @@
     <string name="export_contains_credentials">"Export contains credentials"</string>
     <string name="endpoint_toml">"Endpoint TOML"</string>
     <string name="cli_toml">"CLI TOML"</string>
-    <string name="tt_link">"tt:// / hy2:// link"</string>
+    <string name="tt_link">"tt:// / hy2:// / vless:// link"</string>
+    <string name="tls_fingerprint_not_emulated">Browser TLS fingerprint is not emulated</string>
     <string name="save_unencrypted_credentials">"Save unencrypted credentials?"</string>
     <string name="anyone_with_this_file_can_use">"Anyone with this file can use the profile. "</string>
     <string name="choose_file">"Choose file"</string>
@@ -193,7 +194,7 @@
     <string name="v3_qr_photo">QR from photo</string>
     <string name="v3_file">File</string>
     <string name="v3_paste_title">Link or configuration text</string>
-    <string name="v3_paste_hint">tt://, hy2:// or TOML / YAML / JSON</string>
+    <string name="v3_paste_hint">tt://, hy2://, vless:// or TOML / YAML / JSON</string>
     <string name="v3_paste_note">First we show what will be imported: name, server, protocol and warnings.</string>
     <string name="v3_portal">Connect to a server</string>
     <string name="v3_portal_detail">One-time code from the panel; profiles arrive by sync</string>

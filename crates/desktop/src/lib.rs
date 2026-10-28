@@ -13,6 +13,8 @@ pub struct Summary {
     pub hostname: String,
     pub protocol: String,
     pub default: bool,
+    /// A requested browser TLS fingerprint that the client does not imitate.
+    pub fingerprint_unemulated: bool,
 }
 #[derive(Serialize)]
 pub struct View {
@@ -87,6 +89,7 @@ impl Controller {
                     hostname: p.endpoint.hostname.clone(),
                     protocol: p.transport_name().into(),
                     default: i == 0,
+                    fingerprint_unemulated: p.tls_fingerprint_unemulated(),
                 })
                 .collect(),
             connection: {
@@ -110,6 +113,7 @@ impl Controller {
             hostname: p.endpoint.hostname.clone(),
             protocol: p.transport_name().into(),
             default: false,
+            fingerprint_unemulated: p.tls_fingerprint_unemulated(),
         };
         self.pending = Some(p);
         Ok(summary)

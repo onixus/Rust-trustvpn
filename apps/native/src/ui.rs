@@ -163,6 +163,8 @@ pub(super) struct Tokens {
     pub(super) violet_soft: Color,
     pub(super) orange: Color,
     pub(super) orange_soft: Color,
+    pub(super) teal: Color,
+    pub(super) teal_soft: Color,
     pub(super) warn: Color,
     pub(super) warn_soft: Color,
     pub(super) danger: Color,
@@ -189,6 +191,8 @@ pub(super) const DARK_TOKENS: Tokens = Tokens {
     violet_soft: rgb(0x2A2340),
     orange: rgb(0xFFB27A),
     orange_soft: rgb(0x3A2A1C),
+    teal: rgb(0x5FD4C4),
+    teal_soft: rgb(0x14302D),
     warn: rgb(0xE0A526),
     warn_soft: rgba(0xE0A526, 0.15),
     danger: rgb(0xFF6B70),
@@ -217,6 +221,8 @@ pub(super) const LIGHT_TOKENS: Tokens = Tokens {
     violet_soft: rgb(0xE6E0FF),
     orange: rgb(0x9A4A0C),
     orange_soft: rgb(0xFFE6D3),
+    teal: rgb(0x0B6E63),
+    teal_soft: rgb(0xD4F2EE),
     warn: rgb(0x8F6200),
     warn_soft: rgba(0xE0A526, 0.18),
     danger: rgb(0xC2272D),
@@ -708,11 +714,20 @@ pub(super) fn protocol_label(p: &Profile) -> String {
         _ => p.transport_name().to_owned(),
     }
 }
+/// A VLESS link may ask for a browser TLS fingerprint; the client keeps it
+/// for export but does not imitate it, and says so.
+fn fingerprint_note() -> &'static str {
+    t(
+        "Отпечаток TLS браузера не эмулируется",
+        "Browser TLS fingerprint is not emulated",
+    )
+}
 fn badge(p: &Profile, tk: Tokens) -> (&'static str, Color, Color) {
     match p.protocol {
         rtrust_profile::Protocol::TrustTunnel => ("TT", tk.blue, tk.blue_soft),
         rtrust_profile::Protocol::Hysteria2 => ("H2", tk.violet, tk.violet_soft),
         rtrust_profile::Protocol::AmneziaWg => ("AW", tk.orange, tk.orange_soft),
+        rtrust_profile::Protocol::Vless => ("VL", tk.teal, tk.teal_soft),
     }
 }
 
@@ -2210,10 +2225,13 @@ impl App {
     fn profile_detail<'a>(&'a self, tk: Tokens, p: &'a Profile) -> Element<'a, Message> {
         let (code, fg, bg) = badge(p, tk);
         let backups = self.saved_connection.fallbacks_for(&self.profiles, Some(p));
-        let capability = match rtrust_engine::check_capabilities(p) {
+        let mut capability = match rtrust_engine::check_capabilities(p) {
             Ok(()) => t("поддерживается", "supported").to_owned(),
             Err(e) => e.to_string(),
         };
+        if p.tls_fingerprint_unemulated() {
+            capability = format!("{capability} · {}", fingerprint_note());
+        }
         let mut panel = column![
             row![
                 soft(bg, 17.0, text(code).size(15).font(BOLD).color(fg))
@@ -2380,7 +2398,10 @@ impl App {
             column![
                 text(t("Ссылка или текст конфигурации", "Link or configuration text")).font(BOLD),
                 text_editor(&self.input)
-                    .placeholder(t("tt://, hy2:// или текст конфигурации", "tt://, hy2:// or configuration text"))
+                    .placeholder(t(
+                        "tt://, hy2://, vless:// или текст конфигурации",
+                        "tt://, hy2://, vless:// or configuration text"
+                    ))
                     .height(110)
                     .padding(12)
                     .on_action(Message::Edit),
@@ -2459,6 +2480,13 @@ impl App {
                         t("Логин и пароль", "Login and password"),
                         t("скрыты", "hidden").to_owned(),
                     ));
+                if p.tls_fingerprint_unemulated() {
+                    preview = preview.push(kv(
+                        tk,
+                        t("Отпечаток TLS", "TLS fingerprint"),
+                        fingerprint_note().to_owned(),
+                    ));
+                }
                 if let Err(e) = rtrust_engine::check_capabilities(p) {
                     preview = preview.push(
                         soft(

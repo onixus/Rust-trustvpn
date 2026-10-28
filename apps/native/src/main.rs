@@ -559,7 +559,7 @@ impl App {
             .iter()
             .find(|arg| *arg != "--autostart" && *arg != "--no-auto-connect")
         {
-            let input = if ["tt://", "hy2://", "hysteria2://"]
+            let input = if rtrust_profile::LINK_SCHEMES
                 .iter()
                 .any(|scheme| arg.to_string_lossy().starts_with(scheme))
             {

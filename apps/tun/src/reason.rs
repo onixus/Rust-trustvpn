@@ -74,6 +74,7 @@ fn engine(error: &Error, timeout: &str) -> String {
         Error::Authentication => "reason=auth_rejected".into(),
         Error::Rejected(code) => format!("reason=http_status code={code}"),
         Error::Credit => "reason=stream_credit".into(),
+        Error::Unanswered => "reason=streams_unanswered".into(),
         Error::Io => "reason=io_error".into(),
         Error::Destination => "reason=destination".into(),
         Error::Profile => "reason=profile".into(),
@@ -247,6 +248,11 @@ mod tests {
                 "stage=health reason=goaway code=0 by=peer",
             ),
             (Stage::Udp, Error::Credit, "stage=udp reason=stream_credit"),
+            (
+                Stage::Health,
+                Error::Unanswered,
+                "stage=health reason=streams_unanswered",
+            ),
             (
                 Stage::Udp,
                 Error::Unsupported("x"),
