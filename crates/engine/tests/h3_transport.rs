@@ -4,6 +4,8 @@ use rtrust_profile::Profile;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+mod support;
+
 /// In-process HTTP/3 CONNECT endpoint: the first `_check` answers 200, any
 /// other target echoes the request body after the client's FIN. Like endpoint
 /// 1.1.0 with a blocked stream, it finishes `lost*.invalid`, `_icmp` and every later
@@ -13,15 +15,7 @@ async fn endpoint() -> (Profile, tokio::task::JoinHandle<()>) {
 }
 /// `streams`: the endpoint's concurrent bidirectional stream limit.
 async fn endpoint_limited(streams: Option<u32>) -> (Profile, tokio::task::JoinHandle<()>) {
-    let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
-    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![certified.cert.der().clone()], key.into())
-        .unwrap();
+    let (mut tls, certificate) = support::localhost_tls();
     tls.alpn_protocols = vec![b"h3".to_vec()];
     let quic = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(quic));
@@ -33,8 +27,7 @@ async fn endpoint_limited(streams: Option<u32>) -> (Profile, tokio::task::JoinHa
     let server = quinn::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap();
     let address = server.local_addr().unwrap();
     let p = Profile::import(&format!(
-        "hostname='localhost'\naddresses=['{address}']\nusername='test'\npassword='secret'\nupstream_protocol='http3'\ncertificate='''{}'''\n",
-        certified.cert.pem()
+        "hostname='localhost'\naddresses=['{address}']\nusername='test'\npassword='secret'\nupstream_protocol='http3'\ncertificate='''{certificate}'''\n"
     ))
     .unwrap();
     let task = tokio::spawn(async move {

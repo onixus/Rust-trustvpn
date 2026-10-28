@@ -24,6 +24,9 @@ __pycache__/
 *.key
 *.p12
 *.pfx
+*.jks
+*.keystore
+keystore.properties
 
 /apps/android/.gradle/
 /apps/android/local.properties

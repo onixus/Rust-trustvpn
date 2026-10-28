@@ -7,25 +7,22 @@ use tokio::{
     net::TcpListener,
 };
 
+mod support;
+
 async fn endpoint() -> (Profile, tokio::task::JoinHandle<()>) {
     endpoint_limited(None).await
 }
 /// `streams`: the endpoint's SETTINGS_MAX_CONCURRENT_STREAMS.
 async fn endpoint_limited(streams: Option<u32>) -> (Profile, tokio::task::JoinHandle<()>) {
-    let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
-    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![certified.cert.der().clone()], key.into())
-        .unwrap();
+    let (mut tls, certificate) = support::localhost_tls();
     tls.alpn_protocols = vec![b"h2".to_vec()];
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let p=Profile::import(&format!("hostname='localhost'\naddresses=['{address}']\nusername='test'\npassword='secret'\ncertificate='''{}'''\n",certified.cert.pem())).unwrap();
+    let p = Profile::import(&format!(
+        "hostname='localhost'\naddresses=['{address}']\nusername='test'\npassword='secret'\ncertificate='''{certificate}'''\n"
+    ))
+    .unwrap();
     let task = tokio::spawn(async move {
         loop {
             let (tcp, _) = listener.accept().await.unwrap();
