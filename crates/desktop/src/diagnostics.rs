@@ -504,25 +504,17 @@ impl Backend for System {
         }
         #[cfg(target_os = "linux")]
         {
+            // Ask the kernel directly: a Flatpak sandbox has no /usr/sbin/ip.
             // Explicit effective UID matches the service's uidrange policy rule.
-            let uid = unsafe { libc::geteuid() }.to_string();
-            let bytes = command(
-                "/usr/sbin/ip",
-                &[
-                    "-j",
-                    "route",
-                    "get",
-                    &ip.to_string(),
-                    "ipproto",
-                    "tcp",
-                    "dport",
-                    "443",
-                    "uid",
-                    &uid,
-                ],
-            )
-            .await?;
-            linux_route(&bytes)
+            let uid = unsafe { libc::geteuid() };
+            let lookup = tokio::task::spawn_blocking(move || netlink_route(ip, uid));
+            let oif = tokio::time::timeout(STEP, lookup)
+                .await
+                .map_err(|_| Fact::Timeout)?
+                .map_err(|_| Fact::Failed)??;
+            let tunnel = c"rtrust0";
+            let index = unsafe { libc::if_nametoindex(tunnel.as_ptr()) };
+            Ok(index != 0 && oif == index)
         }
         #[cfg(target_os = "windows")]
         {
@@ -684,17 +676,172 @@ fn mac_route(bytes: &[u8]) -> Result<bool, Fact> {
     Ok(interfaces[0] == "utun5254")
 }
 #[cfg(any(target_os = "linux", test))]
-fn linux_route(bytes: &[u8]) -> Result<bool, Fact> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| Fact::Failed)?;
-    let rows = value
-        .as_array()
-        .filter(|r| r.len() == 1)
-        .ok_or(Fact::Failed)?;
-    let device = rows[0]
-        .get("dev")
-        .and_then(|v| v.as_str())
-        .ok_or(Fact::Failed)?;
-    Ok(device == "rtrust0")
+mod rtnl {
+    pub const RTM_NEWROUTE: u16 = 24;
+    pub const RTM_GETROUTE: u16 = 26;
+    pub const NLMSG_ERROR: u16 = 2;
+    pub const NLM_F_REQUEST: u16 = 1;
+    pub const RTA_DST: u16 = 1;
+    pub const RTA_OIF: u16 = 4;
+    pub const RTA_UID: u16 = 25;
+    pub const RTA_IP_PROTO: u16 = 27;
+    pub const RTA_DPORT: u16 = 29;
+    pub const AF_INET: u8 = 2;
+    pub const AF_INET6: u8 = 10;
+    pub const IPPROTO_TCP: u8 = 6;
+    pub const HEADER: usize = 16;
+    pub const RTMSG: usize = 12;
+}
+/// `ip route get IP ipproto tcp dport 443 uid UID` as one RTM_GETROUTE request.
+#[cfg(any(target_os = "linux", test))]
+fn route_request(ip: IpAddr, uid: u32, seq: u32) -> Vec<u8> {
+    fn attr(out: &mut Vec<u8>, kind: u16, value: &[u8]) {
+        out.extend_from_slice(&((4 + value.len()) as u16).to_ne_bytes());
+        out.extend_from_slice(&kind.to_ne_bytes());
+        out.extend_from_slice(value);
+        out.resize(out.len().next_multiple_of(4), 0);
+    }
+    let (family, prefix, address) = match ip {
+        IpAddr::V4(v4) => (rtnl::AF_INET, 32, v4.octets().to_vec()),
+        IpAddr::V6(v6) => (rtnl::AF_INET6, 128, v6.octets().to_vec()),
+    };
+    let mut out = vec![0; rtnl::HEADER];
+    out.extend_from_slice(&[family, prefix, 0, 0, 0, 0, 0, 0]);
+    out.extend_from_slice(&0u32.to_ne_bytes());
+    attr(&mut out, rtnl::RTA_DST, &address);
+    attr(&mut out, rtnl::RTA_UID, &uid.to_ne_bytes());
+    attr(&mut out, rtnl::RTA_IP_PROTO, &[rtnl::IPPROTO_TCP]);
+    // The kernel reads the port in network byte order, as iproute2 sends it.
+    attr(&mut out, rtnl::RTA_DPORT, &443u16.to_be_bytes());
+    let len = out.len() as u32;
+    out[0..4].copy_from_slice(&len.to_ne_bytes());
+    out[4..6].copy_from_slice(&rtnl::RTM_GETROUTE.to_ne_bytes());
+    out[6..8].copy_from_slice(&rtnl::NLM_F_REQUEST.to_ne_bytes());
+    out[8..12].copy_from_slice(&seq.to_ne_bytes());
+    out
+}
+/// Output interface index of the single route in the kernel's reply to `seq`.
+/// A kernel error (no route, unreachable) or an ambiguous reply is Failed.
+#[cfg(any(target_os = "linux", test))]
+fn route_oif(bytes: &[u8], seq: u32) -> Result<u32, Fact> {
+    let u16_at = |b: &[u8], at: usize| u16::from_ne_bytes([b[at], b[at + 1]]);
+    let u32_at = |b: &[u8], at: usize| u32::from_ne_bytes(b[at..at + 4].try_into().unwrap());
+    let mut found = None;
+    let mut rest = bytes;
+    while rest.len() >= rtnl::HEADER {
+        let len = u32_at(rest, 0) as usize;
+        if len < rtnl::HEADER || len > rest.len() {
+            return Err(Fact::Failed);
+        }
+        let (message, next) = rest.split_at(len);
+        rest = next
+            .get(len.next_multiple_of(4) - len..)
+            .unwrap_or_default();
+        if u32_at(message, 8) != seq {
+            continue;
+        }
+        match u16_at(message, 4) {
+            rtnl::RTM_NEWROUTE if found.is_none() => {
+                let mut attrs = message
+                    .get(rtnl::HEADER + rtnl::RTMSG..)
+                    .ok_or(Fact::Failed)?;
+                let mut oif = None;
+                while attrs.len() >= 4 {
+                    let size = u16_at(attrs, 0) as usize;
+                    if size < 4 || size > attrs.len() {
+                        return Err(Fact::Failed);
+                    }
+                    if u16_at(attrs, 2) == rtnl::RTA_OIF {
+                        if size != 8 || oif.is_some() {
+                            return Err(Fact::Failed);
+                        }
+                        oif = Some(u32_at(attrs, 4));
+                    }
+                    attrs = attrs.get(size.next_multiple_of(4)..).unwrap_or_default();
+                }
+                found = Some(oif.ok_or(Fact::Failed)?);
+            }
+            // An error reply (no route, unreachable) is a failed lookup.
+            rtnl::NLMSG_ERROR => return Err(Fact::Failed),
+            _ => return Err(Fact::Failed),
+        }
+    }
+    found.ok_or(Fact::Failed)
+}
+#[cfg(target_os = "linux")]
+fn netlink_route(ip: IpAddr, uid: u32) -> Result<u32, Fact> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::NETLINK_ROUTE,
+        )
+    };
+    if fd < 0 {
+        return Err(Fact::Unsupported);
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let timeout = libc::timeval {
+        tv_sec: STEP.as_secs() as _,
+        tv_usec: 0,
+    };
+    if unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            (&timeout as *const libc::timeval).cast(),
+            std::mem::size_of::<libc::timeval>() as _,
+        )
+    } != 0
+    {
+        return Err(Fact::Failed);
+    }
+    let mut kernel: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+    kernel.nl_family = libc::AF_NETLINK as u16;
+    let seq = now_ms() as u32;
+    let request = route_request(ip, uid, seq);
+    let sent = unsafe {
+        libc::sendto(
+            fd.as_raw_fd(),
+            request.as_ptr().cast(),
+            request.len(),
+            0,
+            (&kernel as *const libc::sockaddr_nl).cast(),
+            std::mem::size_of::<libc::sockaddr_nl>() as _,
+        )
+    };
+    if sent != request.len() as isize {
+        return Err(Fact::Failed);
+    }
+    let mut buffer = vec![0u8; OUTPUT_LIMIT as usize];
+    let mut from: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+    let mut from_len = std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+    let received = unsafe {
+        libc::recvfrom(
+            fd.as_raw_fd(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            libc::MSG_TRUNC,
+            (&mut from as *mut libc::sockaddr_nl).cast(),
+            &mut from_len,
+        )
+    };
+    if received < 0 {
+        return Err(
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+                Fact::Timeout
+            } else {
+                Fact::Failed
+            },
+        );
+    }
+    // Only the kernel (port 0) answers; a truncated reply is not trusted.
+    if from.nl_pid != 0 || received as usize > buffer.len() {
+        return Err(Fact::Failed);
+    }
+    route_oif(&buffer[..received as usize], seq)
 }
 /// The VPN itself is down: that is the finding, not a changed session.
 fn unavailable(snapshot: &Snapshot) -> bool {
@@ -728,8 +875,11 @@ async fn diagnose(backend: &impl Backend, target: &Target, report: &mut Report) 
         Fact::Passed
     };
     report.answer_count = ips.len();
-    // One selected address, no retry to other addresses or a direct comparison.
-    let ip = ips[0];
+    // One selected address for the request, no retry or direct comparison.
+    // Prefer IPv4: split TUN carries selected IPv4 networks only, and a full
+    // tunnel may block IPv6. An IPv6 answer listed first would then test a
+    // path the session never carries and time out; IPv6-only names keep it.
+    let ip = ips.iter().copied().find(IpAddr::is_ipv4).unwrap_or(ips[0]);
     report.ipv6 = ip.is_ipv6();
     let mut decision = backend.policy(ip);
     // Server revisions are opaque input. Export only a fingerprint, never raw text.
@@ -754,6 +904,31 @@ async fn diagnose(backend: &impl Backend, target: &Target, report: &mut Report) 
         Err(e) => {
             report.route = e;
             return;
+        }
+    }
+    // A full tunnel claims IPv6 too: preferring IPv4 for the request must not
+    // hide an IPv6 answer routed past the tunnel. Route only, no request.
+    let full = initial.transport.mode == rtrust_control::observations::Mode::Full;
+    if let Some(v6) = ips
+        .iter()
+        .copied()
+        .find(IpAddr::is_ipv6)
+        .filter(|_| full && ip.is_ipv4())
+    {
+        if !backend.active() || backend.lifecycle().generation != initial.generation {
+            report.route = Fact::SessionChanged;
+            return;
+        }
+        match backend.route(v6).await {
+            Ok(true) => {}
+            Ok(false) => {
+                report.route = Fact::RouteMismatch;
+                return;
+            }
+            Err(e) => {
+                report.route = e;
+                return;
+            }
         }
     }
     if !backend.active() || backend.lifecycle().generation != initial.generation {
@@ -818,10 +993,13 @@ mod tests {
         calls: AtomicUsize,
         change: bool,
         transport: rtrust_control::observations::Outcome,
+        mode: rtrust_control::observations::Mode,
+        routed: std::sync::Mutex<Vec<IpAddr>>,
+        route_v6: Option<Result<bool, Fact>>,
     }
     impl Backend for Fake {
         fn lifecycle(&self) -> Snapshot {
-            let mut s = Snapshot::unknown(rtrust_control::observations::Mode::Full);
+            let mut s = Snapshot::unknown(self.mode);
             if self.change && self.calls.load(Ordering::SeqCst) > 0 {
                 s.generation = 1;
             }
@@ -843,8 +1021,12 @@ mod tests {
         async fn resolve(&self, _: &Target) -> Result<Vec<IpAddr>, Fact> {
             self.dns.clone()
         }
-        async fn route(&self, _: IpAddr) -> Result<bool, Fact> {
-            self.route
+        async fn route(&self, ip: IpAddr) -> Result<bool, Fact> {
+            self.routed.lock().unwrap().push(ip);
+            match self.route_v6 {
+                Some(v6) if ip.is_ipv6() => v6,
+                _ => self.route,
+            }
         }
         async fn https(&self, _: &Target, _: IpAddr) -> Result<u16, Fact> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -859,6 +1041,9 @@ mod tests {
             calls: AtomicUsize::new(0),
             change: false,
             transport: rtrust_control::observations::Outcome::Configured,
+            mode: rtrust_control::observations::Mode::Full,
+            routed: Default::default(),
+            route_v6: None,
         }
     }
     fn report(dns: Fact, route: Fact, https: Fact) -> Report {
@@ -1114,6 +1299,57 @@ mod tests {
         assert_eq!(f.calls.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]
+    async fn the_request_uses_the_first_ipv4_answer_in_every_tun_mode() {
+        use rtrust_control::observations::Mode;
+        let v6: IpAddr = "2001:db8::7".parse().unwrap();
+        let v4: IpAddr = "198.51.100.7".parse().unwrap();
+        let other: IpAddr = "198.51.100.8".parse().unwrap();
+        for (mode, dns, routed) in [
+            // Split TUN carries IPv4 only: the IPv6 answer is not its path.
+            (Mode::Split, vec![v6, v4, other], vec![v4]),
+            // Full: IPv4 for the request, and the IPv6 answer's route too.
+            (Mode::Full, vec![v6, v4, other], vec![v4, v6]),
+            (Mode::Full, vec![v4, other], vec![v4]),
+            // Only IPv6: still one address, checked as before.
+            (Mode::Split, vec![v6], vec![v6]),
+            (Mode::Full, vec![v6], vec![v6]),
+        ] {
+            let mut f = fake(Ok(true));
+            f.mode = mode;
+            f.dns = Ok(dns);
+            let mut r = Report::new(f.lifecycle());
+            diagnose(&f, &Target::parse("service.example").unwrap(), &mut r).await;
+            assert_eq!(*f.routed.lock().unwrap(), routed);
+            assert_eq!(r.ipv6, routed[0].is_ipv6());
+            assert_eq!(r.route, Fact::Passed);
+            assert_eq!(r.https, Fact::Passed);
+        }
+    }
+    #[tokio::test]
+    async fn full_tunnel_never_passes_while_an_ipv6_answer_bypasses_it() {
+        use rtrust_control::observations::Mode;
+        let dns: Vec<IpAddr> = vec![
+            "2001:db8::7".parse().unwrap(),
+            "198.51.100.7".parse().unwrap(),
+        ];
+        for (mode, v6, route) in [
+            (Mode::Full, Ok(false), Fact::RouteMismatch),
+            (Mode::Full, Err(Fact::Timeout), Fact::Timeout),
+            // Split TUN never claims IPv6, so its IPv6 route is not checked.
+            (Mode::Split, Ok(false), Fact::Passed),
+        ] {
+            let mut f = fake(Ok(true));
+            f.mode = mode;
+            f.dns = Ok(dns.clone());
+            f.route_v6 = Some(v6);
+            let mut r = Report::new(f.lifecycle());
+            diagnose(&f, &Target::parse("service.example").unwrap(), &mut r).await;
+            assert_eq!(r.route, route);
+            let sent = usize::from(route == Fact::Passed);
+            assert_eq!(f.calls.load(Ordering::SeqCst), sent);
+        }
+    }
+    #[tokio::test]
     async fn http_errors_are_reachability_not_application_or_internet_health() {
         let f = fake(Ok(true));
         let mut r = Report::new(f.lifecycle());
@@ -1165,12 +1401,112 @@ mod tests {
             mac_route(b"interface: utun5254\ninterface: en0\n"),
             Err(Fact::Failed)
         );
-        assert_eq!(linux_route(br#"[{"dev":"rtrust0"}]"#), Ok(true));
-        assert_eq!(linux_route(br#"[{"dev":"eth0"}]"#), Ok(false));
+    }
+    fn netlink_message(kind: u16, seq: u32, body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&((16 + body.len()) as u32).to_ne_bytes());
+        out.extend_from_slice(&kind.to_ne_bytes());
+        out.extend_from_slice(&0u16.to_ne_bytes());
+        out.extend_from_slice(&seq.to_ne_bytes());
+        out.extend_from_slice(&0u32.to_ne_bytes());
+        out.extend_from_slice(body);
+        out.resize(out.len().next_multiple_of(4), 0);
+        out
+    }
+    fn route_reply(seq: u32, oifs: &[u32]) -> Vec<u8> {
+        let mut body = vec![2, 32, 0, 0, 254, 0, 0, 1, 0, 0, 0, 0];
+        // RTA_DST 198.51.100.7, then each RTA_OIF.
+        body.extend_from_slice(&8u16.to_ne_bytes());
+        body.extend_from_slice(&1u16.to_ne_bytes());
+        body.extend_from_slice(&[198, 51, 100, 7]);
+        for oif in oifs {
+            body.extend_from_slice(&8u16.to_ne_bytes());
+            body.extend_from_slice(&4u16.to_ne_bytes());
+            body.extend_from_slice(&oif.to_ne_bytes());
+        }
+        netlink_message(24, seq, &body)
+    }
+    #[test]
+    fn netlink_route_request_matches_ip_route_get_with_uid_and_port() {
+        let request = route_request("198.51.100.7".parse().unwrap(), 1000, 77);
+        let len = u32::from_ne_bytes(request[0..4].try_into().unwrap()) as usize;
+        assert_eq!(len, request.len());
+        assert_eq!(u16::from_ne_bytes([request[4], request[5]]), 26);
+        assert_eq!(u16::from_ne_bytes([request[6], request[7]]), 1);
+        assert_eq!(u32::from_ne_bytes(request[8..12].try_into().unwrap()), 77);
+        assert_eq!(&request[16..18], &[2, 32]);
+        let mut attrs = Vec::new();
+        let mut rest = &request[28..];
+        while rest.len() >= 4 {
+            let size = u16::from_ne_bytes([rest[0], rest[1]]) as usize;
+            attrs.push((
+                u16::from_ne_bytes([rest[2], rest[3]]),
+                rest[4..size].to_vec(),
+            ));
+            rest = &rest[size.next_multiple_of(4)..];
+        }
         assert_eq!(
-            linux_route(br#"[{"dev":"rtrust0"},{"dev":"eth0"}]"#),
+            attrs,
+            vec![
+                (1, vec![198, 51, 100, 7]),
+                (25, 1000u32.to_ne_bytes().to_vec()),
+                (27, vec![6]),
+                (29, vec![0x01, 0xbb]),
+            ]
+        );
+        let v6 = route_request("2001:db8::1".parse().unwrap(), 1000, 1);
+        assert_eq!(&v6[16..18], &[10, 128]);
+        assert_eq!(u16::from_ne_bytes([v6[28], v6[29]]), 20);
+    }
+    #[test]
+    fn netlink_route_reply_yields_one_interface_and_rejects_the_rest() {
+        assert_eq!(route_oif(&route_reply(7, &[42]), 7), Ok(42));
+        // Other sequence numbers are not ours and are skipped.
+        let mut stray = route_reply(6, &[9]);
+        stray.extend(route_reply(7, &[42]));
+        assert_eq!(route_oif(&stray, 7), Ok(42));
+        assert_eq!(route_oif(&route_reply(6, &[42]), 7), Err(Fact::Failed));
+        assert_eq!(route_oif(&route_reply(7, &[]), 7), Err(Fact::Failed));
+        assert_eq!(route_oif(&route_reply(7, &[42, 43]), 7), Err(Fact::Failed));
+        let mut two = route_reply(7, &[42]);
+        two.extend(route_reply(7, &[43]));
+        assert_eq!(route_oif(&two, 7), Err(Fact::Failed));
+        // ENETUNREACH from the kernel is a failed lookup, never a route.
+        let mut error = (-101i32).to_ne_bytes().to_vec();
+        error.extend(&route_request("198.51.100.7".parse().unwrap(), 1000, 7)[..16]);
+        assert_eq!(
+            route_oif(&netlink_message(rtnl::NLMSG_ERROR, 7, &error), 7),
             Err(Fact::Failed)
         );
+        let mut truncated = route_reply(7, &[42]);
+        truncated.truncate(truncated.len() - 2);
+        assert_eq!(route_oif(&truncated, 7), Err(Fact::Failed));
+        assert_eq!(route_oif(&[], 7), Err(Fact::Failed));
+        assert_eq!(route_oif(&[0xff; 40], 7), Err(Fact::Failed));
+    }
+    /// Real kernel, no external program: loopback always routes via `lo`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn netlink_route_asks_the_kernel_without_iproute2() {
+        let uid = unsafe { libc::geteuid() };
+        let lo = unsafe { libc::if_nametoindex(c"lo".as_ptr()) };
+        assert_ne!(lo, 0);
+        assert_eq!(netlink_route("127.0.0.1".parse().unwrap(), uid), Ok(lo));
+    }
+    /// Live check with a connected TUN session, e.g. inside the Flatpak sandbox:
+    /// `RTRUST_TUNNEL_ROUTE_IP=<tunnelled IPv4> <test binary> --ignored netlink_route_reaches`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn netlink_route_reaches_the_tunnel_interface() {
+        let ip = std::env::var("RTRUST_TUNNEL_ROUTE_IP")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let tunnel = unsafe { libc::if_nametoindex(c"rtrust0".as_ptr()) };
+        assert_ne!(tunnel, 0, "rtrust0 is not up");
+        assert_eq!(netlink_route(ip, uid), Ok(tunnel));
     }
     #[tokio::test]
     async fn command_output_is_bounded_and_failure_is_redacted() {
