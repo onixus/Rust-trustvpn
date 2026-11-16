@@ -306,11 +306,25 @@ impl Stack {
     pub fn connections(&self) -> usize {
         self.flows.len()
     }
+    /// When TCP retransmission or a delayed ACK needs another poll. An idle
+    /// stack returns none, so the dataplane can sleep instead of a fixed tick.
+    pub fn deadline(&mut self) -> Option<Instant> {
+        let now = SmolInstant::from_millis(self.epoch.elapsed().as_millis() as i64);
+        self.interface
+            .poll_delay(now, &self.sockets)
+            .map(|delay| Instant::now() + Duration::from_micros(delay.total_micros()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn idle_stack_has_no_poll_deadline() {
+        let mut stack = Stack::new();
+        assert!(stack.deadline().is_none());
+        assert_eq!(stack.connections(), 0);
+    }
     #[tokio::test]
     async fn policy_drain_joins_a_pending_connect_and_removes_old_output() {
         struct Owned(Arc<std::sync::atomic::AtomicBool>);

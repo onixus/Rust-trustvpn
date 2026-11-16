@@ -186,6 +186,12 @@ async fn transport(
     .await
     .map_err(|_| crate::failover::Failure::timeout("Endpoint connection timed out"))?
 }
+/// One lookup so a disappearing adapter fails once, before routes or DNS change.
+fn interface_index(device: &tun_rs::AsyncDevice) -> Result<u32, String> {
+    device
+        .if_index()
+        .map_err(|_| "Wintun interface index unavailable".into())
+}
 struct Worker(Option<tokio::task::JoinHandle<RunResult>>);
 impl Worker {
     fn new(task: tokio::task::JoinHandle<RunResult>) -> Self {
@@ -439,23 +445,10 @@ async fn serve(
         .build_async()
         .map_err(|_| "Cannot create Wintun adapter; install signed wintun.dll beside service")?;
     let device = Arc::new(device);
-    routes::ready(
-        device
-            .if_index()
-            .map_err(|_| "Wintun interface index unavailable")?,
-        ADDRESS,
-    )
-    .await?;
-    routes::ready6(
-        device
-            .if_index()
-            .map_err(|_| "Wintun interface index unavailable")?,
-    )
-    .await?;
+    let index = interface_index(&device)?;
+    routes::ready(index, ADDRESS).await?;
+    routes::ready6(index).await?;
     let networks = if let Some(dns) = dns {
-        let index = device
-            .if_index()
-            .map_err(|_| "Wintun interface index unavailable")?;
         full::install(
             index,
             &full::endpoints(&failover.guard_profile())?,
@@ -466,12 +459,7 @@ async fn serve(
     } else {
         networks
     };
-    let mut routes = routes::Routes::install(
-        device
-            .if_index()
-            .map_err(|_| "Wintun interface index unavailable")?,
-        &networks,
-    )?;
+    let mut routes = routes::Routes::install(index, &networks)?;
     // A selection that carries the resolver (e.g. everything but the LAN)
     // gets VPN DNS too; otherwise names would leak to the LAN resolver.
     let split_dns = split_dns.filter(|_| dns.is_none());
@@ -480,10 +468,7 @@ async fn serve(
             let mut luid = Default::default();
             if unsafe {
                 windows_sys::Win32::NetworkManagement::IpHelper::ConvertInterfaceIndexToLuid(
-                    device
-                        .if_index()
-                        .map_err(|_| "Wintun interface index unavailable")?,
-                    &mut luid,
+                    index, &mut luid,
                 )
             } != 0
             {
@@ -495,11 +480,7 @@ async fn serve(
         None => None,
     };
     if dns.is_some() {
-        routes.full_ipv6(
-            device
-                .if_index()
-                .map_err(|_| "Wintun interface index unavailable")?,
-        )?;
+        routes.full_ipv6(index)?;
     }
     journal.success();
     let mut worker = Worker::new(tokio::spawn(crate::dataplane::run(
@@ -556,7 +537,7 @@ async fn lease_loop(
 ) -> Result<Option<rtrust_control::observations::Snapshot>, String> {
     let (supervisor, mut freshness) = context;
     let full = dns.is_some();
-    let plan = match (dns, device.if_index()) {
+    let plan = match (dns, interface_index(&device)) {
         (Some(dns), Ok(index)) => Some(probe::Plan {
             index,
             dns,
@@ -646,7 +627,7 @@ async fn lease_loop(
                 _ = &mut retry, if state == State::Blocked && !reconnecting && !access_expired => {
                     attempt_path = labels.path();
                     attempt_started = std::time::Instant::now();
-                    if full && full::refresh(device.if_index().map_err(|_| "Missing Wintun interface")?, &full::endpoints(&failover.guard_profile())?).is_err() {
+                    if full && full::refresh(interface_index(&device)?, &full::endpoints(&failover.guard_profile())?).is_err() {
                         crate::failover::journal_failure(rtrust_journal::Record::failure(attempt_path, rtrust_journal::Class::Other, rtrust_engine::planned_transport(failover.current()), budget.attempt(), rtrust_journal::Budget::from_cooling(budget.cooling()), attempt_started.elapsed()));
                         retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                         continue;
