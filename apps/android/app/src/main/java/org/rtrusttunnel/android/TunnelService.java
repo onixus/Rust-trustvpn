@@ -274,9 +274,35 @@ public final class TunnelService extends VpnService {
         Builder builder=new Builder().setSession("R-TrustTunnel").setMtu(plan.getInt("mtu")).addAddress("169.254.254.2",32).setBlocking(false)
             .setUnderlyingNetworks(underlyingNetworks()).setMetered(!meteringInherited);
         if(guard || plan.getBoolean("ipv6"))builder.addAddress("fd00:5254::2",128);
-        if(guard){builder.addRoute("0.0.0.0",0).addRoute("::",0);}else{JSONArray routes=plan.getJSONArray("routes");for(int i=0;i<routes.length();i++){String[] route=routes.getString(i).split("/");builder.addRoute(route[0],Integer.parseInt(route[1]));}}
+        if (guard) builder.addRoute("0.0.0.0", 0).addRoute("::", 0);
+        else addRoutes(builder, plan.getJSONArray("routes"));
         apps.apply(builder,getPackageManager());JSONArray dns=plan.getJSONArray("dns");for(int i=0;i<dns.length();i++)builder.addDnsServer(dns.getString(i));
         ParcelFileDescriptor next=builder.establish();if(next==null)throw new IllegalStateException("VPN permission revoked");return next;
+    }
+    /** Native plan routes are `address/prefix`; the first slash separates them. */
+    private static void addRoutes(Builder builder, JSONArray routes) throws Exception {
+        for (int i = 0; i < routes.length(); i++) {
+            String[] route = routes.getString(i).split("/");
+            builder.addRoute(route[0], Integer.parseInt(route[1]));
+        }
+    }
+    /** `host:port` or `[ipv6]:port`, as the native plan already emits them.
+     *  An unresolvable candidate stays empty so it cannot block other reserves. */
+    private static void resolveEndpoint(Network network, JSONArray addresses, JSONArray resolved) throws Exception {
+        try {
+            for (int i = 0; i < addresses.length(); i++) {
+                String address = addresses.getString(i);
+                int colon = address.lastIndexOf(':');
+                String host = address.substring(0, colon).replace("[", "").replace("]", "");
+                int port = Integer.parseInt(address.substring(colon + 1));
+                for (InetAddress ip : network.getAllByName(host)) {
+                    resolved.put((ip instanceof Inet6Address ? "[" + ip.getHostAddress() + "]" : ip.getHostAddress()) + ":" + port);
+                    if (resolved.length() > 64) throw new IllegalArgumentException("Endpoint limit");
+                }
+            }
+        } catch (UnknownHostException unresolved) {
+            // Keep an empty candidate: its unavailable DNS cannot block other permitted reserves.
+        }
     }
     private void rebuild(long epoch)throws Exception {
         if(stopping)return;transitioning=true;
@@ -301,7 +327,7 @@ public final class TunnelService extends VpnService {
             if(!planned.getBoolean("ok"))throw new IllegalArgumentException("Unsupported policy");JSONObject plan=planned.getJSONObject("plan");
             if(firstPlan==null)firstPlan=plan;else if(!firstPlan.toString().equals(plan.toString()))throw new IllegalArgumentException("Backup cannot change route/DNS/guard policy");
             JSONObject profile=planned.getJSONObject("profile"), endpoint=profile.getJSONObject("endpoint");JSONArray addresses=endpoint.getJSONArray("addresses"), resolved=new JSONArray();
-            try{for(int i=0;i<addresses.length();i++){String address=addresses.getString(i);int colon=address.lastIndexOf(':');String host=address.substring(0,colon).replace("[","").replace("]","");int port=Integer.parseInt(address.substring(colon+1));for(InetAddress ip:network.getAllByName(host)){resolved.put((ip instanceof Inet6Address?"["+ip.getHostAddress()+"]":ip.getHostAddress())+":"+port);if(resolved.length()>64)throw new IllegalArgumentException("Endpoint limit");}}}catch(UnknownHostException unresolved){ /* Keep an empty candidate: its unavailable DNS cannot block other permitted reserves. */ }
+            resolveEndpoint(network, addresses, resolved);
             if(resolved.length()>0)endpoint.put("addresses",resolved);else unavailable.put(profiles.length());profiles.put(profile);
         }
         if(stopping || epoch!=networkEpoch)return;

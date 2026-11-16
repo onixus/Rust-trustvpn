@@ -161,8 +161,9 @@ pub async fn run_with_policy<D: PacketDevice>(
     let mut assembler = crate::fragments::Reassembler::default();
     let mut stack = Stack::new();
     let mut incoming = [0; 65536];
-    let mut tick = tokio::time::interval(Duration::from_millis(5));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // No TCP flows: sleep. A live flow is polled within 5 ms so tunnel bytes
+    // waiting on its bridge are drained; smoltcp cannot see that bridge.
+    let mut tick = Box::pin(tokio::time::sleep(Duration::from_secs(3600)));
     let monitor = session.clone();
     workers.spawn(async move {
         loop {
@@ -329,7 +330,7 @@ pub async fn run_with_policy<D: PacketDevice>(
                     tokio::time::timeout(Duration::from_secs(2), device.send(&fragment)).await??;
                 }
             }
-            _ = tick.tick() => stack.poll(),
+            _ = &mut tick => stack.poll(),
 
             result = workers.join_next() => {
                 if let Some(Ok(Err(error))) = result { return Err(error.into()); }
@@ -339,6 +340,17 @@ pub async fn run_with_policy<D: PacketDevice>(
         while let Some(bytes) = stack.output() {
             tokio::time::timeout(Duration::from_secs(2), device.send(&bytes)).await??;
         }
+        // Live TCP still needs a short poll: tunnel bytes arrive on the duplex
+        // bridge, which smoltcp cannot see. An idle stack has nothing to drain.
+        let delay = match stack.deadline() {
+            Some(at) => at
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(5))
+                .max(Duration::from_millis(1)),
+            None if stack.connections() == 0 => Duration::from_secs(3600),
+            None => Duration::from_millis(5),
+        };
+        tick.as_mut().reset(tokio::time::Instant::now() + delay);
     }
 }
 
