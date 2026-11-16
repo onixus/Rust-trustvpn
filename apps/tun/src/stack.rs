@@ -312,7 +312,7 @@ impl Stack {
         let now = SmolInstant::from_millis(self.epoch.elapsed().as_millis() as i64);
         self.interface
             .poll_delay(now, &self.sockets)
-            .map(|delay| Instant::now() + Duration::from_micros(delay.total_micros().max(0) as u64))
+            .map(|delay| Instant::now() + Duration::from_micros(delay.total_micros()))
     }
 }
 
