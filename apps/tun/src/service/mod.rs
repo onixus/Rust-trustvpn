@@ -83,6 +83,7 @@ impl Workers {
             .and_then(|r| {
                 r.map_err(|e| crate::failover::Failure {
                     class: rtrust_journal::classify_boxed(e.as_ref()),
+                    detail: None,
                     message: format!("Reconnect failed: {e}"),
                     record: None,
                 })

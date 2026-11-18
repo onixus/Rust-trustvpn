@@ -28,9 +28,13 @@ use zeroize::Zeroizing;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// One endpoint address, for TCP connect and the QUIC handshake. A lost path
-/// often needs a retransmit past 4 s; a longer wait must still leave the 20 s
-/// session budget and the 30 s reconnect attempt for the next address.
+/// often needs a retransmit past 4 s. Two such waits fit in [`CONNECT_TIMEOUT`];
+/// a third address is not promised.
 pub const ADDRESS_TIMEOUT: Duration = Duration::from_secs(10);
+/// Whole `Session::connect`. Two address attempts, then health, still fit under
+/// the 30 s service reconnect attempt.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const _: () = assert!(CONNECT_TIMEOUT.as_secs() >= 2 * ADDRESS_TIMEOUT.as_secs());
 
 /// Process-wide TCP flow counts since start, across sessions: numbers only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -390,7 +394,7 @@ impl Session {
     }
     pub async fn connect(p: &Profile) -> Result<Self> {
         check_capabilities(p)?;
-        tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::time::timeout(CONNECT_TIMEOUT, async {
             use rtrust_profile::Protocol;
             let transport = match p.protocol {
                 Protocol::AmneziaWg => {
@@ -419,7 +423,7 @@ impl Session {
         if mark == 0 {
             return Err(Error::Unsupported("marked transport requires a mark"));
         }
-        tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::time::timeout(CONNECT_TIMEOUT, async {
             use rtrust_profile::Protocol;
             let mark = Some(mark);
             let transport = match p.protocol {
@@ -459,7 +463,7 @@ impl Session {
                 "resolve endpoint on the underlying network before VPN setup",
             ));
         }
-        tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::time::timeout(CONNECT_TIMEOUT, async {
             let protector = Some(protector);
             let transport = match p.protocol {
                 Protocol::AmneziaWg => {
@@ -616,7 +620,7 @@ impl H2Session {
                 "TrustTunnel transport for another protocol",
             ));
         }
-        tokio::time::timeout(Duration::from_secs(20), Self::connect_inner(p, None, None))
+        tokio::time::timeout(CONNECT_TIMEOUT, Self::connect_inner(p, None, None))
             .await
             .map_err(|_| Error::Timeout)?
     }

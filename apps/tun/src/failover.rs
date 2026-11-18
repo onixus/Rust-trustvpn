@@ -105,6 +105,8 @@ impl RecoveryLabels {
 pub struct Failure {
     pub message: String,
     pub class: rtrust_journal::Class,
+    /// Closed `stage=` / `reason=` text for the journal. Never GUI or endpoint text.
+    pub detail: Option<String>,
     // Linux/macOS workers carry deferred accepted-attempt metadata; Windows
     // records its synchronous attempt at the supervisor instead.
     #[cfg(not(windows))]
@@ -115,6 +117,7 @@ impl Failure {
     pub fn engine(error: rtrust_engine::Error, message: impl Into<String>) -> Self {
         Self {
             class: rtrust_journal::classify(&error),
+            detail: None,
             message: message.into(),
             #[cfg(not(windows))]
             record: None,
@@ -124,6 +127,7 @@ impl Failure {
         Self {
             message: message.into(),
             class: rtrust_journal::Class::Timeout,
+            detail: None,
             #[cfg(not(windows))]
             record: None,
         }
@@ -134,6 +138,7 @@ impl From<rtrust_engine::Error> for Failure {
         let class = rtrust_journal::classify(&error);
         Self {
             class,
+            detail: None,
             message: error.to_string(),
             #[cfg(not(windows))]
             record: None,
@@ -145,6 +150,7 @@ impl From<String> for Failure {
         Self {
             message,
             class: rtrust_journal::Class::Other,
+            detail: None,
             #[cfg(not(windows))]
             record: None,
         }
