@@ -68,9 +68,16 @@ Example (synthetic):
 ```
 
 `level` is one of `debug`, `warning`, `error`, `critical`. A typed connection
-failure is `error`. Lifecycle state is `debug` unless the producer marks a
-warning, error or critical stop. Lines written before levels existed have no
-token and keep the seven-day bound below.
+failure is `error`. Ordinary lifecycle state is `debug`. A kill-switch or DNS
+probe verdict (`system_probe`) and the macOS incident lines — power, reconnect
+timing and completion, transport connect, stop timing and the data-plane
+summary — are `warning`, so a support copy still has them after the 15-minute
+state window. A transport stop and a failed reconnect are `error`, as a closed
+token (`vpn_reconnect_failed`), never the GUI's error text. A service process
+that cannot continue writes `service_stopped` at `critical` and flushes before
+exit; the same line is written when the Windows service fails inside SCM,
+where the process itself does not exit. Lines written before levels existed
+have no token and keep the seven-day bound below.
 
 - `path`: `start`, `reconnect`, `wake_reconnect`, `socks_recovery`.
 - `class`: `endpoint_unreachable`, `tls`, `authentication`, `profile`, `timeout`,
@@ -124,9 +131,14 @@ beyond their timestamp plus their own window. No
 process can prune while it is stopped; the next writer startup performs retention
 before its first append. Copy logs for support before they age out. Persisted
 records survive normal service/app restarts and runtime-directory cleanup.
-There is no shutdown flush integration: even normal process shutdown can lose
-queued tail records, and abrupt power loss can also lose buffered records.
-This is not an audit or guaranteed-delivery log.
+A critical stop is the exception: it has a reserved slot, so a full 256-entry
+queue does not drop it and it does not displace a queued record. The
+error-exit path then flushes for up to two seconds and reports the result; a
+false result means the writer did not confirm it took the line. A second
+critical line while that slot is held is still dropped. A clean shutdown, a
+signal kill and power loss have no flush. Even a confirmed flush only proves
+the writer accepted the line, not that the disk has it, and abrupt power loss
+can still lose buffered records. This is not an audit or guaranteed-delivery log.
 
 Producers use `try_send` into a bounded 256-entry queue. One dedicated writer
 thread performs path discovery, ACL/mode operations, scans, rotation and writes;

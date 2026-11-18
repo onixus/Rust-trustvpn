@@ -180,6 +180,10 @@ pub(super) fn remove(uid: u32, token: Option<&str>) -> Result<(), String> {
             rtrust_journal::Level::Warning,
             "pf_reference_unavailable own_rules_removed",
         );
+        // The reference is already gone; a lost warning cannot be reconstructed
+        // later. Tests never reach the installed journal.
+        #[cfg(not(test))]
+        let _ = rtrust_journal::service().flush(std::time::Duration::from_secs(2));
     }
     Ok(())
 }

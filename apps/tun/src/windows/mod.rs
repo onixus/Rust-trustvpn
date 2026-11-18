@@ -90,6 +90,11 @@ fn service_main(_: Vec<OsString>) {
             run(&args[0], pipe, receiver).await
         })
     })();
+    if result.is_err() {
+        // dispatch() returns Ok once SCM has the service, so an in-service
+        // failure never reaches the process-exit writer in rtrust-service.
+        crate::journal_stop("service_stopped");
+    }
     let _ = handler.set_service_status(status(
         ServiceState::Stopped,
         if result.is_ok() { 0 } else { 1 },
