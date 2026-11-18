@@ -202,14 +202,21 @@ impl Worker {
     fn new(task: tokio::task::JoinHandle<RunResult>) -> Self {
         Self(Some(task))
     }
-    /// True when the session ended degraded without ever delivering data.
-    async fn finished(&mut self) -> bool {
-        let mut unproven = false;
-        if let Some(task) = self.0.as_mut() {
-            unproven = task.await.as_ref().is_ok_and(crate::dataplane::unproven);
-        }
+    fn running(&self) -> bool {
+        self.0.is_some()
+    }
+    /// Why the data plane ended, and whether that exit is unproven.
+    /// Closed `key=value` tokens only; the journal line carries no endpoint data.
+    async fn finished(&mut self) -> Option<(String, bool)> {
+        let task = self.0.as_mut()?;
+        let result = task.await;
         self.0 = None;
-        unproven
+        let unproven = result.as_ref().is_ok_and(crate::dataplane::unproven);
+        let reason = match &result {
+            Ok(ended) => crate::reason::stopped(ended),
+            Err(_) => "reason=worker_failed".into(),
+        };
+        Some((reason, unproven))
     }
     async fn stop(&mut self) {
         if let Some(task) = self.0.take() {
@@ -620,10 +627,14 @@ async fn lease_loop(
                     }
                 },
                 _ = stop.changed() => return Ok(None),
-                unproven = worker.finished(), if state == State::Connected => {
+                ended = worker.finished(), if state == State::Connected && worker.running() => {
                     probes.cancel();
+                    if let Some((reason, unproven)) = ended {
+                        let uptime_ms = u64::try_from(connected_since.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        crate::journal(rtrust_journal::Level::Error, &crate::reason::stopped_event("VPN transport stopped", &reason, rtrust_journal::transport_token(rtrust_engine::planned_transport(failover.current())), uptime_ms));
+                        budget.disconnected(connected_since.elapsed(), unproven);
+                    }
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
-                    budget.disconnected(connected_since.elapsed(), unproven);
                     if failover.ended(connected_since.elapsed(), std::time::Instant::now()) {
                         monitor.failed_over(rtrust_control::observations::now_ms());
                     }
@@ -814,7 +825,10 @@ mod tests {
     #[tokio::test]
     async fn stop_after_transport_failure_does_not_poll_completed_task() {
         let mut worker = Worker::new(tokio::spawn(async { Err("endpoint lost".into()) }));
-        worker.finished().await;
+        let (reason, unproven) = worker.finished().await.expect("running worker");
+        assert_eq!(reason, "reason=worker_stopped");
+        assert!(!unproven);
+        assert!(worker.finished().await.is_none());
         worker.stop().await;
         worker.stop().await;
     }

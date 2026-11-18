@@ -27,6 +27,11 @@ use zeroize::Zeroizing;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// One endpoint address, for TCP connect and the QUIC handshake. A lost path
+/// often needs a retransmit past 4 s; a longer wait must still leave the 20 s
+/// session budget and the 30 s reconnect attempt for the next address.
+pub const ADDRESS_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Process-wide TCP flow counts since start, across sessions: numbers only.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FlowCounters {
@@ -630,7 +635,7 @@ impl H2Session {
         for address in &p.endpoint.addresses {
             // A failed address must not consume the entire global timeout.
             match tokio::time::timeout(
-                Duration::from_secs(4),
+                ADDRESS_TIMEOUT,
                 connect_tcp(address, mark, protector),
             )
             .await
