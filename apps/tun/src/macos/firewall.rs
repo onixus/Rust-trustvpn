@@ -176,7 +176,10 @@ pub(super) fn remove(uid: u32, token: Option<&str>) -> Result<(), String> {
         // A crash between pfctl -E and journal fsync may lose the reference.
         // Explicit recovery may remove our guard, but must never disable PF
         // globally to compensate for an unknown reference owned by this process.
-        eprintln!("PF reference unavailable; own rules removed, global PF state retained");
+        crate::journal(
+            rtrust_journal::Level::Warning,
+            "pf_reference_unavailable own_rules_removed",
+        );
     }
     Ok(())
 }

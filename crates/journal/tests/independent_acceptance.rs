@@ -323,7 +323,7 @@ fn contents(config: &Config) -> String {
 }
 fn seed_line(time: u64, attempt: u32) -> String {
     format!(
-        "{time} pid=1 connect_failed path=start class=other transport=h2 attempt={attempt} budget=burst duration_ms=19\n"
+        "{time} pid=1 level=error connect_failed path=start class=other transport=h2 attempt={attempt} budget=burst duration_ms=19\n"
     )
 }
 fn assert_schema(text: &str) {
@@ -331,9 +331,10 @@ fn assert_schema(text: &str) {
         assert!(line.len() < 1024);
         assert!(!line.bytes().any(|b| b.is_ascii_control()));
         let fields: Vec<_> = line.split(' ').collect();
-        assert_eq!(fields.len(), 9, "unexpected free-text/schema field");
+        assert_eq!(fields.len(), 10, "unexpected free-text/schema field");
         fields[0].parse::<u64>().unwrap();
-        assert_eq!(fields[2], "connect_failed");
+        assert_eq!(fields[2], "level=error");
+        assert_eq!(fields[3], "connect_failed");
         fields[1]
             .strip_prefix("pid=")
             .unwrap()
@@ -346,7 +347,7 @@ fn assert_schema(text: &str) {
                 "path=wake_reconnect",
                 "path=socks_recovery"
             ]
-            .contains(&fields[3])
+            .contains(&fields[4])
         );
         assert!(
             [
@@ -360,7 +361,7 @@ fn assert_schema(text: &str) {
                 "class=cancelled",
                 "class=other"
             ]
-            .contains(&fields[4])
+            .contains(&fields[5])
         );
         assert!(
             [
@@ -370,15 +371,15 @@ fn assert_schema(text: &str) {
                 "transport=amneziawg",
                 "transport=unknown"
             ]
-            .contains(&fields[5])
+            .contains(&fields[6])
         );
-        fields[6]
+        fields[7]
             .strip_prefix("attempt=")
             .unwrap()
             .parse::<u32>()
             .unwrap();
-        assert!(["budget=burst", "budget=cooldown"].contains(&fields[7]));
-        fields[8]
+        assert!(["budget=burst", "budget=cooldown"].contains(&fields[8]));
+        fields[9]
             .strip_prefix("duration_ms=")
             .unwrap()
             .parse::<u64>()

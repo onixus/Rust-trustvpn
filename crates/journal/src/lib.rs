@@ -19,6 +19,48 @@ mod unix;
 mod windows;
 pub use rtrust_engine::PlannedTransport as Transport;
 
+/// How long a record of each level is kept. Fixed; not configurable.
+pub const DEBUG_RETENTION_MS: u64 = 15 * 60 * 1000;
+pub const WARNING_RETENTION_MS: u64 = 30 * 60 * 1000;
+pub const ERROR_RETENTION_MS: u64 = 60 * 60 * 1000;
+pub const CRITICAL_RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    Debug,
+    Warning,
+    Error,
+    Critical,
+}
+impl Level {
+    pub const fn retention_ms(self) -> u64 {
+        match self {
+            Self::Debug => DEBUG_RETENTION_MS,
+            Self::Warning => WARNING_RETENTION_MS,
+            Self::Error => ERROR_RETENTION_MS,
+            Self::Critical => CRITICAL_RETENTION_MS,
+        }
+    }
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Warning => "warning",
+            Self::Error => "error",
+            Self::Critical => "critical",
+        }
+    }
+    /// Closed token only. Anything else is not a level.
+    pub fn parse(token: &str) -> Option<Self> {
+        match token {
+            "level=debug" => Some(Self::Debug),
+            "level=warning" => Some(Self::Warning),
+            "level=error" => Some(Self::Error),
+            "level=critical" => Some(Self::Critical),
+            _ => None,
+        }
+    }
+}
+
 macro_rules! tokens {
     ($name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,7 +171,7 @@ impl Record {
     }
     fn line(self) -> String {
         format!(
-            "{} pid={} connect_failed path={} class={} transport={} attempt={} budget={} duration_ms={}\n",
+            "{} pid={} level=error connect_failed path={} class={} transport={} attempt={} budget={} duration_ms={}\n",
             self.time,
             self.pid,
             self.path.as_str(),
@@ -349,11 +391,15 @@ impl Journal {
     pub fn submit(&self, record: Record) {
         self.enqueue(record.line());
     }
-    /// Only existing, redacted lifecycle messages belong here. New failures use Record.
+    /// State changes. Kept 15 minutes. New failures use [`Record`] (error, 60 minutes).
     pub fn lifecycle(&self, event: &str) {
+        self.lifecycle_at(Level::Debug, event);
+    }
+    /// Only existing, redacted lifecycle messages belong here.
+    pub fn lifecycle_at(&self, level: Level, event: &str) {
         let clean: String = event
             .chars()
-            .take(900)
+            .take(880)
             .map(|c| {
                 if c.is_ascii() && !c.is_control() {
                     c
@@ -362,7 +408,12 @@ impl Journal {
                 }
             })
             .collect();
-        self.enqueue(format!("{} pid={} {clean}\n", now_ms(), std::process::id()));
+        self.enqueue(format!(
+            "{} pid={} level={} {clean}\n",
+            now_ms(),
+            std::process::id(),
+            level.as_str()
+        ));
     }
     fn enqueue(&self, line: String) {
         if let Some(tx) = &self.tx

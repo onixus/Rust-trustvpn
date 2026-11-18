@@ -64,8 +64,13 @@ symlinks, hardlinks or custom directories at journal filenames.
 Example (synthetic):
 
 ```text
-1700000000000 pid=123 connect_failed path=reconnect class=tls transport=h3 attempt=2 budget=burst duration_ms=187
+1700000000000 pid=123 level=error connect_failed path=reconnect class=tls transport=h3 attempt=2 budget=burst duration_ms=187
 ```
+
+`level` is one of `debug`, `warning`, `error`, `critical`. A typed connection
+failure is `error`. Lifecycle state is `debug` unless the producer marks a
+warning, error or critical stop. Lines written before levels existed have no
+token and keep the seven-day bound below.
 
 - `path`: `start`, `reconnect`, `wake_reconnect`, `socks_recovery`.
 - `class`: `endpoint_unreachable`, `tls`, `authentication`, `profile`, `timeout`,
@@ -108,11 +113,14 @@ discarded instead of evicting newer segments to preserve it. No
 truncate-and-start-over rotation is used. Empty lock files carry no record data.
 Unknown files in the directory are not managed or deleted.
 
-Every record older than seven days is removed, including expired prefixes of a
-mixed active/rotated file. Pruning runs at writer startup, before each append,
-and every 60 seconds while idle. Malformed and incomplete records are discarded.
-Future-dated records survive an RTC rollback; they remain byte-cap bounded and
-age out once wall time advances beyond their timestamp plus seven days. No
+A record is removed once it is older than its level's window: debug 15 minutes,
+warning 30 minutes, error 60 minutes, critical 24 hours. A line with no `level`
+token, including records written before this policy, keeps the previous
+seven-day bound. Pruning covers expired prefixes of a mixed active/rotated file
+and runs at writer startup, before each append, and every 60 seconds while idle.
+Malformed and incomplete records are discarded. Future-dated records survive an
+RTC rollback; they remain byte-cap bounded and age out once wall time advances
+beyond their timestamp plus their own window. No
 process can prune while it is stopped; the next writer startup performs retention
 before its first append. Copy logs for support before they age out. Persisted
 records survive normal service/app restarts and runtime-directory cleanup.

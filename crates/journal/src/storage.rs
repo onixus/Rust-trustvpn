@@ -9,6 +9,15 @@ pub(crate) const SEGMENT: u64 = 1_000_000;
 pub(crate) const TOTAL: u64 = 15_000_000;
 pub(crate) const AGE: u64 = 7 * 24 * 60 * 60 * 1000;
 const MAX_SEGMENTS: usize = 1024;
+/// A closed `level=` token selects its window. Lines without one, including
+/// records written before levels existed, keep the seven-day bound.
+fn retention(line: &[u8]) -> u64 {
+    let text = std::str::from_utf8(line).unwrap_or("");
+    text.split(' ')
+        .find_map(crate::Level::parse)
+        .map(crate::Level::retention_ms)
+        .unwrap_or(AGE)
+}
 fn invalid() -> io::Error {
     io::Error::other("unsafe journal state")
 }
@@ -102,7 +111,7 @@ impl Store {
                     .next()
                     .and_then(|b| std::str::from_utf8(b).ok())
                     .and_then(|s| s.parse::<u64>().ok());
-                if time.is_some_and(|t| now.saturating_sub(t) <= AGE) {
+                if time.is_some_and(|t| now.saturating_sub(t) <= retention(line)) {
                     kept.extend_from_slice(line);
                 }
             }
@@ -249,6 +258,46 @@ mod tests {
         );
         s.prune(AGE * 3 + 103).unwrap();
         assert!(s.segments().unwrap().is_empty());
+    }
+    #[test]
+    fn each_level_expires_on_its_own_window() {
+        let (_tmp, mut s) = store();
+        let now = 10_000_000_000u64;
+        for level in [
+            crate::Level::Debug,
+            crate::Level::Warning,
+            crate::Level::Error,
+            crate::Level::Critical,
+        ] {
+            let window = level.retention_ms();
+            s.append(
+                &format!(
+                    "{} pid=1 level={} stale\n",
+                    now - window - 1,
+                    level.as_str()
+                ),
+                now,
+            )
+            .unwrap();
+            s.append(
+                &format!("{} pid=1 level={} kept\n", now - window, level.as_str()),
+                now,
+            )
+            .unwrap();
+        }
+        // A line from before levels existed keeps the seven-day bound.
+        s.append(&format!("{} unlabeled\n", now - AGE), now)
+            .unwrap();
+        s.prune(now).unwrap();
+        let mut text = String::new();
+        s.dir
+            .file("events.log", false)
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert!(!text.contains("stale"), "{text}");
+        assert_eq!(text.matches("kept").count(), 4, "{text}");
+        assert!(text.contains("unlabeled"), "{text}");
     }
     #[test]
     fn near_cap_mixed_rewrite_discards_oldest_target_never_newer_history() {

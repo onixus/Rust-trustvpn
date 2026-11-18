@@ -41,6 +41,15 @@ pub mod windows;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
+/// Best-effort diagnostics. A test build must not touch the installed journal:
+/// `rtrust_journal::service` is disabled only inside that crate's own tests.
+pub(crate) fn journal(level: rtrust_journal::Level, event: &str) {
+    #[cfg(not(test))]
+    rtrust_journal::service().lifecycle_at(level, event);
+    #[cfg(test)]
+    let _ = (level, event);
+}
+
 pub use dataplane::{
     PacketDevice, degraded, degraded_event, degraded_kind, run_with_dns as run_packet_flow,
     run_with_policy, unproven,

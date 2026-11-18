@@ -486,11 +486,11 @@ fn record(line: &str) -> Option<(u64, u32)> {
         require(numeric(field(p[2], "count=")));
         return None;
     }
-    require(p.len() == 9 && p[2] == "connect_failed");
+    require(p.len() == 10 && p[2] == "level=error" && p[3] == "connect_failed");
     let pid = field(p[1], "pid=");
     require(numeric(pid));
     require(
-        ["start", "reconnect", "wake_reconnect", "socks_recovery"].contains(&field(p[3], "path=")),
+        ["start", "reconnect", "wake_reconnect", "socks_recovery"].contains(&field(p[4], "path=")),
     );
     require(
         [
@@ -504,21 +504,21 @@ fn record(line: &str) -> Option<(u64, u32)> {
             "cancelled",
             "other",
         ]
-        .contains(&field(p[4], "class=")),
+        .contains(&field(p[5], "class=")),
     );
-    require(["h2", "h3", "hysteria", "amneziawg", "unknown"].contains(&field(p[5], "transport=")));
+    require(["h2", "h3", "hysteria", "amneziawg", "unknown"].contains(&field(p[6], "transport=")));
     require(
-        numeric(field(p[6], "attempt="))
-            && ["burst", "cooldown"].contains(&field(p[7], "budget="))
-            && numeric(field(p[8], "duration_ms=")),
+        numeric(field(p[7], "attempt="))
+            && ["burst", "cooldown"].contains(&field(p[8], "budget="))
+            && numeric(field(p[9], "duration_ms=")),
     );
     // A fresh candidate-created journal must contain only these synthetic B events.
     require(
-        p[3] == "path=start"
-            && p[4] == "class=profile"
-            && p[5] == "transport=h2"
-            && p[6] == "attempt=1"
-            && p[7] == "budget=burst",
+        p[4] == "path=start"
+            && p[5] == "class=profile"
+            && p[6] == "transport=h2"
+            && p[7] == "attempt=1"
+            && p[8] == "budget=burst",
     );
     Some((checked(p[0].parse()), checked(pid.parse())))
 }

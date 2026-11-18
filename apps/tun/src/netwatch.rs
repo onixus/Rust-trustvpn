@@ -55,7 +55,12 @@ impl Watch {
             tick,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             notify: notify_socket()
-                .inspect_err(|error| eprintln!("Network change notifications unavailable: {error}"))
+                .inspect_err(|_| {
+                    crate::journal(
+                        rtrust_journal::Level::Warning,
+                        "network_notifications_unavailable",
+                    )
+                })
                 .ok(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             settle_until: None,

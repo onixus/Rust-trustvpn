@@ -548,7 +548,10 @@ async fn serve(
         {
             if !*session.finished.borrow() {
                 // Missing or wrong owner: the live session and its guard stay.
-                events::record("recover_rejected reason=not_owner");
+                events::record_at(
+                    rtrust_journal::Level::Warning,
+                    "recover_rejected reason=not_owner",
+                );
                 return reply(&mut stream, State::Blocked, NOT_OWNER).await;
             }
             // The actor already ended; its guard is released only through
@@ -1161,7 +1164,7 @@ async fn connected(
                     summary = None;
                     monitor.transition(false, rtrust_control::observations::now_ms());
                 }
-                events::record("access_expired");
+                events::record_at(rtrust_journal::Level::Warning, "access_expired");
                 // Join in-flight route refresh before allowing explicit Stop
                 // to release the guard, but keep IPC responsive while draining.
                 let stopping = workers.stop();
@@ -1238,7 +1241,7 @@ async fn connected(
                     if restart_pending { continue; }
                     let stalled = result.as_ref().ok().and_then(crate::dataplane::degraded_kind);
                     let degraded = stalled.map(|(proven, _)| proven);
-                    if let Some((proven, kind)) = stalled { events::record(&crate::dataplane::degraded_event(proven, kind)); }
+                    if let Some((proven, kind)) = stalled { events::record_at(rtrust_journal::Level::Warning, &crate::dataplane::degraded_event(proven, kind)); }
                     // Classes and numeric codes only; no endpoint data.
                     let reason = match &result {
                         Ok(result) => crate::reason::stopped(result),
@@ -1248,7 +1251,7 @@ async fn connected(
                         Ok(_) => "VPN transport stopped".into(),
                         Err(_) => "VPN transport worker failed".into(),
                     };
-                    events::record(&crate::reason::stopped_event(&last_failure, &reason, workers.transport, millis(connected_since)));
+                    events::record_at(rtrust_journal::Level::Error, &crate::reason::stopped_event(&last_failure, &reason, workers.transport, millis(connected_since)));
                     state = State::Blocked;
                     // A flapping endpoint must not reset the backoff indefinitely.
                     monitor.transition(false, rtrust_control::observations::now_ms());
@@ -1272,7 +1275,7 @@ async fn connected(
                             last_failure = "VPN reconnect failed".into();
                             // `stage=.. reason=..` classes from device.rs and
                             // fixed route-guard strings only; no endpoint data.
-                            events::record(&format!("{last_failure}: {error}"));
+                            events::record_at(rtrust_journal::Level::Error, &format!("{last_failure}: {error}"));
                         }
                         Err(error) => {
                             crate::failover::journal_failure(rtrust_journal::Record::failure(path, if error.is_cancelled() { rtrust_journal::Class::Cancelled } else { rtrust_journal::Class::Other }, rtrust_engine::planned_transport(failover.current()), retry_delay.attempt(), rtrust_journal::Budget::from_cooling(retry_delay.cooling()), Duration::ZERO));
