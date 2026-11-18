@@ -522,14 +522,14 @@ async fn serve(
                         record.path = path;
                         crate::failover::journal_failure(record);
                     }
-                    if let Ok(Err(error))=&result { eprintln!("VPN reconnect failed: {error}"); }
+                    if let Ok(Err(_))=&result { crate::journal(rtrust_journal::Level::Error, "vpn_reconnect_failed"); }
                     if let Ok(Ok(prepared)) = result {
                         // Route mutations stay in the lease task, never in the
                         // reconnect worker: Stop/EOF cannot race a late install.
                         let reattached=routes.reattach();
-                        if let Err(error)=&reattached {
+                        if reattached.is_err() {
                             crate::failover::journal_failure(rtrust_journal::Record::failure(path, rtrust_journal::Class::Other, rtrust_engine::planned_transport(failover.current()), retry_delay.attempt(), rtrust_journal::Budget::from_cooling(retry_delay.cooling()), Duration::ZERO));
-                            eprintln!("VPN route reattach failed: {error}");
+                            crate::journal(rtrust_journal::Level::Error, "vpn_route_reattach_failed");
                         }
                         if reattached.is_ok() {
                             labels.connected();

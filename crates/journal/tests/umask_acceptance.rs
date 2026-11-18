@@ -219,7 +219,7 @@ fn now() -> u64 {
 
 fn seed_line(time: u64, attempt: u32) -> String {
     format!(
-        "{time} pid=123 connect_failed path=start class=other transport=h2 attempt={attempt} budget=burst duration_ms=19\n"
+        "{time} pid=123 level=error connect_failed path=start class=other transport=h2 attempt={attempt} budget=burst duration_ms=19\n"
     )
 }
 

@@ -64,8 +64,20 @@ symlinks, hardlinks or custom directories at journal filenames.
 Example (synthetic):
 
 ```text
-1700000000000 pid=123 connect_failed path=reconnect class=tls transport=h3 attempt=2 budget=burst duration_ms=187
+1700000000000 pid=123 level=error connect_failed path=reconnect class=tls transport=h3 attempt=2 budget=burst duration_ms=187
 ```
+
+`level` is one of `debug`, `warning`, `error`, `critical`. A typed connection
+failure is `error`. Ordinary lifecycle state is `debug`. A kill-switch or DNS
+probe verdict (`system_probe`) and the macOS incident lines — power, reconnect
+timing and completion, transport connect, stop timing and the data-plane
+summary — are `warning`, so a support copy still has them after the 15-minute
+state window. A transport stop and a failed reconnect are `error`, as a closed
+token (`vpn_reconnect_failed`), never the GUI's error text. A service process
+that cannot continue writes `service_stopped` at `critical` and flushes before
+exit; the same line is written when the Windows service fails inside SCM,
+where the process itself does not exit. Lines written before levels existed
+have no token and keep the seven-day bound below.
 
 - `path`: `start`, `reconnect`, `wake_reconnect`, `socks_recovery`.
 - `class`: `endpoint_unreachable`, `tls`, `authentication`, `profile`, `timeout`,
@@ -108,17 +120,25 @@ discarded instead of evicting newer segments to preserve it. No
 truncate-and-start-over rotation is used. Empty lock files carry no record data.
 Unknown files in the directory are not managed or deleted.
 
-Every record older than seven days is removed, including expired prefixes of a
-mixed active/rotated file. Pruning runs at writer startup, before each append,
-and every 60 seconds while idle. Malformed and incomplete records are discarded.
-Future-dated records survive an RTC rollback; they remain byte-cap bounded and
-age out once wall time advances beyond their timestamp plus seven days. No
+A record is removed once it is older than its level's window: debug 15 minutes,
+warning 30 minutes, error 60 minutes, critical 24 hours. A line with no `level`
+token, including records written before this policy, keeps the previous
+seven-day bound. Pruning covers expired prefixes of a mixed active/rotated file
+and runs at writer startup, before each append, and every 60 seconds while idle.
+Malformed and incomplete records are discarded. Future-dated records survive an
+RTC rollback; they remain byte-cap bounded and age out once wall time advances
+beyond their timestamp plus their own window. No
 process can prune while it is stopped; the next writer startup performs retention
 before its first append. Copy logs for support before they age out. Persisted
 records survive normal service/app restarts and runtime-directory cleanup.
-There is no shutdown flush integration: even normal process shutdown can lose
-queued tail records, and abrupt power loss can also lose buffered records.
-This is not an audit or guaranteed-delivery log.
+A critical stop is the exception: it has a reserved slot, so a full 256-entry
+queue does not drop it and it does not displace a queued record. The
+error-exit path then flushes for up to two seconds and reports the result; a
+false result means the writer did not confirm it took the line. A second
+critical line while that slot is held is still dropped. A clean shutdown, a
+signal kill and power loss have no flush. Even a confirmed flush only proves
+the writer accepted the line, not that the disk has it, and abrupt power loss
+can still lose buffered records. This is not an audit or guaranteed-delivery log.
 
 Producers use `try_send` into a bounded 256-entry queue. One dedicated writer
 thread performs path discovery, ACL/mode operations, scans, rotation and writes;

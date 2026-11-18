@@ -4,7 +4,7 @@ use std::{
     error::Error,
     path::PathBuf,
     sync::{
-        Arc, OnceLock,
+        Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
@@ -18,6 +18,48 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 pub use rtrust_engine::PlannedTransport as Transport;
+
+/// How long a record of each level is kept. Fixed; not configurable.
+pub const DEBUG_RETENTION_MS: u64 = 15 * 60 * 1000;
+pub const WARNING_RETENTION_MS: u64 = 30 * 60 * 1000;
+pub const ERROR_RETENTION_MS: u64 = 60 * 60 * 1000;
+pub const CRITICAL_RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    Debug,
+    Warning,
+    Error,
+    Critical,
+}
+impl Level {
+    pub const fn retention_ms(self) -> u64 {
+        match self {
+            Self::Debug => DEBUG_RETENTION_MS,
+            Self::Warning => WARNING_RETENTION_MS,
+            Self::Error => ERROR_RETENTION_MS,
+            Self::Critical => CRITICAL_RETENTION_MS,
+        }
+    }
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Warning => "warning",
+            Self::Error => "error",
+            Self::Critical => "critical",
+        }
+    }
+    /// Closed token only. Anything else is not a level.
+    pub fn parse(token: &str) -> Option<Self> {
+        match token {
+            "level=debug" => Some(Self::Debug),
+            "level=warning" => Some(Self::Warning),
+            "level=error" => Some(Self::Error),
+            "level=critical" => Some(Self::Critical),
+            _ => None,
+        }
+    }
+}
 
 macro_rules! tokens {
     ($name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
@@ -129,7 +171,7 @@ impl Record {
     }
     fn line(self) -> String {
         format!(
-            "{} pid={} connect_failed path={} class={} transport={} attempt={} budget={} duration_ms={}\n",
+            "{} pid={} level=error connect_failed path={} class={} transport={} attempt={} budget={} duration_ms={}\n",
             self.time,
             self.pid,
             self.path.as_str(),
@@ -276,16 +318,30 @@ impl Config {
 }
 enum Message {
     Line(String),
+    /// A stop record. A full queue drops one ordinary line to admit it; it is
+    /// never summarized away by `journal_dropped`.
+    Critical(String),
     Flush(mpsc::SyncSender<()>),
 }
 pub struct Journal {
     tx: Option<mpsc::SyncSender<Message>>,
+    /// One reserved slot. A critical line and a flush acknowledgement enter
+    /// here when the bounded queue is full, so a stop is not dropped to make
+    /// room and never displaces another queued record.
+    urgent: Option<Arc<Urgent>>,
     dropped: Arc<AtomicU64>,
+}
+struct Urgent {
+    slot: Mutex<Option<Message>>,
+    pending: Condvar,
+    /// Lines accepted into the queue and not yet taken by the writer.
+    queued: AtomicU64,
 }
 impl Journal {
     pub fn disabled() -> Self {
         Self {
             tx: None,
+            urgent: None,
             dropped: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -299,8 +355,14 @@ impl Journal {
         idle: Duration,
     ) -> Self {
         let (tx, rx) = mpsc::sync_channel(256);
+        let urgent = Arc::new(Urgent {
+            slot: Mutex::new(None),
+            pending: Condvar::new(),
+            queued: AtomicU64::new(0),
+        });
         let dropped = Arc::new(AtomicU64::new(0));
         let count = dropped.clone();
+        let reserved = Arc::clone(&urgent);
         let worker = std::thread::Builder::new()
             .name("event-journal".into())
             .spawn(move || {
@@ -313,47 +375,67 @@ impl Journal {
                     };
                     let _ = store.prune(clock());
                     loop {
-                        match rx.recv_timeout(idle) {
-                            Ok(Message::Line(line)) => {
-                                let n = count.swap(0, Ordering::Relaxed);
-                                if n != 0
-                                    && store
-                                        .append(
-                                            &format!("{} journal_dropped count={n}\n", clock()),
-                                            clock(),
-                                        )
-                                        .is_err()
-                                {
-                                    count.fetch_add(n, Ordering::Relaxed);
+                        // Both producers notify this condvar. The predicate
+                        // covers a line that arrived before the wait, so a
+                        // notify is never lost between the check and it.
+                        let guard = reserved.slot.lock().unwrap_or_else(|e| e.into_inner());
+                        let (mut guard, waited) = reserved
+                            .pending
+                            .wait_timeout_while(guard, idle, |slot| {
+                                slot.is_none() && reserved.queued.load(Ordering::Acquire) == 0
+                            })
+                            .unwrap_or_else(|e| e.into_inner());
+                        if let Some(message) = guard.take() {
+                            drop(guard);
+                            deliver(&mut store, &count, &clock, message);
+                            continue;
+                        }
+                        drop(guard);
+                        if waited.timed_out() {
+                            let _ = store.prune(clock());
+                        }
+                        loop {
+                            match rx.try_recv() {
+                                Ok(message) => {
+                                    deliver(&mut store, &count, &clock, message);
+                                    reserved.queued.fetch_sub(1, Ordering::Release);
                                 }
-                                if store.append(&line, clock()).is_err() {
-                                    count.fetch_add(1, Ordering::Relaxed);
-                                }
+                                // Empty and every sender is gone: stop. Checked
+                                // here, not by a second recv, so a line that
+                                // arrives in between is never consumed and lost.
+                                Err(mpsc::TryRecvError::Disconnected) => return,
+                                Err(mpsc::TryRecvError::Empty) => break,
                             }
-                            Ok(Message::Flush(done)) => {
-                                let _ = done.try_send(());
-                            }
-                            Err(mpsc::RecvTimeoutError::Timeout) => {
-                                let _ = store.prune(clock());
-                            }
-                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         }
                     }
                 }));
             });
         Self {
-            tx: worker.ok().map(|_| tx),
+            tx: worker.is_ok().then_some(tx),
+            urgent: worker.is_ok().then_some(urgent),
             dropped,
         }
     }
     pub fn submit(&self, record: Record) {
         self.enqueue(record.line());
     }
-    /// Only existing, redacted lifecycle messages belong here. New failures use Record.
+    /// State changes. Kept 15 minutes. New failures use [`Record`] (error, 60 minutes).
     pub fn lifecycle(&self, event: &str) {
+        self.lifecycle_at(Level::Debug, event);
+    }
+    /// Only existing, redacted lifecycle messages belong here.
+    pub fn lifecycle_at(&self, level: Level, event: &str) {
+        let line = self.lifecycle_line(level, event);
+        if level == Level::Critical {
+            self.enqueue_critical(line);
+        } else {
+            self.enqueue(line);
+        }
+    }
+    fn lifecycle_line(&self, level: Level, event: &str) -> String {
         let clean: String = event
             .chars()
-            .take(900)
+            .take(880)
             .map(|c| {
                 if c.is_ascii() && !c.is_control() {
                     c
@@ -362,22 +444,121 @@ impl Journal {
                 }
             })
             .collect();
-        self.enqueue(format!("{} pid={} {clean}\n", now_ms(), std::process::id()));
+        format!(
+            "{} pid={} level={} {clean}\n",
+            now_ms(),
+            std::process::id(),
+            level.as_str()
+        )
     }
     fn enqueue(&self, line: String) {
-        if let Some(tx) = &self.tx
-            && tx.try_send(Message::Line(line)).is_err()
-        {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
+        let Some(tx) = &self.tx else { return };
+        if self.send(tx, Message::Line(line)) {
+            return;
         }
+        self.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Admit one critical line even when the bounded queue is full, through the
+    /// reserved slot. Still non-blocking: a second critical line finds the slot
+    /// taken and counts as dropped rather than waiting.
+    fn enqueue_critical(&self, line: String) {
+        let Some(tx) = &self.tx else { return };
+        if self.send(tx, Message::Critical(line.clone())) {
+            return;
+        }
+        if self.offer(Message::Critical(line)) {
+            return;
+        }
+        self.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Count before the send, so the writer cannot see a queued line whose
+    /// count is still zero and sleep past it.
+    fn send(&self, tx: &mpsc::SyncSender<Message>, message: Message) -> bool {
+        if let Some(urgent) = &self.urgent {
+            urgent.queued.fetch_add(1, Ordering::Release);
+        }
+        if tx.try_send(message).is_err() {
+            if let Some(urgent) = &self.urgent {
+                urgent.queued.fetch_sub(1, Ordering::Release);
+            }
+            return false;
+        }
+        if let Some(urgent) = &self.urgent {
+            urgent.pending.notify_one();
+        }
+        true
+    }
+    fn offer(&self, message: Message) -> bool {
+        let Some(urgent) = &self.urgent else {
+            return false;
+        };
+        let mut slot = urgent.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(message);
+        drop(slot);
+        urgent.pending.notify_one();
+        true
     }
     /// Synchronous shutdown/test hook only, never used by async connection code.
+    /// The reserved slot is kept for a critical line, so a full queue is
+    /// retried until the writer drains it. The wait stays bounded by `bound`.
     pub fn flush(&self, bound: Duration) -> bool {
         let Some(tx) = &self.tx else {
             return false;
         };
         let (done, rx) = mpsc::sync_channel(1);
-        tx.try_send(Message::Flush(done)).is_ok() && rx.recv_timeout(bound).is_ok()
+        // The reserved slot belongs to a critical line already waiting. Keep
+        // retrying the queue until the writer has drained enough to take the
+        // acknowledgement; the wait stays bounded by `bound`.
+        let deadline = Instant::now() + bound;
+        loop {
+            if self.send(tx, Message::Flush(done.clone())) {
+                return rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .is_ok();
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+fn deliver(
+    store: &mut storage::Store,
+    count: &AtomicU64,
+    clock: &impl Fn() -> u64,
+    message: Message,
+) {
+    match message {
+        Message::Line(line) => write(store, count, clock, &line),
+        Message::Critical(line) => {
+            // Ahead of any drop marker: a stop must not be buried under the
+            // count of whatever the queue could not hold.
+            let _ = store.append(&line, clock());
+            write_drops(store, count, clock);
+        }
+        Message::Flush(done) => {
+            let _ = done.try_send(());
+        }
+    }
+}
+fn write_drops(store: &mut storage::Store, count: &AtomicU64, clock: &impl Fn() -> u64) {
+    let n = count.swap(0, Ordering::Relaxed);
+    if n != 0
+        && store
+            .append(&format!("{} journal_dropped count={n}\n", clock()), clock())
+            .is_err()
+    {
+        count.fetch_add(n, Ordering::Relaxed);
+    }
+}
+fn write(store: &mut storage::Store, count: &AtomicU64, clock: &impl Fn() -> u64, line: &str) {
+    write_drops(store, count, clock);
+    if store.append(line, clock()).is_err() {
+        count.fetch_add(1, Ordering::Relaxed);
     }
 }
 pub fn service() -> &'static Journal {

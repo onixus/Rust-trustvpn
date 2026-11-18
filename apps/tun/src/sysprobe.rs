@@ -390,7 +390,9 @@ pub fn diagnose(last: &std::sync::Mutex<String>, line: &str) {
     };
     if *last != line {
         line.clone_into(&mut last);
-        rtrust_journal::service().lifecycle(line);
+        // Warning, not debug: a guard or DNS verdict must outlive the 15-minute
+        // state window so a later sleep or support copy can still read it.
+        rtrust_journal::service().lifecycle_at(rtrust_journal::Level::Warning, line);
     }
 }
 /// A probe target that is also an endpoint would test an exemption.

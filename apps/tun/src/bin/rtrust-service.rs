@@ -2,6 +2,9 @@
 #[tokio::main]
 async fn main() {
     if let Err(error) = rtrust_tun::service::run().await {
+        if !rtrust_tun::journal_stop("service_stopped") {
+            eprintln!("service_stopped was not confirmed in the journal");
+        }
         eprintln!("{error}");
         std::process::exit(1);
     }
@@ -15,6 +18,9 @@ fn main() {
 #[cfg(target_os = "windows")]
 fn main() {
     if let Err(error) = rtrust_tun::windows::dispatch() {
+        if !rtrust_tun::journal_stop("service_stopped") {
+            eprintln!("service_stopped was not confirmed in the journal");
+        }
         eprintln!("{error}");
         std::process::exit(1);
     }
@@ -24,6 +30,9 @@ fn main() {
 #[tokio::main]
 async fn main() {
     if let Err(error) = rtrust_tun::macos::run().await {
+        if !rtrust_tun::journal_stop("service_stopped") {
+            eprintln!("service_stopped was not confirmed in the journal");
+        }
         eprintln!("{error}");
         std::process::exit(1);
     }

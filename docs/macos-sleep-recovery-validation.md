@@ -39,7 +39,9 @@ and starts no new mutation before the old worker has drained.
   Ignore any successful result from a worker invalidated by a power event.
 - Keep bounded, redacted lifecycle diagnostics at
   `/Library/Logs/R-TrustTunnel/events.log` (root-owned, desktop-readable;
-  seven-day retention and 15,000,000-byte total cap including rotated segments
+  per-level retention — debug 15 minutes, warning 30, error 60, critical 24 hours;
+  unlabeled lines keep seven days. Power, reconnect and stop lines are warnings,
+  so they survive the 15-minute state window — and a 15,000,000-byte total cap including rotated segments
   and rewrite temporary data). See [journal details](diagnostics-journal.md).
   Never record profiles, credentials, request bodies or packet content.
 - Transport stops and failed reconnects carry a reason class

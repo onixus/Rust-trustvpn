@@ -192,6 +192,32 @@ fn queue_saturation_and_dropped_marker_do_not_wait_for_writer() {
 }
 
 #[test]
+fn a_full_queue_still_persists_a_critical_stop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(&tmp);
+    let file = cfg.directory.join(cfg.file);
+    let (ready, entered) = mpsc::sync_channel(1);
+    let (release, wait) = mpsc::sync_channel(1);
+    let journal = Journal::spawn(move || {
+        ready.send(()).unwrap();
+        wait.recv().unwrap();
+        Some(cfg)
+    });
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    for _ in 0..1000 {
+        journal.submit(record());
+    }
+    journal.lifecycle_at(Level::Critical, "service_stopped");
+    release.send(()).unwrap();
+    assert!(journal.flush(Duration::from_secs(5)));
+    let text = std::fs::read_to_string(file).unwrap();
+    assert!(
+        text.contains("level=critical service_stopped"),
+        "critical stop missing from a saturated queue: {text}"
+    );
+}
+
+#[test]
 fn init_panic_and_unavailable_directory_are_best_effort() {
     let journal = Journal::spawn(|| panic!("controlled writer initialization failure"));
     for _ in 0..1000 {

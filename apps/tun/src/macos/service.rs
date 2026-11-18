@@ -355,13 +355,16 @@ impl Workers {
                     )
                     .await;
                     // Durations only: no endpoint, route or profile data.
-                    events::record(&format!(
-                        "reconnect_timing wait_ms={} route_refresh_ms={} total_ms={} ok={}",
-                        wait.as_millis(),
-                        refresh_ms.into_inner(),
-                        millis(started),
-                        result.is_ok()
-                    ));
+                    events::record_at(
+                        rtrust_journal::Level::Warning,
+                        &format!(
+                            "reconnect_timing wait_ms={} route_refresh_ms={} total_ms={} ok={}",
+                            wait.as_millis(),
+                            refresh_ms.into_inner(),
+                            millis(started),
+                            result.is_ok()
+                        ),
+                    );
                     result.map_err(|mut e: crate::failover::Failure| {
                         e.record = Some(rtrust_journal::Record::failure(
                             rtrust_journal::Path::Reconnect,
@@ -454,7 +457,10 @@ pub async fn run() -> Result<(), String> {
     let lease = Arc::new(Mutex::new(()));
     state::directory()?;
     let power = power::Monitor::new()?;
-    events::record("service_started native_power_monitor=registered");
+    events::record_at(
+        rtrust_journal::Level::Warning,
+        "service_started native_power_monitor=registered",
+    );
     let mut tasks = JoinSet::new();
     let mut actors = JoinSet::new();
     let registry: Registry = Arc::new(std::sync::Mutex::new(None));
@@ -548,7 +554,10 @@ async fn serve(
         {
             if !*session.finished.borrow() {
                 // Missing or wrong owner: the live session and its guard stay.
-                events::record("recover_rejected reason=not_owner");
+                events::record_at(
+                    rtrust_journal::Level::Warning,
+                    "recover_rejected reason=not_owner",
+                );
                 return reply(&mut stream, State::Blocked, NOT_OWNER).await;
             }
             // The actor already ended; its guard is released only through
@@ -1088,7 +1097,7 @@ async fn connected(
         workers.stop().await;
         return publish(&mut initial, State::Blocked, &error).await;
     }
-    events::record("tunnel_connected");
+    events::record_at(rtrust_journal::Level::Warning, "tunnel_connected");
     // Numbers only: a bounded data-plane summary after each (re)connect so a
     // session that proxies nothing is visible without raw traffic capture.
     let mut summary: Option<(tokio::time::Instant, &'static str, crate::stats::Snapshot)> =
@@ -1161,7 +1170,7 @@ async fn connected(
                     summary = None;
                     monitor.transition(false, rtrust_control::observations::now_ms());
                 }
-                events::record("access_expired");
+                events::record_at(rtrust_journal::Level::Warning, "access_expired");
                 // Join in-flight route refresh before allowing explicit Stop
                 // to release the guard, but keep IPC responsive while draining.
                 let stopping = workers.stop();
@@ -1187,7 +1196,7 @@ async fn connected(
                 };
             }
             if !access_expired && awake && workers.idle() {
-                events::record("reconnect_scheduled");
+                events::record_at(rtrust_journal::Level::Warning, "reconnect_scheduled");
                 retry(&mut workers, failover.current(), &mut retry_delay);
                 restart_pending = false;
             }
@@ -1202,7 +1211,7 @@ async fn connected(
                     event.map_err(|_| "macOS power monitor stopped")?;
                     let event = *power.borrow_and_update();
                     awake = event.awake;
-                    events::record(&format!("power_event awake={awake} generation={}", event.generation));
+                    events::record_at(rtrust_journal::Level::Warning, &format!("power_event awake={awake} generation={}", event.generation));
                     summary = None;
                     if access_expired { continue; }
                     if !awake {
@@ -1238,7 +1247,7 @@ async fn connected(
                     if restart_pending { continue; }
                     let stalled = result.as_ref().ok().and_then(crate::dataplane::degraded_kind);
                     let degraded = stalled.map(|(proven, _)| proven);
-                    if let Some((proven, kind)) = stalled { events::record(&crate::dataplane::degraded_event(proven, kind)); }
+                    if let Some((proven, kind)) = stalled { events::record_at(rtrust_journal::Level::Warning, &crate::dataplane::degraded_event(proven, kind)); }
                     // Classes and numeric codes only; no endpoint data.
                     let reason = match &result {
                         Ok(result) => crate::reason::stopped(result),
@@ -1248,7 +1257,7 @@ async fn connected(
                         Ok(_) => "VPN transport stopped".into(),
                         Err(_) => "VPN transport worker failed".into(),
                     };
-                    events::record(&crate::reason::stopped_event(&last_failure, &reason, workers.transport, millis(connected_since)));
+                    events::record_at(rtrust_journal::Level::Error, &crate::reason::stopped_event(&last_failure, &reason, workers.transport, millis(connected_since)));
                     state = State::Blocked;
                     // A flapping endpoint must not reset the backoff indefinitely.
                     monitor.transition(false, rtrust_control::observations::now_ms());
@@ -1272,7 +1281,10 @@ async fn connected(
                             last_failure = "VPN reconnect failed".into();
                             // `stage=.. reason=..` classes from device.rs and
                             // fixed route-guard strings only; no endpoint data.
-                            events::record(&format!("{last_failure}: {error}"));
+                            // Closed token only. The typed Record above already
+                            // carries class, transport and attempt; Display text
+                            // is for the GUI and must not enter the journal.
+                            events::record_at(rtrust_journal::Level::Error, "vpn_reconnect_failed");
                         }
                         Err(error) => {
                             crate::failover::journal_failure(rtrust_journal::Record::failure(path, if error.is_cancelled() { rtrust_journal::Class::Cancelled } else { rtrust_journal::Class::Other }, rtrust_engine::planned_transport(failover.current()), retry_delay.attempt(), rtrust_journal::Budget::from_cooling(retry_delay.cooling()), Duration::ZERO));
@@ -1291,7 +1303,7 @@ async fn connected(
                         probes.cancel();
                         monitor.transition(true, rtrust_control::observations::now_ms());
                         wake_reconnect = false;
-                        events::record("reconnect_complete");
+                        events::record_at(rtrust_journal::Level::Warning, "reconnect_complete");
                         continue;
                     }
                     if failover.failed(Instant::now()) {
@@ -1305,7 +1317,7 @@ async fn connected(
                 _ = tokio::time::sleep_until(summary.map(|s| s.0).unwrap_or_else(tokio::time::Instant::now)), if summary.is_some() => {
                     let (_, after, base) = summary.take().unwrap();
                     if freshness.check().is_err() { continue; }
-                    events::record(&format!(
+                    events::record_at(rtrust_journal::Level::Warning, &format!(
                         "dataplane_summary after={after} window_s={} {}",
                         SUMMARY_DELAY.as_secs(),
                         crate::stats::snapshot().since(&base).render()
@@ -1434,12 +1446,15 @@ async fn connected(
                 drop(worker);
                 // Durations only. The utun is released at drain; release covers
                 // the owned routes, DNS and PF restored from the journal.
-                events::record(&format!(
-                    "stop_timing drain_ms={drain_ms} release_ms={} total_ms={} ok={}",
-                    millis(stop_started).saturating_sub(drain_ms),
-                    millis(stop_started),
-                    matches!(result, Ok(Ok(())))
-                ));
+                events::record_at(
+                    rtrust_journal::Level::Warning,
+                    &format!(
+                        "stop_timing drain_ms={drain_ms} release_ms={} total_ms={} ok={}",
+                        millis(stop_started).saturating_sub(drain_ms),
+                        millis(stop_started),
+                        matches!(result, Ok(Ok(())))
+                    ),
+                );
                 let response = match result {
                     Ok(Ok(())) => {
                         monitor.stop(rtrust_control::observations::now_ms());
