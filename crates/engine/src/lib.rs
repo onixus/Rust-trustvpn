@@ -638,11 +638,7 @@ impl H2Session {
         let mut failure = Error::Connect;
         for address in &p.endpoint.addresses {
             // A failed address must not consume the entire global timeout.
-            match tokio::time::timeout(
-                ADDRESS_TIMEOUT,
-                connect_tcp(address, mark, protector),
-            )
-            .await
+            match tokio::time::timeout(ADDRESS_TIMEOUT, connect_tcp(address, mark, protector)).await
             {
                 Ok(Ok(tcp)) => {
                     connected = Some(tcp);
