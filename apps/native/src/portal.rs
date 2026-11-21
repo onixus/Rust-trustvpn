@@ -26,6 +26,8 @@ pub(super) enum Action {
     Refresh,
     Access,
     Renew,
+    /// Background renewal of a still-valid token. Does not disconnect VPN.
+    AutoRenew,
     Renewed(Result<Client, String>),
     AccessReady(Result<rtrust_portal::DeviceAccess, String>),
     Listed(Result<Vec<RemoteProfile>, String>),
@@ -37,6 +39,14 @@ pub(super) enum Action {
     Replace(usize),
     Committed(Result<(), String>),
     Forgotten(Result<(), String>),
+}
+async fn renew_saved(client: Client) -> Result<Client, String> {
+    let client = client.renew_access().await?;
+    let saved = client.clone();
+    tokio::task::spawn_blocking(move || saved.remember())
+        .await
+        .map_err(|_| "Ошибка системного хранилища")??;
+    Ok(client)
 }
 fn task<T: Send + 'static>(
     future: impl std::future::Future<Output = T> + Send + 'static,
@@ -130,26 +140,50 @@ impl App {
             Renew if !self.busy => {
                 if let Some(client) = self.portal.client.clone() {
                     self.busy = true;
-                    return task(
-                        async move {
-                            let client = client.renew_access().await?;
-                            let saved = client.clone();
-                            tokio::task::spawn_blocking(move || saved.remember())
-                                .await
-                                .map_err(|_| "Ошибка системного хранилища")??;
-                            Ok(client)
-                        },
-                        Renewed,
-                    );
+                    return task(renew_saved(client), Renewed);
                 }
+            }
+            AutoRenew if !self.busy => {
+                let existing = self.portal.client.clone();
+                self.busy = true;
+                return task(
+                    async move {
+                        let client = match existing {
+                            Some(client) => client,
+                            None => tokio::task::spawn_blocking(Client::restore)
+                                .await
+                                .map_err(|_| "Ошибка системного хранилища".to_owned())??,
+                        };
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        if !client.renewal_due(now, None) {
+                            return Ok(client);
+                        }
+                        renew_saved(client).await
+                    },
+                    Renewed,
+                );
             }
             Renewed(result) => {
                 self.busy = false;
                 match result {
                     Ok(client) => {
+                        let renewed = client.expires_at().is_some_and(|deadline| {
+                            deadline
+                                > self
+                                    .portal
+                                    .client
+                                    .as_ref()
+                                    .and_then(|old| old.expires_at())
+                                    .unwrap_or(0)
+                        });
                         self.portal.client = Some(client);
-                        self.status =
-                            "Доступ панели продлён. Доступ VPN проверяется отдельно.".into();
+                        if renewed {
+                            self.status =
+                                "Доступ панели продлён. Доступ VPN проверяется отдельно.".into();
+                        }
                     }
                     Err(error) => self.status = error,
                 }

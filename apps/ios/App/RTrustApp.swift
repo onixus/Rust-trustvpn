@@ -29,7 +29,7 @@ struct RTrustApp: App {
                 .privacyShield()
                 .preferredColorScheme(ThemeMode(rawValue: theme)?.scheme)
                 .onChange(of: phase) { state in
-                    if state == .active { Task { await model.refresh() } }
+                    if state == .active { Task { await model.refresh(); await PortalSync.renewIfDue() } }
                     if state == .background { PortalSync.schedule() }
                 }
         }

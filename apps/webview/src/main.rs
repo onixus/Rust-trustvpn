@@ -519,10 +519,22 @@ fn main() {
                         }
                     }
                 }
+                let mut renewed_at = None;
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     let shared = handle.state::<Shared>();
                     let mut c = shared.lock().await;
+                    // Token renewal is independent of the VPN session. A failure
+                    // leaves the previous deadline and does not disconnect.
+                    let renew_due = renewed_at.is_none_or(|at: std::time::Instant| {
+                        at.elapsed() >= std::time::Duration::from_secs(86400)
+                    });
+                    if renew_due {
+                        renewed_at = Some(std::time::Instant::now());
+                        if let Err(e) = c.renew_portal_if_due().await {
+                            c.status = e;
+                        }
+                    }
                     if c.session.is_none()
                         && c.vault.connection.sync.enabled
                         && let Err(e) = sync_profiles(&mut c).await
