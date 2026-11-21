@@ -173,7 +173,9 @@ impl Store {
             let mut offset = 0;
             for line in bytes.split_inclusive(|b| *b == b'\n') {
                 if line.last() == Some(&b'\n')
-                    && line.split(|b| *b == b' ').any(|token| token == RECONNECT_MARK)
+                    && line
+                        .split(|b| *b == b' ')
+                        .any(|token| token == RECONNECT_MARK)
                 {
                     marked.push((bodies.len(), offset, line.len()));
                 }
@@ -186,7 +188,11 @@ impl Store {
         }
         let drop = &marked[..marked.len() - RECONNECT_KEEP];
         for (index, (_, name, bytes)) in bodies.iter().enumerate() {
-            let spans: Vec<_> = drop.iter().filter(|span| span.0 == index).copied().collect();
+            let spans: Vec<_> = drop
+                .iter()
+                .filter(|span| span.0 == index)
+                .copied()
+                .collect();
             if spans.is_empty() {
                 continue;
             }
@@ -275,7 +281,8 @@ mod tests {
     fn reconnect_episodes_keep_the_ten_newest_across_segments() {
         let (_tmp, mut s) = store();
         s.segment = 180;
-        s.append("1 pid=1 level=debug tunnel_connected\n", 1).unwrap();
+        s.append("1 pid=1 level=debug tunnel_connected\n", 1)
+            .unwrap();
         for n in 0..12 {
             s.append(
                 &format!("{n} pid=1 level=error keep=reconnect VPN transport stopped reason=idle_timeout uptime_ms={n}\n"),
@@ -287,7 +294,11 @@ mod tests {
         // whose every line is still fresh must already be down to ten.
         let mut text = String::new();
         for (_, name, _) in s.segments().unwrap() {
-            s.dir.file(&name, false).unwrap().read_to_string(&mut text).unwrap();
+            s.dir
+                .file(&name, false)
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
         }
         assert_eq!(text.matches("keep=reconnect").count(), RECONNECT_KEEP);
         assert!(text.contains("uptime_ms=11"));

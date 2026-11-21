@@ -46,10 +46,7 @@ fn line(head: &str, fields: &str) -> Result<String, ()> {
 }
 
 fn closed_token(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// A fixed event name. Spaces are allowed (`VPN transport stopped`); anything
@@ -82,11 +79,13 @@ mod tests {
 
     #[test]
     fn free_text_and_addresses_are_refused() {
-        assert!(line(
-            "VPN transport stopped",
-            "reason=idle_timeout transport=h3 uptime_ms=4"
-        )
-        .is_ok());
+        assert!(
+            line(
+                "VPN transport stopped",
+                "reason=idle_timeout transport=h3 uptime_ms=4"
+            )
+            .is_ok()
+        );
         assert!(line("VPN transport stopped", "reason=connect to 192.0.2.1").is_err());
         assert!(line("stopped: vpn.example", "reason=ended").is_err());
         assert!(line("VPN transport stopped", "").is_err());
