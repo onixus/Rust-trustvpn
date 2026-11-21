@@ -76,7 +76,12 @@ state window. A transport stop and a failed reconnect are `error`. macOS and Win
 `VPN transport stopped reason=… transport=… uptime_ms=…` with closed tokens
 only. A failed reconnect is the closed token `vpn_reconnect_failed`; Windows
 appends `stage=` and `reason=` from the same closed vocabulary, never the GUI's
-error text. A service process
+error text. The same episode is also written with `keep=reconnect`. Those
+lines are exempt from the level windows below: the writer keeps the **10
+newest** across every segment and drops the older ones when it next prunes.
+The line is otherwise the same closed record (`VPN transport stopped reason=…`
+or `vpn_reconnect_failed stage=… reason=…`) and never an address or endpoint
+text. A service process
 that cannot continue writes `service_stopped` at `critical` and flushes before
 exit; the same line is written when the Windows service fails inside SCM,
 where the process itself does not exit. Lines written before levels existed

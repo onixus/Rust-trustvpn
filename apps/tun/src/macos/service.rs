@@ -1257,7 +1257,12 @@ async fn connected(
                         Ok(_) => "VPN transport stopped".into(),
                         Err(_) => "VPN transport worker failed".into(),
                     };
-                    events::record_at(rtrust_journal::Level::Error, &crate::reason::stopped_event(&last_failure, &reason, workers.transport, millis(connected_since)));
+                    let stopped = crate::reason::stopped_event(&last_failure, &reason, workers.transport, millis(connected_since));
+                    events::record_at(rtrust_journal::Level::Error, &stopped);
+                    // The head may contain spaces; the closed tail starts at `reason=`.
+                    if let Some(fields) = stopped.split_once("reason=") {
+                        crate::reconnect_log::record("VPN transport stopped", &format!("reason={}", fields.1));
+                    }
                     state = State::Blocked;
                     // A flapping endpoint must not reset the backoff indefinitely.
                     monitor.transition(false, rtrust_control::observations::now_ms());
@@ -1285,6 +1290,7 @@ async fn connected(
                             // carries class, transport and attempt; Display text
                             // is for the GUI and must not enter the journal.
                             events::record_at(rtrust_journal::Level::Error, "vpn_reconnect_failed");
+                            crate::reconnect_log::record("vpn_reconnect_failed", &format!("stage=connect reason={} transport={} attempt={}", error.class.as_str(), workers.transport, retry_delay.attempt()));
                         }
                         Err(error) => {
                             crate::failover::journal_failure(rtrust_journal::Record::failure(path, if error.is_cancelled() { rtrust_journal::Class::Cancelled } else { rtrust_journal::Class::Other }, rtrust_engine::planned_transport(failover.current()), retry_delay.attempt(), rtrust_journal::Budget::from_cooling(retry_delay.cooling()), Duration::ZERO));

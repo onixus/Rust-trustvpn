@@ -644,7 +644,11 @@ async fn lease_loop(
                     probes.cancel();
                     if let Some((reason, unproven)) = ended {
                         let uptime_ms = u64::try_from(connected_since.elapsed().as_millis()).unwrap_or(u64::MAX);
-                        crate::journal(rtrust_journal::Level::Error, &crate::reason::stopped_event("VPN transport stopped", &reason, rtrust_journal::transport_token(rtrust_engine::planned_transport(failover.current())), uptime_ms));
+                        let event = crate::reason::stopped_event("VPN transport stopped", &reason, rtrust_journal::transport_token(rtrust_engine::planned_transport(failover.current())), uptime_ms);
+                        crate::journal(rtrust_journal::Level::Error, &event);
+                        if let Some((_, rest)) = event.split_once("reason=") {
+                            crate::reconnect_log::record("VPN transport stopped", &format!("reason={rest}"));
+                        }
                         budget.disconnected(connected_since.elapsed(), unproven);
                     }
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
@@ -659,6 +663,7 @@ async fn lease_loop(
                     if full && full::refresh(interface_index(&device)?, &full::endpoints(&failover.guard_profile())?).is_err() {
                         crate::failover::journal_failure(rtrust_journal::Record::failure(attempt_path, rtrust_journal::Class::Other, rtrust_engine::planned_transport(failover.current()), budget.attempt(), rtrust_journal::Budget::from_cooling(budget.cooling()), attempt_started.elapsed()));
                         crate::journal(rtrust_journal::Level::Error, "vpn_reconnect_failed stage=guard reason=route_refresh");
+                        crate::reconnect_log::record("vpn_reconnect_failed", &format!("stage=guard reason=route_refresh attempt={}", budget.attempt()));
                         retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                         continue;
                     }
@@ -679,10 +684,9 @@ async fn lease_loop(
                         },
                         Err(error) => {
                             crate::failover::journal_failure(rtrust_journal::Record::failure(attempt_path, error.class, rtrust_engine::planned_transport(failover.current()), budget.attempt(), rtrust_journal::Budget::from_cooling(budget.cooling()), attempt_started.elapsed()));
-                            crate::journal(rtrust_journal::Level::Error, &match error.detail {
-                                Some(detail) => format!("vpn_reconnect_failed {detail}"),
-                                None => "vpn_reconnect_failed".into(),
-                            });
+                            let detail = error.detail.unwrap_or_else(|| "stage=connect reason=other".into());
+                            crate::journal(rtrust_journal::Level::Error, &format!("vpn_reconnect_failed {detail}"));
+                            crate::reconnect_log::record("vpn_reconnect_failed", &format!("{detail} transport={} attempt={}", rtrust_journal::transport_token(rtrust_engine::planned_transport(failover.current())), budget.attempt()));
                             // The guard already covers every candidate.
                             if failover.failed(std::time::Instant::now()) {
                                 monitor.failed_over(rtrust_control::observations::now_ms());

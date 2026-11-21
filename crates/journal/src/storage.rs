@@ -9,10 +9,20 @@ pub(crate) const SEGMENT: u64 = 1_000_000;
 pub(crate) const TOTAL: u64 = 15_000_000;
 pub(crate) const AGE: u64 = 7 * 24 * 60 * 60 * 1000;
 const MAX_SEGMENTS: usize = 1024;
+/// How many `keep=reconnect` episodes a segment retains. Older ones are removed
+/// on the next prune, whichever segment they landed in.
+const RECONNECT_KEEP: usize = 10;
+const RECONNECT_MARK: &[u8] = b"keep=reconnect";
+
 /// A closed `level=` token selects its window. Lines without one, including
-/// records written before levels existed, keep the seven-day bound.
+/// records written before levels existed, keep the seven-day bound. A
+/// `keep=reconnect` line is not aged out here: [`cap_reconnects`] keeps the ten
+/// newest of those, and an age window would erase the episode before anyone looked.
 fn retention(line: &[u8]) -> u64 {
     let text = std::str::from_utf8(line).unwrap_or("");
+    if text.split(' ').any(|token| token == "keep=reconnect") {
+        return u64::MAX;
+    }
     text.split(' ')
         .find_map(crate::Level::parse)
         .map(crate::Level::retention_ms)
@@ -142,6 +152,62 @@ impl Store {
         }
         Ok(())
     }
+    /// Keep the ten newest `keep=reconnect` lines across every segment. Other
+    /// lines stay. Each segment is read once and rewritten at most once: a
+    /// second rewrite in the same pass would find the shared temporary still
+    /// present and refuse, dropping the episode that was just stored.
+    fn cap_reconnects(&self) -> io::Result<()> {
+        let mut marked = Vec::new();
+        let mut bodies = Vec::new();
+        for (sequence, name, _) in self.segments()? {
+            let mut bytes = Vec::new();
+            let file = match self.dir.file(&name, false) {
+                Ok(file) => file,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            file.take(self.segment + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > self.segment {
+                return Err(invalid());
+            }
+            let mut offset = 0;
+            for line in bytes.split_inclusive(|b| *b == b'\n') {
+                if line.last() == Some(&b'\n')
+                    && line.split(|b| *b == b' ').any(|token| token == RECONNECT_MARK)
+                {
+                    marked.push((bodies.len(), offset, line.len()));
+                }
+                offset += line.len();
+            }
+            bodies.push((sequence, name, bytes));
+        }
+        if marked.len() <= RECONNECT_KEEP {
+            return Ok(());
+        }
+        let drop = &marked[..marked.len() - RECONNECT_KEEP];
+        for (index, (_, name, bytes)) in bodies.iter().enumerate() {
+            let spans: Vec<_> = drop.iter().filter(|span| span.0 == index).copied().collect();
+            if spans.is_empty() {
+                continue;
+            }
+            let mut kept = Vec::new();
+            let mut cursor = 0;
+            for (_, offset, len) in spans {
+                if offset < cursor || offset + len > bytes.len() {
+                    return Err(invalid());
+                }
+                kept.extend_from_slice(&bytes[cursor..offset]);
+                cursor = offset + len;
+            }
+            kept.extend_from_slice(&bytes[cursor..]);
+            if kept.is_empty() {
+                self.dir.remove(name)?;
+            } else {
+                self.dir.replace(name, &kept)?;
+            }
+        }
+        Ok(())
+    }
     pub fn append(&mut self, line: &str, now: u64) -> io::Result<()> {
         if line.len() > 1024 || line.len() as u64 > self.segment {
             return Err(invalid());
@@ -179,7 +245,14 @@ impl Store {
             return Err(invalid());
         }
         let mut file = self.dir.file(self.base, true)?;
-        file.write_all(line.as_bytes())
+        file.write_all(line.as_bytes())?;
+        // Age pruning skips a segment whose every line is still inside its
+        // window, so it cannot enforce this cap. Ten episodes can arrive long
+        // before any of them expires; count them only after this one is stored.
+        if line.contains("keep=reconnect") {
+            self.cap_reconnects()?;
+        }
+        Ok(())
     }
 }
 
@@ -197,6 +270,53 @@ mod tests {
         })
         .unwrap();
         (tmp, s)
+    }
+    #[test]
+    fn reconnect_episodes_keep_the_ten_newest_across_segments() {
+        let (_tmp, mut s) = store();
+        s.segment = 180;
+        s.append("1 pid=1 level=debug tunnel_connected\n", 1).unwrap();
+        for n in 0..12 {
+            s.append(
+                &format!("{n} pid=1 level=error keep=reconnect VPN transport stopped reason=idle_timeout uptime_ms={n}\n"),
+                n,
+            )
+            .unwrap();
+        }
+        // The cap is part of append, not only of a later age prune. A journal
+        // whose every line is still fresh must already be down to ten.
+        let mut text = String::new();
+        for (_, name, _) in s.segments().unwrap() {
+            s.dir.file(&name, false).unwrap().read_to_string(&mut text).unwrap();
+        }
+        assert_eq!(text.matches("keep=reconnect").count(), RECONNECT_KEEP);
+        assert!(text.contains("uptime_ms=11"));
+        assert!(text.contains("uptime_ms=2"));
+        assert!(!text.contains("uptime_ms=1\n"));
+        assert!(text.contains("tunnel_connected"));
+    }
+    #[test]
+    fn the_eleventh_episode_rewrites_every_segment_in_one_pass() {
+        let (_tmp, mut s) = store();
+        s.segment = 160;
+        for n in 0..11 {
+            s.append(
+                &format!("{n} pid=1 level=error keep=reconnect VPN transport stopped reason=idle_timeout uptime_ms={n}\n"),
+                n,
+            )
+            .unwrap();
+        }
+        let mut text = String::new();
+        for (_, name, _) in s.segments().unwrap() {
+            s.dir
+                .file(&name, false)
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+        }
+        assert_eq!(text.matches("keep=reconnect").count(), RECONNECT_KEEP);
+        assert!(text.contains("uptime_ms=10"));
+        assert!(!text.contains("uptime_ms=0\n"));
     }
     #[test]
     fn strict_cap_after_every_append_and_recent_suffix_survives() {

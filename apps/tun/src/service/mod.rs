@@ -506,6 +506,15 @@ async fn serve(
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
                     endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     // A flapping endpoint must not reset the backoff indefinitely.
+                    let uptime_ms = u64::try_from(connected_since.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let reason = match &result {
+                        Ok(ended) => crate::reason::stopped(ended),
+                        Err(_) => "reason=worker_failed".into(),
+                    };
+                    crate::reconnect_log::record(
+                        "VPN transport stopped",
+                        &format!("{reason} transport={} uptime_ms={uptime_ms}", rtrust_journal::transport_token(rtrust_engine::planned_transport(failover.current()))),
+                    );
                     retry_delay.disconnected(connected_since.elapsed(), result.as_ref().is_ok_and(crate::dataplane::unproven));
                     if failover.ended(connected_since.elapsed(), Instant::now()) {
                         monitor.failed_over(rtrust_control::observations::now_ms());
@@ -523,7 +532,10 @@ async fn serve(
                         record.path = path;
                         crate::failover::journal_failure(record);
                     }
-                    if let Ok(Err(_))=&result { crate::journal(rtrust_journal::Level::Error, "vpn_reconnect_failed"); }
+                    if let Ok(Err(error))=&result {
+                        crate::journal(rtrust_journal::Level::Error, "vpn_reconnect_failed");
+                        crate::reconnect_log::record("vpn_reconnect_failed", &format!("stage=connect reason={} transport={} attempt={}", error.class.as_str(), rtrust_journal::transport_token(rtrust_engine::planned_transport(failover.current())), retry_delay.attempt()));
+                    }
                     if let Ok(Ok(prepared)) = result {
                         // Route mutations stay in the lease task, never in the
                         // reconnect worker: Stop/EOF cannot race a late install.
@@ -531,6 +543,7 @@ async fn serve(
                         if reattached.is_err() {
                             crate::failover::journal_failure(rtrust_journal::Record::failure(path, rtrust_journal::Class::Other, rtrust_engine::planned_transport(failover.current()), retry_delay.attempt(), rtrust_journal::Budget::from_cooling(retry_delay.cooling()), Duration::ZERO));
                             crate::journal(rtrust_journal::Level::Error, "vpn_route_reattach_failed");
+                            crate::reconnect_log::record("vpn_reconnect_failed", &format!("stage=guard reason=route_reattach attempt={}", retry_delay.attempt()));
                         }
                         if reattached.is_ok() {
                             labels.connected();
