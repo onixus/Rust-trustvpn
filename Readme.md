@@ -82,7 +82,7 @@ Plain-language notes and upgrade steps are in [docs/releases/v0.7.0.md](docs/rel
 
 | Platform | Current state | Important remaining work |
 | --- | --- | --- |
-| Windows x64 | Native UI, Wintun/SCM service and WFP guard. Production full-tunnel checks passed for TrustTunnel and Hysteria 2. A real 30-minute S3 sleep/wake Hysteria session passed, including reconnect and traffic checks; Always-on also remained blocked until automatic recovery. | Cold-boot coverage, broader sleep/network combinations, installer signing. |
+| Windows x64 | Native UI, SCM service and WFP guard. The service no longer loads `wintun.dll`; it opens the Rttun UMDF adapter. The driver binary is not built on this host: it needs the WDK and a publisher catalog. Earlier Wintun full-tunnel and sleep checks do not apply to Rttun. | Build and sign `rttun.sys` on the Windows node, then repeat full-tunnel, sleep/wake and reboot acceptance. Installer signing remains open. |
 | Linux x86_64 / ARM64 | Wayland-only desktop, TUN host service, nftables and systemd-resolved. Native/WebView/Both packaging, physical KDE/Wayland smoke, signed Flatpak flow, TrustTunnel/Hysteria full-tunnel and network-handoff coverage exist. | More physical reboot/sleep coverage and final installer polish across distributions. |
 | macOS Apple Silicon | Native/WebView/Both preview, root LaunchDaemon and utun system tunnel. TrustTunnel live IPv4/IPv6 TCP/UDP/ICMP, DNS, reconnect and service-crash recovery passed. Installed sleep/wake passed on two Macs. | Boot Always-on, roam/network handoff, clean install on another Mac, signed automatic update/rollback, Developer ID/notarization, installed Hysteria full-tunnel acceptance. |
 | Android arm64 / x86_64 | Native VpnService, encrypted vault, file/text/QR import, app selection, portal sync, Always-on/lockdown and TrustTunnel/Hysteria support. Physical POCO and Huawei testing covers real traffic and recovery paths; POCO passed 30 minutes of forced deep Doze. | More OEMs (Pixel/Samsung), reboot-before-first-unlock and long soak. MIUI force-stop can leave lockdown active without restarting the VPN service. While the VPN process is dead, lockdown is incomplete: on an Android 16 emulator other apps' DNS and Google Play services traffic went direct. A profile imported without the portal resolves its endpoint before the blocking TUN exists. |
@@ -165,7 +165,7 @@ A passing test on one platform or protocol does not mean every published package
 | `apps/native` | Native desktop client |
 | `apps/webview` | Optional Tauri WebView desktop frontend |
 | `apps/tui` | Linux terminal client |
-| `apps/tun` | Desktop TUN/Wintun/utun dataplane and services |
+| `apps/tun` | Desktop TUN/Rttun/utun dataplane and services |
 | `apps/macos` | macOS application and system integration |
 | `apps/android` | Android VpnService app and JNI/Rust integration |
 | `apps/ios` | iOS Swift/Network Extension preview |

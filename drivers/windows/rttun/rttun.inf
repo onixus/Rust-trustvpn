@@ -1,0 +1,48 @@
+;
+; R-TrustTunnel virtual adapter.
+;
+; This package replaces wintun.dll. It publishes one hardware id, ROOT\Rttun,
+; and the installer may remove only a device with that id. It must not remove
+; SWD\Wintun or any other Net-class device.
+;
+; Catalog signing is required. An unsigned or test-signed package is not a
+; production install. The service verifies the catalog before pnputil runs.
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = Net
+ClassGuid   = {4d36e972-e325-11ce-bfc1-08002be10318}
+Provider    = %Provider%
+CatalogFile = rttun.cat
+DriverVer   = 11/19/2026,0.7.0.0
+PnpLockdown = 1
+
+[Manufacturer]
+%Provider% = Rttun, NTamd64.10.0...19041
+
+[Rttun.NTamd64.10.0...19041]
+%DeviceName% = Rttun.Install, ROOT\Rttun
+
+[Rttun.Install]
+CopyFiles = Rttun.Copy
+
+[Rttun.Install.Services]
+AddService = rttun, 0x2, Rttun.Service
+
+[Rttun.Service]
+DisplayName   = %ServiceName%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %13%\rttun.sys
+
+[Rttun.Copy]
+rttun.sys
+
+[DestinationDirs]
+Rttun.Copy = 13
+
+[Strings]
+Provider    = "R-TrustTunnel"
+DeviceName  = "RTrustTunnel"
+ServiceName = "R-TrustTunnel adapter"

@@ -38,7 +38,7 @@ assert not ps("if(Get-Process R-TrustTunnel -ErrorAction SilentlyContinue){'runn
 assert ps('(Get-Service RTrustTunnel).Status')=='Running'
 for name in ['full-state.json','always-on.rtrust','always-on.key']:
     assert not (SERVICE/name).exists(),'Refusing an existing VPN policy or recovery journal'
-original={name:digest(SERVICE/name) for name in ['rtrust-service.exe','wintun.dll']}
+original={name:digest(SERVICE/name) for name in ['rtrust-service.exe','rttun_umdf.dll','rttun.inf','rttun.cat']}
 scm=ps("(Get-CimInstance Win32_Service -Filter \"Name='RTrustTunnel'\").PathName")
 # Use the real authenticated client to prove that no live service lease exists.
 # The maintenance connection is closed before SCM stop; the GUI is closed above.

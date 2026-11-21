@@ -116,7 +116,7 @@ pub fn install(
             )
         })?;
         if best.InterfaceIndex == index {
-            return Err("Endpoint would route into Wintun".into());
+            return Err("Endpoint would route into the tunnel adapter".into());
         }
         // An existing exact route is borrowed, never recorded for removal.
         if best.DestinationPrefix.PrefixLength == 32 {
@@ -152,7 +152,7 @@ pub fn install(
     }
     interface_dns(luid, dns)
 }
-/// The adapter's own resolver; it disappears with the Wintun adapter.
+/// The adapter's own resolver; it disappears with the tunnel adapter.
 pub fn interface_dns(luid: NET_LUID_LH, dns: Ipv4Addr) -> Result<(), String> {
     let mut guid = windows_sys::core::GUID::default();
     check(unsafe { ConvertInterfaceLuidToGuid(&luid, &mut guid) })?;

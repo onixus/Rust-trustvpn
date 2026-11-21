@@ -17,7 +17,7 @@
 param(
     [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{32}$')][string]$Authorize,
     [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$OriginalSha256,
-    [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$WintunSha256,
+    [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$DriverSha256,
     [Parameter(Mandatory=$true)][string]$CandidatePath,
     [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$CandidateSha256,
     [Parameter(Mandatory=$true)][string]$StartTestPath,
@@ -714,7 +714,7 @@ function OriginalMetadata {
     Demand ((ConfigDigest) -eq $originalConfig -and (TextHash (Run $sc 'sdshow RTrustTunnel' 10000)) -eq $originalScSecurity)
     Demand ((TextHash (Run $sc 'qfailure RTrustTunnel' 10000)) -eq $originalFailures -and
         (TextHash (Run $sc 'qfailureflag RTrustTunnel' 10000)) -eq $originalFailureFlag)
-    Demand ((Hash $wintun) -eq $wintunHash -and (PinFile $wintun) -eq $wintunId -and (SddlHash $wintun) -eq $wintunSd)
+    Demand ((Hash $driver) -eq $driverHash -and (PinFile $driver) -eq $driverId -and (SddlHash $driver) -eq $driverSd)
     Demand ((KeyMetadata) -eq $keyMetadata -and (DnsDigest) -eq $dns)
     $s=Service; Demand ($s.State -eq 'Running'); [void](ServiceProcess $s)
     AbsentState
@@ -796,9 +796,10 @@ try {
     $originalConfig=ConfigDigest; $originalScSecurity=TextHash (Run $sc 'sdshow RTrustTunnel' 10000)
     $originalFailures=TextHash (Run $sc 'qfailure RTrustTunnel' 10000)
     $originalFailureFlag=TextHash (Run $sc 'qfailureflag RTrustTunnel' 10000)
-    $wintun=Join-Path $installDirectory 'wintun.dll'; OsProtected $wintun; $wintunId=PinFile $wintun
-    $wintunSd=SddlHash $wintun
-    $wintunHash=Hash $wintun; Demand ($wintunHash -eq $WintunSha256.ToLowerInvariant())
+    if (Test-Path (Join-Path $installDirectory 'wintun.dll')) { throw 'wintun.dll is still installed beside the service' }
+    $driver=Join-Path $installDirectory 'rttun_umdf.dll'; OsProtected $driver; $driverId=PinFile $driver
+    $driverSd=SddlHash $driver
+    $driverHash=Hash $driver; Demand ($driverHash -eq $DriverSha256.ToLowerInvariant())
     $keyMetadata=KeyMetadata; $dns=DnsDigest
     AbsentState
     Demand (-not [IO.Directory]::Exists((Join-Path $programData 'R-TrustTunnel\logs')))
