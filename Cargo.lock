@@ -5794,6 +5794,7 @@ dependencies = [
  "rtrust-mobile",
  "rtrust-profile",
  "rtrust-store",
+ "rttun-proto",
  "serde",
  "serde_json",
  "smoltcp",
@@ -5843,6 +5844,10 @@ dependencies = [
  "tokio",
  "zeroize",
 ]
+
+[[package]]
+name = "rttun-proto"
+version = "0.7.0"
 
 [[package]]
 name = "rustc-hash"

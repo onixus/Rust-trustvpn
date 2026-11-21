@@ -67,7 +67,7 @@ Vendored `h2` and `h3` live under `vendor/` and are patched through
 
 ### Windows
 
-UI runs as the user. System VPN is owned by the SCM service using Wintun and WFP.
+UI runs as the user. System VPN is owned by the SCM service using the Rttun UMDF adapter and WFP. The service does not load `wintun.dll`.
 The service owns routes, DNS/network guard and recovery. The UI talks to it through
 authenticated local IPC. Signed update metadata is separate from Authenticode.
 

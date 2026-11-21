@@ -30,7 +30,7 @@ pub trait PacketDevice: Send + Sync {
         Err(std::io::ErrorKind::WouldBlock.into())
     }
 }
-#[cfg(not(target_os = "ios"))]
+#[cfg(not(any(target_os = "ios", target_os = "windows")))]
 impl PacketDevice for tun_rs::AsyncDevice {
     async fn recv(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
         tun_rs::AsyncDevice::recv(self, buffer).await
@@ -41,6 +41,32 @@ impl PacketDevice for tun_rs::AsyncDevice {
     }
     async fn send(&self, packet: &[u8]) -> std::io::Result<usize> {
         tun_rs::AsyncDevice::send(self, packet).await
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl PacketDevice for crate::windows::driver::Adapter {
+    async fn recv(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        // Cancellation-safe: a pending wait does not consume a packet.
+        loop {
+            if self.is_closed() {
+                return Err(std::io::Error::other("Rttun adapter closed"));
+            }
+            match self.pop_from_host(buffer) {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+                other => return other,
+            }
+        }
+    }
+    fn try_recv(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.pop_from_host(buffer)
+    }
+    async fn send(&self, packet: &[u8]) -> std::io::Result<usize> {
+        let len = packet.len();
+        self.push_from_tunnel(packet)?;
+        Ok(len)
     }
 }
 
@@ -98,11 +124,21 @@ fn discard_backlog<D: PacketDevice>(device: &D) -> usize {
     discarded
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "windows")))]
 pub async fn run(
     session: Session,
     tunnel: rtrust_engine::Tunnel,
     device: std::sync::Arc<tun_rs::AsyncDevice>,
+    address: Ipv4Addr,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_with_dns(session, tunnel, device, address, Vec::new(), None).await
+}
+
+#[cfg(target_os = "windows")]
+pub async fn run(
+    session: Session,
+    tunnel: rtrust_engine::Tunnel,
+    device: std::sync::Arc<crate::windows::driver::Adapter>,
     address: Ipv4Addr,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     run_with_dns(session, tunnel, device, address, Vec::new(), None).await

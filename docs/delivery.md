@@ -67,7 +67,7 @@ Gate: codec fuzz без panic/OOM в заданных лимитах, API contra
 - HTTP/2 для системного туннеля; UDP/ICMP, IPv6 tunnel-or-block, local stub, bounded buffers. HTTP/3 для TUN/Wintun перенесён в [техдолг волны 3](technical-debt.md); SOCKS HTTP/3 сохраняется.
 - Cancel на каждом этапе, смена Wi-Fi/Ethernet, sleep/resume, UI crash, worker crash.
 - Kill switch до первого изменения маршрутов, recovery journal и repair UX.
-- Windows Setup.exe предоставляет выбор Native/WebView/Both, MSI устанавливает выбранные frontend, одну службу и signed Wintun с фиксированным hash. `R-TrustTunnel.exe` запускается без консоли. Собственные binaries/installer подписываются при наличии signing pipeline; отсутствие подписи не скрывать.
+- Windows Setup.exe предоставляет выбор Native/WebView/Both, MSI устанавливает выбранные frontend, одну службу и подписанный пакет Rttun (`rttun.sys`, `rttun.inf`, `rttun.cat`). `wintun.dll` не входит в поставку. `R-TrustTunnel.exe` запускается без консоли. Собственные binaries/installer подписываются при наличии signing pipeline; отсутствие подписи не скрывать.
 - Linux GUI setup предлагает тот же выбор и устанавливает deb/rpm через системный package backend/polkit. Пакеты доступны через Discover, имеют desktop/AppStream metadata и Plasma tray integration. AppImage/Flatpak не заменяют установку системной службы и отложены.
 - Native frontend выпускается первым; WebView — отдельный frontend на общем Rust controller. Полная поставка с выбором UI требует одинакового набора основных функций и переключения без разрыва VPN. Подробности: [desktop-apps.md](desktop-apps.md).
 
@@ -89,7 +89,7 @@ Gate: старый официальный клиент и действующие
 
 M0–M4 относятся к первой волне Windows/Linux. Вторая волна начинается после её приёмки; scope описан ниже и в [android-macos.md](android-macos.md).
 
-Подписанные/проверяемые packages, SBOM и лицензии зависимостей, pin/hash Wintun, воспроизводимые CI artifacts. Автообновление UI/service только согласованным комплектом с versioned IPC; загруженный update проверяется до elevation. Backup profiles/schema до обновления, rollback проверяется на реальной предыдущей версии. При обновлении не снимать guard, пока старая сессия ещё защищает трафик.
+Подписанные/проверяемые packages, SBOM и лицензии зависимостей, pin/hash пакета Rttun, воспроизводимые CI artifacts. Автообновление UI/service только согласованным комплектом с versioned IPC; загруженный update проверяется до elevation. Backup profiles/schema до обновления, rollback проверяется на реальной предыдущей версии. При обновлении не снимать guard, пока старая сессия ещё защищает трафик.
 
 Windows CI должен включать VM с реальным Wintun/WFP и reboot; Linux — VM/kernel namespaces с nftables, DNS manager и desktop smoke. Cross-compilation на macOS не доказывает работу VPN на Windows/Linux.
 

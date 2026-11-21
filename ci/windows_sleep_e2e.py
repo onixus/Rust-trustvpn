@@ -83,8 +83,8 @@ def compare_routes(after, label, endpoint):
     if not gone and not added: return
     for route in gone: log(label + ' route missing: ' + route)
     for route in added: log(label + ' route added: ' + route)
-    wintun = fixture.ps("@(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object InterfaceDescription -match 'Wintun' | Select-Object -ExpandProperty ifIndex) -join ','")
-    owned = {i for i in wintun.split(',') if i}
+    owned_text = fixture.ps("@(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object Name -eq 'RTrustTunnel' | Select-Object -ExpandProperty ifIndex) -join ','")
+    owned = {i for i in owned_text.split(',') if i}
     def service(route):
         prefix, index, _, metric = route.split('|')
         return (metric == '21076' or index in owned or prefix in ('0.0.0.0/1', '128.0.0.0/1', '::/1', '8000::/1')

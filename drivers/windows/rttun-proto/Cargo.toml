@@ -1,0 +1,9 @@
+[package]
+name = "rttun-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Packet and ring contract for the R-TrustTunnel Windows adapter. No driver, no DLL."
+publish = false
+
+[dependencies]

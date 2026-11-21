@@ -51,15 +51,15 @@ def adapter_diagnostics():
 $ErrorActionPreference='Stop'
 Get-CimInstance Win32_Service -Filter "Name='RTrustTunnel'" | Select-Object State,ProcessId | Format-List
 Get-NetAdapter -IncludeHidden | Where-Object Name -eq RTrustTunnel | Select-Object Name,InterfaceGuid,InterfaceIndex,Status | Format-List
-Get-PnpDevice -Class Net | Where-Object InstanceId -like 'SWD\WINTUN\*' | Select-Object Status,InstanceId,Problem | Format-List
+Get-PnpDevice -Class Net | Where-Object InstanceId -like 'ROOT\RTTUN\*' | Select-Object Status,InstanceId,Problem | Format-List
 $journal=Join-Path $env:ProgramFiles 'RTrustTunnel Service/full-state.json'
 if(Test-Path $journal) { Get-Content $journal -Raw | ConvertFrom-Json | Select-Object version,adapter | Format-List }
 """
     try:
         result=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',script],capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=10)
-        print('Wintun pending snapshot:',result.stdout,result.stderr,flush=True)
+        print('Rttun pending snapshot:',result.stdout,result.stderr,flush=True)
     except subprocess.TimeoutExpired:
-        print('Wintun pending snapshot timed out',flush=True)
+        print('Rttun pending snapshot timed out',flush=True)
 
 def main():
     global pipe

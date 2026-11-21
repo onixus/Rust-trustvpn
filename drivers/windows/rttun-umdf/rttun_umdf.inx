@@ -1,0 +1,64 @@
+;
+; R-TrustTunnel UMDF host. Hardware id is ROOT\Rttun. This is not Wintun and
+; it does not remove any other Net-class device.
+;
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Net
+ClassGuid   = {4d36e972-e325-11ce-bfc1-08002be10318}
+Provider    = %Provider%
+CatalogFile = rttun.cat
+DriverVer   = 11/19/2026,0.7.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %Disk%,,,""
+
+[SourceDisksFiles]
+rttun_umdf.dll = 1,,
+
+[Manufacturer]
+%Provider% = Rttun, NT$ARCH$.10.0...19041
+
+[Rttun.NT$ARCH$.10.0...19041]
+%DeviceName% = Rttun.Install, ROOT\Rttun
+
+[Rttun.Install.NT]
+CopyFiles = Rttun.Copy
+Characteristics = 0x84
+AddReg = Rttun.Ndi
+Include = wudfrd.inf, netcxrd.inf
+Needs = WUDFRD.NT, netcxrd_Filter.NT
+
+[Rttun.Install.NT.HW]
+Include = wudfrd.inf, netcxrd.inf
+Needs = WUDFRD.NT.HW, netcxrd_Filter.NT.HW
+
+[Rttun.Install.NT.Services]
+Include = wudfrd.inf, netcxrd.inf
+Needs = WUDFRD.NT.Services, netcxrd_Filter.NT.Services
+
+[Rttun.Install.NT.Wdf]
+UmdfService = rttun_umdf, Rttun.Wdf
+UmdfServiceOrder = rttun_umdf
+UmdfExtensions = NetAdapterCx0202
+
+[Rttun.Wdf]
+UmdfLibraryVersion = $UMDFVERSION$
+ServiceBinary = %13%\rttun_umdf.dll
+
+[Rttun.Copy]
+rttun_umdf.dll
+
+[Rttun.Ndi]
+HKR, Ndi, Service, 0, "netcxrd"
+HKR, Ndi\Interfaces, UpperRange, 0, "ndis5"
+HKR, Ndi\Interfaces, LowerRange, 0, "ethernet"
+
+[Strings]
+Provider   = "R-TrustTunnel"
+DeviceName = "RTrustTunnel"
+Disk       = "R-TrustTunnel driver"

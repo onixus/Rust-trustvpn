@@ -82,7 +82,7 @@ Desktop-интерфейс 0.7.0 с синтетическими профиля�
 
 | Платформа | Текущее состояние | Что ещё не закрыто |
 | --- | --- | --- |
-| Windows x64 | Native UI, Wintun/SCM-служба и WFP guard. Production full-tunnel проверки прошли для TrustTunnel и Hysteria 2. Реальный 30-минутный S3 sleep/wake с Hysteria прошёл reconnect и traffic checks; Always-on также оставался заблокированным до автоматического восстановления. | Cold boot, более широкий набор sleep/network сценариев, подпись установщика. |
+| Windows x64 | Native UI, SCM-служба и WFP guard. Служба больше не загружает `wintun.dll`: она открывает адаптер Rttun. Бинарь драйвера на этой машине не собран: нужны WDK и каталог издателя. Прежние проверки Wintun к Rttun не относятся. | Собрать и подписать `rttun.sys` на Windows-ноде, затем повторить full-tunnel, sleep/wake и reboot. Подпись установщика остаётся открытой. |
 | Linux x86_64 / ARM64 | Wayland-only desktop, TUN host service, nftables и systemd-resolved. Есть Native/WebView/Both packaging, физический KDE/Wayland smoke, подписанный Flatpak flow, TrustTunnel/Hysteria full-tunnel и network handoff. | Больше физических reboot/sleep проверок и финальная полировка установки на разных дистрибутивах. |
 | macOS Apple Silicon | Native/WebView/Both preview, root LaunchDaemon и системный туннель через utun. Для TrustTunnel пройдены live IPv4/IPv6 TCP/UDP/ICMP, DNS, reconnect и восстановление после падения службы. Sleep/wake установленного пакета прошёл на двух Mac. | Boot Always-on, roam/network handoff, clean install на другом Mac, подписанное auto update/rollback, Developer ID/notarization, приёмка установленного Hysteria full-tunnel. |
 | Android arm64 / x86_64 | Native VpnService, encrypted vault, file/text/QR import, выбор приложений, portal sync, Always-on/lockdown и TrustTunnel/Hysteria. Физические POCO и Huawei проверены на реальном трафике и восстановлении; POCO прошёл 30 минут forced deep Doze. | Дополнительные OEM (Pixel/Samsung), reboot-before-first-unlock и длительный soak. На MIUI force-stop может оставить lockdown активным без рестарта VPN-службы. Пока процесс VPN мёртв, lockdown неполный: на эмуляторе Android 16 DNS других приложений и трафик Google Play services шли напрямую. Профиль, импортированный без портала, резолвит endpoint до появления блокирующего TUN. |
@@ -165,7 +165,7 @@ curl --socks5-hostname 127.0.0.1:1080 https://example.com
 | `apps/native` | Нативный desktop-клиент |
 | `apps/webview` | Дополнительный Tauri WebView frontend |
 | `apps/tui` | Консольный клиент для Linux |
-| `apps/tun` | Desktop TUN/Wintun/utun dataplane и службы |
+| `apps/tun` | Desktop TUN/Rttun/utun dataplane и службы |
 | `apps/macos` | Интеграция приложения и системы macOS |
 | `apps/android` | Android VpnService и JNI/Rust интеграция |
 | `apps/ios` | iOS Swift/Network Extension preview |

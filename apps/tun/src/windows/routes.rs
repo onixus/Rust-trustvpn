@@ -152,11 +152,11 @@ async fn ready_address(index: u32, address: SOCKADDR_INET) -> Result<(), String>
             return Ok(());
         }
         if code == 0 && row.DadState == IpDadStateDuplicate {
-            return Err("Wintun address is already in use".into());
+            return Err("Tunnel address is already in use".into());
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
-                "Wintun address not ready (status {code}, DAD {})",
+                "Tunnel address not ready (status {code}, DAD {})",
                 row.DadState
             ));
         }
@@ -305,14 +305,15 @@ fn settling() -> impl FnMut() -> Result<(), String> {
     }
 }
 
-/// Wintun closes synchronously, but Windows may finish removing its interface
-/// asynchronously. Never reuse or delete an adapter whose ownership is unknown.
+/// The adapter closes synchronously, but Windows may finish removing its
+/// interface asynchronously. Never reuse or delete an adapter whose ownership
+/// is unknown.
 pub fn wait_removed() -> Result<(), String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut absent = settling();
     while let Err(reason) = absent() {
         if std::time::Instant::now() >= deadline {
-            return Err(format!("Wintun adapter removal is still pending: {reason}"));
+            return Err(format!("Rttun adapter removal is still pending: {reason}"));
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
@@ -320,8 +321,9 @@ pub fn wait_removed() -> Result<(), String> {
 }
 
 /// Resolve the network GUID in the administrator-owned journal to its actual
-/// PnP instance. Wintun's NetCfgInstanceId and SWD instance ID are not equivalent.
-/// Enumeration is restricted to Wintun; never remove by display name or driver.
+/// PnP instance. Enumeration is restricted to our enumerator (`ROOT\Rttun`).
+/// A leftover `SWD\Wintun` device is not ours and is not removed. Never remove
+/// by display name or by driver class.
 pub fn recover_owned_adapter(guid: &str) -> Result<(), String> {
     crate::adapter_cleanup::remove_until_absent(
         || remove_owned_adapter(guid),
@@ -349,7 +351,9 @@ fn remove_owned_adapter(guid: &str) -> Result<String, String> {
     {
         return Err("Invalid adapter identity in recovery journal".into());
     }
-    let enumerator: Vec<u16> = "SWD\\Wintun\0".encode_utf16().collect();
+    let enumerator: Vec<u16> = format!("{}\0", rttun_proto::ENUMERATOR)
+        .encode_utf16()
+        .collect();
     let property: Vec<u16> = "NetCfgInstanceId\0".encode_utf16().collect();
     let expected = format!("{{{guid}}}");
     unsafe {
@@ -362,7 +366,7 @@ fn remove_owned_adapter(guid: &str) -> Result<String, String> {
             DIGCF_ALLCLASSES,
         );
         if set == -1 {
-            return Err("Cannot enumerate Wintun devices".into());
+            return Err("Cannot enumerate Rttun devices".into());
         }
         let (mut matched, mut unreadable, mut reboot) = (0u32, 0u32, false);
         let result = (|| {
@@ -377,7 +381,7 @@ fn remove_owned_adapter(guid: &str) -> Result<String, String> {
                             "matched {matched}, unreadable {unreadable}, reboot required {reboot}"
                         ))
                     } else {
-                        Err("Wintun enumeration failed".into())
+                        Err("Rttun enumeration failed".into())
                     };
                 }
                 let key = SetupDiOpenDevRegKey(
@@ -410,14 +414,14 @@ fn remove_owned_adapter(guid: &str) -> Result<String, String> {
                 }
                 let end = value.iter().position(|v| *v == 0).unwrap_or(value.len());
                 let value = String::from_utf16(&value[..end])
-                    .map_err(|_| "Invalid Wintun network identity")?;
+                    .map_err(|_| "Invalid Rttun network identity")?;
                 if !value.eq_ignore_ascii_case(&expected) {
                     continue;
                 }
                 matched += 1;
                 if SetupDiCallClassInstaller(DIF_REMOVE, set, &data) == 0 {
                     return Err(format!(
-                        "Cannot remove owned Wintun device ({})",
+                        "Cannot remove owned Rttun device ({})",
                         GetLastError()
                     ));
                 }
@@ -433,7 +437,7 @@ fn remove_owned_adapter(guid: &str) -> Result<String, String> {
                 // Keep enumerating: never let an earlier matching instance
                 // hide another still-present instance during PnP teardown.
             }
-            Err("Too many Wintun devices".into())
+            Err("Too many Rttun devices".into())
         })();
         SetupDiDestroyDeviceInfoList(set);
         result

@@ -52,8 +52,9 @@ Source: "..\..\dist\native-preview-windows\rtrust-update.exe"; DestDir: "{app}";
 Source: "..\..\dist\native-preview-windows\R-TrustTunnel.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: native
 Source: "..\..\dist\native-preview-windows\R-TrustTunnel-WebView.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: webview
 Source: "..\..\dist\native-preview-windows\rtrust-service.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\..\dist\native-preview-windows\wintun.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\..\dist\native-preview-windows\WINTUN-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\dist\native-preview-windows\rttun_umdf.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\dist\native-preview-windows\rttun.inf"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\dist\native-preview-windows\rttun.cat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\scripts\install-windows-service.ps1"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 Name: "{group}\R-TrustTunnel Native"; Filename: "{app}\R-TrustTunnel.exe"; Components: native; IconFilename: "{app}\rtrust.ico"

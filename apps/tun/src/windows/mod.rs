@@ -1,4 +1,5 @@
 //! Windows SCM service with one SID-authorized lease and bounded IPv4 routing.
+pub(crate) mod driver;
 mod firewall;
 mod full;
 mod probe;
@@ -205,10 +206,12 @@ async fn transport(
     })?
 }
 /// One lookup so a disappearing adapter fails once, before routes or DNS change.
-fn interface_index(device: &tun_rs::AsyncDevice) -> Result<u32, String> {
-    device
-        .if_index()
-        .map_err(|_| "Wintun interface index unavailable".into())
+fn interface_index(device: &driver::Adapter) -> Result<u32, String> {
+    let index = device.index();
+    if index == 0 {
+        return Err("Rttun interface index unavailable".into());
+    }
+    Ok(index)
 }
 struct Worker(Option<tokio::task::JoinHandle<RunResult>>);
 impl Worker {
@@ -454,22 +457,8 @@ async fn serve(
         }
         None => return Ok(()),
     };
-    // Absolute DLL path inside the admin-owned service installation directory.
-    let dll = std::env::current_exe()
-        .map_err(|_| "Service path unavailable")?
-        .with_file_name("wintun.dll");
-    let device = tun_rs::DeviceBuilder::new()
-        .name(DEVICE)
-        .mtu(crate::packet::MTU as u16)
-        .ipv4(ADDRESS, 32, None)
-        .ipv6(crate::ipv6::ADDRESS, 128)
-        .metric(5)
-        .wintun_log(false)
-        .delete_driver(false)
-        .wintun_file(dll.to_str().ok_or("Invalid DLL path")?.to_owned())
-        .build_async()
-        .map_err(|_| "Cannot create Wintun adapter; install signed wintun.dll beside service")?;
-    let device = Arc::new(device);
+    // Our UMDF package, verified before any route or DNS change. No wintun.dll.
+    let device = driver::create()?;
     let index = interface_index(&device)?;
     routes::ready(index, ADDRESS).await?;
     routes::ready6(index).await?;
@@ -497,7 +486,7 @@ async fn serve(
                 )
             } != 0
             {
-                return Err("Wintun interface LUID unavailable".into());
+                return Err("Rttun interface LUID unavailable".into());
             }
             full::interface_dns(luid, resolver)?;
             Some(firewall::lock_dns(unsafe { luid.Value })?)
@@ -551,7 +540,7 @@ async fn serve(
 async fn lease_loop(
     pipe: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
     failover: &mut crate::failover::Failover,
-    device: Arc<tun_rs::AsyncDevice>,
+    device: Arc<driver::Adapter>,
     worker: &mut Worker,
     stop: &mut watch::Receiver<bool>,
     dns: Option<Ipv4Addr>,
@@ -594,9 +583,9 @@ async fn lease_loop(
         &format!(
             "{}{}",
             if full {
-                "Весь компьютер: IPv4, IPv6 и DNS через Wintun"
+                "Весь компьютер: IPv4, IPv6 и DNS через Rttun"
             } else {
-                "Выбранные IPv4-сети подключены через Wintun"
+                "Выбранные IPv4-сети подключены через Rttun"
             },
             failover.note()
         ),
@@ -721,9 +710,9 @@ async fn lease_loop(
                     pipe,
                     state.clone(),
                     if access_expired { "Access confirmation expired; protection retained. Synchronize before reconnecting." } else if state == State::Connected {
-                        "Wintun подключён"
+                        "Rttun подключён"
                     } else {
-                        "Переподключение; выбранные IPv4-сети удерживаются на Wintun"
+                        "Переподключение; выбранные IPv4-сети удерживаются на Rttun"
                     },
                     &mut monitor,
                     failover.active(),

@@ -99,8 +99,8 @@ pipeline {
               if ($LASTEXITCODE) { throw 'Smoke failed' }
               python scripts/package-preview.py --ui both
               if ($LASTEXITCODE) { throw 'Packaging failed' }
-              python ci/wintun.py
-              if ($LASTEXITCODE) { throw 'Wintun packaging failed' }
+              python ci/rttun.py
+              if ($LASTEXITCODE) { throw 'Rttun packaging failed' }
               python ci/run.py windows-installer python ci/package_windows.py
               if ($LASTEXITCODE) { throw 'Installer packaging failed' }
               if ($env:WINDOWS_SYSTEM_E2E -eq 'true') {
