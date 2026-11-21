@@ -115,6 +115,7 @@ async fn run(
     let shared: Shared = Arc::new(Mutex::new(controller));
     let health: Health = Default::default();
     tokio::spawn(watch_health(shared.clone(), health.clone()));
+    tokio::spawn(renew_portal(shared.clone()));
     let (done_tx, mut done_rx) = mpsc::channel::<Outcome>(8);
     let (input_tx, mut input_rx) = mpsc::channel::<Event>(64);
     std::thread::spawn(move || {
@@ -326,6 +327,17 @@ fn preview(c: &mut Controller, input: &str) -> Result<Row, String> {
         hostname: summary.hostname,
         protocol: summary.protocol,
     })
+}
+
+/// Extends a still-valid portal token. Does not touch the VPN session.
+async fn renew_portal(shared: Shared) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        let c = shared.lock().await;
+        if let Err(error) = c.renew_portal_if_due().await {
+            let _ = error;
+        }
+    }
 }
 
 /// Records lifecycle failures without holding the controller during the check;

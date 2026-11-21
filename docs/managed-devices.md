@@ -88,8 +88,8 @@ ownership, обязательности профильной политики и
 | Device-specific VPN rotation | не подтверждено | не подтверждено | зависит от tunnel#22 |
 | Endpoint revoke + active-session SLA | не подтверждено | не подтверждено | зависит от tunnel#22 |
 | QR invitation | JSON paste с origin fence | Android camera/image + confirmation; iOS отложен | short-lived one_time_qr на HTTPS |
-| Portal token renewal | явное продление до expiry | Android: явное продление; iOS отложен | device-only token/renew, ещё действующий токен |
-| Mandatory offline freshness deadline | Linux/Windows TUN/full; macOS TUN/full — локальное исправление, installed acceptance NOT RUN; совместимые UI/service (текущий IPC v7); SOCKS/постоянный Always-on отклонены | Android: boot/elapsed receipt + блокирующий TUN | offline_freshness v1 |
+| Portal token renewal | автопродление ещё действующего токена, в том числе при VPN | Android и iOS: то же; истёкший токен не отправляется | device-only token/renew, ещё действующий токен |
+| Mandatory offline freshness deadline | не блокирует сохранённый конфиг; lease остаётся подсказкой синхронизации | Android: receipt не блокирует VpnService; iOS lease не вводился | offline_freshness v1 необязателен для подключения |
 
 «Забыть локально» удаляет привязку keyring. Серверное удаление устройства
 отзывает API tokens/grants/routing membership; legacy/shared VPN-пароль
@@ -117,8 +117,13 @@ Snapshot, QR, `/token/renew` и freshness добавляются поверх э
 
 ## Продление API-доступа
 
-Кнопка продления в native/WebView/Android вызывает device-only
-`/portal/v2/token/renew` с явным consent. Сервер повторно проверяет статус,
+Кнопка продления в native/WebView/Android/iOS вызывает device-only
+`/portal/v2/token/renew` с явным consent. Пока токен ещё действует и до срока
+осталось меньше недели, те же клиенты продлевают его сами, не чаще раза в
+сутки и в том числе при включённом VPN. Это срок API панели, не срок VPN.
+Сохранённый конфиг подключается без живой панели и без lease свежести:
+связка нужна, чтобы получить профиль, а не чтобы поднять туннель.
+Сервер повторно проверяет статус,
 revocation и expiry токена внутри write transaction, затем продлевает API
 доступ на 30 дней без изменения самого токена, профилей, grants или VPN
 credentials. Клиент отсчитывает срок от начала запроса; Android меняет только

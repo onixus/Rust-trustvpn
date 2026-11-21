@@ -272,6 +272,6 @@ mod admission_tests {
         .unwrap();
         assert!(next.profiles == vault.profiles);
         assert!(!next.connection.sync.tracked[0].available);
-        assert!(next.connection.sync.lease_for(false, &[profile]).is_err());
+        assert!(next.connection.sync.connect_blocked(&[profile]).is_err());
     }
 }

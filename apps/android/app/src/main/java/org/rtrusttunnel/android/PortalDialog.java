@@ -89,7 +89,7 @@ final class PortalDialog {
                     JSONObject session = new PortalClient(origin, "").enroll(secret, label);
                     // Serialize with UI profile edits, including a recreated Activity.
                     activity.runOnUiThread(() -> {
-                        try { vault.savePortal(session); error(activity.getString(R.string.portal_enrolled)); }
+                        try { vault.savePortal(session); PortalSyncWorker.schedule(activity); error(activity.getString(R.string.portal_enrolled)); }
                         catch (Exception e) { error(activity.getString(R.string.portal_failed)); }
                     });
                 });

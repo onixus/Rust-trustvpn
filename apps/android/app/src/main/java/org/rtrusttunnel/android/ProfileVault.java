@@ -82,7 +82,7 @@ final class ProfileVault {
     void renewPortalAccess(JSONObject session,long expiresAt) throws Exception { synchronized (LOCK) {
         JSONObject data=readUnlocked(), current=data.optJSONObject("portal");
         if (!PortalClient.samePortal(current,session) || current.optLong("expires_at")!=session.optLong("expires_at")) throw new IOException("Registration changed");
-        current.put("expires_at",expiresAt).remove("sync_auth_expired"); writeUnlocked(data);
+        current.put("expires_at",expiresAt).put("renewed_at",System.currentTimeMillis()/1000).remove("sync_auth_expired"); writeUnlocked(data);
     } }
     void expirePortalSync(JSONObject session) throws Exception { synchronized (LOCK) {
         JSONObject data = readUnlocked(), current = data.optJSONObject("portal");

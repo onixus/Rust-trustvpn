@@ -4,7 +4,7 @@
     <string name="recovery_enable">Enable automatic recovery</string>
     <string name="recovery_disable">Disable backups</string>
     <string name="recovery_invalid">Choose 1–3 compatible profiles. Disconnect before changing backups.</string>
-    <string name="access_refresh_required">Access is out of date. Traffic is blocked; refresh profiles from the portal.</string>
+    <string name="access_refresh_required">Portal confirmation is out of date. The saved profile still connects; refresh when the portal is available.</string>
     <string name="recovery_backup_active">Permitted backup %1$d is active</string>
     <string name="routing_admin">Administrator routes</string>
     <string name="routing_user">Owner routes</string>
