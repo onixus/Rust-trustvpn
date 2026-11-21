@@ -20,7 +20,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 /// the session reports itself unhealthy; the reference keeps retrying, a
 /// caller may reconnect.
 const STALLED_INITIATIONS: u32 = 4;
-/// Endpoint addresses tried within the caller's 20 s connection budget.
+/// Endpoint addresses tried within the caller's connection budget.
 const MAX_ADDRESSES: usize = 3;
 
 pub(crate) enum Command {

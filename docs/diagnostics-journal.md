@@ -69,11 +69,14 @@ Example (synthetic):
 
 `level` is one of `debug`, `warning`, `error`, `critical`. A typed connection
 failure is `error`. Ordinary lifecycle state is `debug`. A kill-switch or DNS
-probe verdict (`system_probe`) and the macOS incident lines — power, reconnect
+probe verdict (`system_probe`) and the incident lines — power, reconnect
 timing and completion, transport connect, stop timing and the data-plane
 summary — are `warning`, so a support copy still has them after the 15-minute
-state window. A transport stop and a failed reconnect are `error`, as a closed
-token (`vpn_reconnect_failed`), never the GUI's error text. A service process
+state window. A transport stop and a failed reconnect are `error`. macOS and Windows log
+`VPN transport stopped reason=… transport=… uptime_ms=…` with closed tokens
+only. A failed reconnect is the closed token `vpn_reconnect_failed`; Windows
+appends `stage=` and `reason=` from the same closed vocabulary, never the GUI's
+error text. A service process
 that cannot continue writes `service_stopped` at `critical` and flushes before
 exit; the same line is written when the Windows service fails inside SCM,
 where the process itself does not exit. Lines written before levels existed

@@ -86,7 +86,8 @@ impl H3Session {
                 let connecting = endpoint
                     .connect(addr, &p.endpoint.hostname)
                     .map_err(|_| Error::Connect)?;
-                match tokio::time::timeout(Duration::from_secs(4), connecting).await {
+                // Same bound as TCP: 4 s dropped a live path before QUIC retransmitted.
+                match tokio::time::timeout(ADDRESS_TIMEOUT, connecting).await {
                     Ok(Ok(connection)) => {
                         connected = Some((endpoint, connection));
                         break 'addresses;

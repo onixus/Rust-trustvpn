@@ -171,25 +171,38 @@ fn selected_routes(
     routes::preflight(&networks)?;
     Ok(networks)
 }
+fn staged(stage: crate::reason::Stage, error: rtrust_engine::Error) -> crate::failover::Failure {
+    let detail = crate::reason::reconnect(stage, &error);
+    let mut failure = crate::failover::Failure::from(error);
+    failure.detail = Some(detail);
+    failure
+}
 async fn transport(
     profile: &rtrust_profile::Profile,
 ) -> Result<(Session, rtrust_engine::Tunnel), crate::failover::Failure> {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(rtrust_control::recovery::ATTEMPT_TIMEOUT, async {
         let session = Session::connect(profile)
             .await
-            .map_err(crate::failover::Failure::from)?;
+            .map_err(|error| staged(crate::reason::Stage::Connect, error))?;
         session
             .health()
             .await
-            .map_err(crate::failover::Failure::from)?;
+            .map_err(|error| staged(crate::reason::Stage::Health, error))?;
         let udp = session
             .open_udp()
             .await
-            .map_err(crate::failover::Failure::from)?;
+            .map_err(|error| staged(crate::reason::Stage::Udp, error))?;
         Ok((session, udp))
     })
     .await
-    .map_err(|_| crate::failover::Failure::timeout("Endpoint connection timed out"))?
+    .map_err(|_| {
+        let mut failure = crate::failover::Failure::timeout("Endpoint connection timed out");
+        failure.detail = Some(crate::reason::reconnect(
+            crate::reason::Stage::Connect,
+            &rtrust_engine::Error::Timeout,
+        ));
+        failure
+    })?
 }
 /// One lookup so a disappearing adapter fails once, before routes or DNS change.
 fn interface_index(device: &tun_rs::AsyncDevice) -> Result<u32, String> {
@@ -202,14 +215,21 @@ impl Worker {
     fn new(task: tokio::task::JoinHandle<RunResult>) -> Self {
         Self(Some(task))
     }
-    /// True when the session ended degraded without ever delivering data.
-    async fn finished(&mut self) -> bool {
-        let mut unproven = false;
-        if let Some(task) = self.0.as_mut() {
-            unproven = task.await.as_ref().is_ok_and(crate::dataplane::unproven);
-        }
+    fn running(&self) -> bool {
+        self.0.is_some()
+    }
+    /// Why the data plane ended, and whether that exit is unproven.
+    /// Closed `key=value` tokens only; the journal line carries no endpoint data.
+    async fn finished(&mut self) -> Option<(String, bool)> {
+        let task = self.0.as_mut()?;
+        let result = task.await;
         self.0 = None;
-        unproven
+        let unproven = result.as_ref().is_ok_and(crate::dataplane::unproven);
+        let reason = match &result {
+            Ok(ended) => crate::reason::stopped(ended),
+            Err(_) => "reason=worker_failed".into(),
+        };
+        Some((reason, unproven))
     }
     async fn stop(&mut self) {
         if let Some(task) = self.0.take() {
@@ -620,10 +640,14 @@ async fn lease_loop(
                     }
                 },
                 _ = stop.changed() => return Ok(None),
-                unproven = worker.finished(), if state == State::Connected => {
+                ended = worker.finished(), if state == State::Connected && worker.running() => {
                     probes.cancel();
+                    if let Some((reason, unproven)) = ended {
+                        let uptime_ms = u64::try_from(connected_since.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        crate::journal(rtrust_journal::Level::Error, &crate::reason::stopped_event("VPN transport stopped", &reason, rtrust_journal::transport_token(rtrust_engine::planned_transport(failover.current())), uptime_ms));
+                        budget.disconnected(connected_since.elapsed(), unproven);
+                    }
                     state = State::Blocked; monitor.transition(false, rtrust_control::observations::now_ms());
-                    budget.disconnected(connected_since.elapsed(), unproven);
                     if failover.ended(connected_since.elapsed(), std::time::Instant::now()) {
                         monitor.failed_over(rtrust_control::observations::now_ms());
                     }
@@ -634,6 +658,7 @@ async fn lease_loop(
                     attempt_started = std::time::Instant::now();
                     if full && full::refresh(interface_index(&device)?, &full::endpoints(&failover.guard_profile())?).is_err() {
                         crate::failover::journal_failure(rtrust_journal::Record::failure(attempt_path, rtrust_journal::Class::Other, rtrust_engine::planned_transport(failover.current()), budget.attempt(), rtrust_journal::Budget::from_cooling(budget.cooling()), attempt_started.elapsed()));
+                        crate::journal(rtrust_journal::Level::Error, "vpn_reconnect_failed stage=guard reason=route_refresh");
                         retry.as_mut().reset(tokio::time::Instant::now()+budget.next_delay(rand::random()));
                         continue;
                     }
@@ -654,6 +679,10 @@ async fn lease_loop(
                         },
                         Err(error) => {
                             crate::failover::journal_failure(rtrust_journal::Record::failure(attempt_path, error.class, rtrust_engine::planned_transport(failover.current()), budget.attempt(), rtrust_journal::Budget::from_cooling(budget.cooling()), attempt_started.elapsed()));
+                            crate::journal(rtrust_journal::Level::Error, &match error.detail {
+                                Some(detail) => format!("vpn_reconnect_failed {detail}"),
+                                None => "vpn_reconnect_failed".into(),
+                            });
                             // The guard already covers every candidate.
                             if failover.failed(std::time::Instant::now()) {
                                 monitor.failed_over(rtrust_control::observations::now_ms());
@@ -814,7 +843,10 @@ mod tests {
     #[tokio::test]
     async fn stop_after_transport_failure_does_not_poll_completed_task() {
         let mut worker = Worker::new(tokio::spawn(async { Err("endpoint lost".into()) }));
-        worker.finished().await;
+        let (reason, unproven) = worker.finished().await.expect("running worker");
+        assert_eq!(reason, "reason=worker_stopped");
+        assert!(!unproven);
+        assert!(worker.finished().await.is_none());
         worker.stop().await;
         worker.stop().await;
     }
