@@ -106,6 +106,8 @@ pub struct Failure {
     pub message: String,
     pub class: rtrust_journal::Class,
     /// Closed `stage=` / `reason=` text for the journal. Never GUI or endpoint text.
+    /// Read by the Windows supervisor; other platforms keep their own records.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub detail: Option<String>,
     // Linux/macOS workers carry deferred accepted-attempt metadata; Windows
     // records its synchronous attempt at the supervisor instead.
