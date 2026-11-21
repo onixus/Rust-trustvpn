@@ -288,7 +288,19 @@ public final class PortalClientTest {
             check(conflict(body) == 0, "revision conflict fallback");
         check(PortalClient.Failure.conflict(new byte[0]).status == 409, "409 status kept");
     }
+    static void renewalWindow() throws Exception {
+        JSONObject session = session().put("expires_at", 1_000_000L);
+        check(!PortalClient.renewalDue(session, 1_000_000L - 8L * 86400), "not yet inside the week");
+        check(PortalClient.renewalDue(session, 1_000_000L - 6L * 86400), "inside the week");
+        session.put("renewed_at", 1_000_000L - 6L * 86400);
+        check(!PortalClient.renewalDue(session, 1_000_000L - 6L * 86400 + 3600), "already renewed today");
+        check(PortalClient.renewalDue(session, 1_000_000L - 5L * 86400), "a day later may retry");
+        check(!PortalClient.renewalDue(session, 1_000_000L), "expired token is not sent");
+        session.put("sync_auth_expired", true);
+        check(!PortalClient.renewalDue(session, 1_000_000L - 6L * 86400), "revoked registration is not renewed");
+    }
     public static void main(String[] args) throws Exception {
+        renewalWindow();
         limitConflicts();
         metadataSequences();
         snapshotSequences();

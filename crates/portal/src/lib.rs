@@ -156,6 +156,8 @@ pub struct Client {
     token: Zeroizing<String>,
     expires_at: Option<u64>,
     device_id: Option<u64>,
+    /// Portal rejected this token. Kept so the user can forget it; never sent.
+    rejected: bool,
 }
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -413,6 +415,22 @@ fn identifier(value: &str) -> Result<&str, String> {
     Ok(value)
 }
 impl Client {
+    /// Renew a still-valid token once it has less than a week left, and at
+    /// most once a day. An expired or unknown deadline is not sent.
+    pub fn renewal_due(&self, unix_seconds: u64, renewed_at: Option<u64>) -> bool {
+        const WEEK: u64 = 7 * 86400;
+        const DAY: u64 = 86400;
+        if self.rejected {
+            return false;
+        }
+        let Some(deadline) = self.expires_at else {
+            return false;
+        };
+        if unix_seconds >= deadline || deadline - unix_seconds >= WEEK {
+            return false;
+        }
+        renewed_at.is_none_or(|at| unix_seconds.saturating_sub(at) >= DAY)
+    }
     /// Only portal API expiry is known. Endpoint credentials have independent lifetimes.
     pub fn access_expired(&self, unix_seconds: u64) -> bool {
         self.expires_at
@@ -429,7 +447,7 @@ impl Client {
     }
     pub fn remember(&self) -> Result<(), String> {
         let bytes = Zeroizing::new(
-            serde_json::to_vec(&json!({"origin":self.origin.as_str(),"token":self.token.as_str(),"expires_at":self.expires_at,"device_id":self.device_id}))
+            serde_json::to_vec(&json!({"origin":self.origin.as_str(),"token":self.token.as_str(),"expires_at":self.expires_at,"device_id":self.device_id,"rejected":self.rejected}))
                 .map_err(|_| "Ошибка сохранения привязки")?,
         );
         keyring::Entry::new("org.rtrusttunnel.desktop", "portal-device-v2")
@@ -451,6 +469,10 @@ impl Client {
             expires_at: Option<u64>,
             #[serde(default)]
             device_id: Option<u64>,
+            /// Set after the portal rejects this token. The secret stays so the
+            /// user can forget it, but it is never sent again.
+            #[serde(default)]
+            rejected: bool,
         }
         let saved: Saved =
             serde_json::from_slice(&bytes).map_err(|_| "Повреждена сохранённая привязка")?;
@@ -462,7 +484,17 @@ impl Client {
         client.token = token;
         client.expires_at = saved.expires_at;
         client.device_id = saved.device_id;
+        client.rejected = saved.rejected;
         Ok(client)
+    }
+    /// Persist a portal rejection without recreating a forgotten registration.
+    fn mark_rejected(token: &str) -> Result<(), String> {
+        let mut client = Self::restore()?;
+        if client.token.as_str() != token {
+            return Ok(());
+        }
+        client.rejected = true;
+        client.remember()
     }
     pub fn forget() -> Result<(), String> {
         match keyring::Entry::new("org.rtrusttunnel.desktop", "portal-device-v2")
@@ -496,6 +528,7 @@ impl Client {
             token: Zeroizing::new(String::new()),
             expires_at: None,
             device_id: None,
+            rejected: false,
         })
     }
     async fn request<T: DeserializeOwned>(
@@ -516,7 +549,7 @@ impl Client {
         body: Option<Value>,
         missing_ok: bool,
     ) -> Result<Option<T>, String> {
-        if !self.token.is_empty() && self.access_expired(now()?) {
+        if self.rejected || (!self.token.is_empty() && self.access_expired(now()?)) {
             return Err("Срок токена панели истёк. Привяжите устройство заново.".into());
         }
         let url = self
@@ -543,6 +576,12 @@ impl Client {
             );
         }
         if !response.status().is_success() {
+            if matches!(response.status().as_u16(), 401 | 403) && !self.token.is_empty() {
+                let token = self.token.clone();
+                // A newer enrollment has different token bytes and is left alone.
+                // Keyring I/O stays off the async worker.
+                let _ = std::thread::spawn(move || Self::mark_rejected(&token)).join();
+            }
             return Err(match response.status().as_u16() {
                 401 => "Код истёк или доступ устройства отозван. Привяжите устройство заново.",
                 403 => "Недостаточно прав на эту операцию.",
@@ -933,6 +972,17 @@ mod tests {
         assert!(!client.access_expired(129));
         assert!(client.access_expired(130));
         assert!(client.access_expired(131));
+        let week = 7 * 86400;
+        client.expires_at = Some(1_000 + week - 1);
+        assert!(client.renewal_due(1_000, None));
+        assert!(!client.renewal_due(1_000, Some(1_000)));
+        assert!(client.renewal_due(1_000 + 86400, Some(1_000)));
+        client.expires_at = Some(1_000 + week);
+        assert!(!client.renewal_due(1_000, None));
+        client.expires_at = Some(1_000);
+        assert!(!client.renewal_due(1_000, None));
+        client.expires_at = None;
+        assert!(!client.renewal_due(1_000, None));
     }
     #[tokio::test]
     async fn expired_token_never_contacts_the_portal() {
