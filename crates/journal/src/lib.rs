@@ -419,6 +419,15 @@ impl Journal {
     pub fn submit(&self, record: Record) {
         self.enqueue(record.line());
     }
+    /// One reconnect episode. `line` is a finished record, already checked by
+    /// the caller to contain only closed tokens. It is queued like any other
+    /// line; the writer keeps the ten newest `keep=reconnect` lines.
+    pub fn reconnect(&self, line: String) {
+        if line.len() > 1024 || !line.ends_with('\n') || !line.contains("keep=reconnect") {
+            return;
+        }
+        self.enqueue(line);
+    }
     /// State changes. Kept 15 minutes. New failures use [`Record`] (error, 60 minutes).
     pub fn lifecycle(&self, event: &str) {
         self.lifecycle_at(Level::Debug, event);

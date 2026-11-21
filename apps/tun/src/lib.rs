@@ -11,6 +11,8 @@ pub mod ipv6;
 pub mod packet;
 pub mod policy;
 pub mod reason;
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+mod reconnect_log;
 pub mod stack;
 pub mod stats;
 
