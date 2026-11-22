@@ -606,9 +606,9 @@ async fn lease_loop(
         &format!(
             "{}{}",
             if full {
-                "Весь компьютер: IPv4, IPv6 и DNS через Wintun"
+                crate::whole_computer_status(block_ipv6, "Wintun")
             } else {
-                "Выбранные IPv4-сети подключены через Wintun"
+                "Выбранные IPv4-сети подключены через Wintun".to_owned()
             },
             failover.note()
         ),

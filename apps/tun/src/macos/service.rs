@@ -293,6 +293,8 @@ struct Workers {
     /// `Session::transport_name` of the running data plane, for events.
     transport: &'static str,
     reconnect: Option<tokio::task::JoinHandle<Result<device::Prepared, crate::failover::Failure>>>,
+    /// Whole-computer status must not claim IPv6 relay when this is set.
+    block_ipv6: bool,
 }
 impl Drop for Workers {
     fn drop(&mut self) {
@@ -1016,6 +1018,7 @@ async fn start(
         transport: prepared.transport(),
         tunnel: Some(freshness.spawn(prepared)),
         reconnect: None,
+        block_ipv6,
     };
     let retry_guard = guard.clone();
     let release_lease = held_lease.clone();
@@ -1133,9 +1136,9 @@ async fn connected(
         &format!(
             "{}{}",
             if full {
-                "Весь компьютер: IPv4, IPv6 и DNS через VPN"
+                crate::whole_computer_status(workers.block_ipv6, "VPN")
             } else {
-                "IPv4-сети подключены"
+                "IPv4-сети подключены".to_owned()
             },
             failover.note()
         ),
@@ -1381,14 +1384,15 @@ async fn connected(
                 if viewed {
                     probes.viewed(awake && state == State::Connected);
                 }
+                let connected = if full {
+                    crate::whole_computer_status(workers.block_ipv6, "VPN")
+                } else {
+                    "Выбранные IPv4-сети подключены".to_owned()
+                };
                 let mut response = Response::new(
                     state.clone(),
                     if state == State::Connected {
-                        if full {
-                            "Весь компьютер: IPv4, IPv6 и DNS через VPN"
-                        } else {
-                            "Выбранные IPv4-сети подключены"
-                        }
+                        connected.as_str()
                     } else {
                         &last_failure
                     },
@@ -1630,6 +1634,7 @@ mod tests {
                 transport: "test",
                 tunnel: Some(worker),
                 reconnect: None,
+                block_ipv6: false,
             },
             false,
             receiver,
@@ -2166,6 +2171,7 @@ mod tests {
                 transport: "test",
                 tunnel: None,
                 reconnect: Some(worker),
+                block_ipv6: false,
             },
             false,
             power,
@@ -2241,6 +2247,7 @@ mod tests {
                     transport: "test",
                     tunnel: None,
                     reconnect: Some(worker),
+                    block_ipv6: false,
                 },
                 false,
                 receiver,
@@ -2333,6 +2340,7 @@ mod tests {
                     transport: "test",
                     tunnel: Some(tokio::spawn(std::future::pending())),
                     reconnect: None,
+                    block_ipv6: false,
                 },
                 false,
                 receiver,
@@ -2557,6 +2565,7 @@ mod tests {
                     transport: "test",
                     tunnel: Some(tunnel),
                     reconnect: Some(worker),
+                    block_ipv6: false,
                 },
                 false,
                 receiver,
@@ -2655,6 +2664,7 @@ mod tests {
                 transport: "test",
                 tunnel: Some(tunnel),
                 reconnect: Some(reconnect),
+                block_ipv6: false,
             },
             false,
             receiver,
@@ -2713,6 +2723,7 @@ mod tests {
                 transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
+                block_ipv6: false,
             },
             false,
             receiver,
@@ -2789,6 +2800,7 @@ mod tests {
                 transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
+                block_ipv6: false,
             },
             false,
             receiver,
@@ -2860,6 +2872,7 @@ mod tests {
                 transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
+                block_ipv6: false,
             },
             false,
             receiver,
@@ -3091,6 +3104,7 @@ mod tests {
                     transport: "test",
                     tunnel: None,
                     reconnect: Some(worker),
+                    block_ipv6: false,
                 },
                 false,
                 power_events,
@@ -3175,6 +3189,7 @@ mod tests {
                 transport: "test",
                 tunnel: None,
                 reconnect: Some(worker),
+                block_ipv6: false,
             },
             false,
             power_events,
@@ -3706,6 +3721,7 @@ mod tests {
                 transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
+                block_ipv6: false,
             },
             true,
             receiver,
@@ -3914,6 +3930,7 @@ mod tester_summary_tests {
                 transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
+                block_ipv6: false,
             },
             receiver,
             failover().await,

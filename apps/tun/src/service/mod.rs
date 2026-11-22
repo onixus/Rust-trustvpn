@@ -464,9 +464,9 @@ async fn serve(
         &format!(
             "{}{}",
             if full {
-                "Весь компьютер: IPv4, IPv6 и DNS через VPN"
+                crate::whole_computer_status(block_ipv6, "VPN")
             } else {
-                "IPv4-сети подключены"
+                "IPv4-сети подключены".to_owned()
             },
             failover.note()
         ),
@@ -602,15 +602,16 @@ async fn serve(
                         .generation,
                     failover.active(),
                 );
+                let connected = if full {
+                    crate::whole_computer_status(block_ipv6, "VPN")
+                } else {
+                    "Выбранные IPv4-сети подключены".to_owned()
+                };
                 reply_observed(
                 &mut stream,
                 state.clone(),
                 if access_expired { "Access confirmation expired; protection retained. Synchronize before reconnecting." } else if state == State::Connected {
-                    if full {
-                        "Весь компьютер: IPv4, IPv6 и DNS через VPN"
-                    } else {
-                        "Выбранные IPv4-сети подключены"
-                    }
+                    connected.as_str()
                 } else {
                     if full {
                         "Связь потеряна. Сеть заблокирована; выполняется переподключение."

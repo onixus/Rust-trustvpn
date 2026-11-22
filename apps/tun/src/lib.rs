@@ -1,4 +1,34 @@
 //! Experimental bounded IPv4 data plane. No routing, DNS or firewall changes.
+
+/// Connected status for whole-computer mode. Must not claim IPv6 relay when the
+/// user asked the service to refuse that family locally.
+pub(crate) fn whole_computer_status(block_ipv6: bool, transport: &str) -> String {
+    if block_ipv6 {
+        format!(
+            "Весь компьютер: IPv4 и DNS через {transport}. IPv6 заблокирован локально, обхода нет"
+        )
+    } else {
+        format!("Весь компьютер: IPv4, IPv6 и DNS через {transport}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::whole_computer_status;
+
+    #[test]
+    fn blocked_ipv6_status_never_claims_the_family_is_relayed() {
+        for transport in ["VPN", "Wintun"] {
+            let blocked = whole_computer_status(true, transport);
+            assert!(blocked.contains(transport));
+            assert!(blocked.contains("IPv6 заблокирован локально"));
+            assert!(!blocked.contains("IPv6 и DNS"));
+            let relayed = whole_computer_status(false, transport);
+            assert!(relayed.contains("IPv4, IPv6 и DNS"));
+            assert!(!relayed.contains("заблокирован"));
+        }
+    }
+}
 #[cfg(any(target_os = "windows", test))]
 mod adapter_cleanup;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
