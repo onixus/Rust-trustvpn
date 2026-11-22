@@ -169,6 +169,7 @@ fn a_degraded_verdict_stops_the_real_proxy_before_the_retry_wait() {
             0,
             Default::default(),
             String::new(),
+            false,
         ))
         .unwrap();
     let proxy = session.proxy().unwrap().clone();

@@ -137,6 +137,8 @@
   <label id="port-field"><span data-i18n="net.port">SOCKS port</span><input id="port" type="number" min="1" max="65535"></label>
   <label id="networks-field"><span data-i18n="net.networks">IPv4 networks</span><input id="networks" placeholder="192.0.2.0/24, 10.0.0.0/8"><small id="networks-managed" data-i18n="net.managed" hidden>The server assigns the routes for this device.</small></label>
   <label><span data-i18n="net.dns">DNS server</span><input id="dns" placeholder="1.1.1.1"></label>
+   <label id="ipv6-field" class="card switch"><span data-i18n="net.ipv6">Block IPv6 completely</span><input id="block-ipv6" type="checkbox"></label>
+   <small id="ipv6-note" data-i18n="net.ipv6_note">IPv6 is captured and refused on this computer: neither through the tunnel nor around it. An older connection service rejects the setting instead of ignoring it.</small>
  </div>
  <label class="card switch"><span data-i18n="net.auto">Connect on launch</span><input id="auto" type="checkbox"></label>
  <div class="row end"><button type="button" id="save" class="btn primary" data-i18n="net.save">Save settings</button></div>

@@ -36,7 +36,7 @@ const T={en:{
  'detail.unknown':'No result from this check yet.','detail.off':'No session.','detail.connecting':'Waiting for the service.','detail.error':'The last connection attempt failed.',
  'home.profile':'Profile','home.default':'Default profile','home.backup':'Backup',
  'tile.mode':'Mode','tile.dns_sub':'DNS server','tile.sync':'Sync','tile.auto':'Autoconnect','tile.auto_sub':'when the app starts','tile.on':'On','tile.off':'Off','tile.unregistered':'not registered',
- 'mode.full':'Whole device','mode.full_sub':'All IPv4, IPv6 and DNS through the tunnel','mode.tun':'Selected networks','mode.tun_sub':'Only the IPv4 networks you list','mode.socks':'Local proxy','mode.socks_sub':'SOCKS5 for apps you configure',
+ 'mode.full':'Whole device','mode.full_sub':'All IPv4, IPv6 and DNS through the tunnel','mode.full_blocked':'IPv4 and DNS through the tunnel, IPv6 blocked','mode.tun':'Selected networks','mode.tun_sub':'Only the IPv4 networks you list','mode.socks':'Local proxy','mode.socks_sub':'SOCKS5 for apps you configure',
  'mode.full_tile':'all traffic','mode.tun_tile':'{n} IPv4 networks','mode.socks_tile':'port {port}',
  'profiles.search':'Name, server or protocol','profiles.add':'Add profile','profiles.col_profile':'Profile','profiles.col_protocol':'Protocol','profiles.col_state':'State',
  'profiles.hint':'Select a profile to see its actions. Connect uses the selected profile; automatic connection uses the default.',
@@ -59,7 +59,7 @@ const T={en:{
  'diag.rules_title':'Why the route is like this','diag.rules_detail':'The routing policy used by the last check: profile rules, exclusions or administrator routes.','diag.rules':'Review rules',
  'diag.report':'Preview and redact report','diag.report_note':'User additions are saved as entered. Remove sensitive details before export.','diag.replace':'Replace edits with latest report','diag.export':'Save locally…',
  'diag.none':'No check yet.','diag.checking':'Checking…','diag.historical':'Historical result · ','diag.age':'{s} seconds old',
- 'net.lead':'Choose which traffic goes through the tunnel. Disconnect before changing settings.','net.mode':'Connection mode','net.port':'SOCKS port','net.networks':'IPv4 networks','net.dns':'DNS server','net.auto':'Connect on launch','net.save':'Save settings',
+ 'net.lead':'Choose which traffic goes through the tunnel. Disconnect before changing settings.','net.mode':'Connection mode','net.port':'SOCKS port','net.networks':'IPv4 networks','net.dns':'DNS server','net.ipv6':'Block IPv6 completely','net.ipv6_note':'IPv6 is captured and refused on this computer: neither through the tunnel nor around it. An older connection service rejects the setting instead of ignoring it.','net.auto':'Connect on launch','net.save':'Save settings',
  'sync.lead':'Register this device with your server to download and upload profiles.','sync.address':'Portal HTTPS address','sync.code':'Enrollment code or invitation JSON','sync.name':'Device name',
  'sync.enroll':'Register device','sync.now':'Sync profiles now','sync.renew':'Renew portal access','sync.auto':'Background synchronization','sync.registration':'Registration',
  'sync.forget_note':'Forget this local registration. Downloaded VPN credentials have independent access; this does not revoke them on the server.','sync.forget':'Forget registration',
@@ -97,7 +97,7 @@ const T={en:{
  'detail.unknown':'Результата этой проверки пока нет.','detail.off':'Нет сеанса.','detail.connecting':'Ждём службу.','detail.error':'Последняя попытка подключения не удалась.',
  'home.profile':'Профиль','home.default':'Профиль по умолчанию','home.backup':'Резерв',
  'tile.mode':'Режим','tile.dns_sub':'DNS-сервер','tile.sync':'Синхронизация','tile.auto':'Автоподключение','tile.auto_sub':'при запуске приложения','tile.on':'Включено','tile.off':'Выключено','tile.unregistered':'устройство не зарегистрировано',
- 'mode.full':'Всё устройство','mode.full_sub':'Весь IPv4, IPv6 и DNS через туннель','mode.tun':'Выбранные сети','mode.tun_sub':'Только перечисленные сети IPv4','mode.socks':'Локальный прокси','mode.socks_sub':'SOCKS5 для настроенных приложений',
+ 'mode.full':'Всё устройство','mode.full_sub':'Весь IPv4, IPv6 и DNS через туннель','mode.full_blocked':'IPv4 и DNS через туннель, IPv6 заблокирован','mode.tun':'Выбранные сети','mode.tun_sub':'Только перечисленные сети IPv4','mode.socks':'Локальный прокси','mode.socks_sub':'SOCKS5 для настроенных приложений',
  'mode.full_tile':'весь трафик','mode.tun_tile':'сетей IPv4: {n}','mode.socks_tile':'порт {port}',
  'profiles.search':'Имя, сервер или протокол','profiles.add':'Добавить профиль','profiles.col_profile':'Профиль','profiles.col_protocol':'Протокол','profiles.col_state':'Состояние',
  'profiles.hint':'Выберите профиль, чтобы увидеть действия. «Подключить» использует выбранный профиль, автоподключение — профиль по умолчанию.',
@@ -120,7 +120,7 @@ const T={en:{
  'diag.rules_title':'Почему маршрут такой','diag.rules_detail':'Политика маршрутизации последней проверки: правила профиля, исключения или маршруты администратора.','diag.rules':'Показать правила',
  'diag.report':'Предпросмотр и обезличивание отчёта','diag.report_note':'Ваши дополнения сохраняются как есть. Удалите чувствительные данные перед экспортом.','diag.replace':'Заменить правки последним отчётом','diag.export':'Сохранить локально…',
  'diag.none':'Проверок ещё не было.','diag.checking':'Проверяем…','diag.historical':'Прошлый результат · ','diag.age':'{s} с назад',
- 'net.lead':'Выберите, какой трафик идёт через туннель. Перед изменением настроек отключитесь.','net.mode':'Режим подключения','net.port':'Порт SOCKS','net.networks':'Сети IPv4','net.dns':'DNS-сервер','net.auto':'Подключаться при запуске','net.save':'Сохранить настройки',
+ 'net.lead':'Выберите, какой трафик идёт через туннель. Перед изменением настроек отключитесь.','net.mode':'Режим подключения','net.port':'Порт SOCKS','net.networks':'Сети IPv4','net.dns':'DNS-сервер','net.ipv6':'Полностью блокировать IPv6','net.ipv6_note':'IPv6 перехватывается и отклоняется на этом компьютере: ни в туннель, ни мимо него. Старая служба отклонит настройку, а не проигнорирует её.','net.auto':'Подключаться при запуске','net.save':'Сохранить настройки',
  'sync.lead':'Зарегистрируйте устройство на своём сервере, чтобы загружать и выгружать профили.','sync.address':'HTTPS-адрес портала','sync.code':'Код регистрации или JSON приглашения','sync.name':'Имя устройства',
  'sync.enroll':'Зарегистрировать устройство','sync.now':'Синхронизировать сейчас','sync.renew':'Продлить доступ к порталу','sync.auto':'Фоновая синхронизация','sync.registration':'Регистрация',
  'sync.forget_note':'Забыть локальную регистрацию. Загруженные учётные данные VPN действуют независимо; на сервере они не отзываются.','sync.forget':'Забыть регистрацию',
@@ -242,7 +242,7 @@ function renderHome(){
  if(backup){setAvatar($('backup-code'),backup);$('backup-name').textContent=backup.name;$('backup-sub').textContent=`${backup.protocol} · ${backup.hostname}`;}
  const c=state.connection;
  $('tile-mode').textContent=t({Full:'mode.full',Tun:'mode.tun',Socks:'mode.socks'}[c.mode]||'mode.full');
- $('tile-mode-sub').textContent=c.mode==='Socks'?t('mode.socks_tile',{port:c.socks_port}):c.mode==='Tun'?(c.managed_routes?t('mode.tun_managed'):t('mode.tun_tile',{n:(c.networks||[]).length})):t('mode.full_tile');
+ $('tile-mode-sub').textContent=c.mode==='Socks'?t('mode.socks_tile',{port:c.socks_port}):c.mode==='Tun'?(c.managed_routes?t('mode.tun_managed'):t('mode.tun_tile',{n:(c.networks||[]).length})):(c.block_ipv6?t('mode.full_blocked'):t('mode.full_tile'));
  $('tile-dns').textContent=String(c.dns||'—');
  $('tile-sync').textContent=c.sync?.enabled?t('tile.on'):t('tile.off');
  let origin='';try{origin=c.sync?.origin?new URL(c.sync.origin).host:''}catch{origin=''}
@@ -325,10 +325,11 @@ function preview(p){
 /* ---------- Actions ---------- */
 // Fields the user edited keep their values across refreshes (including a
 // revision-conflict reload) until their own form is saved successfully.
-const NETWORK_FIELDS=['mode','port','networks','dns','auto'],SYNC_FIELDS=['address'];
+const NETWORK_FIELDS=['mode','port','networks','dns','auto','block-ipv6'],SYNC_FIELDS=['address'];
 const dirty=new Set();
 for(const id of ['port','networks','dns','auto','address'])$(id).addEventListener('input',()=>dirty.add(id));
 $('auto').addEventListener('change',()=>dirty.add('auto'));
+$('block-ipv6').addEventListener('change',()=>dirty.add('block-ipv6'));
 function clean(ids){ids.forEach(id=>dirty.delete(id));}
 function fillForms(){
  const c=state.connection,set=(id,fn)=>{if(!dirty.has(id))fn();};
@@ -338,6 +339,7 @@ function fillForms(){
  set('port',()=>{$('port').value=c.socks_port});
  set('networks',()=>{$('networks').value=c.networks.join(', ')});
  set('dns',()=>{$('dns').value=c.dns});
+  set('block-ipv6',()=>{$('block-ipv6').checked=!!c.block_ipv6});
  set('address',()=>{$('address').value=c.sync.origin});
  $('networks-managed').hidden=!c.managed_routes;modeFields();
 }
@@ -388,14 +390,14 @@ $('connect').onclick=()=>{
 $('paste').onclick=()=>run(async()=>{let input=$('input').value;$('input').value='';preview(await invoke('preview',{input}));input=''});
 $('file').onclick=()=>run(async()=>preview(await invoke('pick_import')));
 $('pending').onclick=()=>run(()=>invoke('commit_import',{revision:state.revision}));
-$('save').onclick=()=>run(async()=>{await invoke('save_settings',{revision:state.revision,settings:{...state.connection,auto_connect:$('auto').checked,mode:$('mode').value,socks_port:Number($('port').value),networks:$('networks').value.split(',').map(s=>s.trim()).filter(Boolean),dns:$('dns').value}});clean(NETWORK_FIELDS)});
+$('save').onclick=()=>run(async()=>{await invoke('save_settings',{revision:state.revision,settings:{...state.connection,auto_connect:$('auto').checked,mode:$('mode').value,socks_port:Number($('port').value),networks:$('networks').value.split(',').map(s=>s.trim()).filter(Boolean),dns:$('dns').value,block_ipv6:$('block-ipv6').checked}});clean(NETWORK_FIELDS)});
 $('enroll').onclick=()=>run(async()=>{const code=$('code').value;$('code').value='';await invoke('portal_enroll',{revision:state.revision,address:$('address').value,code,name:$('name').value});clean(SYNC_FIELDS)});
 $('sync').onclick=()=>run(()=>invoke('portal_sync',{revision:state.revision}));
 $('forget').onclick=()=>run(async()=>{await invoke('portal_forget',{revision:state.revision});clean(SYNC_FIELDS)});
 $('renew').onclick=()=>run(()=>invoke('portal_renew',{revision:state.revision}));
 $('syncauto').onchange=()=>run(()=>invoke('portal_auto',{revision:state.revision,enabled:$('syncauto').checked}));
 $('profile-search').oninput=()=>renderProfiles();
-function modeFields(){$('port-field').hidden=$('mode').value!=='Socks';$('networks-field').hidden=$('mode').value!=='Tun';}
+function modeFields(){const full=$('mode').value==='Full';$('port-field').hidden=$('mode').value!=='Socks';$('networks-field').hidden=$('mode').value!=='Tun';$('ipv6-field').hidden=!full;$('ipv6-note').hidden=!full;}
 document.querySelectorAll('[name=mode-choice]').forEach(r=>r.onchange=()=>{dirty.add('mode');$('mode').value=r.value;modeFields();});
 
 applyCopy();applyTheme(readTheme());preview(null);

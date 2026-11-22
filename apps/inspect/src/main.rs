@@ -63,7 +63,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let client = if args[1] == "--serve-full" {
-            rtrust_control::Client::start_full(p, fallbacks, argument.parse()?).await?
+            rtrust_control::Client::start_full(p, fallbacks, argument.parse()?, false).await?
         } else {
             rtrust_control::Client::start(
                 p,

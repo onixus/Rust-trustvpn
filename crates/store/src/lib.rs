@@ -48,6 +48,11 @@ pub struct ConnectionSettings {
     /// when the default profile's endpoint fails, in preference order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_profiles: Vec<String>,
+    /// Whole-computer mode only. When set, IPv6 is captured and refused locally
+    /// even if the connected profile can relay it. Omitted keeps the previous
+    /// policy: relay IPv6 only when the profile says the endpoint can.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub block_ipv6: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,6 +87,7 @@ impl Default for ConnectionSettings {
             exclude_lan: false,
             managed_routes: None,
             fallback_profiles: vec![],
+            block_ipv6: false,
         }
     }
 }
@@ -447,6 +453,7 @@ mod tests {
             serde_json::from_str(r#"{"mode":"Socks","socks_port":1080,"networks":[]}"#).unwrap();
         assert_eq!(old.dns.to_string(), "1.1.1.1");
         assert!(!old.auto_connect);
+        assert!(!old.block_ipv6);
         let full = super::ConnectionSettings {
             mode: super::Mode::Full,
             dns: "10.0.0.53".parse().unwrap(),
@@ -463,7 +470,7 @@ mod tests {
     fn split_selection_and_server_policy_roundtrip_and_stay_optional() {
         let plain = ConnectionSettings::default();
         let json = serde_json::to_value(&plain).unwrap();
-        for key in ["exclude", "exclude_lan", "managed_routes"] {
+        for key in ["exclude", "exclude_lan", "managed_routes", "block_ipv6"] {
             assert!(json.get(key).is_none(), "{key}");
         }
         let managed = ManagedRoutes {
@@ -543,6 +550,7 @@ mod tests {
             exclude_lan: false,
             managed_routes: None,
             fallback_profiles: vec![],
+            block_ipv6: false,
         };
         let new = save_in(dir.path(), &vault, Some(old.clone()), |create| {
             assert!(!create);

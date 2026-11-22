@@ -293,6 +293,8 @@ struct Workers {
     /// `Session::transport_name` of the running data plane, for events.
     transport: &'static str,
     reconnect: Option<tokio::task::JoinHandle<Result<device::Prepared, crate::failover::Failure>>>,
+    /// Whole-computer status must not claim IPv6 relay when this is set.
+    block_ipv6: bool,
 }
 impl Drop for Workers {
     fn drop(&mut self) {
@@ -314,6 +316,7 @@ impl Workers {
         lease: &Lease,
         freshness: &Freshness,
     ) {
+        let block_ipv6 = self.block_ipv6;
         let freshness = freshness.clone();
         let profile = profile.clone();
         let guard = guard.clone();
@@ -345,7 +348,7 @@ impl Workers {
                             freshness.check()?;
                             tokio::time::timeout(
                                 Duration::from_secs(30),
-                                device::Prepared::reconnect(&profile, device),
+                                device::Prepared::reconnect(&profile, device, block_ipv6),
                             )
                             .await
                             .map_err(|_| {
@@ -830,7 +833,7 @@ async fn start(
         1,
         rtrust_journal::Budget::Burst,
     );
-    let (profile, selection, dns, split_dns, fallbacks) = match request.command {
+    let (profile, selection, dns, split_dns, fallbacks, block_ipv6) = match request.command {
         Command::Start {
             profile,
             networks,
@@ -848,13 +851,21 @@ async fn start(
                 journal.class(rtrust_journal::Class::Profile);
                 return publish(&mut initial, State::Error, &error).await;
             }
-            (profile, selection, None, dns, fallbacks)
+            (profile, selection, None, dns, fallbacks, false)
         }
         Command::StartFull {
             profile,
             dns,
             fallbacks,
-        } => (profile, Default::default(), Some(dns), None, fallbacks),
+            block_ipv6,
+        } => (
+            profile,
+            Default::default(),
+            Some(dns),
+            None,
+            fallbacks,
+            block_ipv6,
+        ),
         _ => return publish(&mut initial, State::Error, "Start or Recover required").await,
     };
     let full = dns.is_some();
@@ -945,7 +956,9 @@ async fn start(
     let prepared = match prepare_start_attempt(
         freshness.during_result(async {
             failover
-                .connect_initial(|profile| async move { device::Prepared::connect(&profile).await })
+                .connect_initial(|profile| async move {
+                    device::Prepared::connect(&profile, block_ipv6).await
+                })
                 .await
                 .map_err(Fenced::Failed)
         }),
@@ -1005,6 +1018,7 @@ async fn start(
         transport: prepared.transport(),
         tunnel: Some(freshness.spawn(prepared)),
         reconnect: None,
+        block_ipv6,
     };
     let retry_guard = guard.clone();
     let release_lease = held_lease.clone();
@@ -1121,9 +1135,9 @@ async fn connected(
         &format!(
             "{}{}",
             if full {
-                "Весь компьютер: IPv4, IPv6 и DNS через VPN"
+                crate::whole_computer_status(workers.block_ipv6, "VPN")
             } else {
-                "IPv4-сети подключены"
+                "IPv4-сети подключены".to_owned()
             },
             failover.note()
         ),
@@ -1369,14 +1383,15 @@ async fn connected(
                 if viewed {
                     probes.viewed(awake && state == State::Connected);
                 }
+                let connected = if full {
+                    crate::whole_computer_status(workers.block_ipv6, "VPN")
+                } else {
+                    "Выбранные IPv4-сети подключены".to_owned()
+                };
                 let mut response = Response::new(
                     state.clone(),
                     if state == State::Connected {
-                        if full {
-                            "Весь компьютер: IPv4, IPv6 и DNS через VPN"
-                        } else {
-                            "Выбранные IPv4-сети подключены"
-                        }
+                        connected.as_str()
                     } else {
                         &last_failure
                     },
@@ -1618,6 +1633,7 @@ mod tests {
                 transport: "test",
                 tunnel: Some(worker),
                 reconnect: None,
+                block_ipv6: false,
             },
             false,
             receiver,
@@ -2058,6 +2074,7 @@ mod tests {
                 profile: Box::new(profile),
                 dns: "192.0.2.53".parse().unwrap(),
                 fallbacks: vec![],
+                block_ipv6: false,
             },
         ] {
             let (spawn, _spawned) = mpsc::channel(16);
@@ -2153,6 +2170,7 @@ mod tests {
                 transport: "test",
                 tunnel: None,
                 reconnect: Some(worker),
+                block_ipv6: false,
             },
             false,
             power,
@@ -2228,6 +2246,7 @@ mod tests {
                     transport: "test",
                     tunnel: None,
                     reconnect: Some(worker),
+                    block_ipv6: false,
                 },
                 false,
                 receiver,
@@ -2320,6 +2339,7 @@ mod tests {
                     transport: "test",
                     tunnel: Some(tokio::spawn(std::future::pending())),
                     reconnect: None,
+                    block_ipv6: false,
                 },
                 false,
                 receiver,
@@ -2544,6 +2564,7 @@ mod tests {
                     transport: "test",
                     tunnel: Some(tunnel),
                     reconnect: Some(worker),
+                    block_ipv6: false,
                 },
                 false,
                 receiver,
@@ -2642,6 +2663,7 @@ mod tests {
                 transport: "test",
                 tunnel: Some(tunnel),
                 reconnect: Some(reconnect),
+                block_ipv6: false,
             },
             false,
             receiver,
@@ -2700,6 +2722,7 @@ mod tests {
                 transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
+                block_ipv6: false,
             },
             false,
             receiver,
@@ -2776,6 +2799,7 @@ mod tests {
                 transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
+                block_ipv6: false,
             },
             false,
             receiver,
@@ -2847,6 +2871,7 @@ mod tests {
                 transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
+                block_ipv6: false,
             },
             false,
             receiver,
@@ -3078,6 +3103,7 @@ mod tests {
                     transport: "test",
                     tunnel: None,
                     reconnect: Some(worker),
+                    block_ipv6: false,
                 },
                 false,
                 power_events,
@@ -3162,6 +3188,7 @@ mod tests {
                 transport: "test",
                 tunnel: None,
                 reconnect: Some(worker),
+                block_ipv6: false,
             },
             false,
             power_events,
@@ -3519,6 +3546,7 @@ mod tests {
                     profile: Box::new(profile),
                     dns: "192.0.2.53".parse().unwrap(),
                     fallbacks: vec![],
+                    block_ipv6: false,
                 },
             },
         )
@@ -3692,6 +3720,7 @@ mod tests {
                 transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
+                block_ipv6: false,
             },
             true,
             receiver,
@@ -3900,6 +3929,7 @@ mod tester_summary_tests {
                 transport: "test",
                 tunnel: Some(tokio::spawn(std::future::pending())),
                 reconnect: None,
+                block_ipv6: false,
             },
             receiver,
             failover().await,

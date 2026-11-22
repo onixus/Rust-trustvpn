@@ -204,7 +204,9 @@ impl Controller {
             .chain(fallbacks.iter().cloned())
             .collect::<Vec<_>>();
         let lease = c.sync.lease_for(c.managed_routes.is_some(), &authorized)?;
-        let ipv4_only = mode == connection::Mode::Full && !p.endpoint.has_ipv6;
+        // The toggle blocks IPv6 even when this profile could relay it.
+        // A profile without IPv6 egress already fails the family locally.
+        let ipv4_only = mode == connection::Mode::Full && (c.block_ipv6 || !p.endpoint.has_ipv6);
         self.diagnostics.cancel();
         self.session_epoch = self.session_epoch.wrapping_add(1);
         self.session = Some(
@@ -214,7 +216,7 @@ impl Controller {
                 mode,
                 c.socks_port,
                 selection,
-                c.dns.to_string(),
+                (c.dns.to_string(), c.block_ipv6),
                 lease,
             )
             .await?,

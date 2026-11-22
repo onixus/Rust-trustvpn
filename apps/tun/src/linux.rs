@@ -14,19 +14,25 @@ impl Prepared {
         name: &str,
         address: Ipv4Addr,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        Self::connect_mode(profile, name, address, false).await
+        Self::connect_mode(profile, name, address, false, false).await
     }
     pub async fn connect_mode(
         profile: &rtrust_profile::Profile,
         name: &str,
         address: Ipv4Addr,
         full: bool,
+        block_ipv6: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let session = if full {
+        let mut session = if full {
             Session::connect_marked(profile, 0x5254).await?
         } else {
             Session::connect(profile).await?
         };
+        // The user asked to refuse IPv6 even though this endpoint could relay
+        // it. Capture stays; nothing leaves through the tunnel or around it.
+        if block_ipv6 {
+            session.block_ipv6();
+        }
         session.health().await?;
         let tunnel = session.open_udp().await?;
         // Reject existing interfaces before configuring a new, nonpersistent TUN.

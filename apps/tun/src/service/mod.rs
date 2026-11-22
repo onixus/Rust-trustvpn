@@ -60,6 +60,7 @@ impl Workers {
         profile: &rtrust_profile::Profile,
         delay: &mut rtrust_control::recovery::Budget,
         full: bool,
+        block_ipv6: bool,
     ) {
         let profile = profile.clone();
         let wait = delay.next_delay(rand::random());
@@ -76,6 +77,7 @@ impl Workers {
                     routes::DEVICE,
                     routes::ADDRESS.parse().unwrap(),
                     full,
+                    block_ipv6,
                 ),
             )
             .await
@@ -269,7 +271,7 @@ async fn serve(
             return reply(&mut stream, State::Error, &error).await;
         }
     };
-    let (profile, networks, dns, split_dns, fallbacks) = match command {
+    let (profile, networks, dns, split_dns, fallbacks, block_ipv6) = match command {
         Command::PrepareUpdate => {
             if FullRoutes::pending() || Routes::pending() {
                 return reply(
@@ -328,7 +330,7 @@ async fn serve(
                 }) {
                 Ok(routes) => {
                     let resolver = Routes::resolver(&routes, dns);
-                    (profile, routes, None, resolver, fallbacks)
+                    (profile, routes, None, resolver, fallbacks, false)
                 }
                 Err(error) => return reply(&mut stream, State::Error, &error).await,
             }
@@ -337,6 +339,7 @@ async fn serve(
             profile,
             dns,
             fallbacks,
+            block_ipv6,
         } => {
             if let Err(error) = rtrust_control::validate_dns(dns) {
                 if let Some(journal) = journal.as_mut() {
@@ -344,7 +347,7 @@ async fn serve(
                 }
                 return reply(&mut stream, State::Error, &error).await;
             }
-            (profile, vec![], Some(dns), None, fallbacks)
+            (profile, vec![], Some(dns), None, fallbacks, block_ipv6)
         }
         _ => return reply(&mut stream, State::Error, "Start or Recover required").await,
     };
@@ -396,7 +399,7 @@ async fn serve(
             result = async {
                 let mut connection_failed=false;
                 let result=rtrust_control::freshness::while_valid(freshness.as_mut(), async {
-                    failover.connect_initial(|profile| async move { crate::linux::Prepared::connect_mode(&profile, routes::DEVICE, routes::ADDRESS.parse().unwrap(), full).await }).await.map_err(|e| {
+                    failover.connect_initial(|profile| async move { crate::linux::Prepared::connect_mode(&profile, routes::DEVICE, routes::ADDRESS.parse().unwrap(), full, block_ipv6).await }).await.map_err(|e| {
                         connection_failed=true;
                         e.annotate(&mut journal,|e|rtrust_journal::classify_boxed(e.as_ref()));
                         "No allowed VPN endpoint connected within the startup budget".to_owned()
@@ -454,9 +457,9 @@ async fn serve(
         &format!(
             "{}{}",
             if full {
-                "Весь компьютер: IPv4, IPv6 и DNS через VPN"
+                crate::whole_computer_status(block_ipv6, "VPN")
             } else {
-                "IPv4-сети подключены"
+                "IPv4-сети подключены".to_owned()
             },
             failover.note()
         ),
@@ -521,7 +524,7 @@ async fn serve(
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     }
                     attempt_path = labels.path();
-                    workers.retry(failover.current(), &mut retry_delay, full);
+                    workers.retry(failover.current(), &mut retry_delay, full, block_ipv6);
                 }
                 result = async { workers.reconnect.as_mut().unwrap().await }, if workers.reconnect.is_some() => {
                     workers.reconnect = None;
@@ -562,7 +565,7 @@ async fn serve(
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     }
                     attempt_path = labels.path();
-                    workers.retry(failover.current(), &mut retry_delay, full);
+                    workers.retry(failover.current(), &mut retry_delay, full, block_ipv6);
                 }
                 // Started only by this timer while connected in full mode and
                 // viewed through the lease; Status never probes.
@@ -592,15 +595,16 @@ async fn serve(
                         .generation,
                     failover.active(),
                 );
+                let connected = if full {
+                    crate::whole_computer_status(block_ipv6, "VPN")
+                } else {
+                    "Выбранные IPv4-сети подключены".to_owned()
+                };
                 reply_observed(
                 &mut stream,
                 state.clone(),
                 if access_expired { "Access confirmation expired; protection retained. Synchronize before reconnecting." } else if state == State::Connected {
-                    if full {
-                        "Весь компьютер: IPv4, IPv6 и DNS через VPN"
-                    } else {
-                        "Выбранные IPv4-сети подключены"
-                    }
+                    connected.as_str()
                 } else {
                     if full {
                         "Связь потеряна. Сеть заблокирована; выполняется переподключение."
