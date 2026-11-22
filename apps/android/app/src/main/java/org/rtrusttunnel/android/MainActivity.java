@@ -192,7 +192,10 @@ public class MainActivity extends Activity {
         host.addView(view, new FrameLayout.LayoutParams(-1, -1));
         syncBack();
         renderState();
+        if (tv() && slider != null) slider.post(slider::requestFocus);
     }
+
+    private boolean tv() { return getResources().getBoolean(R.bool.rtrust_tv); }
 
     // ---- State ------------------------------------------------------------------------
 
@@ -502,7 +505,7 @@ public class MainActivity extends Activity {
         TextView all = text(getString(R.string.v3_all_profiles) + "  →", 13, p.blueText, true); all.setPadding(dp(8), dp(6), 0, dp(6));
         all.setOnClickListener(v -> show(PROFILES)); header.addView(all);
         strip = column();
-        slider = new SlideButton(this); slider.setAction(this::toggle);
+        slider = new SlideButton(this); slider.setAction(this::toggle); if (tv()) slider.setDirect(true);
         LinearLayout.LayoutParams sliderParams = new LinearLayout.LayoutParams(-1, dp(64)); sliderParams.topMargin = dp(12);
         sliderParams.gravity = Gravity.CENTER_HORIZONTAL;
         // 85% of the column, centred: the width follows the parent once it is laid out.
@@ -711,12 +714,14 @@ public class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false);
         LinearLayout body = column(); body.setPadding(0, dp(14), 0, dp(16));
 
-        LinearLayout scan = column(); scan.setGravity(Gravity.CENTER); scan.setPadding(dp(16), dp(26), dp(16), dp(22));
-        scan.setBackground(rippled(round(0xFF05070A, dp(28)))); scan.setClickable(true); scan.setFocusable(true); scan.setOnClickListener(v -> qrCamera());
-        ImageView qr = new ImageView(this); qr.setImageDrawable(tinted(R.drawable.ic_qr, BUSY)); scan.addView(qr, new LinearLayout.LayoutParams(dp(72), dp(72)));
-        TextView scanTitle = text(getString(R.string.v3_scan), 16, 0xFFF4F5F7, true); scanTitle.setPadding(0, dp(14), 0, dp(2)); scan.addView(scanTitle);
-        scan.addView(text(getString(R.string.qr_camera_detail), 13, 0xFFC9D3E0, false));
-        body.addView(scan);
+        if (!tv()) {
+            LinearLayout scan = column(); scan.setGravity(Gravity.CENTER); scan.setPadding(dp(16), dp(26), dp(16), dp(22));
+            scan.setBackground(rippled(round(0xFF05070A, dp(28)))); scan.setClickable(true); scan.setFocusable(true); scan.setOnClickListener(v -> qrCamera());
+            ImageView qr = new ImageView(this); qr.setImageDrawable(tinted(R.drawable.ic_qr, BUSY)); scan.addView(qr, new LinearLayout.LayoutParams(dp(72), dp(72)));
+            TextView scanTitle = text(getString(R.string.v3_scan), 16, 0xFFF4F5F7, true); scanTitle.setPadding(0, dp(14), 0, dp(2)); scan.addView(scanTitle);
+            scan.addView(text(getString(R.string.qr_camera_detail), 13, 0xFFC9D3E0, false));
+            body.addView(scan);
+        }
 
         LinearLayout grid = new LinearLayout(this); grid.setPadding(0, dp(10), 0, dp(10));
         grid.addView(tile(R.drawable.ic_image, getString(R.string.v3_qr_photo), getString(R.string.qr_image_detail), false,
@@ -732,6 +737,7 @@ public class MainActivity extends Activity {
         TextView note = text(getString(R.string.v3_paste_note), 12, p.muted, false); paste.addView(note);
         TextView previewButton = text(getString(R.string.preview), 14, p.onBlue, true); previewButton.setGravity(Gravity.CENTER);
         previewButton.setBackground(rippled(round(p.light ? p.blueText : p.blue, dp(14)))); previewButton.setPadding(dp(18), 0, dp(18), 0);
+        previewButton.setClickable(true); previewButton.setFocusable(true);
         previewButton.setOnClickListener(v -> { String raw = input.getText().toString(); input.setText(""); if (!raw.trim().isEmpty()) preview(raw); });
         LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(-2, dp(44)); buttonParams.topMargin = dp(10); buttonParams.gravity = Gravity.END;
         paste.addView(previewButton, buttonParams);
