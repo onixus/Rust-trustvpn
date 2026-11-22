@@ -29,23 +29,29 @@ pub struct AssetKind {
     names: &'static [&'static str],
 }
 
-/// Native GUI and the terminal client share the desktop package.
-pub const NATIVE: AssetKind = AssetKind {
-    id: "native",
-    names: &[
-        "R-TrustTunnel-Windows-x64-Setup.exe",
-        "R-TrustTunnel-macOS-arm64-UI-Choices.dmg",
-        "R-TrustTunnel-Linux-x86_64.flatpak",
-    ],
-};
-pub const WEBVIEW: AssetKind = AssetKind {
-    id: "webview",
-    names: &[
-        "R-TrustTunnel-Windows-x64-Setup.exe",
-        "R-TrustTunnel-macOS-arm64-UI-Choices.dmg",
-        "R-TrustTunnel-Linux-x86_64-webview.flatpak",
-    ],
-};
+/// Native GUI and the terminal client share the desktop package of this OS.
+pub fn native_kind() -> AssetKind {
+    AssetKind {
+        id: "native",
+        names: match std::env::consts::OS {
+            "windows" => &["R-TrustTunnel-Windows-x64-Setup.exe"],
+            "macos" => &["R-TrustTunnel-macOS-arm64-UI-Choices.dmg"],
+            "linux" => &["R-TrustTunnel-Linux-x86_64.flatpak"],
+            _ => &[],
+        },
+    }
+}
+pub fn webview_kind() -> AssetKind {
+    AssetKind {
+        id: "webview",
+        names: match std::env::consts::OS {
+            "windows" => &["R-TrustTunnel-Windows-x64-Setup.exe"],
+            "macos" => &["R-TrustTunnel-macOS-arm64-UI-Choices.dmg"],
+            "linux" => &["R-TrustTunnel-Linux-x86_64-webview.flatpak"],
+            _ => &[],
+        },
+    }
+}
 pub const ANDROID: AssetKind = AssetKind {
     id: "android",
     names: &["R-TrustTunnel-Android.apk"],
@@ -63,8 +69,8 @@ pub fn kind_for_current_app() -> Option<AssetKind> {
         "android" => Some(ANDROID),
         "ios" => Some(IOS),
         _ => match option_env!("CARGO_PKG_NAME") {
-            Some("rtrust-webview") => Some(WEBVIEW),
-            Some("rtrust-tui") | Some("rtrust-native") => Some(NATIVE),
+            Some("rtrust-webview") => Some(webview_kind()),
+            Some("rtrust-tui") | Some("rtrust-native") => Some(native_kind()),
             _ => None,
         },
     }
@@ -187,10 +193,7 @@ pub fn parse_sums(text: &str) -> Vec<(String, String)> {
     text.lines()
         .filter_map(|line| {
             let (hash, name) = line.split_once("  ")?;
-            if hash.len() == 64
-                && hash.bytes().all(|b| b.is_ascii_hexdigit())
-                && safe_name(name)
-            {
+            if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) && safe_name(name) {
                 Some((name.to_string(), hash.to_ascii_lowercase()))
             } else {
                 None
@@ -251,7 +254,8 @@ async fn get_bytes(url: &str, limit: usize) -> Result<Vec<u8>, String> {
         return Err("GitHub не отдал релиз".into());
     }
     let mut data = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| "Ответ GitHub прерван")? {
+    while let Some(chunk) = response.chunk().await.map_err(|_| "Ответ GitHub прерван")?
+    {
         if data.len().saturating_add(chunk.len()) > limit {
             return Err("Ответ GitHub слишком большой".into());
         }
@@ -288,10 +292,7 @@ pub async fn check(kind: AssetKind) -> Result<ReleaseInfo, String> {
         return Ok(info(
             release,
             None,
-            Some(
-                "Для этой платформы установочный файл в релизах GitHub не публикуется."
-                    .into(),
-            ),
+            Some("Для этой платформы установочный файл в релизах GitHub не публикуется.".into()),
         ));
     }
     let sums_url = asset_url(&release.tag_name, "SHA256SUMS")?;
@@ -330,8 +331,8 @@ pub async fn download(asset: &ListedAsset, folder: &Path) -> Result<PathBuf, Str
         return Err("Некорректный адрес файла релиза".into());
     }
     std::fs::create_dir_all(folder).map_err(|_| "Нет доступа к каталогу обновлений")?;
-    let mut file =
-        tempfile::NamedTempFile::new_in(folder).map_err(|_| "Не удалось создать временный пакет")?;
+    let mut file = tempfile::NamedTempFile::new_in(folder)
+        .map_err(|_| "Не удалось создать временный пакет")?;
     let mut response = send(&url).await.map_err(|_| "Не удалось загрузить пакет")?;
     if !response.status().is_success() {
         return Err("GitHub не выдал пакет".into());
@@ -385,6 +386,19 @@ pub async fn fetch_newer(kind: AssetKind) -> Result<(ReleaseInfo, Option<PathBuf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_names_belong_to_the_running_os() {
+        let names = native_kind().names;
+        assert_eq!(names.len(), 1);
+        let name = names[0];
+        match std::env::consts::OS {
+            "macos" => assert!(name.contains("macOS")),
+            "windows" => assert!(name.contains("Windows")),
+            "linux" => assert!(name.ends_with(".flatpak")),
+            _ => assert!(names.is_empty()),
+        }
+    }
 
     #[test]
     fn version_order_ignores_pre_release_suffix() {

@@ -134,8 +134,7 @@ impl App {
                 {
                     let tag = self.updates.github.release.as_ref().unwrap().tag.clone();
                     self.busy = true;
-                    self.updates.github.status =
-                        "Загрузка пакета и сверка с SHA256SUMS…".into();
+                    self.updates.github.status = "Загрузка пакета и сверка с SHA256SUMS…".into();
                     return Task::perform(
                         async move {
                             let folder = rtrust_update::cache_dir()?.join("github").join(tag);
@@ -203,13 +202,15 @@ impl App {
         ];
         #[cfg(target_os = "windows")]
         {
-            view = view.push(button("Установить обновление").on_press_maybe(
-                (self.can_change_profiles()
-                    && !self.dirty
-                    && self.store_conflict.is_none()
-                    && self.updates.staged.is_some())
-                .then_some(Message::Update(Action::Install)),
-            ));
+            view = view.push(
+                button("Установить обновление").on_press_maybe(
+                    (self.can_change_profiles()
+                        && !self.dirty
+                        && self.store_conflict.is_none()
+                        && self.updates.staged.is_some())
+                    .then_some(Message::Update(Action::Install)),
+                ),
+            );
         }
         #[cfg(not(target_os = "windows"))]
         let _ = newer;
@@ -223,21 +224,27 @@ impl App {
         view = view.push(button("Скачать проверенный пакет").on_press_maybe(
             (!self.busy && github_newer).then_some(Message::Update(Action::GithubDownload)),
         ));
-        view = view.push(button("Открыть страницу релиза").on_press_maybe(
-            self.updates
-                .github
-                .release
-                .as_ref()
-                .is_some_and(|r| !r.page.is_empty())
-                .then_some(Message::Update(Action::GithubOpen)),
-        ));
+        view = view.push(
+            button("Открыть страницу релиза").on_press_maybe(
+                self.updates
+                    .github
+                    .release
+                    .as_ref()
+                    .is_some_and(|r| !r.page.is_empty())
+                    .then_some(Message::Update(Action::GithubOpen)),
+            ),
+        );
         view.spacing(8).into()
     }
 }
 
 fn github_status(release: &rtrust_update::github::ReleaseInfo) -> String {
     if !release.newer {
-        return format!("GitHub: {} — новее установленной {} нет.", release.version, env!("CARGO_PKG_VERSION"));
+        return format!(
+            "GitHub: {} — новее установленной {} нет.",
+            release.version,
+            env!("CARGO_PKG_VERSION")
+        );
     }
     match &release.asset {
         Some(asset) => format!(
