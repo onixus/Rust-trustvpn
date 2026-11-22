@@ -30,7 +30,7 @@ final class SlideButton extends View {
     private Runnable action;
     private String text = "";
     private int track, trackStroke, knob, iconTint, labelColor;
-    private boolean outline, dragging, reverse;
+    private boolean outline, dragging, reverse, direct;
     private float progress, grab, downX;
     private ValueAnimator animator;
 
@@ -45,6 +45,11 @@ final class SlideButton extends View {
     }
 
     void setAction(Runnable action) { this.action = action; }
+    /** TV remote: OK and a click act immediately. The phone APK keeps the slide. */
+    void setDirect(boolean direct) {
+        this.direct = direct;
+        setFocusableInTouchMode(direct);
+    }
     String text() { return text; }
 
     /** Repaints only when something changed; called from the 500 ms status poll. */
@@ -75,7 +80,7 @@ final class SlideButton extends View {
         if (alpha > 0) {
             label.setColor(labelColor); label.setAlpha(alpha);
             float room = w - (pad + d + 14 * density) - 16 * density;
-            CharSequence shown = TextUtils.ellipsize(reverse ? "←  " + text : text + "  →", label, room, TextUtils.TruncateAt.END);
+            CharSequence shown = TextUtils.ellipsize(direct ? text : reverse ? "←  " + text : text + "  →", label, room, TextUtils.TruncateAt.END);
             float baseline = h / 2 - (label.descent() + label.ascent()) / 2;
             float start = reverse ? w - pad - d - 14 * density - label.measureText(shown, 0, shown.length()) : pad + d + 14 * density;
             canvas.drawText(shown, 0, shown.length(), start, baseline, label);
@@ -90,12 +95,22 @@ final class SlideButton extends View {
         icon.setTint(iconTint);
         icon.setBounds(Math.round(cx - size / 2f), Math.round(cy - size / 2f), Math.round(cx + size / 2f), Math.round(cy + size / 2f));
         icon.draw(canvas);
+        if (direct && isFocused()) {
+            stroke.setStrokeWidth(2.5f * density); stroke.setColor(0xFF4DA3FF);
+            rect.set(density, density, w - density, h - density);
+            canvas.drawRoundRect(rect, r, r, stroke);
+        }
     }
+    @Override protected void drawableStateChanged() { super.drawableStateChanged(); if (direct) invalidate(); }
 
     /** A touch never clicks: only a full drag acts. performClick() is the accessibility path. */
     @android.annotation.SuppressLint("ClickableViewAccessibility")
     @Override public boolean onTouchEvent(MotionEvent event) {
         if (!isEnabled()) return false;
+        if (direct) {
+            if (event.getActionMasked() == MotionEvent.ACTION_UP) performClick();
+            return true;
+        }
         float x = knobX();
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:

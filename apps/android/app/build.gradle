@@ -4,12 +4,15 @@ android {
     compileSdk 36
     ndkVersion "28.2.13676358"
     defaultConfig {
-        applicationId (project.findProperty('rtrustApplicationId') ?: 'org.rtrusttunnel.android').toString()
+        def tv = project.hasProperty('rtrustTv')
+        applicationId (tv ? 'org.rtrusttunnel.android.tv' : (project.findProperty('rtrustApplicationId') ?: 'org.rtrusttunnel.android').toString())
         minSdk 29
         targetSdk 36
-        versionCode = (project.findProperty('rtrustVersionCode') ?: '70001').toInteger()
-        versionName '0.7.0'
-        ndk { abiFilters 'arm64-v8a', 'x86_64' }
+        versionCode = (project.findProperty('rtrustVersionCode') ?: (tv ? '70004' : '70001')).toInteger()
+        versionName tv ? '0.7.1-tv.3' : '0.7.0'
+        manifestPlaceholders = [appLabel: tv ? 'R-TrustTunnel TV' : 'R-TrustTunnel']
+        resValue 'bool', 'rtrust_tv', tv ? 'true' : 'false'
+        if (tv) ndk { abiFilters 'armeabi-v7a', 'arm64-v8a' } else ndk { abiFilters 'arm64-v8a', 'x86_64' }
         testInstrumentationRunner 'org.rtrusttunnel.android.SmokeInstrumentation'
     }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
@@ -21,4 +24,5 @@ dependencies {
     implementation 'androidx.core:core:1.17.0'
     implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
     implementation 'com.google.zxing:core:3.5.3'
+    if (project.hasProperty('rtrustTv')) implementation project(':tvmeta')
 }
