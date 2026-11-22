@@ -533,7 +533,7 @@ async fn serve(
         &mut worker,
         &mut stop,
         dns,
-        (supervisor.as_deref(), freshness),
+        (supervisor.as_deref(), freshness, block_ipv6),
     )
     .await;
     worker.stop().await;
@@ -570,9 +570,10 @@ async fn lease_loop(
     context: (
         Option<&crate::always_on::Supervisor>,
         Option<rtrust_control::freshness::Deadline>,
+        bool,
     ),
 ) -> Result<Option<rtrust_control::observations::Snapshot>, String> {
-    let (supervisor, mut freshness) = context;
+    let (supervisor, mut freshness, block_ipv6) = context;
     let full = dns.is_some();
     let plan = match (dns, interface_index(&device)) {
         (Some(dns), Ok(index)) => Some(probe::Plan {

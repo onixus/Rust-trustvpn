@@ -45,10 +45,10 @@ impl Session {
         mode: Mode,
         port: u16,
         selection: rtrust_control::Selection,
-        dns: String,
-        block_ipv6: bool,
+        dns: (String, bool),
         lease: Option<rtrust_control::freshness::Lease>,
     ) -> Result<Self, String> {
+        let (dns, block_ipv6) = dns;
         let Some(lease) = lease else {
             return Self::start(profile, fallbacks, mode, port, selection, dns, block_ipv6).await;
         };

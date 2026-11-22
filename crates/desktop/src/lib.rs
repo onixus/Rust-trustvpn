@@ -216,8 +216,7 @@ impl Controller {
                 mode,
                 c.socks_port,
                 selection,
-                c.dns.to_string(),
-                c.block_ipv6,
+                (c.dns.to_string(), c.block_ipv6),
                 lease,
             )
             .await?,

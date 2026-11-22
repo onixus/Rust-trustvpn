@@ -315,8 +315,8 @@ impl Workers {
         guard: &Guard,
         lease: &Lease,
         freshness: &Freshness,
-        block_ipv6: bool,
     ) {
+        let block_ipv6 = self.block_ipv6;
         let freshness = freshness.clone();
         let profile = profile.clone();
         let guard = guard.clone();
@@ -1043,7 +1043,6 @@ async fn start(
                 &retry_guard,
                 &held_lease,
                 &retry_freshness,
-                block_ipv6,
             )
         },
         move || {
