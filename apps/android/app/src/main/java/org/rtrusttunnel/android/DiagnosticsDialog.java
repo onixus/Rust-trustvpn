@@ -28,7 +28,10 @@ final class DiagnosticsDialog {
         return status.getJSONObject("observations").getLong("generation");
     }
     static Network vpn(ConnectivityManager cm) { return vpn(cm, false); }
-    /** legacyAddress is the TV package only. API 29–30 have no owner UID; the phone path stays unsupported. */
+    /** API 29–30 have no owner UID. Only a TV package or leanback device may match its own address. */
+    static boolean tv(android.content.Context context) {
+        return context.getResources().getBoolean(R.bool.rtrust_tv) || context.getPackageManager().hasSystemFeature("android.software.leanback");
+    }
     static Network vpn(ConnectivityManager cm, boolean legacyAddress) {
         Network found = null;
         for (Network n : cm.getAllNetworks()) {
@@ -102,7 +105,7 @@ final class DiagnosticsDialog {
         long started = System.currentTimeMillis(), epoch = -1;
         try {
             ConnectivityManager cm = activity.getSystemService(ConnectivityManager.class);
-            epoch = generation(); Network network = vpn(cm, activity.getResources().getBoolean(R.bool.rtrust_tv));
+            epoch = generation(); Network network = vpn(cm, tv(activity));
             if (network == null) { cause = "check_unsupported"; route = "unsupported"; }
             else {
                 job.current(cm, network, epoch);
