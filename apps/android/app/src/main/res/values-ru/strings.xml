@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="github_update">Релизы GitHub</string>
+    <string name="github_update_detail">Проверить и скачать сверенный пакет</string>
+    <string name="github_checking">Проверка GitHub…</string>
+    <string name="github_downloading">Загрузка и сверка SHA-256…</string>
+    <string name="github_current">GitHub %1$s не новее установленной %2$s.</string>
+    <string name="github_ready">%1$s сверен с SHA256SUMS. Установщик спросит перед заменой приложения.</string>
+    <string name="github_failed">Проверка GitHub не удалась. Установленное приложение не изменено.</string>
     <string name="recovery_title">Разрешённые резервы для этого профиля</string>
     <string name="recovery_enable">Включить автоматическое восстановление</string>
     <string name="recovery_disable">Отключить резервы</string>

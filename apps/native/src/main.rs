@@ -22,7 +22,6 @@ mod sync;
 mod tester_socks_tests;
 mod tray;
 mod ui;
-#[cfg(target_os = "windows")]
 mod updates;
 use connection::{Mode, Session};
 use iced::{
@@ -217,18 +216,13 @@ enum Page {
     /// Sync and portal enrollment.
     Portal,
     Settings,
-    #[cfg(target_os = "windows")]
     Updates,
 }
 impl Page {
     /// Sections whose controls must stay usable during a long operation:
     /// always-on disable/recovery, backups and updates live outside Settings.
     fn reachable_while_busy(self) -> bool {
-        #[cfg(target_os = "windows")]
-        if self == Page::Updates {
-            return true;
-        }
-        matches!(self, Page::Settings | Page::Network)
+        matches!(self, Page::Settings | Page::Network | Page::Updates)
     }
 }
 struct App {
@@ -236,7 +230,6 @@ struct App {
     glass_enabled: bool,
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     always_on: always_on::State,
-    #[cfg(target_os = "windows")]
     updates: updates::State,
     portal: portal::State,
     store_recovery: bool,
@@ -362,7 +355,6 @@ enum Message {
     Sync(sync::Action),
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     Intent(intent::Action),
-    #[cfg(target_os = "windows")]
     Update(updates::Action),
     Save,
     ReadBackup,
@@ -436,7 +428,6 @@ impl App {
             glass_enabled: glass::preference(),
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             always_on: always_on::State::default(),
-            #[cfg(target_os = "windows")]
             updates: updates::State::default(),
             portal: portal::State::default(),
             store_recovery: false,
@@ -704,7 +695,6 @@ impl App {
                     | Message::BlockIpv6(_)
             );
         match m {
-            #[cfg(target_os = "windows")]
             Message::Update(action) => return self.updates_update(action),
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             Message::AlwaysOn(action) => return self.always_update(action),

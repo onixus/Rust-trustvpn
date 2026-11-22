@@ -1,4 +1,9 @@
 //! Signed update metadata and bounded artifact download. No elevation or execution.
+//!
+//! [`github`] looks up a newer GitHub Release and downloads the asset named by
+//! the release `SHA256SUMS`. That file is an unsigned checksum list, so a match
+//! only proves the asset matches the list published next to it. It is not the
+//! Ed25519 channel above and never installs or executes anything.
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ring::{digest, signature};
 use serde::{Deserialize, Serialize};
@@ -12,7 +17,7 @@ pub const CURRENT_SEQUENCE: u64 = 13;
 /// of the GUI/service IPC: both components are replaced together by the installer.
 pub const CURRENT_IPC: u32 = 1;
 const ROOT: &[u8] = include_bytes!("root.pub");
-const MAX_PACKAGE: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_PACKAGE: u64 = 256 * 1024 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -138,7 +143,7 @@ pub fn verify_publication(
     }
     verify_file(artifact, release)
 }
-fn http() -> Result<reqwest::Client, String> {
+pub(crate) fn http() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
@@ -316,6 +321,8 @@ pub fn artifact_path(folder: &Path, release: &Release) -> PathBuf {
         if cfg!(windows) { ".exe" } else { ".package" }
     ))
 }
+pub mod github;
+
 pub async fn stage(release: &Release) -> Result<PathBuf, String> {
     if release.manifest.sequence <= CURRENT_SEQUENCE {
         return Err("Новая версия не найдена".into());
