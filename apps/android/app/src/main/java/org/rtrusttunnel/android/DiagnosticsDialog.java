@@ -27,18 +27,27 @@ final class DiagnosticsDialog {
         if (!TunnelService.active || status.optInt("state") != 2) throw new IOException();
         return status.getJSONObject("observations").getLong("generation");
     }
-    private static Network vpn(ConnectivityManager cm) {
-        if (Build.VERSION.SDK_INT < 31) return null;
+    static Network vpn(ConnectivityManager cm) {
         Network found = null;
         for (Network n : cm.getAllNetworks()) {
             NetworkCapabilities c = cm.getNetworkCapabilities(n);
-            if (c != null && c.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
-                && c.getOwnerUid() == android.os.Process.myUid()) {
-                if (found != null) return null;
-                found = n;
-            }
+            if (c == null || !c.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
+            if (Build.VERSION.SDK_INT >= 31) {
+                if (c.getOwnerUid() != android.os.Process.myUid()) continue;
+            } else if (!ownsAddress(cm.getLinkProperties(n))) continue;
+            if (found != null) return null;
+            found = n;
         }
         return found;
+    }
+    /** API 29–30 have no owner UID. The address is the one this app's VpnService adds. */
+    private static boolean ownsAddress(LinkProperties link) {
+        if (!TunnelService.active || link == null) return false;
+        for (LinkAddress address : link.getLinkAddresses()) {
+            String host = address.getAddress().getHostAddress();
+            if ("169.254.254.2".equals(host) || "fd00:5254::2".equals(host)) return true;
+        }
+        return false;
     }
     static boolean validTarget(String host) {
         if (host.isEmpty() || host.length() > 253 || !host.equals(host.trim())) return false;
