@@ -46,10 +46,11 @@ impl Session {
         port: u16,
         selection: rtrust_control::Selection,
         dns: String,
+        block_ipv6: bool,
         lease: Option<rtrust_control::freshness::Lease>,
     ) -> Result<Self, String> {
         let Some(lease) = lease else {
-            return Self::start(profile, fallbacks, mode, port, selection, dns).await;
+            return Self::start(profile, fallbacks, mode, port, selection, dns, block_ipv6).await;
         };
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         if mode != Mode::Socks {
@@ -62,6 +63,7 @@ impl Session {
                     Some(selection)
                 },
                 dns.parse().map_err(|_| "Invalid IPv4 DNS")?,
+                mode == Mode::Full && block_ipv6,
                 lease,
             )
             .await?;
@@ -79,6 +81,7 @@ impl Session {
         port: u16,
         selection: rtrust_control::Selection,
         dns: String,
+        block_ipv6: bool,
     ) -> Result<Self, String> {
         let _ = &dns;
         match mode {
@@ -88,6 +91,7 @@ impl Session {
                     profile,
                     fallbacks,
                     dns.parse().map_err(|_| "Некорректный IPv4 DNS")?,
+                    block_ipv6,
                 )
                 .await?;
                 Ok(Self::tun(client).await)

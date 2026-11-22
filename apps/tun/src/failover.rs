@@ -472,6 +472,7 @@ pub(crate) mod tests {
                 profile,
                 dns: "198.18.0.53".parse().unwrap(),
                 fallbacks: vec![],
+                block_ipv6: false,
             }
         } else {
             rtrust_control::Command::Start {

@@ -135,18 +135,25 @@ impl Supervisor {
                         dns,
                         backups,
                         generation,
+                        block_ipv6,
                     } => (
                         Command::EnableAlwaysOn {
                             profile,
                             dns,
                             generation,
+                            block_ipv6,
                         },
                         Some(backups),
                     ),
                     command => (command, None),
                 };
                 let result = match command {
-                    Command::EnableAlwaysOn { profile, dns, .. } => {
+                    Command::EnableAlwaysOn {
+                        profile,
+                        dns,
+                        block_ipv6,
+                        ..
+                    } => {
                         if generation != task.generation.load(Ordering::Acquire) {
                             Err("Настройка отменена отключением".into())
                         } else if backups.as_ref().is_some_and(|p| {
@@ -162,6 +169,7 @@ impl Supervisor {
                                 profile: *profile,
                                 dns,
                                 backups: backups.unwrap_or_default(),
+                                block_ipv6,
                             };
                             let result =
                                 tokio::time::timeout(Duration::from_secs(45), prepare(&mut policy))
@@ -371,6 +379,7 @@ fn launch(
                                 profile: Box::new(policy.profile.clone()),
                                 dns: policy.dns,
                                 fallbacks: vec![],
+                                block_ipv6: policy.block_ipv6,
                             },
                         },
                     )
@@ -615,6 +624,7 @@ mod tests {
             profile: profile("primary.example", "192.0.2.1"),
             dns: "1.1.1.1".parse().unwrap(),
             backups: vec![profile("backup.example", "192.0.2.2")],
+            block_ipv6: false,
         };
         tokio::time::timeout(Duration::from_secs(2), prepare(&mut policy))
             .await
@@ -672,12 +682,14 @@ mod tests {
                 dns,
                 generation,
                 backups: vec![profile_for_backup()],
+                block_ipv6: false,
             }
         } else {
             Command::EnableAlwaysOn {
                 profile,
                 dns,
                 generation,
+                block_ipv6: false,
             }
         }
     }

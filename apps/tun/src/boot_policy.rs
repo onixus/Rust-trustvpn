@@ -11,6 +11,10 @@ pub struct Policy {
     pub dns: Ipv4Addr,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub backups: Vec<rtrust_profile::Profile>,
+    /// Whole-computer always-on refuses IPv6 locally when the user asked.
+    /// Omitted policies keep relaying IPv6 when the profile allows it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub block_ipv6: bool,
 }
 impl Policy {
     pub fn validate(&self, owner: &str) -> Result<(), String> {
@@ -42,6 +46,7 @@ impl Policy {
                 profile: profile.clone(),
                 dns: self.dns,
                 backups: vec![],
+                block_ipv6: false,
             };
             candidate.validate(owner)?;
             if profile == &self.profile {
@@ -255,7 +260,7 @@ mod tests {
     use super::*;
     #[test]
     fn boot_policy_is_authenticated_owner_bound_and_has_no_plaintext_credentials() {
-        let policy=Policy{version:1,owner:"1000".into(),profile:rtrust_profile::Profile::import("hostname='boot.example'\naddresses=['192.0.2.1:443']\nusername='boot-user'\npassword='boot-secret-canary'\n").unwrap(),backups:vec![],dns:"1.1.1.1".parse().unwrap()};
+        let policy=Policy{version:1,owner:"1000".into(),profile:rtrust_profile::Profile::import("hostname='boot.example'\naddresses=['192.0.2.1:443']\nusername='boot-user'\npassword='boot-secret-canary'\n").unwrap(),backups:vec![],dns:"1.1.1.1".parse().unwrap(),block_ipv6:false};
         let key = [7; 32];
         let encrypted = seal(&policy, &key).unwrap();
         assert!(!encrypted.windows(18).any(|w| w == b"boot-secret-canary"));
@@ -286,6 +291,7 @@ mod tests {
             profile: profiles[0].clone(),
             dns: "1.1.1.1".parse().unwrap(),
             backups: profiles[1..].to_vec(),
+            block_ipv6: false,
         };
         policy.validate("1000").unwrap();
         let data = seal(&policy, &[7; 32]).unwrap();
@@ -313,6 +319,7 @@ mod tests {
             profile: profile("primary.example"),
             dns: "1.1.1.1".parse().unwrap(),
             backups: vec![profile("backup.example")],
+            block_ipv6: false,
         };
         let bytes = seal(&policy, &[7; 32]).unwrap();
         let restored = unseal(&bytes, &[7; 32], "1000").unwrap();

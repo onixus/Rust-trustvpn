@@ -151,6 +151,22 @@ impl Client {
                 "Служба не поддерживает автоматическое восстановление на этой платформе".into(),
             );
         }
+        if matches!(
+            command,
+            Command::EnableAlwaysOn {
+                block_ipv6: true,
+                ..
+            } | Command::EnableRecovery {
+                block_ipv6: true,
+                ..
+            }
+        ) && !capabilities.block_ipv6
+        {
+            return Err(
+                "Служба не умеет блокировать IPv6 по запросу; обновите службу. Always-on не включён."
+                    .into(),
+            );
+        }
         if let Command::EnableAlwaysOn { generation, .. }
         | Command::EnableRecovery { generation, .. } = &mut command
         {
@@ -231,6 +247,7 @@ impl Client {
         profile: rtrust_profile::Profile,
         fallbacks: Vec<rtrust_profile::Profile>,
         dns: std::net::Ipv4Addr,
+        block_ipv6: bool,
     ) -> Result<Self, String> {
         validate_dns(dns)?;
         validate_fallbacks(&fallbacks)?;
@@ -238,6 +255,7 @@ impl Client {
             profile: Box::new(profile),
             dns,
             fallbacks,
+            block_ipv6,
         })
         .await
     }
@@ -246,6 +264,7 @@ impl Client {
         fallbacks: Vec<rtrust_profile::Profile>,
         selection: Option<Selection>,
         dns: std::net::Ipv4Addr,
+        block_ipv6: bool,
         lease: crate::freshness::Lease,
     ) -> Result<Self, String> {
         validate_fallbacks(&fallbacks)?;
@@ -267,6 +286,7 @@ impl Client {
                 profile: Box::new(profile),
                 dns,
                 fallbacks,
+                block_ipv6,
             },
         };
         Self::start_command(Command::StartLeased {
@@ -290,6 +310,14 @@ impl Client {
             && !capabilities.failover
         {
             return Err("Служба не поддерживает резервные профили; обновите службу".into());
+        }
+        if let Command::StartFull { block_ipv6: true, .. } = inspected
+            && !capabilities.block_ipv6
+        {
+            return Err(
+                "Служба не умеет блокировать IPv6 по запросу; обновите службу. Подключение не начато."
+                    .into(),
+            );
         }
         let mut stream = socket().await?;
         let response = exchange(&mut stream, command, 45).await?;

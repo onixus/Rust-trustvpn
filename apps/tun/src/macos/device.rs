@@ -21,11 +21,17 @@ pub fn unused() -> Result<(), Failure> {
     }
 }
 impl Prepared {
-    pub async fn connect(profile: &rtrust_profile::Profile) -> Result<Self, Failure> {
+    pub async fn connect(
+        profile: &rtrust_profile::Profile,
+        block_ipv6: bool,
+    ) -> Result<Self, Failure> {
         unused()?;
-        let session = Session::connect(profile)
+        let mut session = Session::connect(profile)
             .await
             .map_err(|e| Failure::engine(e, "Cannot authenticate VPN endpoint"))?;
+        if block_ipv6 {
+            session.block_ipv6();
+        }
         session
             .health()
             .await
@@ -60,12 +66,16 @@ impl Prepared {
     pub async fn reconnect(
         profile: &rtrust_profile::Profile,
         device: Arc<tun_rs::AsyncDevice>,
+        block_ipv6: bool,
     ) -> Result<Self, Failure> {
         use crate::reason::{Stage, reconnect};
-        let session = Session::connect(profile).await.map_err(|e| {
+        let mut session = Session::connect(profile).await.map_err(|e| {
             let message = reconnect(Stage::Connect, &e);
             Failure::engine(e, message)
         })?;
+        if block_ipv6 {
+            session.block_ipv6();
+        }
         session.health().await.map_err(|e| {
             let message = reconnect(Stage::Health, &e);
             Failure::engine(e, message)

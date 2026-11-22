@@ -394,6 +394,8 @@ enum Message {
     WholeIpv4,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     Dns(String),
+    /// Whole-computer mode: capture IPv6 and refuse it locally.
+    BlockIpv6(bool),
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     RecoverService,
     Recovered(Result<String, String>),
@@ -638,6 +640,7 @@ impl App {
                 .filter(|name| self.profiles.iter().any(|p| &p.name == *name))
                 .cloned()
                 .collect(),
+            block_ipv6: self.saved_connection.block_ipv6,
         };
         settings
             .validate()
@@ -692,6 +695,7 @@ impl App {
                     | Message::ExcludeLan(_)
                     | Message::WholeIpv4
                     | Message::Dns(_)
+                    | Message::BlockIpv6(_)
             );
         match m {
             #[cfg(target_os = "windows")]
@@ -949,6 +953,10 @@ impl App {
                 self.dns = value;
                 self.dirty = true;
             }
+            Message::BlockIpv6(value) if self.can_change_profiles() => {
+                self.saved_connection.block_ipv6 = value;
+                self.dirty = true;
+            }
             Message::Mode(mode) if self.can_change_profiles() => {
                 self.mode = mode;
                 self.saved_connection.mode = match mode {
@@ -1167,6 +1175,7 @@ impl App {
                     };
                     let mode = self.mode;
                     let dns = self.dns.clone();
+                    let block_ipv6 = mode == Mode::Full && self.saved_connection.block_ipv6;
                     let fallbacks = self
                         .saved_connection
                         .fallbacks_for(&self.profiles, Some(&profile));
@@ -1193,7 +1202,7 @@ impl App {
                     let epoch = self.connection_epoch;
                     self.connecting = true;
                     self.connection_name = profile.name.clone();
-                    self.connection_ipv6 = profile.endpoint.has_ipv6;
+                    self.connection_ipv6 = profile.endpoint.has_ipv6 && !block_ipv6;
                     self.status = if mode == Mode::Socks {
                         "Подключение к серверу…"
                     } else {
@@ -1203,7 +1212,7 @@ impl App {
                     let (task, handle) = Task::perform(
                         async move {
                             Session::start_authorized(
-                                profile, fallbacks, mode, port, selection, dns, lease,
+                                profile, fallbacks, mode, port, selection, dns, block_ipv6, lease,
                             )
                             .await
                             .map_err(|e| e.to_string())
@@ -1242,7 +1251,18 @@ impl App {
                         }
                         self.last_diagnostic = None;
                         self.diagnostic_report = None;
-                        self.status = if self.mode == Mode::Socks { "Прокси SOCKS5/HTTP включён. Его можно указать и как системный прокси Windows. Для DNS выберите разрешение имён через прокси." } else if self.saved_connection.mode == rtrust_store::Mode::Full && self.connection_ipv6 { "IPv4, IPv6 и DNS всего компьютера через VPN. Пересылка между интерфейсами заблокирована." } else if self.saved_connection.mode == rtrust_store::Mode::Full { "IPv4 и DNS всего компьютера через VPN. Сервер без IPv6: IPv6 заблокирован, приложения переходят на IPv4. Пересылка между интерфейсами заблокирована." } else { "Выбранные IPv4-сети подключены через службу. Исключения, остальной трафик и системный DNS идут напрямую." }.into();
+                        self.status = if self.mode == Mode::Socks {
+                            "Прокси SOCKS5/HTTP включён. Его можно указать и как системный прокси Windows. Для DNS выберите разрешение имён через прокси."
+                        } else if self.saved_connection.mode == rtrust_store::Mode::Full && self.connection_ipv6 {
+                            "IPv4, IPv6 и DNS всего компьютера через VPN. Пересылка между интерфейсами заблокирована."
+                        } else if self.saved_connection.mode == rtrust_store::Mode::Full && self.saved_connection.block_ipv6 {
+                            "IPv4 и DNS всего компьютера через VPN. IPv6 заблокирован по вашей настройке: приложения переходят на IPv4, обхода нет. Пересылка между интерфейсами заблокирована."
+                        } else if self.saved_connection.mode == rtrust_store::Mode::Full {
+                            "IPv4 и DNS всего компьютера через VPN. Сервер без IPv6: IPv6 заблокирован, приложения переходят на IPv4. Пересылка между интерфейсами заблокирована."
+                        } else {
+                            "Выбранные IPv4-сети подключены через службу. Исключения, остальной трафик и системный DNS идут напрямую."
+                        }
+                        .into();
                         if let Some(warning) =
                             self.session.as_ref().and_then(|s| s.owner_warning(true))
                         {
@@ -2278,7 +2298,35 @@ impl App {
             } else {
                 pick_list(Mode::ALL, Some(self.mode), |_| Message::Tick)
             };
-            panel = column![mode, dns].spacing(6).push(text(if cfg!(target_os = "macos") { "IPv4, IPv6 и DNS через VPN. Требуется системная служба macOS. После аварии защита остаётся до явного сброса." } else if cfg!(target_os = "windows") { "IPv4, IPv6 и DNS через VPN. Прямая LAN и пересылка заблокированы. После аварии защита остаётся до явного сброса." } else { "IPv4, IPv6 и DNS всего компьютера через VPN. Пересылка между интерфейсами заблокирована. Требуется systemd-resolved." }).size(12))
+            let mut block_ipv6 = checkbox(self.saved_connection.block_ipv6).label(ui::t(
+                "Полностью блокировать IPv6",
+                "Block IPv6 completely",
+            ));
+            if self.can_change_profiles() {
+                block_ipv6 = block_ipv6.on_toggle(Message::BlockIpv6);
+            }
+            let family = if self.saved_connection.block_ipv6 {
+                ui::t(
+                    "IPv4 и DNS через VPN. IPv6 перехватывается и отклоняется локально: ни в туннель, ни мимо него.",
+                    "IPv4 and DNS through the VPN. IPv6 is captured and refused locally: neither through the tunnel nor around it.",
+                )
+            } else if cfg!(target_os = "macos") {
+                ui::t(
+                    "IPv4, IPv6 и DNS через VPN. Требуется системная служба macOS. После аварии защита остаётся до явного сброса.",
+                    "IPv4, IPv6 and DNS through the VPN. The macOS system service is required. After a failure, protection stays until you reset it.",
+                )
+            } else if cfg!(target_os = "windows") {
+                ui::t(
+                    "IPv4, IPv6 и DNS через VPN. Прямая LAN и пересылка заблокированы. После аварии защита остаётся до явного сброса.",
+                    "IPv4, IPv6 and DNS through the VPN. Direct LAN and forwarding are blocked. After a failure, protection stays until you reset it.",
+                )
+            } else {
+                ui::t(
+                    "IPv4, IPv6 и DNS всего компьютера через VPN. Пересылка между интерфейсами заблокирована. Требуется systemd-resolved.",
+                    "IPv4, IPv6 and DNS of the whole computer through the VPN. Forwarding between interfaces is blocked. systemd-resolved is required.",
+                )
+            };
+            panel = column![mode, dns, block_ipv6].spacing(6).push(text(family).size(12))
                 .push(button("Сбросить блокировку после аварии").on_press_maybe(self.can_change_profiles().then_some(Message::RecoverService)));
         }
         panel.into()
@@ -2980,6 +3028,18 @@ mod tests {
         #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
         assert_eq!(app.mode, Mode::Socks);
     }
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn full_tunnel_ipv6_block_is_saved_and_frozen_while_connecting() {
+        let mut app = app();
+        let _ = app.update(Message::Mode(Mode::Full));
+        let _ = app.update(Message::BlockIpv6(true));
+        assert!(app.saved_connection.block_ipv6);
+        assert!(app.connection_settings().unwrap().block_ipv6);
+        app.connecting = true;
+        let _ = app.update(Message::BlockIpv6(false));
+        assert!(app.saved_connection.block_ipv6);
+    }
     #[test]
     fn loading_restores_settings_without_connecting_or_losing_linux_mode() {
         let mut app = app();
@@ -2994,6 +3054,7 @@ mod tests {
             exclude_lan: true,
             managed_routes: None,
             fallback_profiles: vec![],
+            block_ipv6: false,
         };
         let vault = rtrust_store::Vault {
             profiles: app.profiles.clone(),

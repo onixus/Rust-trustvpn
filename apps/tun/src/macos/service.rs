@@ -313,6 +313,7 @@ impl Workers {
         guard: &Guard,
         lease: &Lease,
         freshness: &Freshness,
+        block_ipv6: bool,
     ) {
         let freshness = freshness.clone();
         let profile = profile.clone();
@@ -345,7 +346,7 @@ impl Workers {
                             freshness.check()?;
                             tokio::time::timeout(
                                 Duration::from_secs(30),
-                                device::Prepared::reconnect(&profile, device),
+                                device::Prepared::reconnect(&profile, device, block_ipv6),
                             )
                             .await
                             .map_err(|_| {
@@ -830,7 +831,7 @@ async fn start(
         1,
         rtrust_journal::Budget::Burst,
     );
-    let (profile, selection, dns, split_dns, fallbacks) = match request.command {
+    let (profile, selection, dns, split_dns, fallbacks, block_ipv6) = match request.command {
         Command::Start {
             profile,
             networks,
@@ -848,13 +849,21 @@ async fn start(
                 journal.class(rtrust_journal::Class::Profile);
                 return publish(&mut initial, State::Error, &error).await;
             }
-            (profile, selection, None, dns, fallbacks)
+            (profile, selection, None, dns, fallbacks, false)
         }
         Command::StartFull {
             profile,
             dns,
             fallbacks,
-        } => (profile, Default::default(), Some(dns), None, fallbacks),
+            block_ipv6,
+        } => (
+            profile,
+            Default::default(),
+            Some(dns),
+            None,
+            fallbacks,
+            block_ipv6,
+        ),
         _ => return publish(&mut initial, State::Error, "Start or Recover required").await,
     };
     let full = dns.is_some();
@@ -945,7 +954,9 @@ async fn start(
     let prepared = match prepare_start_attempt(
         freshness.during_result(async {
             failover
-                .connect_initial(|profile| async move { device::Prepared::connect(&profile).await })
+                .connect_initial(|profile| async move {
+                    device::Prepared::connect(&profile, block_ipv6).await
+                })
                 .await
                 .map_err(Fenced::Failed)
         }),
@@ -1029,6 +1040,7 @@ async fn start(
                 &retry_guard,
                 &held_lease,
                 &retry_freshness,
+                block_ipv6,
             )
         },
         move || {
@@ -2058,6 +2070,7 @@ mod tests {
                 profile: Box::new(profile),
                 dns: "192.0.2.53".parse().unwrap(),
                 fallbacks: vec![],
+                block_ipv6: false,
             },
         ] {
             let (spawn, _spawned) = mpsc::channel(16);
@@ -3519,6 +3532,7 @@ mod tests {
                     profile: Box::new(profile),
                     dns: "192.0.2.53".parse().unwrap(),
                     fallbacks: vec![],
+                    block_ipv6: false,
                 },
             },
         )

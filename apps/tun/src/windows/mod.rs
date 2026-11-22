@@ -179,11 +179,15 @@ fn staged(stage: crate::reason::Stage, error: rtrust_engine::Error) -> crate::fa
 }
 async fn transport(
     profile: &rtrust_profile::Profile,
+    block_ipv6: bool,
 ) -> Result<(Session, rtrust_engine::Tunnel), crate::failover::Failure> {
     tokio::time::timeout(rtrust_control::recovery::ATTEMPT_TIMEOUT, async {
-        let session = Session::connect(profile)
+        let mut session = Session::connect(profile)
             .await
             .map_err(|error| staged(crate::reason::Stage::Connect, error))?;
+        if block_ipv6 {
+            session.block_ipv6();
+        }
         session
             .health()
             .await
@@ -307,7 +311,7 @@ async fn serve(
             return reply(pipe, State::Error, &error).await;
         }
     };
-    let (profile, selection, dns, split_dns, fallbacks) = match command {
+    let (profile, selection, dns, split_dns, fallbacks, block_ipv6) = match command {
         Command::PrepareUpdate => {
             // Failures are answered in the caller's version so a previous
             // updater reports the reason; the reservation is still refused.
@@ -356,12 +360,13 @@ async fn serve(
                 }
                 return reply(pipe, State::Error, &error).await;
             }
-            (profile, selection, None, dns, fallbacks)
+            (profile, selection, None, dns, fallbacks, false)
         }
         Command::StartFull {
             profile,
             dns,
             fallbacks,
+            block_ipv6,
         } => {
             if let Err(error) = rtrust_control::validate_dns(dns) {
                 if let Some(journal) = journal.as_mut() {
@@ -369,7 +374,14 @@ async fn serve(
                 }
                 return reply(pipe, State::Error, &error).await;
             }
-            (profile, Default::default(), Some(dns), None, fallbacks)
+            (
+                profile,
+                Default::default(),
+                Some(dns),
+                None,
+                fallbacks,
+                block_ipv6,
+            )
         }
         Command::Recover { .. } => {
             full::recover()?;
@@ -420,7 +432,7 @@ async fn serve(
         let mut connection_failed = false;
         let result = rtrust_control::freshness::while_valid(freshness.as_mut(), async {
             failover
-                .connect_initial(|profile| async move { transport(&profile).await })
+                .connect_initial(|profile| async move { transport(&profile, block_ipv6).await })
                 .await
                 .map_err(|error| {
                     connection_failed = true;
@@ -669,7 +681,10 @@ async fn lease_loop(
                     }
                     let profile = failover.current().clone();
                     connecting = Box::pin(async move {
-                        tokio::time::timeout(rtrust_control::recovery::ATTEMPT_TIMEOUT, transport(&profile))
+                        tokio::time::timeout(
+                            rtrust_control::recovery::ATTEMPT_TIMEOUT,
+                            transport(&profile, block_ipv6),
+                        )
                             .await.map_err(|_| crate::failover::Failure::timeout("Reconnect timed out"))?
                     }); reconnecting=true;
                 },

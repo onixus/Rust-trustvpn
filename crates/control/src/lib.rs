@@ -57,6 +57,11 @@ pub enum Command {
         dns: std::net::Ipv4Addr,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         fallbacks: Vec<rtrust_profile::Profile>,
+        /// Capture IPv6 and refuse it locally instead of relaying it. Omitted
+        /// keeps the previous policy, which follows the profile. A service that
+        /// does not know this field rejects the whole command.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        block_ipv6: bool,
     },
     ProbeEndpoint {
         token: endpoint::Token,
@@ -75,6 +80,9 @@ pub enum Command {
         /// Fence obtained from AlwaysOnStatus before sending this mutation.
         #[serde(default)]
         generation: Option<u64>,
+        /// Persisted with the boot policy. Omitted keeps the previous relay.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        block_ipv6: bool,
     },
     EnableRecovery {
         profile: Box<rtrust_profile::Profile>,
@@ -82,6 +90,9 @@ pub enum Command {
         backups: Vec<rtrust_profile::Profile>,
         #[serde(default)]
         generation: Option<u64>,
+        /// Same persisted IPv6 policy as EnableAlwaysOn.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        block_ipv6: bool,
     },
     DisableAlwaysOn,
     /// `viewed` as for `Status`; the always-on supervisor forwards it.
@@ -144,6 +155,10 @@ pub struct Capabilities {
     pub network_events: bool,
     /// The service accepts allowed backup profiles with Start.
     pub failover: bool,
+    /// Whole-computer mode can refuse IPv6 locally when the user asks, instead
+    /// of following only the profile. Absence means an older service.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub block_ipv6: bool,
     #[serde(default)]
     pub automatic_recovery: bool,
 }
@@ -166,6 +181,7 @@ impl Capabilities {
             endpoint_probes: cfg!(target_os = "linux"),
             network_events: true,
             failover: true,
+            block_ipv6: true,
             automatic_recovery: cfg!(any(target_os = "linux", target_os = "windows")),
         }
     }
@@ -718,6 +734,7 @@ mod tests {
                 profile,
                 dns: "10.0.0.53".parse().unwrap(),
                 fallbacks: vec![],
+                block_ipv6: false,
             },
             Command::Recover { owner: None },
             Command::Stop,
@@ -1109,6 +1126,38 @@ mod tests {
         assert_eq!(split["dns"], "1.1.1.1");
         let old: Command = serde_json::from_value(plain).unwrap();
         assert!(matches!(old, Command::Start { dns: None, .. }));
+    }
+    #[test]
+    fn full_tunnel_ipv6_block_is_optional_and_an_old_service_cannot_claim_it() {
+        let profile = rtrust_profile::Profile::import(
+            "hostname='vpn.example'\naddresses=['192.0.2.1:443']\nusername='u'\npassword='p'\n",
+        )
+        .unwrap();
+        let blocked = Command::StartFull {
+            profile: Box::new(profile),
+            dns: "10.0.0.53".parse().unwrap(),
+            fallbacks: vec![],
+            block_ipv6: true,
+        };
+        let value = serde_json::to_value(&blocked).unwrap();
+        assert_eq!(value["block_ipv6"], true);
+        let mut legacy = value.clone();
+        legacy.as_object_mut().unwrap().remove("block_ipv6");
+        let parsed: Command = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(parsed, Command::StartFull { block_ipv6: false, .. }));
+        let old_service = serde_json::json!({
+            "managed_access_freshness": true,
+            "observations_schema": 1,
+            "lifecycle_observations": true,
+            "system_probes": true,
+            "endpoint_probes": false,
+            "network_events": true,
+            "failover": true,
+            "automatic_recovery": true
+        });
+        let capabilities: Capabilities = serde_json::from_value(old_service).unwrap();
+        assert!(!capabilities.block_ipv6);
+        assert!(Capabilities::current().block_ipv6);
     }
     #[test]
     fn tunneled_resolver_requires_a_routed_valid_address() {

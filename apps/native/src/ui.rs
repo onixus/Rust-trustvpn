@@ -1218,6 +1218,7 @@ impl App {
             self.connection_ipv6
         } else {
             self.current().is_some_and(|p| p.endpoint.has_ipv6)
+                && !self.saved_connection.block_ipv6
         }
     }
     /// Whether the connect/disconnect pill is shown: always on Home, and during a
@@ -1845,6 +1846,11 @@ impl App {
                 t("Весь компьютер", "Whole computer").to_owned(),
                 if self.full_ipv6() {
                     "IPv4/IPv6 + DNS"
+                } else if self.saved_connection.block_ipv6 {
+                    t(
+                        "IPv4 + DNS, IPv6 заблокирован полностью",
+                        "IPv4 + DNS, IPv6 blocked completely",
+                    )
                 } else {
                     t("IPv4 + DNS, IPv6 заблокирован", "IPv4 + DNS, IPv6 blocked")
                 }

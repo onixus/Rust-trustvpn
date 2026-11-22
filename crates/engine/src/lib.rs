@@ -512,6 +512,11 @@ impl Session {
     pub fn ipv6(&self) -> bool {
         self.1
     }
+    /// Refuse IPv6 locally even when the endpoint could relay it. The capture
+    /// path stays in place; nothing is sent through the tunnel or around it.
+    pub fn block_ipv6(&mut self) {
+        self.1 = false;
+    }
     /// Fails when the endpoint stopped answering, and also when outbound
     /// traffic has stayed unanswered while opens to several destinations failed
     /// or stayed silent.

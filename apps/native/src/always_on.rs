@@ -76,6 +76,7 @@ impl App {
                     dns,
                     backups,
                     generation: None,
+                    block_ipv6: self.saved_connection.block_ipv6,
                 }
             }
             Action::Observed(generation, result) => {
@@ -140,6 +141,7 @@ impl App {
                     profile: Box::new(profile),
                     dns,
                     generation: None,
+                    block_ipv6: self.saved_connection.block_ipv6,
                 }
             }
             _ => return Task::none(),
