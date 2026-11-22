@@ -195,7 +195,8 @@ public class MainActivity extends Activity {
         if (tv() && slider != null) slider.post(slider::requestFocus);
     }
 
-    private boolean tv() { return getResources().getBoolean(R.bool.rtrust_tv); }
+    /** TV package, or the phone APK running on a leanback device. Phones do not report leanback. */
+    private boolean tv() { return DiagnosticsDialog.tv(this); }
 
     // ---- State ------------------------------------------------------------------------
 

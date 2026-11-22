@@ -5,8 +5,8 @@
     <uses-feature android:name="android.hardware.faketouch" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
-    <application android:banner="@drawable/tv_banner">
-        <activity android:name="org.rtrusttunnel.android.MainActivity" android:banner="@drawable/tv_banner">
+    <application>
+        <activity android:name="org.rtrusttunnel.android.MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
