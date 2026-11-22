@@ -45,6 +45,7 @@ public class MainActivity extends Activity {
     private static final class Row { String name, value; int color, valueColor; boolean ring; String note; }
 
     private String diagnosticExport;
+    private boolean githubBusy;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private String selectedId, pendingConnectId, liveProfileId, problemText = "";
     private ProfileVault vault;
@@ -986,7 +987,8 @@ public class MainActivity extends Activity {
             new Entry(R.drawable.ic_lock, getString(R.string.v3_always_short), always, this::vpnSettings, false),
             new Entry(R.drawable.ic_cloud, getString(R.string.settings_server), portalHost == null ? getString(R.string.portal_not_enrolled) : portalHost, () -> new PortalDialog(this, vault, this::reload).show(), false),
             new Entry(R.drawable.ic_sync, getString(R.string.v3_traffic), getString(TunnelService.inheritMetering(this) ? R.string.metering_detail_inherit : R.string.metering_detail_always), this::meteringSettings, false),
-            new Entry(R.drawable.ic_eye, getString(R.string.v3_theme), theme, this::themeSettings, false));
+            new Entry(R.drawable.ic_eye, getString(R.string.v3_theme), theme, this::themeSettings, false),
+            new Entry(R.drawable.ic_sync, getString(R.string.github_update), getString(R.string.github_update_detail), this::githubUpdate, false));
         String query = search == null ? "" : search.getText().toString().trim().toLowerCase(Locale.getDefault());
         if (query.isEmpty()) {
             results.addView(section(R.string.v3_section_actions));
@@ -1025,6 +1027,32 @@ public class MainActivity extends Activity {
         }
         if (found.getChildCount() > 0) { results.addView(section(R.string.v3_section_profiles)); results.addView(found); }
         if (results.getChildCount() == 0) { TextView none = text(getString(R.string.v3_no_match), 14, p.muted, false); none.setPadding(dp(4), dp(16), 0, 0); results.addView(none); }
+    }
+    private void githubUpdate() {
+        if (githubBusy) return;
+        githubBusy = true;
+        Toast.makeText(this, R.string.github_checking, Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            try {
+                String current = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+                GithubUpdate.Release release = GithubUpdate.check(current);
+                if (!release.newer) {
+                    handler.post(() -> Toast.makeText(this, getString(R.string.github_current, release.version, current), Toast.LENGTH_LONG).show());
+                    return;
+                }
+                handler.post(() -> Toast.makeText(this, R.string.github_downloading, Toast.LENGTH_SHORT).show());
+                File apk = GithubUpdate.download(this, release);
+                handler.post(() -> {
+                    Toast.makeText(this, getString(R.string.github_ready, release.version), Toast.LENGTH_LONG).show();
+                    try { GithubUpdate.offer(this, apk); }
+                    catch (Exception e) { Toast.makeText(this, R.string.github_failed, Toast.LENGTH_LONG).show(); }
+                });
+            } catch (Exception e) {
+                handler.post(() -> Toast.makeText(this, R.string.github_failed, Toast.LENGTH_LONG).show());
+            } finally {
+                githubBusy = false;
+            }
+        }).start();
     }
     private void themeSettings() {
         String mode = Palette.mode(this);

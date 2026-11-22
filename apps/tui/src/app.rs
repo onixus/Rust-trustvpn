@@ -194,6 +194,9 @@ pub enum Command {
         settings: Box<ConnectionSettings>,
     },
     Recover,
+    /// Look up the latest GitHub Release and, when it is newer, download the
+    /// package after checking it against the unsigned SHA256SUMS. Never installs.
+    Github,
     /// `force` exits even when disconnecting fails (signals, lost terminal).
     Quit {
         force: bool,
@@ -274,6 +277,7 @@ impl App {
             Command::Discard => self.t("Отмена импорта…", "Discarding import…"),
             Command::Edit { .. } | Command::Settings { .. } => self.t("Сохранение…", "Saving…"),
             Command::Recover => self.t("Снятие блокировки…", "Releasing the block…"),
+            Command::Github => self.t("Проверка GitHub…", "Checking GitHub…"),
             Command::Quit { .. } => self.t("Отключение и выход…", "Disconnecting and quitting…"),
         });
         self.message = None;
@@ -465,6 +469,7 @@ impl App {
                 self.list.select(len.checked_sub(1));
                 None
             }
+            KeyCode::Char('u') => self.start(Command::Github),
             KeyCode::Char('q') | KeyCode::Esc => self.request_quit(),
             KeyCode::Enter | KeyCode::Char('c') => {
                 if self.snap.session {
@@ -877,8 +882,8 @@ impl App {
                 "↑↓ select · d disconnect · q quit",
             ),
             Modal::None => self.t(
-                "↑↓ выбор · Enter подключить · i импорт · s по умолч. · x удалить · m режим · n/e сети · l LAN · p порт · o DNS · a авто · R сброс · q выход",
-                "↑↓ select · Enter connect · i import · s default · x delete · m mode · n/e networks · l LAN · p port · o DNS · a auto · R recover · q quit",
+                "↑↓ выбор · Enter подключить · i импорт · u GitHub · s по умолч. · x удалить · m режим · n/e сети · l LAN · p порт · o DNS · a авто · R сброс · q выход",
+                "↑↓ select · Enter connect · i import · u GitHub · s default · x delete · m mode · n/e networks · l LAN · p port · o DNS · a auto · R recover · q quit",
             ),
             _ => self.t("y — да · n — нет", "y yes · n no"),
         }

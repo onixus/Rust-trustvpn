@@ -1423,11 +1423,8 @@ impl App {
             (t("Сеть", "Network"), Page::Network),
             (t("Синхронизация", "Sync"), Page::Portal),
             (t("Настройки", "Settings"), Page::Settings),
+            (t("Обновления", "Updates"), Page::Updates),
         ];
-        #[cfg(target_os = "windows")]
-        items.push((t("Обновления", "Updates"), Page::Updates));
-        #[cfg(not(target_os = "windows"))]
-        let _ = &mut items;
         for (label, page) in items {
             let selected = active_page == page;
             nav = nav.push(
@@ -1517,7 +1514,6 @@ impl App {
             Page::Network => title(t("Сеть", "Network")).into(),
             Page::Portal => title(t("Синхронизация", "Sync")).into(),
             Page::Settings => title(t("Настройки", "Settings")).into(),
-            #[cfg(target_os = "windows")]
             Page::Updates => title(t("Обновления", "Updates")).into(),
         };
         let body: Element<'_, Message> = if self.store_conflict.is_some() {
@@ -1531,7 +1527,6 @@ impl App {
                 Page::Network => self.network_view(tk),
                 Page::Portal => card(tk, self.portal_view()).into(),
                 Page::Settings => self.settings_view(tk),
-                #[cfg(target_os = "windows")]
                 Page::Updates => card(tk, self.updates_view()).into(),
             }
         };
@@ -3514,11 +3509,8 @@ mod tests {
             Page::Network,
             Page::Portal,
             Page::Settings,
+            Page::Updates,
         ];
-        #[cfg(target_os = "windows")]
-        pages.push(Page::Updates);
-        #[cfg(not(target_os = "windows"))]
-        let _ = &mut pages;
         for theme in [ThemeChoice::Dark, ThemeChoice::Light] {
             app.theme_choice = theme;
             for width in [900.0, 1180.0, 1600.0] {

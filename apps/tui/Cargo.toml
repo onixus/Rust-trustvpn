@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 rtrust-desktop.workspace = true
+rtrust-update.workspace = true
 rtrust-store.workspace = true
 rtrust-profile.workspace = true
 rtrust-control.workspace = true

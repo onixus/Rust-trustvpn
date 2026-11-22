@@ -3,6 +3,66 @@ use rtrust_desktop::{Controller, Summary, View};
 use tauri::{Manager, State};
 use tokio::sync::Mutex;
 type Shared = std::sync::Arc<Mutex<Controller>>;
+#[derive(serde::Serialize)]
+struct GithubUpdate {
+    version: String,
+    newer: bool,
+    asset: String,
+    page: String,
+    /// Checksum-verified package, empty until the user downloads it.
+    file: String,
+    note: String,
+}
+fn github_note(release: &rtrust_update::github::ReleaseInfo) -> String {
+    if !release.newer {
+        return format!(
+            "GitHub {version} is not newer than {current}.",
+            version = release.version,
+            current = env!("CARGO_PKG_VERSION")
+        );
+    }
+    match &release.asset {
+        Some(asset) => format!(
+            "GitHub {version} is newer. {name} matches SHA256SUMS. Install it yourself; this is not the signed update channel.",
+            version = release.version,
+            name = asset.name
+        ),
+        None => format!("GitHub {version} is newer, but has no package for this app.", version = release.version),
+    }
+}
+#[tauri::command]
+async fn github_check() -> Result<GithubUpdate, String> {
+    let kind = rtrust_update::github::kind_for_current_app()
+        .ok_or("This app has no GitHub package")?;
+    let release = rtrust_update::github::check(kind).await?;
+    Ok(GithubUpdate {
+        version: release.version.clone(),
+        newer: release.newer,
+        asset: release.asset.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
+        page: release.page.clone(),
+        file: String::new(),
+        note: github_note(&release),
+    })
+}
+#[tauri::command]
+async fn github_download() -> Result<GithubUpdate, String> {
+    let kind = rtrust_update::github::kind_for_current_app()
+        .ok_or("This app has no GitHub package")?;
+    let (release, file) = rtrust_update::github::fetch_newer(kind).await?;
+    let path = file.map(|p| p.display().to_string()).unwrap_or_default();
+    let mut note = github_note(&release);
+    if !path.is_empty() {
+        note = format!("{note} Saved: {path}");
+    }
+    Ok(GithubUpdate {
+        version: release.version,
+        newer: release.newer,
+        asset: release.asset.map(|a| a.name).unwrap_or_default(),
+        page: release.page,
+        file: path,
+        note,
+    })
+}
 fn note_pending(c: &mut Controller, result: Result<Summary, String>) {
     c.status = match result {
         Ok(p) => format!(
@@ -483,6 +543,8 @@ fn main() {
         .manage(std::sync::Arc::new(Mutex::new(controller)))
         .invoke_handler(tauri::generate_handler![
             ui_ready,
+            github_check,
+            github_download,
             diagnostic_cancel,
             diagnostic_start,
             diagnostic_edit,

@@ -5774,6 +5774,7 @@ dependencies = [
  "rtrust-engine",
  "rtrust-profile",
  "rtrust-store",
+ "rtrust-update",
  "tokio",
  "zeroize",
 ]
@@ -5836,6 +5837,7 @@ dependencies = [
  "rtrust-portal",
  "rtrust-profile",
  "rtrust-store",
+ "rtrust-update",
  "serde",
  "serde_json",
  "tauri",
