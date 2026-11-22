@@ -95,12 +95,13 @@ final class SlideButton extends View {
         icon.setTint(iconTint);
         icon.setBounds(Math.round(cx - size / 2f), Math.round(cy - size / 2f), Math.round(cx + size / 2f), Math.round(cy + size / 2f));
         icon.draw(canvas);
-        if (isFocused()) {
+        if (direct && isFocused()) {
             stroke.setStrokeWidth(2.5f * density); stroke.setColor(0xFF4DA3FF);
             rect.set(density, density, w - density, h - density);
             canvas.drawRoundRect(rect, r, r, stroke);
         }
     }
+    @Override protected void drawableStateChanged() { super.drawableStateChanged(); if (direct) invalidate(); }
 
     /** A touch never clicks: only a full drag acts. performClick() is the accessibility path. */
     @android.annotation.SuppressLint("ClickableViewAccessibility")
@@ -135,15 +136,6 @@ final class SlideButton extends View {
         }
     }
     @Override public boolean performClick() { super.performClick(); fire(); return true; }
-    @Override public boolean onKeyDown(int keyCode, android.view.KeyEvent event) {
-        if (direct && event.getRepeatCount() == 0 && (keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER
-            || keyCode == android.view.KeyEvent.KEYCODE_ENTER || keyCode == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER
-            || keyCode == android.view.KeyEvent.KEYCODE_BUTTON_A || keyCode == android.view.KeyEvent.KEYCODE_SPACE)) {
-            performClick();
-            return true;
-        }
-        return super.onKeyDown(keyCode, event);
-    }
     @Override public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
         super.onInitializeAccessibilityNodeInfo(info); info.setClassName(Button.class.getName());
     }
