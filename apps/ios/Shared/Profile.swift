@@ -60,6 +60,16 @@ struct PortalSession: Codable, Equatable {
     var backgroundSync = false
     var lastSync: Date?
     var authExpired = false
+    /// Unix seconds. Absent on a registration saved before renewal existed.
+    var expiresAt: Date?
+    var renewedAt: Date?
+    /// Still-valid token inside the last week, and not renewed in the last day.
+    func renewalDue(at now: Date) -> Bool {
+        guard !authExpired, let expiresAt, expiresAt > now else { return false }
+        let week: TimeInterval = 7 * 86400, day: TimeInterval = 86400
+        guard expiresAt.timeIntervalSince(now) < week else { return false }
+        return renewedAt.map { now.timeIntervalSince($0) >= day } ?? true
+    }
 }
 struct VaultData: Codable {
     var version = 1

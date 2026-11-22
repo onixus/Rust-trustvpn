@@ -93,6 +93,13 @@ class PortalClient {
             || !value.getString("code").matches("[A-Za-z0-9_-]{20,128}")) throw new IOException();
         return value;
     }
+    /** Still-valid token with less than a week left, and not renewed in the last day. */
+    static boolean renewalDue(JSONObject session, long nowSeconds) {
+        if (session == null || session.optBoolean("sync_auth_expired") || !session.has("expires_at")) return false;
+        long expires = session.optLong("expires_at", 0), renewed = session.optLong("renewed_at", 0);
+        if (expires <= nowSeconds || expires - nowSeconds >= 7L * 86400) return false;
+        return renewed <= 0 || nowSeconds - renewed >= 86400;
+    }
     long renewAccess() throws Exception {
         long requestedAt=System.currentTimeMillis()/1000;
         JSONObject result=request("/portal/v2/token/renew",new JSONObject().put("consent",true));

@@ -34,12 +34,13 @@ impl SyncSettings {
             .iter()
             .any(|entry| same_access(&entry.baseline, profile))
     }
-    pub fn lease_for(
-        &self,
-        assigned_routes: bool,
-        profiles: &[Profile],
-    ) -> std::result::Result<Option<rtrust_control::freshness::Lease>, String> {
-        let mut managed = assigned_routes;
+    /// Connect admission for a profile that already has endpoint credentials.
+    ///
+    /// Device linking delivers profiles. It is not a runtime dependency of the
+    /// VPN session: a missing, expired or unreadable portal lease must not
+    /// refuse a saved config. The only fail-closed case is a grant a successful
+    /// sync already marked unavailable. Endpoint revoke remains a server check.
+    pub fn connect_blocked(&self, profiles: &[Profile]) -> std::result::Result<(), String> {
         for profile in profiles {
             let mut matching = self
                 .tracked
@@ -49,22 +50,13 @@ impl SyncSettings {
             if matching.peek().is_none() {
                 continue;
             }
-            managed = true;
             if !matching.any(|entry| entry.available) {
                 return Err(
                     "Cached managed access is no longer granted; resolve the portal profile".into(),
                 );
             }
         }
-        if !managed {
-            return Ok(None);
-        }
-        let lease = self
-            .access_lease
-            .clone()
-            .ok_or("Panel freshness confirmation required; synchronize with an updated portal")?;
-        lease.validate_at(rtrust_control::freshness::now())?;
-        Ok(Some(lease))
+        Ok(())
     }
     pub(super) fn validate(&self) -> Result<()> {
         if self
@@ -122,49 +114,43 @@ mod tests {
             }],
         };
         assert!(settings.validate().is_ok());
+        // A saved local or portal-delivered config connects without a live lease.
         assert!(
             settings
-                .lease_for(false, std::slice::from_ref(&local))
-                .unwrap()
-                .is_none()
+                .connect_blocked(std::slice::from_ref(&local))
+                .is_ok()
         );
         assert!(
             settings
-                .lease_for(false, std::slice::from_ref(&remote))
-                .is_err()
+                .connect_blocked(std::slice::from_ref(&remote))
+                .is_ok()
         );
-        assert!(settings.lease_for(false, &[local.clone(), remote]).is_err());
-        assert!(settings.lease_for(true, &[local]).is_err());
+        assert!(settings.connect_blocked(&[local.clone(), remote]).is_ok());
         let mut edited = settings.tracked[0].baseline.clone();
         edited.name = "My custom name".into();
         edited.policy = serde_json::json!({});
         assert!(
             settings
-                .lease_for(false, std::slice::from_ref(&edited))
+                .connect_blocked(std::slice::from_ref(&edited))
+                .is_ok()
+        );
+        // An expired receipt is not a connect refusal: the portal may be down.
+        let mut revoked = settings.clone();
+        revoked.tracked[0].available = false;
+        assert!(
+            revoked
+                .connect_blocked(std::slice::from_ref(&edited))
                 .is_err()
         );
-        let mut fresh = settings.clone();
-        let now = rtrust_control::freshness::now();
-        fresh.access_lease = Some(rtrust_control::freshness::Lease {
-            issued_at_ms: now,
-            expires_at_ms: now + 60000,
-        });
         assert!(
-            fresh
-                .lease_for(false, std::slice::from_ref(&edited))
-                .unwrap()
-                .is_some()
+            revoked
+                .connect_blocked(std::slice::from_ref(&local))
+                .is_ok()
         );
-        fresh.tracked[0].available = false;
-        assert!(
-            fresh
-                .lease_for(false, std::slice::from_ref(&edited))
-                .is_err()
-        );
-        let mut alias = fresh.tracked[0].clone();
+        let mut alias = revoked.tracked[0].clone();
         alias.id = "still-granted".into();
         alias.available = true;
-        fresh.tracked.push(alias);
-        assert!(fresh.lease_for(false, &[edited]).unwrap().is_some());
+        revoked.tracked.push(alias);
+        assert!(revoked.connect_blocked(&[edited]).is_ok());
     }
 }

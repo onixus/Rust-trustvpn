@@ -261,6 +261,21 @@ extension ParityTests {
         (200, try JSONSerialization.data(withJSONObject: ["profiles": profiles]))
     }
 
+    func testPortalRenewalWindowDoesNotSendAnExpiredToken() {
+        var session = PortalSession(origin: "https://fixture.invalid", token: Self.fixtureToken)
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertFalse(session.renewalDue(at: now), "Unknown expiry is not auto-renewed")
+        session.expiresAt = now.addingTimeInterval(8 * 86400)
+        XCTAssertFalse(session.renewalDue(at: now))
+        session.expiresAt = now.addingTimeInterval(6 * 86400)
+        XCTAssertTrue(session.renewalDue(at: now))
+        session.renewedAt = now
+        XCTAssertFalse(session.renewalDue(at: now.addingTimeInterval(3600)))
+        XCTAssertTrue(session.renewalDue(at: now.addingTimeInterval(86400)))
+        XCTAssertFalse(session.renewalDue(at: session.expiresAt!))
+        session.authExpired = true
+        XCTAssertFalse(session.renewalDue(at: now))
+    }
     func testPortalWholeBatchFenceSequences() async throws {
         let client = Self.fixtureClient(PortalSession(origin: "https://fixture.invalid", token: Self.fixtureToken))
         let initial: [[String: Any]] = [["id": "one", "revision": "r1", "origin": "portal_managed"], ["id": "two", "revision": "r1"]]

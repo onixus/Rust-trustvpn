@@ -187,16 +187,10 @@ public final class TunnelService extends VpnService {
     static boolean accessBlocked(){TunnelService s=running;return s!=null && s.accessHeld;}
     static Network portalRecoveryNetwork(){TunnelService s=running;return s!=null && s.accessHeld && !s.stopping?s.underlying:null;}
     static void recoverySettingsChanged(){TunnelService s=running;if(s!=null)synchronized(s.networkEvents){s.logicalSession=System.nanoTime() & Long.MAX_VALUE;s.networkEpoch++;s.transitioning=true;s.requestRefresh();}}
+    /** Saved endpoint credentials authorize the session. A portal receipt is a
+     *  delivery hint, not a dataplane gate: the console may be down. */
     public synchronized boolean accessValid() {
-        if(stopping || transitioning || accessHeld) return false;
-        long wall=System.currentTimeMillis(),elapsed=SystemClock.elapsedRealtime();
-        boolean managed=false;for(ProfileVault.Selection entry:candidates)if(!entry.localPolicy)managed=true;
-        if(!managed)return true;
-        if(lastWall>0 && wall<lastWall)clockInvalid=true;
-        if(clockInvalid)return false;
-        lastWall=wall;
-        for(ProfileVault.Selection entry:candidates)if(!entry.localPolicy && !OfflineLease.valid(entry.lease,wall,elapsed,boot))return false;
-        return true;
+        return !stopping && !transitioning;
     }
     private static String receipts(ProfileVault.ConnectionSet set)throws Exception {
         JSONArray values=new JSONArray();for(ProfileVault.Selection entry:set.profiles)values.put(new JSONObject().put("id",entry.id).put("revision",entry.revision).put("lease",entry.lease).put("group",entry.managedRouting));
@@ -208,12 +202,12 @@ public final class TunnelService extends VpnService {
     }
     private void pollAccess(){
         if(stopping || !active || candidates.isEmpty())return;
-        if(!transitioning && !accessValid()){transitioning=true;accessHeld=true;problem=getString(R.string.access_refresh_required);requestRefresh();}
+        // An expired receipt must not stop traffic. The next user reconnect
+        // uses the saved config whether or not the portal answers.
         try{
             ProfileVault.ConnectionSet next=new ProfileVault(this).connectionSet(requestedId);String key=receipts(next);
             if(!key.equals(receiptKey)){
-                boolean fresh=true;for(ProfileVault.Selection entry:next.profiles)if(!entry.localPolicy && !OfflineLease.valid(entry.lease,System.currentTimeMillis(),SystemClock.elapsedRealtime(),boot))fresh=false;
-                if(!accessHeld && !transitioning && fresh && policies(next).equals(policyKey)){synchronized(this){candidates=java.util.Collections.unmodifiableList(next.profiles);receiptKey=key;lastWall=System.currentTimeMillis();clockInvalid=false;}}
+                if(!transitioning && policies(next).equals(policyKey)){synchronized(this){candidates=java.util.Collections.unmodifiableList(next.profiles);receiptKey=key;lastWall=System.currentTimeMillis();clockInvalid=false;}}
                 else requestRefresh();
             }
         }catch(Exception invalid){transitioning=true;requestRefresh();}
@@ -316,10 +310,7 @@ public final class TunnelService extends VpnService {
         }
         ProfileVault.ConnectionSet set=vault.connectionSet(requestedId);
         if(guard==set.profiles.get(0).localPolicy)throw new IllegalStateException("Ownership changed");
-        String nextReceipts=receipts(set);synchronized(this){if(!nextReceipts.equals(receiptKey)){lastWall=System.currentTimeMillis();clockInvalid=false;}receiptKey=nextReceipts;policyKey=policies(set);candidates=java.util.Collections.unmodifiableList(set.profiles);}
-        long wall=System.currentTimeMillis(),elapsed=SystemClock.elapsedRealtime();
-        if(guard && clockInvalid){accessHeld=true;problem=getString(R.string.access_refresh_required);return;}
-        for(ProfileVault.Selection entry:candidates)if(!entry.localPolicy && !OfflineLease.valid(entry.lease,wall,elapsed,boot)){accessHeld=true;problem=getString(R.string.access_refresh_required);return;}
+        String nextReceipts=receipts(set);synchronized(this){receiptKey=nextReceipts;policyKey=policies(set);candidates=java.util.Collections.unmodifiableList(set.profiles);}
         accessHeld=false;Network network=underlying;if(network==null){problem="";return;}
         JSONArray local=localPrefixes(network), profiles=new JSONArray(), unavailable=new JSONArray();JSONObject firstPlan=null;
         for(ProfileVault.Selection entry:candidates){

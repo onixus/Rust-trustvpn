@@ -502,7 +502,7 @@ async fn serve(
                         endpoint_lease.update(failover.current(), monitor.sample(rtrust_control::observations::now_ms()).generation, failover.active());
                     },
                 },
-                result = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() => {
+                result = async { workers.tunnel.as_mut().unwrap().await }, if workers.tunnel.is_some() && !access_expired => {
                     endpoint_lease.suspend();
                     workers.tunnel = None;
                     probes.cancel();
@@ -526,7 +526,7 @@ async fn serve(
                     attempt_path = labels.path();
                     workers.retry(failover.current(), &mut retry_delay, full, block_ipv6);
                 }
-                result = async { workers.reconnect.as_mut().unwrap().await }, if workers.reconnect.is_some() => {
+                result = async { workers.reconnect.as_mut().unwrap().await }, if workers.reconnect.is_some() && !access_expired => {
                     workers.reconnect = None;
                     let path = attempt_path;
                     let failure = match &result { Ok(Err(e)) => Some(e.class), Err(e) => Some(if e.is_cancelled() { rtrust_journal::Class::Cancelled } else { rtrust_journal::Class::Other }), _ => None };

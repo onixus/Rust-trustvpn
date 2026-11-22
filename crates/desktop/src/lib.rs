@@ -203,7 +203,10 @@ impl Controller {
         let authorized = std::iter::once(p.clone())
             .chain(fallbacks.iter().cloned())
             .collect::<Vec<_>>();
-        let lease = c.sync.lease_for(c.managed_routes.is_some(), &authorized)?;
+        // Saved endpoint credentials authorize the session. A portal lease is
+        // not required: the console may be down while the tunnel is up.
+        c.sync.connect_blocked(&authorized)?;
+        let lease = None;
         // The toggle blocks IPv6 even when this profile could relay it.
         // A profile without IPv6 egress already fails the family locally.
         let ipv4_only = mode == connection::Mode::Full && (c.block_ipv6 || !p.endpoint.has_ipv6);
@@ -232,6 +235,32 @@ impl Controller {
     }
     pub fn connected_note(&self) -> &'static str {
         self.connected_note
+    }
+    /// Portal API lifetime only. Does not touch the VPN session or vault.
+    /// An expired token is not sent; a failed renew leaves the previous deadline.
+    pub async fn renew_portal_if_due(&self) -> Result<(), String> {
+        let restored = match tokio::task::spawn_blocking(rtrust_portal::Client::restore).await {
+            Ok(Ok(client)) => client,
+            _ => return Ok(()),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if !restored.renewal_due(now, None) {
+            return Ok(());
+        }
+        let origin = restored.address().to_owned();
+        let renewed = restored.renew_access().await?;
+        if renewed.address() != origin {
+            return Err("Portal registration changed".into());
+        }
+        let saved = renewed.clone();
+        tokio::task::spawn_blocking(move || saved.remember())
+            .await
+            .map_err(|_| "Ошибка системного хранилища")??;
+        let _ = renewed;
+        Ok(())
     }
     pub async fn disconnect(&mut self) -> Result<(), String> {
         self.diagnostics.cancel();

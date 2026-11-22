@@ -244,6 +244,10 @@ struct App {
     // in memory (never shown) until Recover succeeds or a new session starts.
     pending_owner: Option<rtrust_control::owner::Owner>,
     sync_state: sync::State,
+    /// Last successful automatic portal-token renewal. Not a VPN lease.
+    portal_renewed_at: Option<std::time::Instant>,
+    /// Background renewal is in flight. It must not freeze close or autosave.
+    portal_auto_renewing: bool,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     intent: intent::State,
     store_conflict: Option<(rtrust_store::Vault, Option<Vec<u8>>)>,
@@ -438,6 +442,8 @@ impl App {
             store_recovery: false,
             pending_owner: None,
             sync_state: sync::State::default(),
+            portal_renewed_at: None,
+            portal_auto_renewing: false,
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             intent: intent::State::default(),
             store_conflict: None,
@@ -1092,7 +1098,7 @@ impl App {
                 if let Some(task) = self.always_poll() {
                     return task;
                 }
-                return self.sync_tick();
+                return self.portal_maintenance();
             }
             Message::MakeDefault if !self.busy && !self.connecting && self.session.is_none() => {
                 if self.selected < self.profiles.len() {
@@ -1182,17 +1188,14 @@ impl App {
                     let authorized = std::iter::once(profile.clone())
                         .chain(fallbacks.iter().cloned())
                         .collect::<Vec<_>>();
-                    let lease = match self
-                        .saved_connection
-                        .sync
-                        .lease_for(self.saved_connection.managed_routes.is_some(), &authorized)
-                    {
-                        Ok(lease) => lease,
-                        Err(error) => {
-                            self.status = error;
-                            return Task::none();
-                        }
-                    };
+                    // A saved config is enough. Portal reachability is not a
+                    // connect precondition; only a grant a successful sync
+                    // already marked unavailable still refuses.
+                    if let Err(error) = self.saved_connection.sync.connect_blocked(&authorized) {
+                        self.status = error;
+                        return Task::none();
+                    }
+                    let lease = None;
                     self.socks_recovery = (mode == Mode::Socks)
                         .then(|| socks_recovery::Recovery::new(profile.clone(), port));
                     self.connection_candidates = std::iter::once(profile.name.clone())
@@ -1925,6 +1928,20 @@ impl App {
         }
         self.disconnect();
         iced::exit()
+    }
+    /// Renew a still-valid portal token even while VPN is connected, then
+    /// sync profiles only while disconnected. Neither failure drops the tunnel.
+    fn portal_maintenance(&mut self) -> Task<Message> {
+        let renew_due = self
+            .portal_renewed_at
+            .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(86400));
+        // Keyring restore is inside AutoRenew, so a relaunch with the tunnel
+        // already up still renews. The in-memory client is only an optimization.
+        if renew_due && !self.busy {
+            self.portal_renewed_at = Some(std::time::Instant::now());
+            return self.portal_update(portal::Action::AutoRenew);
+        }
+        self.sync_tick()
     }
     fn can_change_profiles(&self) -> bool {
         !self.busy && !self.connecting && self.session.is_none()

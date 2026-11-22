@@ -32,6 +32,9 @@ struct PortalClient {
         if !session.token.isEmpty {
             _ = try Self.identifier(session.token, max: 128)
             guard session.token.count >= 40 else { throw AppError.message("Invalid portal token") }
+            if session.authExpired || session.expiresAt.map({ $0 <= Date() }) == true {
+                throw NSError(domain: "RTrustPortal", code: 401, userInfo: [NSLocalizedDescriptionKey: tr("Portal registration expired", "Регистрация на сервере истекла")])
+            }
             request.setValue("Bearer " + session.token, forHTTPHeaderField: "Authorization")
         }
         if let body {
@@ -91,9 +94,22 @@ struct PortalClient {
         let capabilities = try await client.request("/portal/v2/capabilities")
         guard capabilities["version"] as? Int == 2, !code.isEmpty, code.count <= 512, !name.isEmpty, name.count <= 80 else { throw AppError.message("Invalid enrollment") }
         let response = try await client.request("/portal/v2/enroll", body: ["code": code, "name": name, "platform": "ios"])
-        guard let token = response["token"] as? String, token.count >= 40, (response["device_id"] as? Int ?? 0) > 0, (response["expires_in"] as? Int ?? 0) > 0 else { throw AppError.message("Invalid enrollment response") }
+        guard let token = response["token"] as? String, token.count >= 40, (response["device_id"] as? Int ?? 0) > 0, let lifetime = response["expires_in"] as? Int, lifetime > 0, lifetime <= 30 * 86400 else { throw AppError.message("Invalid enrollment response") }
         _ = try identifier(token, max: 128)
-        return PortalSession(origin: origin, token: token)
+        return PortalSession(origin: origin, token: token, expiresAt: Date().addingTimeInterval(TimeInterval(lifetime)))
+    }
+    /// Extends a still-valid device token. An expired token is not sent.
+    func renewAccess() async throws -> Date {
+        guard !session.token.isEmpty, !session.authExpired else { throw AppError.message("Register the device again") }
+        if let expiresAt = session.expiresAt, expiresAt <= Date() {
+            throw NSError(domain: "RTrustPortal", code: 401, userInfo: [NSLocalizedDescriptionKey: tr("Portal registration expired", "Регистрация на сервере истекла")])
+        }
+        let response = try await request("/portal/v2/token/renew", body: ["consent": true])
+        guard let lifetime = response["expires_in"] as? Int, lifetime > 0, lifetime <= 30 * 86400,
+              (response["scope"] as? String) == "portal_access_only" else { throw AppError.message("Invalid renewal") }
+        let deadline = Date().addingTimeInterval(TimeInterval(lifetime))
+        guard deadline > Date() else { throw AppError.message("Invalid renewal") }
+        return deadline
     }
     struct Metadata: Equatable {
         let revision: String
@@ -193,9 +209,41 @@ enum PortalSync {
             throw error
         }
     }
+    /// Writes a successful renewal only if the same registration is still stored.
+    static func storeRenewal(_ vault: inout VaultData, session: PortalSession, deadline: Date, now: Date) -> Bool {
+        guard let current = vault.portal, PortalClient.sameBytes(current.origin, session.origin),
+              PortalClient.sameBytes(current.token, session.token), !current.authExpired else { return false }
+        vault.portal?.expiresAt = deadline
+        vault.portal?.renewedAt = now
+        vault.portal?.authExpired = false
+        return true
+    }
+    static func renewIfDue(client: (PortalSession) -> PortalClient = { PortalClient(session: $0) },
+                           snapshot: () throws -> VaultData = { try ProfileVault.snapshot() },
+                           edit: ((inout VaultData) throws -> Void) throws -> Void = { try ProfileVault.edit($0) },
+                           now: () -> Date = { Date() }) async {
+        guard let session = try? snapshot().portal, session.renewalDue(at: now()) else { return }
+        do {
+            let deadline = try await client(session).renewAccess()
+            let committed = now()
+            try? edit { vault in _ = storeRenewal(&vault, session: session, deadline: deadline, now: committed) }
+        } catch {
+            if (error as NSError).domain == "RTrustPortal", (error as NSError).code == 401 || (error as NSError).code == 403 {
+                try? edit { vault in
+                    if let current = vault.portal, PortalClient.sameBytes(current.origin, session.origin),
+                       PortalClient.sameBytes(current.token, session.token) {
+                        vault.portal?.authExpired = true
+                        vault.portal?.backgroundSync = false
+                    }
+                }
+            }
+        }
+    }
     static func schedule() {
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
-        guard (try? ProfileVault.snapshot().portal?.backgroundSync) == true else { return }
+        // Token renewal does not require profile sync. An enrolled device keeps
+        // the task so a still-valid token is extended while the app is suspended.
+        guard (try? ProfileVault.snapshot().portal) != nil else { return }
         let task = BGAppRefreshTaskRequest(identifier: identifier)
         task.earliestBeginDate = Date().addingTimeInterval(3600)
         try? BGTaskScheduler.shared.submit(task)
@@ -204,7 +252,9 @@ enum PortalSync {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { task in
             let work = Task {
                 var success = false
+                await renewIfDue()
                 do { try await run(background: true); success = true } catch { }
+                success = true
                 schedule()
                 task.setTaskCompleted(success: success)
             }
