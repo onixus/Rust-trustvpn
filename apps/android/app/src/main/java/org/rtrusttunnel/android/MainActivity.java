@@ -45,6 +45,7 @@ public class MainActivity extends Activity {
     private static final class Row { String name, value; int color, valueColor; boolean ring; String note; }
 
     private String diagnosticExport;
+    private boolean githubBusy;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private String selectedId, pendingConnectId, liveProfileId, problemText = "";
     private ProfileVault vault;
@@ -1021,6 +1022,8 @@ public class MainActivity extends Activity {
         if (results.getChildCount() == 0) { TextView none = text(getString(R.string.v3_no_match), 14, p.muted, false); none.setPadding(dp(4), dp(16), 0, 0); results.addView(none); }
     }
     private void githubUpdate() {
+        if (githubBusy) return;
+        githubBusy = true;
         Toast.makeText(this, R.string.github_checking, Toast.LENGTH_SHORT).show();
         new Thread(() -> {
             try {
@@ -1039,6 +1042,8 @@ public class MainActivity extends Activity {
                 });
             } catch (Exception e) {
                 handler.post(() -> Toast.makeText(this, R.string.github_failed, Toast.LENGTH_LONG).show());
+            } finally {
+                githubBusy = false;
             }
         }).start();
     }

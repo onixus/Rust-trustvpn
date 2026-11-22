@@ -60,6 +60,7 @@ final class GithubUpdate {
         if (!dir.isDirectory() && !dir.mkdirs()) throw new IllegalStateException("dir");
         File out = new File(dir, ASSET);
         File part = new File(dir, ASSET + ".part");
+        part.delete();
         HttpURLConnection connection = open(assetUrl(release.tag, ASSET), true);
         try (InputStream in = connection.getInputStream(); FileOutputStream file = new FileOutputStream(part)) {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -74,6 +75,9 @@ final class GithubUpdate {
             }
             if (count != release.size || !hex(digest.digest()).equals(release.sha256))
                 throw new IllegalStateException("hash");
+        } catch (Exception e) {
+            part.delete();
+            throw e;
         } finally {
             connection.disconnect();
         }

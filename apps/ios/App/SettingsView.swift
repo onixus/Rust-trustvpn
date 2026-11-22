@@ -61,9 +61,9 @@ struct SettingsView: View {
                 return
             }
             let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-            if GithubVersion(tag) > GithubVersion(current),
-               let page = URL(string: "https://github.com/onixus/Rust-trustvpn/releases/tag/\(tag)"),
-               page.host == "github.com" {
+            let pageURL = "https://github.com/onixus/Rust-trustvpn/releases/tag/\(tag)"
+            if GithubVersion(tag) > GithubVersion(current), GithubTag.isSafe(tag),
+               let page = URL(string: pageURL), page.absoluteString == pageURL, page.host == "github.com" {
                 updateNote = tr("GitHub \(tag) is newer. Opening the release page.", "GitHub \(tag) новее. Открываю страницу релиза.")
                 await UIApplication.shared.open(page)
             } else {
@@ -71,6 +71,16 @@ struct SettingsView: View {
             }
         } catch {
             updateNote = tr("GitHub check failed.", "Проверка GitHub не удалась.")
+        }
+    }
+}
+
+/// A release tag may only be a version-like token. Anything else is not opened.
+private enum GithubTag {
+    static func isSafe(_ tag: String) -> Bool {
+        let rest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+        return !rest.isEmpty && rest.count <= 64 && rest.allSatisfy {
+            $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "_"
         }
     }
 }
