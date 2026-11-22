@@ -193,7 +193,10 @@ public class MainActivity extends Activity {
         host.addView(view, new FrameLayout.LayoutParams(-1, -1));
         syncBack();
         renderState();
+        if (tv() && slider != null) slider.post(slider::requestFocus);
     }
+
+    private boolean tv() { return getResources().getBoolean(R.bool.rtrust_tv); }
 
     // ---- State ------------------------------------------------------------------------
 
@@ -219,18 +222,19 @@ public class MainActivity extends Activity {
     }
     /** Why the app cannot check its own VPN path, or 0. */
     private int pathBlocked() {
-        if (Build.VERSION.SDK_INT < 31) return R.string.v3_check_needs_android12; // network ownership needs API 31
+        if (Build.VERSION.SDK_INT < 31 && !tv()) return R.string.v3_check_needs_android12; // phone ownership proof needs API 31
         if (routingExcludesSelf) return R.string.v3_check_app_excluded;
         return 0;
     }
     /** True when this app's VPN carries no IPv4 default route, so the test address may lawfully stay outside. */
     private boolean splitTunnel() {
-        if (Build.VERSION.SDK_INT < 31) return false; // checks never run there; see pathBlocked()
+        if (Build.VERSION.SDK_INT < 31 && !tv()) return false; // phone checks never run there; see pathBlocked()
         try {
             ConnectivityManager cm = getSystemService(ConnectivityManager.class);
-            for (Network network : cm.getAllNetworks()) {
+            Network owned = DiagnosticsDialog.vpn(cm, tv());
+            for (Network network : owned == null ? new Network[0] : new Network[]{owned}) {
                 NetworkCapabilities caps = cm.getNetworkCapabilities(network);
-                if (caps == null || !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) || caps.getOwnerUid() != android.os.Process.myUid()) continue;
+                if (caps == null || !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
                 LinkProperties links = cm.getLinkProperties(network);
                 if (links == null) return false;
                 for (RouteInfo route : links.getRoutes()) if (route.isDefaultRoute() && route.getDestination().getAddress() instanceof java.net.Inet4Address) return false;
@@ -496,14 +500,14 @@ public class MainActivity extends Activity {
         headline.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> { if (r - l != or - ol) v.post(this::fitHeadline); });
         description = text("", 14, p.muted, false); description.setLineSpacing(0, 1.2f); description.setPadding(0, dp(split ? 8 : 12), 0, dp(split ? 0 : 18));
         checksBox = column(); checksBox.setPadding(dp(16), dp(2), dp(16), dp(2)); checksBox.setBackground(rippled(glass(dp(24), p.card)));
-        checksBox.setClickable(true); checksBox.setFocusable(true); checksBox.setOnClickListener(v -> show(CHECKS));
+        checksBox.setClickable(true); checksBox.setFocusable(true); checksBox.setOnClickListener(v -> show(CHECKS)); tvFocus(checksBox);
         LinearLayout header = new LinearLayout(this); header.setGravity(Gravity.CENTER_VERTICAL); header.setPadding(dp(4), split ? 0 : dp(20), 0, dp(10));
         TextView label = text(getString(R.string.v3_section_profiles).toUpperCase(Locale.getDefault()), 11, p.muted, true); label.setLetterSpacing(0.1f);
         header.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
         TextView all = text(getString(R.string.v3_all_profiles) + "  →", 13, p.blueText, true); all.setPadding(dp(8), dp(6), 0, dp(6));
-        all.setOnClickListener(v -> show(PROFILES)); header.addView(all);
+        all.setClickable(true); all.setOnClickListener(v -> show(PROFILES)); tvFocus(all); header.addView(all);
         strip = column();
-        slider = new SlideButton(this); slider.setAction(this::toggle);
+        slider = new SlideButton(this); slider.setAction(this::toggle); if (tv()) slider.setDirect(true);
         LinearLayout.LayoutParams sliderParams = new LinearLayout.LayoutParams(-1, dp(64)); sliderParams.topMargin = dp(12);
         sliderParams.gravity = Gravity.CENTER_HORIZONTAL;
         // 85% of the column, centred: the width follows the parent once it is laid out.
@@ -575,7 +579,7 @@ public class MainActivity extends Activity {
      * Unfolded foldable or tablet: the window's shorter side is at least 600 dp. Folding
      * or unfolding recreates the activity, so the layout follows the posture.
      */
-    private boolean unfolded() { return getResources().getConfiguration().smallestScreenWidthDp >= 600; }
+    private boolean unfolded() { return !tv() && getResources().getConfiguration().smallestScreenWidthDp >= 600; }
     /** Up to this many profiles on Home; the rest are one tap away on the Profiles screen. */
     private static final int HOME_PROFILES = 5;
     /** Selected profile first, then its backups, then the rest; tap selects, long press opens actions. */
@@ -597,8 +601,8 @@ public class MainActivity extends Activity {
             boolean isSelected = info == selected, live = info.id.equals(liveProfileId);
             LinearLayout card = new LinearLayout(this); card.setGravity(Gravity.CENTER_VERTICAL); card.setPadding(dp(12), dp(12), dp(14), dp(12));
             GradientDrawable bg = glass(dp(22), isSelected ? (p.light ? 0xB3FFFFFF : p.blueSoft) : p.card);
-            if (isSelected) bg.setStroke(dp(1), Color.argb(140, Color.red(p.blueText), Color.green(p.blueText), Color.blue(p.blueText)));
-            card.setBackground(rippled(bg)); card.setClickable(true); card.setFocusable(true);
+            if (isSelected) bg.setStroke(dp(tv() ? 3 : 1), tv() ? 0xFF4DA3FF : Color.argb(140, Color.red(p.blueText), Color.green(p.blueText), Color.blue(p.blueText)));
+            card.setBackground(rippled(bg)); card.setClickable(true); card.setFocusable(true); tvFocus(card);
             card.addView(badge(info), iconParams());
             LinearLayout texts = column();
             TextView title = text(info.name, 16, p.text, true); title.setMaxLines(1); title.setEllipsize(TextUtils.TruncateAt.END); texts.addView(title);
@@ -651,7 +655,7 @@ public class MainActivity extends Activity {
         for (Info info : profiles) {
             if (!query.isEmpty() && !info.matches(query)) continue;
             LinearLayout card = new LinearLayout(this); card.setGravity(Gravity.CENTER_VERTICAL); card.setPadding(dp(14), dp(14), dp(6), dp(14));
-            card.setBackground(rippled(glass(dp(24), p.card))); card.setClickable(true); card.setFocusable(true);
+            card.setBackground(rippled(glass(dp(24), p.card))); card.setClickable(true); card.setFocusable(true); tvFocus(card);
             card.addView(badge(info), new LinearLayout.LayoutParams(dp(44), dp(44)));
             LinearLayout texts = column(); texts.setPadding(dp(12), 0, dp(8), 0);
             LinearLayout titleRow = new LinearLayout(this); titleRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -712,12 +716,14 @@ public class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this); scroll.setVerticalScrollBarEnabled(false);
         LinearLayout body = column(); body.setPadding(0, dp(14), 0, dp(16));
 
-        LinearLayout scan = column(); scan.setGravity(Gravity.CENTER); scan.setPadding(dp(16), dp(26), dp(16), dp(22));
-        scan.setBackground(rippled(round(0xFF05070A, dp(28)))); scan.setClickable(true); scan.setFocusable(true); scan.setOnClickListener(v -> qrCamera());
-        ImageView qr = new ImageView(this); qr.setImageDrawable(tinted(R.drawable.ic_qr, BUSY)); scan.addView(qr, new LinearLayout.LayoutParams(dp(72), dp(72)));
-        TextView scanTitle = text(getString(R.string.v3_scan), 16, 0xFFF4F5F7, true); scanTitle.setPadding(0, dp(14), 0, dp(2)); scan.addView(scanTitle);
-        scan.addView(text(getString(R.string.qr_camera_detail), 13, 0xFFC9D3E0, false));
-        body.addView(scan);
+        if (!tv()) {
+            LinearLayout scan = column(); scan.setGravity(Gravity.CENTER); scan.setPadding(dp(16), dp(26), dp(16), dp(22));
+            scan.setBackground(rippled(round(0xFF05070A, dp(28)))); scan.setClickable(true); scan.setFocusable(true); scan.setOnClickListener(v -> qrCamera());
+            ImageView qr = new ImageView(this); qr.setImageDrawable(tinted(R.drawable.ic_qr, BUSY)); scan.addView(qr, new LinearLayout.LayoutParams(dp(72), dp(72)));
+            TextView scanTitle = text(getString(R.string.v3_scan), 16, 0xFFF4F5F7, true); scanTitle.setPadding(0, dp(14), 0, dp(2)); scan.addView(scanTitle);
+            scan.addView(text(getString(R.string.qr_camera_detail), 13, 0xFFC9D3E0, false));
+            body.addView(scan);
+        }
 
         LinearLayout grid = new LinearLayout(this); grid.setPadding(0, dp(10), 0, dp(10));
         grid.addView(tile(R.drawable.ic_image, getString(R.string.v3_qr_photo), getString(R.string.qr_image_detail), false,
@@ -733,6 +739,7 @@ public class MainActivity extends Activity {
         TextView note = text(getString(R.string.v3_paste_note), 12, p.muted, false); paste.addView(note);
         TextView previewButton = text(getString(R.string.preview), 14, p.onBlue, true); previewButton.setGravity(Gravity.CENTER);
         previewButton.setBackground(rippled(round(p.light ? p.blueText : p.blue, dp(14)))); previewButton.setPadding(dp(18), 0, dp(18), 0);
+        previewButton.setClickable(true); tvFocus(previewButton);
         previewButton.setOnClickListener(v -> { String raw = input.getText().toString(); input.setText(""); if (!raw.trim().isEmpty()) preview(raw); });
         LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(-2, dp(44)); buttonParams.topMargin = dp(10); buttonParams.gravity = Gravity.END;
         paste.addView(previewButton, buttonParams);
@@ -1072,12 +1079,26 @@ public class MainActivity extends Activity {
     /** Card surface: opaque in the dark theme, translucent with a light rim in the light (glass) theme. */
     private GradientDrawable glass(int radius, int fill) { GradientDrawable bg = round(fill, radius); bg.setStroke(Math.max(1, dp(1)), p.cardStroke); return bg; }
     private Drawable rippled(Drawable content) { return new RippleDrawable(ColorStateList.valueOf(p.ripple), content, content); }
+    /** Foreground, not a background layer: the view pushes focused state into it on every move. */
+    private void tvFocus(View view) {
+        if (!tv()) return;
+        view.setFocusable(true);
+        view.setFocusableInTouchMode(true);
+        GradientDrawable ring = new GradientDrawable();
+        ring.setColor(Color.TRANSPARENT);
+        ring.setStroke(dp(3), 0xFF4DA3FF);
+        ring.setCornerRadius(dp(22));
+        android.graphics.drawable.StateListDrawable states = new android.graphics.drawable.StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_focused}, ring);
+        states.addState(new int[]{}, new ColorDrawable(Color.TRANSPARENT));
+        view.setForeground(states);
+    }
     private Drawable tinted(int id, int tint) { Drawable icon = getDrawable(id).mutate(); icon.setTint(tint); return icon; }
     private LinearLayout.LayoutParams weight(boolean gap) { LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -1, 1); if (gap) params.setMarginEnd(dp(10)); return params; }
     private LinearLayout.LayoutParams iconParams() { LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(40), dp(40)); params.setMarginEnd(dp(12)); return params; }
     private ImageButton circle(int icon, int description, Runnable click) {
         ImageButton button = new ImageButton(this); button.setImageDrawable(tinted(icon, p.text)); button.setBackground(rippled(glass(dp(22), p.chip)));
-        button.setContentDescription(getString(description)); button.setOnClickListener(v -> click.run()); return button;
+        button.setContentDescription(getString(description)); button.setOnClickListener(v -> click.run()); tvFocus(button); return button;
     }
     private LinearLayout header(String title, boolean close) {
         LinearLayout header = new LinearLayout(this); header.setGravity(Gravity.CENTER_VERTICAL);
@@ -1115,7 +1136,7 @@ public class MainActivity extends Activity {
         TextView pill = text(title, 16, p.light ? Color.WHITE : p.onBlue, true); pill.setGravity(Gravity.CENTER);
         pill.setCompoundDrawablesRelativeWithIntrinsicBounds(tinted(icon, p.light ? Color.WHITE : p.onBlue), null, null, null); pill.setCompoundDrawablePadding(dp(10));
         pill.setPadding(dp(20), 0, dp(20), 0); pill.setBackground(rippled(round(p.light ? p.blueText : p.blue, dp(29))));
-        pill.setClickable(true); pill.setFocusable(true); pill.setOnClickListener(v -> click.run()); return pill;
+        pill.setClickable(true); pill.setFocusable(true); pill.setOnClickListener(v -> click.run()); tvFocus(pill); return pill;
     }
     private LinearLayout row(int icon, String title, String detail, Runnable click) { return row(icon, title, detail, click, true); }
     /** Icon tile, title and detail. As a standalone card it carries its own glass surface. */
@@ -1129,7 +1150,7 @@ public class MainActivity extends Activity {
         texts.addView(text(title, 15, p.text, true));
         if (detail != null && !detail.isEmpty()) { TextView sub = text(detail, 12, p.muted, false); sub.setPadding(0, dp(2), 0, 0); sub.setMaxLines(2); sub.setEllipsize(TextUtils.TruncateAt.END); texts.addView(sub); }
         row.addView(texts, new LinearLayout.LayoutParams(0, -2, 1));
-        row.setClickable(true); row.setFocusable(true); row.setOnClickListener(v -> click.run());
+        row.setClickable(true); row.setFocusable(true); row.setOnClickListener(v -> click.run()); tvFocus(row);
         return row;
     }
     /** Bento tile; the wide one is the filled primary action. */
@@ -1145,7 +1166,7 @@ public class MainActivity extends Activity {
         if (primary) tile.addView(head, new LinearLayout.LayoutParams(0, -2, 1)); else tile.addView(head);
         TextView sub = text(detail, 12, primary ? fg : p.muted, false); sub.setMaxLines(2); sub.setEllipsize(TextUtils.TruncateAt.END); if (!primary) sub.setPadding(0, dp(4), 0, 0);
         tile.addView(sub);
-        tile.setClickable(true); tile.setFocusable(true); tile.setOnClickListener(v -> click.run());
+        tile.setClickable(true); tile.setFocusable(true); tile.setOnClickListener(v -> click.run()); tvFocus(tile);
         return tile;
     }
     /** Left-to-right rows that wrap, for tags on narrow phones. */

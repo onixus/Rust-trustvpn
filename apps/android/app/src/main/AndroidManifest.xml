@@ -8,7 +8,7 @@
     <!-- Enumerate network-capable apps for the local VPN allowlist, including apps without launcher activities. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
     <queries><intent><action android:name="android.intent.action.VIEW" /><data android:mimeType="application/vnd.android.package-archive" /></intent></queries>
-    <application android:label="R-TrustTunnel" android:theme="@style/Theme.RTrust" android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:usesCleartextTraffic="false" android:supportsRtl="true">
+    <application android:label="${appLabel}" android:theme="@style/Theme.RTrust" android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:usesCleartextTraffic="false" android:supportsRtl="true">
         <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.updates" android:exported="false" android:grantUriPermissions="true">
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/update_paths" />
         </provider>

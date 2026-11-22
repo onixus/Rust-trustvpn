@@ -1,0 +1,6 @@
+plugins { id 'com.android.library' }
+android {
+    namespace 'org.rtrusttunnel.android.tv'
+    compileSdk 36
+    defaultConfig { minSdk 29 }
+}
