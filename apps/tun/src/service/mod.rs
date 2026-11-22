@@ -347,14 +347,7 @@ async fn serve(
                 }
                 return reply(&mut stream, State::Error, &error).await;
             }
-            (
-                profile,
-                vec![],
-                Some(dns),
-                None,
-                fallbacks,
-                block_ipv6,
-            )
+            (profile, vec![], Some(dns), None, fallbacks, block_ipv6)
         }
         _ => return reply(&mut stream, State::Error, "Start or Recover required").await,
     };

@@ -2298,10 +2298,8 @@ impl App {
             } else {
                 pick_list(Mode::ALL, Some(self.mode), |_| Message::Tick)
             };
-            let mut block_ipv6 = checkbox(self.saved_connection.block_ipv6).label(ui::t(
-                "Полностью блокировать IPv6",
-                "Block IPv6 completely",
-            ));
+            let mut block_ipv6 = checkbox(self.saved_connection.block_ipv6)
+                .label(ui::t("Полностью блокировать IPv6", "Block IPv6 completely"));
             if self.can_change_profiles() {
                 block_ipv6 = block_ipv6.on_toggle(Message::BlockIpv6);
             }
@@ -2326,8 +2324,15 @@ impl App {
                     "IPv4, IPv6 and DNS of the whole computer through the VPN. Forwarding between interfaces is blocked. systemd-resolved is required.",
                 )
             };
-            panel = column![mode, dns, block_ipv6].spacing(6).push(text(family).size(12))
-                .push(button("Сбросить блокировку после аварии").on_press_maybe(self.can_change_profiles().then_some(Message::RecoverService)));
+            panel = column![mode, dns, block_ipv6]
+                .spacing(6)
+                .push(text(family).size(12))
+                .push(
+                    button("Сбросить блокировку после аварии").on_press_maybe(
+                        self.can_change_profiles()
+                            .then_some(Message::RecoverService),
+                    ),
+                );
         }
         panel.into()
     }

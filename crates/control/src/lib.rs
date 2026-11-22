@@ -543,6 +543,11 @@ impl Reply {
         }
         let mut response = Response::new(state, message);
         response.version = version;
+        // A previous updater only accepts the keys it already knew. The
+        // current client is the one that asks for the IPv6 block.
+        if version != VERSION {
+            response.capabilities.block_ipv6 = false;
+        }
         Self::Current(Box::new(response))
     }
 }
@@ -862,10 +867,12 @@ mod tests {
             "system_probes",
         ];
         for freshness in [false, true] {
-            let mut response = Response::new(State::Idle, "reserved");
-            response.version = VERSION - 1;
+            let Reply::Current(mut response) = Reply::new(VERSION - 1, State::Idle, "reserved")
+            else {
+                panic!("previous version must stay a current-shaped reply");
+            };
             response.capabilities.managed_access_freshness = freshness;
-            let value = serde_json::to_value(&response).unwrap();
+            let value = serde_json::to_value(response.as_ref()).unwrap();
             let keys = |value: &serde_json::Value| {
                 let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
                 keys.sort();
@@ -890,6 +897,8 @@ mod tests {
             assert_eq!(value["version"], VERSION - 1);
             assert_eq!(value["state"], "Idle");
         }
+        let current = serde_json::to_value(Response::new(State::Idle, "reserved")).unwrap();
+        assert_eq!(current["capabilities"]["block_ipv6"], true);
     }
     #[test]
     fn selection_explain_matches_the_prefixes_installed_with_runtime_inputs() {
@@ -1144,7 +1153,13 @@ mod tests {
         let mut legacy = value.clone();
         legacy.as_object_mut().unwrap().remove("block_ipv6");
         let parsed: Command = serde_json::from_value(legacy).unwrap();
-        assert!(matches!(parsed, Command::StartFull { block_ipv6: false, .. }));
+        assert!(matches!(
+            parsed,
+            Command::StartFull {
+                block_ipv6: false,
+                ..
+            }
+        ));
         let old_service = serde_json::json!({
             "managed_access_freshness": true,
             "observations_schema": 1,

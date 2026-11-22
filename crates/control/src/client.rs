@@ -311,7 +311,9 @@ impl Client {
         {
             return Err("Служба не поддерживает резервные профили; обновите службу".into());
         }
-        if let Command::StartFull { block_ipv6: true, .. } = inspected
+        if let Command::StartFull {
+            block_ipv6: true, ..
+        } = inspected
             && !capabilities.block_ipv6
         {
             return Err(

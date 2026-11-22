@@ -1217,8 +1217,7 @@ impl App {
         if self.connecting || self.session.is_some() {
             self.connection_ipv6
         } else {
-            self.current().is_some_and(|p| p.endpoint.has_ipv6)
-                && !self.saved_connection.block_ipv6
+            self.current().is_some_and(|p| p.endpoint.has_ipv6) && !self.saved_connection.block_ipv6
         }
     }
     /// Whether the connect/disconnect pill is shown: always on Home, and during a
