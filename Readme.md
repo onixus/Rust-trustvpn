@@ -6,7 +6,7 @@ R-TrustTunnel is a native VPN client written in Rust for **TrustTunnel**, **Hyst
 
 The repository contains the Windows, Linux and macOS desktop clients with their privileged tunnel services, the Android VpnService app, an iOS Network Extension preview and the shared Rust crates for transport, profiles, storage and control. The server belongs to [onixus/tunnel](https://github.com/onixus/tunnel).
 
-> **Development preview.** [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0) was published on October 28, 2026 from `232fd7b` (workspace 0.7.0, update sequence 13). Publication does not establish installed-package acceptance or production readiness: see [project status and open gates](docs/project-status.md).
+> **Development preview.** [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0) was published on October 28, 2026 from `232fd7b` (workspace 0.7.0, update sequence 13). `main` is newer than that tag; the published assets do not include later commits. Publication does not establish installed-package acceptance or production readiness: see [project status and open gates](docs/project-status.md).
 
 ## Contents
 
@@ -27,7 +27,7 @@ The repository contains the Windows, Linux and macOS desktop clients with their 
 | --- | --- | --- |
 | Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` | Not Authenticode signed; SmartScreen may warn. Update/rollback of this exact package has not been accepted. |
 | macOS Apple Silicon | `R-TrustTunnel-macOS-arm64-UI-Choices.dmg` | Native, WebView and Both PKGs in one DMG: install exactly one. Ad-hoc sealed, not Developer ID signed or notarized. System-VPN acceptance is incomplete ([release assets](docs/releases/README.md)). |
-| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` | 0.7.0 / 70001, release key introduced in 0.6.0. Installs over 0.6.x and keeps profiles; 0.5.x and older must be uninstalled first, which removes local profiles. |
+| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` | 0.7.0 / 70001, release key introduced in 0.6.0. Installs over 0.6.x and keeps profiles; 0.5.x and older must be uninstalled first, which removes local profiles. Android TV is a separate pre-release, [v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3), not this APK. |
 | Linux x86_64, Wayland | Native / WebView / Both Flatpaks and `rtrust-host-0.7.0-6` | System VPN needs the separate host package; update it together with the app. |
 | iOS arm64 / Simulator | Archives from [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0) | No iOS assets since v0.6.0. The device archive requires Apple signing and is not an installable IPA. |
 
@@ -57,6 +57,8 @@ Since v0.6.2:
 
 Plain-language notes and upgrade steps are in [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md). Earlier changes (wake reconnect, guard proofs, UI variant 3, honest connection status, guarded recovery) are in the [release records](docs/releases/).
 
+On `main` after the v0.7.0 tag, and **not** in the published 0.7.0 packages: a GitHub Releases lookup that checks `SHA256SUMS` and does not install by itself ([secure updates](docs/secure-updates.md)); an optional whole-computer IPv6 block; portal token renewal for a saved config; journal rotation by level; a separate Android TV package. See [project status](docs/project-status.md).
+
 ## Features
 
 ### Client and profiles
@@ -85,7 +87,7 @@ Plain-language notes and upgrade steps are in [docs/releases/v0.7.0.md](docs/rel
 | Windows x64 | Native UI, Wintun/SCM service and WFP guard. Production full-tunnel checks passed for TrustTunnel and Hysteria 2. A real 30-minute S3 sleep/wake Hysteria session passed, including reconnect and traffic checks; Always-on also remained blocked until automatic recovery. | Cold-boot coverage, broader sleep/network combinations, installer signing. |
 | Linux x86_64 / ARM64 | Wayland-only desktop, TUN host service, nftables and systemd-resolved. Native/WebView/Both packaging, physical KDE/Wayland smoke, signed Flatpak flow, TrustTunnel/Hysteria full-tunnel and network-handoff coverage exist. | More physical reboot/sleep coverage and final installer polish across distributions. |
 | macOS Apple Silicon | Native/WebView/Both preview, root LaunchDaemon and utun system tunnel. TrustTunnel live IPv4/IPv6 TCP/UDP/ICMP, DNS, reconnect and service-crash recovery passed. Installed sleep/wake passed on two Macs. | Boot Always-on, roam/network handoff, clean install on another Mac, signed automatic update/rollback, Developer ID/notarization, installed Hysteria full-tunnel acceptance. |
-| Android arm64 / x86_64 | Native VpnService, encrypted vault, file/text/QR import, app selection, portal sync, Always-on/lockdown and TrustTunnel/Hysteria support. Physical POCO and Huawei testing covers real traffic and recovery paths; POCO passed 30 minutes of forced deep Doze. | More OEMs (Pixel/Samsung), reboot-before-first-unlock and long soak. MIUI force-stop can leave lockdown active without restarting the VPN service. While the VPN process is dead, lockdown is incomplete: on an Android 16 emulator other apps' DNS and Google Play services traffic went direct. A profile imported without the portal resolves its endpoint before the blocking TUN exists. |
+| Android arm64 / x86_64 | Native VpnService, encrypted vault, file/text/QR import, app selection, portal sync, Always-on/lockdown and TrustTunnel/Hysteria support. Physical POCO and Huawei testing covers real traffic and recovery paths; POCO passed 30 minutes of forced deep Doze. A separate TV package (`org.rtrusttunnel.android.tv`) is published as [v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3). | More OEMs (Pixel/Samsung), reboot-before-first-unlock and long soak. TV launcher install of the shipped phone APK is not accepted. MIUI force-stop can leave lockdown active without restarting the VPN service. While the VPN process is dead, lockdown is incomplete: on an Android 16 emulator other apps' DNS and Google Play services traffic went direct. A profile imported without the portal resolves its endpoint before the blocking TUN exists. |
 | iOS | Swift/Network Extension preview: import/export, QR, portal sync, On Demand, widget. | Apple signing and a device-installable build. See [iOS](docs/ios.md). |
 
 ## Build

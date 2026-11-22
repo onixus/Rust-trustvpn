@@ -6,7 +6,7 @@ R-TrustTunnel — нативный VPN-клиент на Rust для **TrustTunn
 
 В репозитории находятся desktop-клиенты Windows, Linux и macOS с привилегированными службами туннеля, Android-приложение на VpnService, preview iOS Network Extension и общие Rust-крейты транспорта, профилей, хранилища и управления. Сервер относится к [onixus/tunnel](https://github.com/onixus/tunnel).
 
-> **Development preview.** [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0) опубликован 28 октября 2026 года из `232fd7b` (workspace 0.7.0, update sequence 13). Публикация не доказывает приёмку установленного пакета или готовность к production: см. [состояние проекта и открытые gates](docs/project-status.md).
+> **Development preview.** [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0) опубликован 28 октября 2026 года из `232fd7b` (workspace 0.7.0, update sequence 13). `main` новее этого тега; опубликованные файлы поздние коммиты не содержат. Публикация не доказывает приёмку установленного пакета или готовность к production: см. [состояние проекта и открытые gates](docs/project-status.md).
 
 ## Содержание
 
@@ -27,7 +27,7 @@ R-TrustTunnel — нативный VPN-клиент на Rust для **TrustTunn
 | --- | --- | --- |
 | Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` | Без Authenticode-подписи, SmartScreen может предупредить. Update/rollback именно этого пакета не принят. |
 | macOS Apple Silicon | `R-TrustTunnel-macOS-arm64-UI-Choices.dmg` | PKG Native, WebView и Both в одном DMG: установите ровно один. Ad-hoc sealed, без Developer ID и notarization. Приёмка системного VPN не завершена ([состав релиза](docs/releases/README.md)). |
-| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` | 0.7.0 / 70001, ключ релиза введён в 0.6.0. Ставится поверх 0.6.x с сохранением профилей; 0.5.x и старше нужно сначала удалить, локальные профили при этом удаляются. |
+| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` | 0.7.0 / 70001, ключ релиза введён в 0.6.0. Ставится поверх 0.6.x с сохранением профилей; 0.5.x и старше нужно сначала удалить, локальные профили при этом удаляются. Android TV — отдельный pre-release [v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3), не этот APK. |
 | Linux x86_64, Wayland | Native / WebView / Both Flatpak и `rtrust-host-0.7.0-6` | Системному VPN нужен отдельный host package; обновляйте его вместе с приложением. |
 | iOS arm64 / Simulator | Архивы из [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0) | Начиная с v0.6.0 iOS assets нет. Device archive требует Apple signing и не является готовым IPA. |
 
@@ -57,6 +57,8 @@ Desktop-интерфейс 0.7.0 с синтетическими профиля�
 
 Описание простым языком и порядок обновления — в [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md). Более ранние изменения (переподключение после сна, доказательства защиты, UI вариант 3, честный статус подключения, восстановление с защитой) — в [записях релизов](docs/releases/).
 
+В `main` после тега v0.7.0 и **не** в опубликованных пакетах 0.7.0: проверка GitHub Releases со сверкой `SHA256SUMS` без самостоятельной установки ([обновления](docs/secure-updates.md)); необязательная локальная блокировка IPv6 в режиме «весь компьютер»; продление токена портала для сохранённого конфига; ротация журнала по уровню; отдельный пакет Android TV. См. [состояние проекта](docs/project-status.md).
+
 ## Возможности
 
 ### Клиент и профили
@@ -85,7 +87,7 @@ Desktop-интерфейс 0.7.0 с синтетическими профиля�
 | Windows x64 | Native UI, Wintun/SCM-служба и WFP guard. Production full-tunnel проверки прошли для TrustTunnel и Hysteria 2. Реальный 30-минутный S3 sleep/wake с Hysteria прошёл reconnect и traffic checks; Always-on также оставался заблокированным до автоматического восстановления. | Cold boot, более широкий набор sleep/network сценариев, подпись установщика. |
 | Linux x86_64 / ARM64 | Wayland-only desktop, TUN host service, nftables и systemd-resolved. Есть Native/WebView/Both packaging, физический KDE/Wayland smoke, подписанный Flatpak flow, TrustTunnel/Hysteria full-tunnel и network handoff. | Больше физических reboot/sleep проверок и финальная полировка установки на разных дистрибутивах. |
 | macOS Apple Silicon | Native/WebView/Both preview, root LaunchDaemon и системный туннель через utun. Для TrustTunnel пройдены live IPv4/IPv6 TCP/UDP/ICMP, DNS, reconnect и восстановление после падения службы. Sleep/wake установленного пакета прошёл на двух Mac. | Boot Always-on, roam/network handoff, clean install на другом Mac, подписанное auto update/rollback, Developer ID/notarization, приёмка установленного Hysteria full-tunnel. |
-| Android arm64 / x86_64 | Native VpnService, encrypted vault, file/text/QR import, выбор приложений, portal sync, Always-on/lockdown и TrustTunnel/Hysteria. Физические POCO и Huawei проверены на реальном трафике и восстановлении; POCO прошёл 30 минут forced deep Doze. | Дополнительные OEM (Pixel/Samsung), reboot-before-first-unlock и длительный soak. На MIUI force-stop может оставить lockdown активным без рестарта VPN-службы. Пока процесс VPN мёртв, lockdown неполный: на эмуляторе Android 16 DNS других приложений и трафик Google Play services шли напрямую. Профиль, импортированный без портала, резолвит endpoint до появления блокирующего TUN. |
+| Android arm64 / x86_64 | Native VpnService, encrypted vault, file/text/QR import, выбор приложений, portal sync, Always-on/lockdown и TrustTunnel/Hysteria. Физические POCO и Huawei проверены на реальном трафике и восстановлении; POCO прошёл 30 минут forced deep Doze. Отдельный TV-пакет (`org.rtrusttunnel.android.tv`) опубликован как [v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3). | Дополнительные OEM (Pixel/Samsung), reboot-before-first-unlock и длительный soak. Установка баннера телефонного APK на ТВ не принята. На MIUI force-stop может оставить lockdown активным без рестарта VPN-службы. Пока процесс VPN мёртв, lockdown неполный: на эмуляторе Android 16 DNS других приложений и трафик Google Play services шли напрямую. Профиль, импортированный без портала, резолвит endpoint до появления блокирующего TUN. |
 | iOS | Preview на Swift/Network Extension: import/export, QR, portal sync, On Demand, widget. | Apple signing и сборка для установки на устройство. См. [iOS](docs/ios.md). |
 
 ## Сборка

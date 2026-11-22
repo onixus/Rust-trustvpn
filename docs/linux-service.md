@@ -1,14 +1,21 @@
 # Linux-служба и TUN из native UI
 
-## Актуальный Linux-набор: v0.6.0
+## Актуальный Linux-набор: v0.7.0
 
-Самые новые Linux-пакеты — в [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0)
-(13 октября 2026): x86_64 Flatpak **Native / WebView / Both** и host-пакет
-`rtrust-host-0.6.0-7-x86_64.pkg.tar.gz`. В v0.6.1 Linux-пакетов нет. Среди файлов
-v0.6.0 нет отдельных `.sig` и `rtrusttunnel.gpg`, поэтому сверяйте загрузки по
-`SHA256SUMS` и source manifest релиза; шаги с GPG ниже относятся к v0.3.2-ui.2.
-Приёмка установленного Linux-пакета 0.6.0 (ARM64, reboot, sleep) не проводилась —
-см. [v0.6.0](releases/v0.6.0.md#acceptance-status).
+Самые новые Linux-пакеты — в [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0)
+(28 октября 2026): x86_64 Flatpak **Native / WebView / Both** и host-пакет
+`rtrust-host-0.7.0-6`. Обновляйте host вместе с приложением. Среди файлов релиза
+нет отдельных `.sig` и `rtrusttunnel.gpg`, поэтому сверяйте загрузки по
+`SHA256SUMS` и source manifest; шаги с GPG ниже относятся к v0.3.2-ui.2.
+Приёмка установленного пакета 0.7.0 (ARM64, reboot, sleep) этой сверкой не
+проводилась — см. [v0.7.0](releases/v0.7.0.md). На установленном Flatpak 0.7.0
+строки Route и Connectivity оставались пустыми, потому что в sandbox нет `ip`;
+исправление netlink есть в main с [#121](https://github.com/onixus/Rust-trustvpn/pull/121)
+и в скачанный релиз 0.7.0 не входит.
+
+Предыдущий набор с Linux-пакетами до 0.7.0 — [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0)
+(`rtrust-host-0.6.0-7`) и [v0.6.2](releases/v0.6.2.md) (`rtrust-host-0.6.2-12`).
+В v0.6.1 Linux-пакетов нет.
 
 ## Предыдущий UI refresh: v0.3.2-ui.2
 

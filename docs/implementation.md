@@ -1,21 +1,25 @@
-# Состояние реализации — 28 октября 2026
+# Состояние реализации — 23 ноября 2026
 
-Workspace: **0.7.0** (desktop update sequence 13, Android
-0.7.0 / 70001, iOS 0.7.0 / 70001). Готовится релиз [v0.7.0](releases/v0.7.0.md):
-VLESS через CDN (#112), журнал неудачных подключений (#114), причины остановки
-транспорта на macOS (#113), managed access freshness на macOS (#115) и
-проверка guard на Windows (#116).
+Workspace: **0.7.0** (desktop update sequence 13, control IPC v7, телефонный
+Android 0.7.0 / 70001, iOS 0.7.0 / 70001). Опубликованный Latest —
+[v0.7.0](releases/v0.7.0.md) от 28 октября из `232fd7b`: VLESS через CDN (#112),
+журнал неудачных подключений (#114), причины остановки транспорта на macOS
+(#113), managed access freshness на macOS (#115) и проверка guard на Windows
+(#116). Android TV — отдельный pre-release
+[v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3)
+(`org.rtrusttunnel.android.tv`, 70004), не замена телефонного APK.
 
-[v0.6.2](releases/v0.6.2.md) опубликован 21 октября из `4123160`:
-Windows, macOS (UI Choices DMG), Linux (Flatpak, `rtrust-host-0.6.2-12`) и Android.
+`origin/main` `04f0f85` новее тега на 44 коммита. В исходниках после релиза:
+проверка GitHub Releases (#131), локальная блокировка IPv6 в полном туннеле
+(#129), продление токена портала (#127), ротация журнала по уровню и последние
+10 эпизодов reconnect (#124/#128), handshake 10 с и причина остановки на
+Windows (#125), Route/Connectivity в Linux Flatpak (#121), простой dataplane
+(#122), пакет Android TV и баннер leanback (#130/#132). Эти изменения **не**
+входят в скачанный v0.7.0. Границы — в [сводке](project-status.md).
 
-Тег `v0.6.2` соответствует main `4123160`; в него вошли UI v3, Linux TUI,
-service system probes, IPC v7 и исправления wake/liveness/SOCKS recovery
-(#69–#106). Архивы iOS по-прежнему опубликованы только в v0.5.0.
-Основание сверки — исходники тега, диффы merged PR и открытый
-[документационный PR #109](https://github.com/onixus/Rust-trustvpn/pull/109).
-[Сводка issue и доказательств](project-status.md) отделяет реализацию,
-публикацию и приёмку точного установленного пакета.
+[v0.6.2](releases/v0.6.2.md) опубликован 21 октября из `4123160` и остаётся
+предыдущим desktop/Android релизом. Архивы iOS по-прежнему опубликованы только
+в v0.5.0.
 
 Серверная реализация и deployment принадлежат
 [onixus/tunnel](https://github.com/onixus/tunnel); здесь остаются клиенты,
@@ -25,21 +29,22 @@ shared Rust core, desktop services и client-side portal integration.
 
 | Область | Текущее состояние |
 | --- | --- |
-| Профили | Endpoint/client TOML, R-TrustTunnel JSON, tt://, hy2://, hysteria2://, Hysteria YAML/JSON и awg-quick; preview/validation, loss-aware export, redaction секретов. |
+| Профили | Endpoint/client TOML, R-TrustTunnel JSON, tt://, hy2://, hysteria2://, vless://, Hysteria YAML/JSON и awg-quick; preview/validation, loss-aware export, redaction секретов. |
 | Хранилище | Зашифрованный vault без plaintext fallback. Desktop использует OS credential store; Android — Android Keystore. |
 | TrustTunnel | Нативные Rust HTTP/2 и HTTP/3 transports, TCP/UDP, DNS и системный TUN dataplane. Явный выбор transport без скрытого fallback для профиля с фиксированным protocol. |
 | Hysteria 2 | QUIC/HTTP3 auth, TCP/UDP, Salamander/Gecko, port hopping, Brutal, congestion settings, TLS SNI/pinSHA256, custom CA и mTLS credentials. |
 | AmneziaWG 3 | In-process WireGuard transport с AmneziaWG 3.1 obfuscation и импортом awg-quick. |
+| VLESS (preview) | WebSocket + TLS за CDN, TCP и UDP до 8190 байт, без ICMP и без бинарника Xray. XHTTP импортируется, но не подключается. [VLESS](vless.md). |
 | Windows | Native desktop, Wintun/SCM service, WFP fail-closed, full-tunnel acceptance, sleep/wake recovery и signed metadata updater. |
 | Linux | Wayland desktop, TUN host service, nftables/systemd-resolved, Native/WebView/Both Flatpak, signed install/update/rollback flow. |
 | macOS | Native/WebView/Both packaging, LaunchDaemon/utun system path, glass UI toggle, live TrustTunnel acceptance; часть system-VPN/update acceptance ещё открыта. |
-| Android | VpnService, encrypted vault, file/text/QR import, app routing, portal sync, Always-on/lockdown, resizable widget и Quick Settings tile, managed recovery, следование за предпочтительной сетью после handoff, настройка учёта трафика VPN; minSdk 29, targetSdk 36, versionCode 60202, versionName 0.6.2; APK опубликован в v0.6.2. UI вариант 3, VPN-bound checks (#73), исправление start/stop (#80), обработка link changes (#86/#89) и sleep recovery (#92). |
+| Android | VpnService, encrypted vault, file/text/QR import, app routing, portal sync, Always-on/lockdown, resizable widget и Quick Settings tile, managed recovery, следование за предпочтительной сетью после handoff, настройка учёта трафика VPN; minSdk 29, targetSdk 36. Телефон: versionCode 70001, versionName 0.7.0, APK в v0.7.0. TV: отдельный applicationId, 0.7.1-tv.3 / 70004, leanback-баннер и у телефонного APK на ТВ (#132). UI вариант 3, VPN-bound checks (#73), исправление start/stop (#80), обработка link changes (#86/#89) и sleep recovery (#92). |
 | iOS | Preview на Swift/Network Extension: import/export, QR, portal sync, On Demand, widget; device archive требует Apple signing. |
 | Routing | Desktop IPv4 TUN include/exclude, LAN bypass, profile routing и server-assigned route groups. Route groups не используются Android/iOS. |
 | Linux TUI | `apps/tui` поверх общего desktop Controller: профили, connect/disconnect, SOCKS/TUN/Full настройки; portal/export/system diagnostics остаются в GUI. Installed TUN/full acceptance через TUI — NOT RUN. |
 | Proxy | SOCKS5 и HTTP-запросы на mixed desktop proxy port. Native UI при Degraded останавливает listener и повторяет тот же профиль/порт с recovery budget (#104); без смены режима или direct fallback. Обычные health errors и неудачный ручной Start не запускают этот retry. |
-| Обновления | Опубликованный desktop sequence 9 исправляет ошибку идентичности старой 0.5.0 сборки; на Windows пройден реальный 7→9 update, forced unhealthy install, rollback на 7 и повторный update на 9. Текущие исходники — sequence 12; v0.6.2 опубликован. Наличие release assets не подтверждает продвижение update-channel latest или подписи точного пакета. Для автоотката 10→9 служба Windows допускает от апдейтера sequence 9 (control IPC v1) только `PrepareUpdate` и отвечает в форме v1; покрыто unit-тестами; 2026-10-13 на Windows-стенде пройден 9→10 с принудительным откатом и повтором на манифестах с лабораторной подписью (продакшен-подпись sequence 10 и Authenticode не проверялись) (см. [v0.6.0](releases/v0.6.0.md#compatibility)). |
-| Наблюдения и диагностика | Типизированные observations с generations, события сети/пробуждения, route explain, system-path diagnostics с verdict/actions и автоматическими проверками; control IPC v7 (system probes только при просмотре UI). |
+| Обновления | Подписанный канал: Ed25519, sequence 13 в исходниках и в теге v0.7.0. Sequence 9 чинит идентичность старой 0.5.0 сборки; релизы 0.6.0–0.6.2 — sequences 10–12. Наличие release assets не подтверждает продвижение update-channel `latest` или подписи точного пакета. С #131 клиенты умеют смотреть GitHub Releases и сверять байты с `SHA256SUMS`; это не подпись издателя и не установка. Для автоотката 10→9 служба Windows допускает от апдейтера sequence 9 (control IPC v1) только `PrepareUpdate` и отвечает в форме v1 (см. [v0.6.0](releases/v0.6.0.md#compatibility), [secure updates](secure-updates.md)). |
+| Наблюдения и диагностика | Типизированные observations с generations, события сети/пробуждения, route explain, system-path diagnostics с verdict/actions и автоматическими проверками; control IPC v7 (system probes только при просмотре UI). Журнал службы ротируется по `level` и хранит 10 последних эпизодов reconnect ([журнал](diagnostics-journal.md)). |
 | Recovery | Opt-in восстановление через разрешённые резервные профили (обычная сессия на desktop; Always-on — только Linux/Windows), guard не снимается; macOS/iOS Always-on fallback recovery не поддерживается. Android Always-on reconnect на текущей сети добавлен в #63; переключение на резервный профиль этим не подтверждается. |
 
 ## Проверки, относящиеся к 0.5.0 rebuild.9 (история)
@@ -51,6 +56,13 @@ shared Rust core, desktop services и client-side portal integration.
 - Windows latest переведён на update sequence 9; installed updater распознаёт sequence 9 как текущую.
 - macOS automatic-update promotion пока withheld.
 - Android/iOS binaries в rebuild.9 не пересобирались; используются артефакты исходного v0.5.0.
+
+## Приёмка 0.7.0 и границы исторических результатов
+
+- Запись [v0.7.0](releases/v0.7.0.md#acceptance-status) оставляет installed
+  packages тега **NOT RUN**. Коммиты после `232fd7b` в этот тег не входят.
+- Android TV `v0.7.1-tv.3` опубликован как pre-release; установка на ТВ и
+  проверка, что телефонный лаунчер не получил баннер, в этой сверке — NOT RUN.
 
 ## Приёмка 0.6.2 и границы исторических результатов
 
@@ -107,5 +119,5 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 Подробные platform-specific ограничения и acceptance evidence находятся в:
 [Windows](windows-service.md), [Linux](linux-service.md), [macOS](macos-system.md),
 [Android](android.md), [iOS](ios.md), [Hysteria 2](hysteria2.md),
-[AmneziaWG](amneziawg.md), [secure updates](secure-updates.md) и
-[release v0.5.0](releases/v0.5.0.md).
+[AmneziaWG](amneziawg.md), [VLESS](vless.md), [secure updates](secure-updates.md) и
+[release v0.7.0](releases/v0.7.0.md).
