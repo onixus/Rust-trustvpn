@@ -137,15 +137,15 @@ impl App {
                     Err(e) => self.status = e,
                 }
             }
-            Renew if !self.busy => {
+            Renew if !self.busy && !self.portal_auto_renewing => {
                 if let Some(client) = self.portal.client.clone() {
                     self.busy = true;
                     return task(renew_saved(client), Renewed);
                 }
             }
-            AutoRenew if !self.busy => {
+            AutoRenew if !self.busy && !self.portal_auto_renewing => {
                 let existing = self.portal.client.clone();
-                self.busy = true;
+                self.portal_auto_renewing = true;
                 return task(
                     async move {
                         let client = match existing {
@@ -168,6 +168,7 @@ impl App {
             }
             Renewed(result) => {
                 self.busy = false;
+                self.portal_auto_renewing = false;
                 match result {
                     Ok(client) => {
                         let renewed = client.expires_at().is_some_and(|deadline| {

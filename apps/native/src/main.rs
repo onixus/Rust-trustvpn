@@ -246,6 +246,8 @@ struct App {
     sync_state: sync::State,
     /// Last successful automatic portal-token renewal. Not a VPN lease.
     portal_renewed_at: Option<std::time::Instant>,
+    /// Background renewal is in flight. It must not freeze close or autosave.
+    portal_auto_renewing: bool,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     intent: intent::State,
     store_conflict: Option<(rtrust_store::Vault, Option<Vec<u8>>)>,
@@ -441,6 +443,7 @@ impl App {
             pending_owner: None,
             sync_state: sync::State::default(),
             portal_renewed_at: None,
+            portal_auto_renewing: false,
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             intent: intent::State::default(),
             store_conflict: None,
