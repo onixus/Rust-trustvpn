@@ -1212,7 +1212,13 @@ impl App {
                     let (task, handle) = Task::perform(
                         async move {
                             Session::start_authorized(
-                                profile, fallbacks, mode, port, selection, (dns, block_ipv6), lease,
+                                profile,
+                                fallbacks,
+                                mode,
+                                port,
+                                selection,
+                                (dns, block_ipv6),
+                                lease,
                             )
                             .await
                             .map_err(|e| e.to_string())
