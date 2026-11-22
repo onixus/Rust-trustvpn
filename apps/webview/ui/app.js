@@ -7,6 +7,7 @@ let state,notice='',noticeBase,noticeTimer=null,busy=false,selected=0,phase=null
 const LANG=String(navigator.language||'en').toLowerCase().startsWith('ru')?'ru':'en';
 const T={en:{
  'nav.sections':'Sections','nav.home':'Home','nav.profiles':'Profiles','nav.checks':'Checks','nav.network':'Network','nav.sync':'Sync','nav.settings':'Settings',
+ 'update.title':'GitHub releases','update.note':'SHA256SUMS is not signed. A matching hash does not install the package and does not replace the signed update channel.','update.idle':'Not checked.','update.check':'Check GitHub','update.download':'Download verified package','update.page':'Release page','update.checking':'Checking GitHub…','update.downloading':'Downloading and checking SHA256SUMS…',
  'common.back':'Back','working':'Working…','connected':'Connected','disconnected':'Disconnected',
  'line.vpn':'VPN','line.tunnel':'Tunnel','line.off':'is off','line.connecting':'connecting','line.reconnecting':'reconnecting','line.disconnecting':'disconnecting','line.running':'is up','line.verified':'verified','line.warning1':'Needs','line.warning2':'attention','line.error1':'Not','line.error2':'connected','line.status':'Status','line.unavailable':'unavailable',
  'short.off':'VPN off','short.connecting':'Connecting…','short.reconnecting':'Reconnecting…','short.disconnecting':'Disconnecting…','short.running':'Tunnel is up','short.proxy':'Proxy is up','short.verified':'Tunnel verified','short.warning':'Needs attention','short.error':'Not connected','short.unavailable':'Status unavailable',
@@ -68,6 +69,7 @@ const T={en:{
  'prefs.native':'Boot policy, updates, backup profiles and recovery controls are in the Native app.'
 },ru:{
  'nav.sections':'Разделы','nav.home':'Главная','nav.profiles':'Профили','nav.checks':'Проверки','nav.network':'Сеть','nav.sync':'Синхронизация','nav.settings':'Настройки',
+ 'update.title':'Релизы GitHub','update.note':'SHA256SUMS не подписан. Совпадение хеша не устанавливает пакет и не заменяет подписанный канал обновлений.','update.idle':'Не проверено.','update.check':'Проверить GitHub','update.download':'Скачать проверенный пакет','update.page':'Страница релиза','update.checking':'Проверка GitHub…','update.downloading':'Загрузка и сверка с SHA256SUMS…',
  'common.back':'Назад','working':'Выполняется…','connected':'Подключено','disconnected':'Отключено',
  'line.vpn':'VPN','line.tunnel':'Туннель','line.off':'выключен','line.connecting':'подключается','line.reconnecting':'переподключается','line.disconnecting':'отключается','line.running':'работает','line.verified':'проверен','line.warning1':'Нужно','line.warning2':'внимание','line.error1':'Нет','line.error2':'подключения','line.status':'Состояние','line.unavailable':'недоступно',
  'short.off':'VPN выключен','short.connecting':'Подключение…','short.reconnecting':'Переподключение…','short.disconnecting':'Отключение…','short.running':'Туннель работает','short.proxy':'Прокси работает','short.verified':'Туннель проверен','short.warning':'Нужно внимание','short.error':'Нет подключения','short.unavailable':'Состояние недоступно',
@@ -396,6 +398,14 @@ $('sync').onclick=()=>run(()=>invoke('portal_sync',{revision:state.revision}));
 $('forget').onclick=()=>run(async()=>{await invoke('portal_forget',{revision:state.revision});clean(SYNC_FIELDS)});
 $('renew').onclick=()=>run(()=>invoke('portal_renew',{revision:state.revision}));
 $('syncauto').onchange=()=>run(()=>invoke('portal_auto',{revision:state.revision,enabled:$('syncauto').checked}));
+function showUpdate(u){
+ $('update-status').textContent=u.note;
+ $('update-download').hidden=!(u.newer&&u.asset);
+ const page=$('update-page');
+ if(u.page&&u.page.startsWith('https://github.com/onixus/Rust-trustvpn/releases/tag/')){page.href=u.page;page.hidden=false;}else page.hidden=true;
+}
+$('update-check').onclick=()=>run(async()=>{$('update-status').textContent=t('update.checking');showUpdate(await invoke('github_check'))});
+$('update-download').onclick=()=>run(async()=>{$('update-status').textContent=t('update.downloading');showUpdate(await invoke('github_download'))});
 $('profile-search').oninput=()=>renderProfiles();
 function modeFields(){const full=$('mode').value==='Full';$('port-field').hidden=$('mode').value!=='Socks';$('networks-field').hidden=$('mode').value!=='Tun';$('ipv6-field').hidden=!full;$('ipv6-note').hidden=!full;}
 document.querySelectorAll('[name=mode-choice]').forEach(r=>r.onchange=()=>{dirty.add('mode');$('mode').value=r.value;modeFields();});

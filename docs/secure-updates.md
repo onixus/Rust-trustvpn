@@ -1,5 +1,13 @@
 # Signed desktop updates
 
+GitHub Releases are a separate, weaker channel. Native, WebView, the terminal
+client and Android can look up `onixus/Rust-trustvpn` and download the asset
+named in that release's `SHA256SUMS`. A match proves the bytes equal that
+unsigned list; it does not prove the Ed25519 update root or an OS publisher
+signature, and it never installs or executes the package. iOS only opens the
+release page, because no installable iOS asset is published. The signed channel
+below is unchanged and is not fed by GitHub.
+
 Windows Settings exposes explicit check, download and install actions. Packages
 use an Ed25519 envelope pinned in the application, a monotonically increasing
 release sequence, target and IPC bounds, expiry, exact size and SHA-256. HTTPS

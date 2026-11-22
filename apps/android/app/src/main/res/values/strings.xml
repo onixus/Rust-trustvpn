@@ -152,6 +152,13 @@
     <string name="portal_renew_detail">Extend this device\'s access</string>
     <string name="portal_forget_detail">Delete token and server profiles from this phone</string>
     <string name="app_version">R-TrustTunnel %1$s</string>
+    <string name="github_update">GitHub releases</string>
+    <string name="github_update_detail">Check and download a verified package</string>
+    <string name="github_checking">Checking GitHub…</string>
+    <string name="github_downloading">Downloading and checking SHA-256…</string>
+    <string name="github_current">GitHub %1$s is not newer than %2$s.</string>
+    <string name="github_ready">%1$s matches SHA256SUMS. The installer asks before replacing this app.</string>
+    <string name="github_failed">GitHub check failed. The installed app was not changed.</string>
     <string name="metering_detail_always">Always metered</string>
     <string name="metering_detail_inherit">Same as the current network</string>
     <string name="v3_off_1">VPN</string>

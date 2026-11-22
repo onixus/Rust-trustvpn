@@ -280,6 +280,10 @@ async fn execute(command: Command, shared: &Shared, ru: bool) -> Outcome {
             Err(e) => Outcome::Failed(e),
         },
         Command::Disconnect => done(c.disconnect().await, ""),
+        Command::Github => {
+            drop(c);
+            return github_update(ru).await;
+        }
         Command::Recover => {
             if c.session.is_some() {
                 return Outcome::Failed(tr(ru, "Сначала отключитесь", "Disconnect first").into());
@@ -327,6 +331,52 @@ fn preview(c: &mut Controller, input: &str) -> Result<Row, String> {
         hostname: summary.hostname,
         protocol: summary.protocol,
     })
+}
+
+/// Latest GitHub Release for this app. A newer package is downloaded and checked
+/// against the unsigned SHA256SUMS; nothing is installed or executed.
+async fn github_update(ru: bool) -> Outcome {
+    let kind = match rtrust_update::github::kind_for_current_app() {
+        Some(kind) => kind,
+        None => {
+            return Outcome::Failed(
+                tr(ru, "У этого приложения нет пакета на GitHub", "This app has no GitHub package")
+                    .into(),
+            );
+        }
+    };
+    let (release, file) = match rtrust_update::github::fetch_newer(kind).await {
+        Ok(found) => found,
+        Err(error) => return Outcome::Failed(error),
+    };
+    let current = env!("CARGO_PKG_VERSION");
+    if !release.newer {
+        return Outcome::Done(
+            format!(
+                "{} {} — {} {current}",
+                tr(ru, "GitHub", "GitHub"),
+                release.version,
+                tr(ru, "не новее установленной", "is not newer than")
+            ),
+        );
+    }
+    match file {
+        Some(path) => Outcome::Done(format!(
+            "{} {} {} {}. {} {}",
+            tr(ru, "GitHub", "GitHub"),
+            release.version,
+            tr(ru, "сверен с SHA256SUMS и сохранён:", "matches SHA256SUMS and was saved:"),
+            path.display(),
+            tr(ru, "Установите вручную.", "Install it yourself."),
+            tr(ru, "Это не подписанный канал.", "This is not the signed channel.")
+        )),
+        None => Outcome::Done(format!(
+            "{} {} {}.",
+            tr(ru, "GitHub", "GitHub"),
+            release.version,
+            tr(ru, "новее, но пакета для этой платформы нет", "is newer, but has no package for this platform")
+        )),
+    }
 }
 
 /// Extends a still-valid portal token. Does not touch the VPN session.

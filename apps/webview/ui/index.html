@@ -165,7 +165,13 @@
   <label class="mode"><input type="radio" name="theme-choice" value="light"><span class="card"><b data-i18n="prefs.light">Light</b><small data-i18n="prefs.light_sub">Frosted glass</small></span></label>
  </fieldset>
  <p class="hint" data-i18n="prefs.language">Language follows the system: Russian or English. Messages from the connection service may be in English.</p>
- <p class="hint" data-i18n="prefs.native">Boot policy, updates, backup profiles and recovery controls are in the Native app.</p>
+ <p class="hint" data-i18n="prefs.native">Boot policy, backup profiles and recovery controls are in the Native app.</p>
+  <div class="card form-card">
+   <b data-i18n="update.title">GitHub releases</b>
+   <small data-i18n="update.note">SHA256SUMS is not signed. A matching hash does not install the package and does not replace the signed update channel.</small>
+   <p id="update-status" role="status" data-i18n="update.idle">Not checked.</p>
+   <div class="row"><button type="button" id="update-check" class="btn" data-i18n="update.check">Check GitHub</button><button type="button" id="update-download" class="btn primary" data-i18n="update.download" hidden>Download verified package</button><a id="update-page" class="btn quiet" hidden data-i18n="update.page">Release page</a></div>
+  </div>
 </section>
 </main>
 </div>
