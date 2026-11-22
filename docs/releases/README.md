@@ -19,3 +19,10 @@ On October 16, 2026 the other macOS files were removed from the v0.6.1 release a
 its `SHA256SUMS` was regenerated; the remaining digests did not change.
 v0.6.2-beta.1 (published before this change) has the six system-candidate
 DMG/PKG files and no UI Choices DMG; earlier releases keep their full sets.
+
+The current Latest desktop/phone release is
+[v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0)
+([notes](v0.7.0.md)). Android TV is a separate pre-release,
+[v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3),
+and is not a desktop update. Commits on `main` after `232fd7b` are not in the
+v0.7.0 assets.

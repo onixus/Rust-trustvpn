@@ -345,10 +345,11 @@ container unit tests do not establish a physical-node or installed-package gate.
 Existing historical acceptance reports apply to their own commits and packages.
 
 Issue #31 is closed in GitHub. The preceding validation describes its historical
-implementation, not a fresh acceptance of v0.6.2 packages. Issues #33/#81/#90
-retain diagnostics/probe acceptance work, #36 tracks package/device evidence,
-and #107 tracks durable failed-connect logging. This documentation refresh
-does not publish or promote a release.
+implementation, not a fresh acceptance of v0.7.0 packages. Issues #33/#81
+retain diagnostics/probe acceptance work, and #36 tracks package/device evidence.
+#90 and #107 are closed: viewed admission is IPC v7, and the failure journal
+ships in v0.7.0 (level windows and the last ten reconnect episodes are only on
+main after that tag). This documentation refresh does not publish or promote a release.
 
 ### Validation recorded on 2026-10-10
 
