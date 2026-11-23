@@ -282,7 +282,7 @@ async fn execute(command: Command, shared: &Shared, ru: bool) -> Outcome {
         Command::Disconnect => done(c.disconnect().await, ""),
         Command::Github => {
             drop(c);
-            return github_update(ru).await;
+            github_update(ru).await
         }
         Command::Recover => {
             if c.session.is_some() {
