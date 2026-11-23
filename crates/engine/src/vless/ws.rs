@@ -271,7 +271,9 @@ mod tests {
         let mut bytes = server(BINARY, true, &[0xff, 0xff]);
         bytes.extend(server(BINARY, true, &[9]));
         let got = events(&bytes).await.unwrap();
-        assert!(matches!(&got[..], [Event::Data(a), Event::Data(b)] if a.as_ref() == [0xff, 0xff] && b.as_ref() == [9]));
+        assert!(
+            matches!(&got[..], [Event::Data(a), Event::Data(b)] if a.as_ref() == [0xff, 0xff] && b.as_ref() == [9])
+        );
     }
     #[test]
     fn accept_matches_rfc_6455_example() {
