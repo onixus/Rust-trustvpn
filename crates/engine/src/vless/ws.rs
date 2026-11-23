@@ -182,11 +182,11 @@ impl<R: AsyncRead + Unpin> Reader<R> {
     fn parse(&mut self) -> Result<Option<Event>> {
         loop {
             if self.remaining > 0 {
-                if self.buf.is_empty() {
+                if (self.buf.len() as u64) < self.remaining {
                     return Ok(None);
                 }
-                let take = self.remaining.min(self.buf.len() as u64) as usize;
-                self.remaining -= take as u64;
+                let take = self.remaining as usize;
+                self.remaining = 0;
                 return Ok(Some(Event::Data(self.buf.split_to(take).freeze())));
             }
             if self.buf.len() < 2 {
@@ -256,12 +256,22 @@ mod tests {
         let mut out = vec![(if fin { 0x80 } else { 0 }) | opcode];
         if payload.len() < 126 {
             out.push(payload.len() as u8);
-        } else {
+        } else if payload.len() <= 0xffff {
             out.push(126);
             out.extend((payload.len() as u16).to_be_bytes());
+        } else {
+            out.push(127);
+            out.extend((payload.len() as u64).to_be_bytes());
         }
         out.extend(payload);
         out
+    }
+    #[tokio::test]
+    async fn a_read_holding_two_frames_yields_both() {
+        let mut bytes = server(BINARY, true, &[0xff, 0xff]);
+        bytes.extend(server(BINARY, true, &[9]));
+        let got = events(&bytes).await.unwrap();
+        assert!(matches!(&got[..], [Event::Data(a), Event::Data(b)] if a.as_ref() == [0xff, 0xff] && b.as_ref() == [9]));
     }
     #[test]
     fn accept_matches_rfc_6455_example() {
