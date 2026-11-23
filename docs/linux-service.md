@@ -10,7 +10,7 @@
 Приёмка установленного пакета 0.7.0 (ARM64, reboot, sleep) этой сверкой не
 проводилась — см. [v0.7.0](releases/v0.7.0.md). На установленном Flatpak 0.7.0
 строки Route и Connectivity оставались пустыми, потому что в sandbox нет `ip`;
-исправление netlink входит в подготовленный [v0.7.1](releases/v0.7.1.md)
+исправление netlink входит в опубликованный [v0.7.1](releases/v0.7.1.md)
 ([#121](https://github.com/onixus/Rust-trustvpn/pull/121)) и в скачанный релиз
 0.7.0 не входит.
 

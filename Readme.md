@@ -6,7 +6,7 @@ R-TrustTunnel is a native VPN client written in Rust for **TrustTunnel**, **Hyst
 
 The repository contains the Windows, Linux and macOS desktop clients with their privileged tunnel services, the Android VpnService app, an iOS Network Extension preview and the shared Rust crates for transport, profiles, storage and control. The server belongs to [onixus/tunnel](https://github.com/onixus/tunnel).
 
-> **Development preview.** The source workspace is **0.7.1**, update sequence 14. [v0.7.1](docs/releases/v0.7.1.md) is prepared and not published; [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0) (October 28, 2026, `232fd7b`) is the latest published release. Publication does not establish installed-package acceptance or production readiness: see [project status and open gates](docs/project-status.md).
+> **Development preview.** The source workspace is **0.7.1**, update sequence 14. [v0.7.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1) (`55bc488`, 23 November 2026) is the latest published desktop/phone release. Publication does not establish installed-package acceptance or production readiness: see [project status and open gates](docs/project-status.md).
 
 ## Contents
 
@@ -23,17 +23,17 @@ The repository contains the Windows, Linux and macOS desktop clients with their 
 
 ## Download
 
-| Platform | Asset from [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0), until v0.7.1 is published | Notes |
+| Platform | Asset from [v0.7.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1) | Notes |
 | --- | --- | --- |
 | Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` | Not Authenticode signed; SmartScreen may warn. Update/rollback of this exact package has not been accepted. |
 | macOS Apple Silicon | `R-TrustTunnel-macOS-arm64-UI-Choices.dmg` | Native, WebView and Both PKGs in one DMG: install exactly one. Ad-hoc sealed, not Developer ID signed or notarized. System-VPN acceptance is incomplete ([release assets](docs/releases/README.md)). |
-| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` | 0.7.0 / 70001, release key introduced in 0.6.0. Installs over 0.6.x and keeps profiles; 0.5.x and older must be uninstalled first, which removes local profiles. Android TV is a separate pre-release, [v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3), not this APK. |
-| Linux x86_64, Wayland | Native / WebView / Both Flatpaks and `rtrust-host-0.7.0-6` | System VPN needs the separate host package; update it together with the app. |
+| Android 10+, arm64 / x86_64 | `R-TrustTunnel-Android.apk` | 0.7.1 / 70005, release key introduced in 0.6.0. Installs over 0.6.x and 0.7.0 and keeps profiles; 0.5.x and older must be uninstalled first, which removes local profiles. Android TV is a separate pre-release, [v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3), not this APK. |
+| Linux x86_64, Wayland | Native / WebView / Both Flatpaks and `rtrust-host-0.7.1-46` | System VPN needs the separate host package; update it together with the app. |
 | iOS arm64 / Simulator | Archives from [v0.5.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.5.0) | No iOS assets since v0.6.0. The device archive requires Apple signing and is not an installable IPA. |
 
 The release includes `SHA256SUMS` and the source identity and manifest. Their presence is not independent signature, provenance or update-channel verification. Desktop app and service must come from the same release. A vault with a VLESS profile cannot be read by 0.6.x, so do not roll back after adding one.
 
-Release records: [v0.7.1](docs/releases/v0.7.1.md) (prepared) · [v0.7.0](docs/releases/v0.7.0.md) · [v0.6.2](docs/releases/v0.6.2.md) · [all releases](docs/releases/).
+Release records: [v0.7.1](docs/releases/v0.7.1.md) · [v0.7.0](docs/releases/v0.7.0.md) · [v0.6.2](docs/releases/v0.6.2.md) · [all releases](docs/releases/).
 
 ## Screenshots
 

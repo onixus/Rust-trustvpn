@@ -21,8 +21,8 @@ v0.6.2-beta.1 (published before this change) has the six system-candidate
 DMG/PKG files and no UI Choices DMG; earlier releases keep their full sets.
 
 The current published Latest desktop/phone release is
-[v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0)
-([notes](v0.7.0.md)). [v0.7.1](v0.7.1.md) is prepared and not published.
+[v0.7.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1)
+([notes](v0.7.1.md), `55bc488`).
 Android TV is a separate pre-release,
 [v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3),
 and is not a desktop update and not the 0.7.1 phone package. Commits on `main`

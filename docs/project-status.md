@@ -1,9 +1,10 @@
 # Состояние проекта и issue — 23 ноября 2026
 
-Ветка `release/0.7.1` поднимает workspace до **0.7.1** / sequence **14** и
-упаковывает коммиты ниже в [v0.7.1](releases/v0.7.1.md). Тег не создан,
-пакеты не опубликованы. Опубликованный Latest остаётся v0.7.0, пока релиз не
-выпущен. Android TV по-прежнему отдельный pre-release `v0.7.1-tv.3`.
+[v0.7.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1)
+(`55bc488`) опубликован 23 ноября 2026: workspace **0.7.1** / sequence **14**.
+Jenkins этого SHA: native #109, linux #46, android #12, все SUCCESS.
+Приёмка установленных пакетов не проводилась. Android TV по-прежнему отдельный
+pre-release `v0.7.1-tv.3`. Подписанный канал `latest` не продвигался.
 
 Основание: GitHub `origin/main` `04f0f85729110f5b06c214ff9d5c263f25163146`
 (merge [#132](https://github.com/onixus/Rust-trustvpn/pull/132), 23 ноября

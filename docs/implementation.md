@@ -1,9 +1,9 @@
 # Состояние реализации — 23 ноября 2026
 
 Workspace: **0.7.1** (desktop update sequence 14, control IPC v7, телефонный
-Android 0.7.1 / 70005, iOS 0.7.1 / 70005). [v0.7.1](releases/v0.7.1.md)
-подготовлен из `3d2a94a` и не опубликован. Опубликованный Latest —
-[v0.7.0](releases/v0.7.0.md) от 28 октября из `232fd7b`: VLESS через CDN (#112),
+Android 0.7.1 / 70005, iOS 0.7.1 / 70005). Опубликованный Latest —
+[v0.7.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1)
+(`55bc488`). Предыдущий [v0.7.0](releases/v0.7.0.md) от 28 октября из `232fd7b`: VLESS через CDN (#112),
 журнал неудачных подключений (#114), причины остановки транспорта на macOS
 (#113), managed access freshness на macOS (#115) и проверка guard на Windows
 (#116). Android TV — отдельный pre-release
