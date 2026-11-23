@@ -6,7 +6,8 @@
     <uses-feature android:name="android.hardware.faketouch" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
-    <application>
+    <!-- The merged app manifest carries the banner; this library only adds the filter. -->
+    <application tools:ignore="MissingTvBanner">
         <!-- Banner and class live on the app activity this declaration merges into. -->
         <activity android:name="org.rtrusttunnel.android.MainActivity" tools:ignore="MissingClass,MissingTvBanner">
             <intent-filter>
