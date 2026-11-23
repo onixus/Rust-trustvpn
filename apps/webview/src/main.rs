@@ -27,18 +27,25 @@ fn github_note(release: &rtrust_update::github::ReleaseInfo) -> String {
             version = release.version,
             name = asset.name
         ),
-        None => format!("GitHub {version} is newer, but has no package for this app.", version = release.version),
+        None => format!(
+            "GitHub {version} is newer, but has no package for this app.",
+            version = release.version
+        ),
     }
 }
 #[tauri::command]
 async fn github_check() -> Result<GithubUpdate, String> {
-    let kind = rtrust_update::github::kind_for_current_app()
-        .ok_or("This app has no GitHub package")?;
+    let kind =
+        rtrust_update::github::kind_for_current_app().ok_or("This app has no GitHub package")?;
     let release = rtrust_update::github::check(kind).await?;
     Ok(GithubUpdate {
         version: release.version.clone(),
         newer: release.newer,
-        asset: release.asset.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
+        asset: release
+            .asset
+            .as_ref()
+            .map(|a| a.name.clone())
+            .unwrap_or_default(),
         page: release.page.clone(),
         file: String::new(),
         note: github_note(&release),
@@ -46,8 +53,8 @@ async fn github_check() -> Result<GithubUpdate, String> {
 }
 #[tauri::command]
 async fn github_download() -> Result<GithubUpdate, String> {
-    let kind = rtrust_update::github::kind_for_current_app()
-        .ok_or("This app has no GitHub package")?;
+    let kind =
+        rtrust_update::github::kind_for_current_app().ok_or("This app has no GitHub package")?;
     let (release, file) = rtrust_update::github::fetch_newer(kind).await?;
     let path = file.map(|p| p.display().to_string()).unwrap_or_default();
     let mut note = github_note(&release);
