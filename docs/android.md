@@ -6,9 +6,9 @@ the desktop client. There is no WebView, CLI subprocess or privileged host servi
 Baseline: Android 10/API 29+, arm64-v8a; x86_64 is also built for emulator testing.
 Acceptance uses Android 16/API 36 x86_64 and physical POCO X3 NFC and Huawei DEL-LX9 phones running Android 12/API 31.
 
-Current published phone package: [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0),
-versionCode **70001**, versionName **0.7.0** ([release record](releases/v0.7.0.md)).
-Source on `origin/main` still builds that phone identity. A separate TV package,
+Current published phone package: [v0.7.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1),
+versionCode **70005**, versionName **0.7.1** ([release record](releases/v0.7.1.md)).
+A separate TV package,
 built only with `-PrtrustTv`, is published as pre-release
 [v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3):
 `org.rtrusttunnel.android.tv`, versionCode **70004**, versionName **0.7.1-tv.3**,

@@ -21,7 +21,9 @@ pub(super) enum Action {
     Checked(Result<rtrust_update::Release, String>),
     Download,
     Downloaded(Result<std::path::PathBuf, String>),
+    #[cfg(target_os = "windows")]
     Install,
+    #[cfg(target_os = "windows")]
     Started(Result<(), String>),
     GithubCheck,
     GithubChecked(Result<rtrust_update::github::ReleaseInfo, String>),
@@ -169,6 +171,7 @@ impl App {
                     open_page(&page);
                 }
             }
+            #[cfg(target_os = "windows")]
             Action::Started(result) => {
                 self.busy = false;
                 match result {

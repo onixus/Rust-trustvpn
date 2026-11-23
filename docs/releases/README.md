@@ -20,9 +20,10 @@ its `SHA256SUMS` was regenerated; the remaining digests did not change.
 v0.6.2-beta.1 (published before this change) has the six system-candidate
 DMG/PKG files and no UI Choices DMG; earlier releases keep their full sets.
 
-The current Latest desktop/phone release is
-[v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0)
-([notes](v0.7.0.md)). Android TV is a separate pre-release,
+The current published Latest desktop/phone release is
+[v0.7.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1)
+([notes](v0.7.1.md), `55bc488`).
+Android TV is a separate pre-release,
 [v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3),
-and is not a desktop update. Commits on `main` after `232fd7b` are not in the
-v0.7.0 assets.
+and is not a desktop update and not the 0.7.1 phone package. Commits on `main`
+after `232fd7b` are not in the v0.7.0 assets; they are what 0.7.1 packages.

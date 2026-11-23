@@ -1,21 +1,24 @@
 # Состояние реализации — 23 ноября 2026
 
-Workspace: **0.7.0** (desktop update sequence 13, control IPC v7, телефонный
-Android 0.7.0 / 70001, iOS 0.7.0 / 70001). Опубликованный Latest —
-[v0.7.0](releases/v0.7.0.md) от 28 октября из `232fd7b`: VLESS через CDN (#112),
+Workspace: **0.7.1** (desktop update sequence 14, control IPC v7, телефонный
+Android 0.7.1 / 70005, iOS 0.7.1 / 70005). Опубликованный Latest —
+[v0.7.1](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1)
+(`55bc488`). Предыдущий [v0.7.0](releases/v0.7.0.md) от 28 октября из `232fd7b`: VLESS через CDN (#112),
 журнал неудачных подключений (#114), причины остановки транспорта на macOS
 (#113), managed access freshness на macOS (#115) и проверка guard на Windows
 (#116). Android TV — отдельный pre-release
 [v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3)
-(`org.rtrusttunnel.android.tv`, 70004), не замена телефонного APK.
+(`org.rtrusttunnel.android.tv`, 70004), не замена телефонного APK и не пакет
+0.7.1.
 
-`origin/main` `04f0f85` новее тега на 44 коммита. В исходниках после релиза:
-проверка GitHub Releases (#131), локальная блокировка IPv6 в полном туннеле
-(#129), продление токена портала (#127), ротация журнала по уровню и последние
-10 эпизодов reconnect (#124/#128), handshake 10 с и причина остановки на
-Windows (#125), Route/Connectivity в Linux Flatpak (#121), простой dataplane
-(#122), пакет Android TV и баннер leanback (#130/#132). Эти изменения **не**
-входят в скачанный v0.7.0. Границы — в [сводке](project-status.md).
+В 0.7.1, и **не** в скачанном v0.7.0: проверка GitHub Releases (#131),
+локальная блокировка IPv6 в полном туннеле (#129), продление токена портала
+(#127), ротация журнала по уровню и последние 10 эпизодов reconnect
+(#124/#128), handshake 10 с и причина остановки на Windows (#125),
+Route/Connectivity в Linux Flatpak (#121), простой dataplane (#122). Пакет
+Android TV и баннер leanback (#130/#132) уже опубликованы как `v0.7.1-tv.3`;
+из тега 0.7.1 их под старым именем не переиздают. Границы — в
+[сводке](project-status.md).
 
 [v0.6.2](releases/v0.6.2.md) опубликован 21 октября из `4123160` и остаётся
 предыдущим desktop/Android релизом. Архивы iOS по-прежнему опубликованы только
@@ -38,12 +41,12 @@ shared Rust core, desktop services и client-side portal integration.
 | Windows | Native desktop, Wintun/SCM service, WFP fail-closed, full-tunnel acceptance, sleep/wake recovery и signed metadata updater. |
 | Linux | Wayland desktop, TUN host service, nftables/systemd-resolved, Native/WebView/Both Flatpak, signed install/update/rollback flow. |
 | macOS | Native/WebView/Both packaging, LaunchDaemon/utun system path, glass UI toggle, live TrustTunnel acceptance; часть system-VPN/update acceptance ещё открыта. |
-| Android | VpnService, encrypted vault, file/text/QR import, app routing, portal sync, Always-on/lockdown, resizable widget и Quick Settings tile, managed recovery, следование за предпочтительной сетью после handoff, настройка учёта трафика VPN; minSdk 29, targetSdk 36. Телефон: versionCode 70001, versionName 0.7.0, APK в v0.7.0. TV: отдельный applicationId, 0.7.1-tv.3 / 70004, leanback-баннер и у телефонного APK на ТВ (#132). UI вариант 3, VPN-bound checks (#73), исправление start/stop (#80), обработка link changes (#86/#89) и sleep recovery (#92). |
+| Android | VpnService, encrypted vault, file/text/QR import, app routing, portal sync, Always-on/lockdown, resizable widget и Quick Settings tile, managed recovery, следование за предпочтительной сетью после handoff, настройка учёта трафика VPN; minSdk 29, targetSdk 36. Телефон в исходниках: versionCode 70005, versionName 0.7.1; опубликованный APK — 0.7.0 / 70001. TV: отдельный applicationId, опубликован как 0.7.1-tv.3 / 70004. UI вариант 3, VPN-bound checks (#73), исправление start/stop (#80), обработка link changes (#86/#89) и sleep recovery (#92). |
 | iOS | Preview на Swift/Network Extension: import/export, QR, portal sync, On Demand, widget; device archive требует Apple signing. |
 | Routing | Desktop IPv4 TUN include/exclude, LAN bypass, profile routing и server-assigned route groups. Route groups не используются Android/iOS. |
 | Linux TUI | `apps/tui` поверх общего desktop Controller: профили, connect/disconnect, SOCKS/TUN/Full настройки; portal/export/system diagnostics остаются в GUI. Installed TUN/full acceptance через TUI — NOT RUN. |
 | Proxy | SOCKS5 и HTTP-запросы на mixed desktop proxy port. Native UI при Degraded останавливает listener и повторяет тот же профиль/порт с recovery budget (#104); без смены режима или direct fallback. Обычные health errors и неудачный ручной Start не запускают этот retry. |
-| Обновления | Подписанный канал: Ed25519, sequence 13 в исходниках и в теге v0.7.0. Sequence 9 чинит идентичность старой 0.5.0 сборки; релизы 0.6.0–0.6.2 — sequences 10–12. Наличие release assets не подтверждает продвижение update-channel `latest` или подписи точного пакета. С #131 клиенты умеют смотреть GitHub Releases и сверять байты с `SHA256SUMS`; это не подпись издателя и не установка. Для автоотката 10→9 служба Windows допускает от апдейтера sequence 9 (control IPC v1) только `PrepareUpdate` и отвечает в форме v1 (см. [v0.6.0](releases/v0.6.0.md#compatibility), [secure updates](secure-updates.md)). |
+| Обновления | Подписанный канал: Ed25519, sequence 14 в исходниках 0.7.1; опубликованный v0.7.0 — sequence 13. Sequence 9 чинит идентичность старой 0.5.0 сборки; релизы 0.6.0–0.6.2 — sequences 10–12. Наличие release assets не подтверждает продвижение update-channel `latest` или подписи точного пакета. С #131 клиенты умеют смотреть GitHub Releases и сверять байты с `SHA256SUMS`; это не подпись издателя и не установка. Для автоотката 10→9 служба Windows допускает от апдейтера sequence 9 (control IPC v1) только `PrepareUpdate` и отвечает в форме v1 (см. [v0.6.0](releases/v0.6.0.md#compatibility), [secure updates](secure-updates.md)). |
 | Наблюдения и диагностика | Типизированные observations с generations, события сети/пробуждения, route explain, system-path diagnostics с verdict/actions и автоматическими проверками; control IPC v7 (system probes только при просмотре UI). Журнал службы ротируется по `level` и хранит 10 последних эпизодов reconnect ([журнал](diagnostics-journal.md)). |
 | Recovery | Opt-in восстановление через разрешённые резервные профили (обычная сессия на desktop; Always-on — только Linux/Windows), guard не снимается; macOS/iOS Always-on fallback recovery не поддерживается. Android Always-on reconnect на текущей сети добавлен в #63; переключение на резервный профиль этим не подтверждается. |
 

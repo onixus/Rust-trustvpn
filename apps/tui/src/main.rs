@@ -282,7 +282,7 @@ async fn execute(command: Command, shared: &Shared, ru: bool) -> Outcome {
         Command::Disconnect => done(c.disconnect().await, ""),
         Command::Github => {
             drop(c);
-            return github_update(ru).await;
+            github_update(ru).await
         }
         Command::Recover => {
             if c.session.is_some() {
@@ -340,8 +340,12 @@ async fn github_update(ru: bool) -> Outcome {
         Some(kind) => kind,
         None => {
             return Outcome::Failed(
-                tr(ru, "У этого приложения нет пакета на GitHub", "This app has no GitHub package")
-                    .into(),
+                tr(
+                    ru,
+                    "У этого приложения нет пакета на GitHub",
+                    "This app has no GitHub package",
+                )
+                .into(),
             );
         }
     };
@@ -351,30 +355,40 @@ async fn github_update(ru: bool) -> Outcome {
     };
     let current = env!("CARGO_PKG_VERSION");
     if !release.newer {
-        return Outcome::Done(
-            format!(
-                "{} {} — {} {current}",
-                tr(ru, "GitHub", "GitHub"),
-                release.version,
-                tr(ru, "не новее установленной", "is not newer than")
-            ),
-        );
+        return Outcome::Done(format!(
+            "{} {} — {} {current}",
+            tr(ru, "GitHub", "GitHub"),
+            release.version,
+            tr(ru, "не новее установленной", "is not newer than")
+        ));
     }
     match file {
         Some(path) => Outcome::Done(format!(
             "{} {} {} {}. {} {}",
             tr(ru, "GitHub", "GitHub"),
             release.version,
-            tr(ru, "сверен с SHA256SUMS и сохранён:", "matches SHA256SUMS and was saved:"),
+            tr(
+                ru,
+                "сверен с SHA256SUMS и сохранён:",
+                "matches SHA256SUMS and was saved:"
+            ),
             path.display(),
             tr(ru, "Установите вручную.", "Install it yourself."),
-            tr(ru, "Это не подписанный канал.", "This is not the signed channel.")
+            tr(
+                ru,
+                "Это не подписанный канал.",
+                "This is not the signed channel."
+            )
         )),
         None => Outcome::Done(format!(
             "{} {} {}.",
             tr(ru, "GitHub", "GitHub"),
             release.version,
-            tr(ru, "новее, но пакета для этой платформы нет", "is newer, but has no package for this platform")
+            tr(
+                ru,
+                "новее, но пакета для этой платформы нет",
+                "is newer, but has no package for this platform"
+            )
         )),
     }
 }

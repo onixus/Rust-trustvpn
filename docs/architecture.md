@@ -1,6 +1,6 @@
 # Архитектура R-TrustTunnel
 
-Дата актуализации: 2026-11-23. Workspace 0.7.0, desktop sequence 13, control IPC v7. Опубликованный тег v0.7.0 — `232fd7b`; `origin/main` новее (`04f0f85`). [Границы и открытые issue](project-status.md).
+Дата актуализации: 2026-11-23. Workspace 0.7.1, desktop sequence 14, control IPC v7. Опубликованный тег v0.7.1 — `55bc488`. [Границы и открытые issue](project-status.md).
 
 Главные архитектурные добавления 0.6.x: типизированные [наблюдения VPN](vpn-observations.md)
 с generations, [системная диагностика](system-diagnostics.md), защищённое
@@ -131,7 +131,7 @@ platform target, hashes, size and expiry to a compiled client identity.
 
 Sequence 9 exists specifically to repair the old 0.5.0 sequence-7 identity problem.
 A current client must not offer itself as a new version or select the wrong rollback
-package. Releases 0.6.0, 0.6.1, 0.6.2 and 0.7.0 compile as sequences 10, 11, 12 and 13.
+package. Releases 0.6.0, 0.6.1, 0.6.2 and 0.7.0 compile as sequences 10, 11, 12 and 13. The prepared 0.7.1 sources compile as sequence 14.
 Since #131 the apps can also look up a GitHub Release and check the named asset
 against that release's `SHA256SUMS`. That check does not install the package and
 does not replace the Ed25519 channel. This documentation refresh did not inspect

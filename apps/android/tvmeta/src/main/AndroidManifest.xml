@@ -1,12 +1,15 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- Merged only into the TV package. The phone APK does not depend on this module. -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.hardware.faketouch" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
-    <application>
-        <activity android:name="org.rtrusttunnel.android.MainActivity">
+    <!-- The merged app manifest carries the banner; this library only adds the filter. -->
+    <application tools:ignore="MissingTvBanner">
+        <!-- Banner and class live on the app activity this declaration merges into. -->
+        <activity android:name="org.rtrusttunnel.android.MainActivity" tools:ignore="MissingClass,MissingTvBanner">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />

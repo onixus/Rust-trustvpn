@@ -1416,7 +1416,7 @@ impl App {
         .spacing(4)
         .width(232)
         .padding([20, 14]);
-        let mut items = vec![
+        let items = vec![
             (t("Главная", "Home"), Page::Home),
             (t("Профили", "Profiles"), Page::Profiles),
             (t("Проверки", "Checks"), Page::Diagnostics),
@@ -3501,7 +3501,7 @@ mod tests {
         let mut app = crate::tests::app();
         app.preview = Some(app.profiles[1].clone());
         app.saved_connection.fallback_profiles = vec![app.profiles[1].name.clone()];
-        let mut pages = vec![
+        let pages = vec![
             Page::Home,
             Page::Profiles,
             Page::Import,

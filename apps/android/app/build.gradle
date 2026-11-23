@@ -8,8 +8,8 @@ android {
         applicationId (tv ? 'org.rtrusttunnel.android.tv' : (project.findProperty('rtrustApplicationId') ?: 'org.rtrusttunnel.android').toString())
         minSdk 29
         targetSdk 36
-        versionCode = (project.findProperty('rtrustVersionCode') ?: (tv ? '70004' : '70001')).toInteger()
-        versionName tv ? '0.7.1-tv.3' : '0.7.0'
+        versionCode = (project.findProperty('rtrustVersionCode') ?: (tv ? '70004' : '70005')).toInteger()
+        versionName tv ? '0.7.1-tv.3' : '0.7.1'
         manifestPlaceholders = [appLabel: tv ? 'R-TrustTunnel TV' : 'R-TrustTunnel']
         resValue 'bool', 'rtrust_tv', tv ? 'true' : 'false'
         if (tv) ndk { abiFilters 'armeabi-v7a', 'arm64-v8a' } else ndk { abiFilters 'arm64-v8a', 'x86_64' }
