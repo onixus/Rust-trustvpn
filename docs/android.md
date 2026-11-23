@@ -8,7 +8,8 @@ Acceptance uses Android 16/API 36 x86_64 and physical POCO X3 NFC and Huawei DEL
 
 Current published phone package: [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0),
 versionCode **70001**, versionName **0.7.0** ([release record](releases/v0.7.0.md)).
-Source on `origin/main` still builds that phone identity. A separate TV package,
+Source on this branch builds phone **0.7.1 / 70005** for the prepared
+[v0.7.1](releases/v0.7.1.md), which is not published. A separate TV package,
 built only with `-PrtrustTv`, is published as pre-release
 [v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3):
 `org.rtrusttunnel.android.tv`, versionCode **70004**, versionName **0.7.1-tv.3**,

@@ -6,13 +6,13 @@ R-TrustTunnel — нативный VPN-клиент на Rust для **TrustTunn
 
 В репозитории находятся desktop-клиенты Windows, Linux и macOS с привилегированными службами туннеля, Android-приложение на VpnService, preview iOS Network Extension и общие Rust-крейты транспорта, профилей, хранилища и управления. Сервер относится к [onixus/tunnel](https://github.com/onixus/tunnel).
 
-> **Development preview.** [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0) опубликован 28 октября 2026 года из `232fd7b` (workspace 0.7.0, update sequence 13). `main` новее этого тега; опубликованные файлы поздние коммиты не содержат. Публикация не доказывает приёмку установленного пакета или готовность к production: см. [состояние проекта и открытые gates](docs/project-status.md).
+> **Development preview.** Workspace исходников — **0.7.1**, update sequence 14. [v0.7.1](docs/releases/v0.7.1.md) подготовлен и не опубликован; [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0) (28 октября 2026, `232fd7b`) — последний опубликованный релиз. Публикация не доказывает приёмку установленного пакета или готовность к production: см. [состояние проекта и открытые gates](docs/project-status.md).
 
 ## Содержание
 
 - [Скачать](#скачать)
 - [Скриншоты](#скриншоты)
-- [Что нового в 0.7.0](#что-нового-в-070)
+- [Что нового в 0.7.1](#что-нового-в-071)
 - [Возможности](#возможности)
 - [Статус платформ](#статус-платформ)
 - [Сборка](#сборка)
@@ -23,7 +23,7 @@ R-TrustTunnel — нативный VPN-клиент на Rust для **TrustTunn
 
 ## Скачать
 
-| Платформа | Файл из [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0) | Ограничения |
+| Платформа | Файл из [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0), пока v0.7.1 не опубликован | Ограничения |
 | --- | --- | --- |
 | Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` | Без Authenticode-подписи, SmartScreen может предупредить. Update/rollback именно этого пакета не принят. |
 | macOS Apple Silicon | `R-TrustTunnel-macOS-arm64-UI-Choices.dmg` | PKG Native, WebView и Both в одном DMG: установите ровно один. Ad-hoc sealed, без Developer ID и notarization. Приёмка системного VPN не завершена ([состав релиза](docs/releases/README.md)). |
@@ -33,7 +33,7 @@ R-TrustTunnel — нативный VPN-клиент на Rust для **TrustTunn
 
 В релизе есть `SHA256SUMS`, source identity и manifest. Наличие файлов не заменяет проверку подписи, provenance или канала обновлений. Desktop-приложение и служба должны быть из одного релиза. Хранилище с профилем VLESS не читается версиями 0.6.x, поэтому после добавления такого профиля не откатывайтесь.
 
-Записи релизов: [v0.7.0](docs/releases/v0.7.0.md) · [v0.6.2](docs/releases/v0.6.2.md) · [v0.6.1](docs/releases/v0.6.1.md) · [все релизы](docs/releases/).
+Записи релизов: [v0.7.1](docs/releases/v0.7.1.md) (подготовлен) · [v0.7.0](docs/releases/v0.7.0.md) · [v0.6.2](docs/releases/v0.6.2.md) · [все релизы](docs/releases/).
 
 ## Скриншоты
 
@@ -44,6 +44,18 @@ Desktop-интерфейс 0.7.0 с синтетическими профиля�
 | ![Главная Native](docs/screenshots/native-home-0.7.0.jpg) | ![Главная WebView](docs/screenshots/webview-home-0.7.0.jpg) |
 
 Профили, импорт, проверки, сеть, синхронизация, настройки, светлая тема и способ съёмки — в [галерее](docs/screenshots/README.md). Android блокирует скриншоты через `FLAG_SECURE`.
+
+## Что нового в 0.7.1
+
+По сравнению с v0.7.0, в пакетах этого тега (не в опубликованных файлах 0.7.0):
+
+- **Проверка обновлений на GitHub** ([#131](https://github.com/onixus/Rust-trustvpn/pull/131)). Native, WebView, терминальный клиент и Android смотрят последний стабильный релиз и скачивают файл этой платформы после сверки с `SHA256SUMS`. Установки нет. iOS только открывает страницу релиза. См. [обновления](docs/secure-updates.md).
+- **Необязательная блокировка IPv6** ([#129](https://github.com/onixus/Rust-trustvpn/pull/129)). В режиме «весь компьютер» IPv6 можно отклонять на этом компьютере: ни в туннель, ни мимо него.
+- **Сохранённый конфиг портала** ([#127](https://github.com/onixus/Rust-trustvpn/pull/127)). Уже лежащий на диске конфиг подключается без живого портала. Ещё действующий токен продлевается сам, не чаще раза в сутки.
+- **Журнал и переподключение** ([#124](https://github.com/onixus/Rust-trustvpn/pull/124), [#125](https://github.com/onixus/Rust-trustvpn/pull/125), [#128](https://github.com/onixus/Rust-trustvpn/pull/128)). Отладка живёт меньше ошибок, хранятся последние десять эпизодов переподключения, медленному рукопожатию даётся 10 секунд вместо 4.
+- **Проверки Linux Flatpak** ([#121](https://github.com/onixus/Rust-trustvpn/pull/121)). «Маршрут» и «Связь» больше не зависят от команды `ip` внутри sandbox.
+
+Описание простым языком — в [docs/releases/v0.7.1.md](docs/releases/v0.7.1.md). Android TV остаётся отдельным pre-release [v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3).
 
 ## Что нового в 0.7.0
 
@@ -56,8 +68,6 @@ Desktop-интерфейс 0.7.0 с синтетическими профиля�
 - **Проверка защиты на Windows** ([#116](https://github.com/onixus/Rust-trustvpn/pull/116)). Пробный пакет, отброшенный собственным фильтром WFP, теперь доказывает работу защиты, и строки «Защита» и «DNS» больше не показывают ложную ошибку.
 
 Описание простым языком и порядок обновления — в [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md). Более ранние изменения (переподключение после сна, доказательства защиты, UI вариант 3, честный статус подключения, восстановление с защитой) — в [записях релизов](docs/releases/).
-
-В `main` после тега v0.7.0 и **не** в опубликованных пакетах 0.7.0: проверка GitHub Releases со сверкой `SHA256SUMS` без самостоятельной установки ([обновления](docs/secure-updates.md)); необязательная локальная блокировка IPv6 в режиме «весь компьютер»; продление токена портала для сохранённого конфига; ротация журнала по уровню; отдельный пакет Android TV. См. [состояние проекта](docs/project-status.md).
 
 ## Возможности
 

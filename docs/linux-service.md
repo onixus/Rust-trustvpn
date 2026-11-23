@@ -10,8 +10,9 @@
 Приёмка установленного пакета 0.7.0 (ARM64, reboot, sleep) этой сверкой не
 проводилась — см. [v0.7.0](releases/v0.7.0.md). На установленном Flatpak 0.7.0
 строки Route и Connectivity оставались пустыми, потому что в sandbox нет `ip`;
-исправление netlink есть в main с [#121](https://github.com/onixus/Rust-trustvpn/pull/121)
-и в скачанный релиз 0.7.0 не входит.
+исправление netlink входит в подготовленный [v0.7.1](releases/v0.7.1.md)
+([#121](https://github.com/onixus/Rust-trustvpn/pull/121)) и в скачанный релиз
+0.7.0 не входит.
 
 Предыдущий набор с Linux-пакетами до 0.7.0 — [v0.6.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0)
 (`rtrust-host-0.6.0-7`) и [v0.6.2](releases/v0.6.2.md) (`rtrust-host-0.6.2-12`).

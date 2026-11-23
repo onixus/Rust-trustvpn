@@ -6,13 +6,13 @@ R-TrustTunnel is a native VPN client written in Rust for **TrustTunnel**, **Hyst
 
 The repository contains the Windows, Linux and macOS desktop clients with their privileged tunnel services, the Android VpnService app, an iOS Network Extension preview and the shared Rust crates for transport, profiles, storage and control. The server belongs to [onixus/tunnel](https://github.com/onixus/tunnel).
 
-> **Development preview.** [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0) was published on October 28, 2026 from `232fd7b` (workspace 0.7.0, update sequence 13). `main` is newer than that tag; the published assets do not include later commits. Publication does not establish installed-package acceptance or production readiness: see [project status and open gates](docs/project-status.md).
+> **Development preview.** The source workspace is **0.7.1**, update sequence 14. [v0.7.1](docs/releases/v0.7.1.md) is prepared and not published; [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0) (October 28, 2026, `232fd7b`) is the latest published release. Publication does not establish installed-package acceptance or production readiness: see [project status and open gates](docs/project-status.md).
 
 ## Contents
 
 - [Download](#download)
 - [Screenshots](#screenshots)
-- [What's new in 0.7.0](#whats-new-in-070)
+- [What's new in 0.7.1](#whats-new-in-071)
 - [Features](#features)
 - [Platform status](#platform-status)
 - [Build](#build)
@@ -23,7 +23,7 @@ The repository contains the Windows, Linux and macOS desktop clients with their 
 
 ## Download
 
-| Platform | Asset from [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0) | Notes |
+| Platform | Asset from [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0), until v0.7.1 is published | Notes |
 | --- | --- | --- |
 | Windows x64 | `R-TrustTunnel-Windows-x64-Setup.exe` | Not Authenticode signed; SmartScreen may warn. Update/rollback of this exact package has not been accepted. |
 | macOS Apple Silicon | `R-TrustTunnel-macOS-arm64-UI-Choices.dmg` | Native, WebView and Both PKGs in one DMG: install exactly one. Ad-hoc sealed, not Developer ID signed or notarized. System-VPN acceptance is incomplete ([release assets](docs/releases/README.md)). |
@@ -33,7 +33,7 @@ The repository contains the Windows, Linux and macOS desktop clients with their 
 
 The release includes `SHA256SUMS` and the source identity and manifest. Their presence is not independent signature, provenance or update-channel verification. Desktop app and service must come from the same release. A vault with a VLESS profile cannot be read by 0.6.x, so do not roll back after adding one.
 
-Release records: [v0.7.0](docs/releases/v0.7.0.md) · [v0.6.2](docs/releases/v0.6.2.md) · [v0.6.1](docs/releases/v0.6.1.md) · [all releases](docs/releases/).
+Release records: [v0.7.1](docs/releases/v0.7.1.md) (prepared) · [v0.7.0](docs/releases/v0.7.0.md) · [v0.6.2](docs/releases/v0.6.2.md) · [all releases](docs/releases/).
 
 ## Screenshots
 
@@ -44,6 +44,18 @@ Desktop UI of 0.7.0 with synthetic profiles, not connected:
 | ![Native home screen](docs/screenshots/native-home-0.7.0.jpg) | ![WebView home screen](docs/screenshots/webview-home-0.7.0.jpg) |
 
 Profiles, import, checks, network, sync, settings, the light theme and how the images were made are in the [screenshot gallery](docs/screenshots/README.md). Android blocks screenshots with `FLAG_SECURE`.
+
+## What's new in 0.7.1
+
+Since v0.7.0, in the packages this tag will build (not in the published 0.7.0 files):
+
+- **GitHub update check** ([#131](https://github.com/onixus/Rust-trustvpn/pull/131)). Native, WebView, the terminal client and Android can look up the latest stable release and download this platform's file after checking `SHA256SUMS`. Nothing is installed. iOS only opens the release page. See [secure updates](docs/secure-updates.md).
+- **Optional IPv6 block** ([#129](https://github.com/onixus/Rust-trustvpn/pull/129)). Whole-computer mode can refuse IPv6 on this computer, through the tunnel or around it.
+- **Saved portal config** ([#127](https://github.com/onixus/Rust-trustvpn/pull/127)). A config already on disk connects without a live portal. A still-valid token renews itself at most once a day.
+- **Journal and reconnect** ([#124](https://github.com/onixus/Rust-trustvpn/pull/124), [#125](https://github.com/onixus/Rust-trustvpn/pull/125), [#128](https://github.com/onixus/Rust-trustvpn/pull/128)). Debug lines expire faster than errors, the last ten reconnect episodes are kept, and a slow handshake gets 10 seconds instead of 4.
+- **Linux Flatpak checks** ([#121](https://github.com/onixus/Rust-trustvpn/pull/121)). Route and Connectivity no longer depend on the `ip` command inside the sandbox.
+
+Plain-language notes are in [docs/releases/v0.7.1.md](docs/releases/v0.7.1.md). Android TV stays the separate pre-release [v0.7.1-tv.3](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.1-tv.3).
 
 ## What's new in 0.7.0
 
@@ -56,8 +68,6 @@ Since v0.6.2:
 - **Windows guard probe** ([#116](https://github.com/onixus/Rust-trustvpn/pull/116)). A probe datagram dropped by our own WFP filter now proves the guard, so Protection and DNS no longer show a false failure.
 
 Plain-language notes and upgrade steps are in [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md). Earlier changes (wake reconnect, guard proofs, UI variant 3, honest connection status, guarded recovery) are in the [release records](docs/releases/).
-
-On `main` after the v0.7.0 tag, and **not** in the published 0.7.0 packages: a GitHub Releases lookup that checks `SHA256SUMS` and does not install by itself ([secure updates](docs/secure-updates.md)); an optional whole-computer IPv6 block; portal token renewal for a saved config; journal rotation by level; a separate Android TV package. See [project status](docs/project-status.md).
 
 ## Features
 

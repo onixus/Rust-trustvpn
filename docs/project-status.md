@@ -1,5 +1,10 @@
 # Состояние проекта и issue — 23 ноября 2026
 
+Ветка `release/0.7.1` поднимает workspace до **0.7.1** / sequence **14** и
+упаковывает коммиты ниже в [v0.7.1](releases/v0.7.1.md). Тег не создан,
+пакеты не опубликованы. Опубликованный Latest остаётся v0.7.0, пока релиз не
+выпущен. Android TV по-прежнему отдельный pre-release `v0.7.1-tv.3`.
+
 Основание: GitHub `origin/main` `04f0f85729110f5b06c214ff9d5c263f25163146`
 (merge [#132](https://github.com/onixus/Rust-trustvpn/pull/132), 23 ноября
 01:27 +03), тег [v0.7.0](releases/v0.7.0.md) (`232fd7b`, 28 октября),
@@ -9,12 +14,13 @@ installed-package, packet capture, signing или soak заново.
 
 ## Исходники и опубликованные пакеты
 
-Workspace в `Cargo.toml` остаётся **0.7.0**. Desktop update sequence **13**,
-control IPC **v7**. Телефонный Android в исходниках — versionName **0.7.0** /
-versionCode **70001** (`org.rtrusttunnel.android`). Отдельный пакет Android TV
-собирается только с `-PrtrustTv`: `org.rtrusttunnel.android.tv`, versionName
-**0.7.1-tv.3** / versionCode **70004**, ABI `armeabi-v7a` и `arm64-v8a`.
-iOS в workspace — 0.7.0 / 70001; отдельных iOS assets после v0.5.0 нет.
+На этой ветке workspace в `Cargo.toml` — **0.7.1**, desktop update sequence
+**14**, control IPC **v7**. Телефонный Android в исходниках — versionName
+**0.7.1** / versionCode **70005** (`org.rtrusttunnel.android`). Отдельный пакет
+Android TV собирается только с `-PrtrustTv`: `org.rtrusttunnel.android.tv`,
+versionName **0.7.1-tv.3** / versionCode **70004**, ABI `armeabi-v7a` и
+`arm64-v8a`; из этого тега его под старым именем не переиздают. iOS в
+workspace — 0.7.1 / 70005; отдельных iOS assets после v0.5.0 нет.
 
 Опубликованный Latest — [v0.7.0](https://github.com/onixus/Rust-trustvpn/releases/tag/v0.7.0)
 (28 октября 2026, GitHub 22:37 UTC): Windows installer, macOS UI Choices DMG,
